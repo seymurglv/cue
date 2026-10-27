@@ -1,0 +1,24 @@
+[package]
+name = "cue-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cue-core.workspace = true
+cue-engines.workspace = true
+# Only for `focus::UNKNOWN_APP`: the same "unknown" name the app would pass.
+cue-platform-win.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# `signal` is for Ctrl+C: the run is interrupted inside the runtime, so the Soniox cleanup gets a chance to start.
+tokio = { workspace = true, features = ["signal"] }
+reqwest.workspace = true
+hound.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# Virtual time in the stream pacing test (`start_paused`).
+tokio = { workspace = true, features = ["test-util"] }

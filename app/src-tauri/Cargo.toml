@@ -1,0 +1,28 @@
+[package]
+name = "cue"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+cue-core.workspace = true
+cue-engines.workspace = true
+cue-platform-win.workspace = true
+# Features (`tray-icon` for the tray icon, `image-png`) are set in the root Cargo.toml as a workspace dependency,
+# so the Tauri CLI does not rewrite them here from tauri.conf.json (the tray icon is not declared there — it is created in code).
+tauri.workspace = true
+tauri-plugin-single-instance.workspace = true
+tauri-plugin-autostart.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+futures-util.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+windows = { workspace = true, features = ["Win32_Globalization"] }

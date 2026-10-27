@@ -1,0 +1,24 @@
+[package]
+name = "cue-engines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cue-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
+reqwest.workspace = true
+keyring.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+hound.workspace = true
+anyhow.workspace = true
+cpal.workspace = true
+# Virtual time in session tests (`start_paused`): deadlines are checked exactly, independent of machine load.
+tokio = { workspace = true, features = ["test-util"] }

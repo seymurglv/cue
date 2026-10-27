@@ -1,0 +1,23 @@
+# Build
+target/
+node_modules/
+dist/
+*.log
+
+# Secrets — API keys live in Windows Credential Manager, not in files
+.env
+.env.*
+*.key
+
+# Comparison bench: recordings live in %LOCALAPPDATA%\CUE\bench, run results stay on this computer only
+bench/recordings/
+bench/runs/
+
+# OS and editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+app/dist/
+app/src-tauri/gen/

@@ -1,0 +1,15 @@
+/* Tray card content: header (icon · title · close button), one thought, button on the right. */
+.tray .in{padding:10px 10px 12px 14px}
+.tray kbd{white-space:nowrap;font-family:"Bebas Neue",sans-serif;font-size:14px;letter-spacing:.05em;line-height:1;padding:2px 6px 1px;border-radius:5px;background:rgba(255,255,255,.14)}
+.tray .nic{flex:none;width:20px;height:20px;display:grid;place-items:center}
+.tray .nic svg,.tray .ai svg{display:block}
+.tray .tone-warn{color:var(--warn)}
+.tray .tone-ok{color:var(--ok)}
+.tray .tone-ask{color:var(--ask)}
+.tray .nhd{display:flex;align-items:center;gap:8px;min-height:28px}
+.tray .nhd b{font-size:13.5px;font-weight:600}
+.tray .nhd .sp{flex:1}
+.tray .nbd{font-size:13px;line-height:1.45;color:rgba(255,255,255,.72);margin:1px 26px 0 28px;white-space:normal}
+.tray .nbd b{color:#fff;font-weight:600}
+.tray .nft{display:flex;justify-content:flex-end;margin-top:10px}
+.tray .ab .lbl{display:inline-flex}

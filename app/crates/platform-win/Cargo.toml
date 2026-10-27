@@ -1,0 +1,18 @@
+[package]
+name = "cue-platform-win"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cue-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+cpal.workspace = true
+hound.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

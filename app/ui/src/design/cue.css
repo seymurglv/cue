@@ -1,0 +1,24 @@
+/* CUE — shared tokens and the colors of the live mark.
+   Free fonts (SIL OFL): Bebas Neue — logo and digits, Montserrat ExtraBold — rare large headings. */
+:root{
+  --bg:#FBFBFA;--card:#FFFFFF;--surface2:#F3F3F1;--text:#111111;--muted:#8E8E8B;--faint:#C4C4C0;--line:#ECECE9;
+  --rec:#FF4A1C;--warn:#EE9A00;--ask:#2F6BFF;--ok:#1E9E5A;--graphite:#1C1C1F;
+  --mac-font:-apple-system,BlinkMacSystemFont,"SF Pro Text","Inter",system-ui,sans-serif;
+  --win-font:"Segoe UI Variable Text","Segoe UI Variable","Segoe UI","Inter",system-ui,sans-serif;
+  --num-font:"Bebas Neue","Montserrat",sans-serif;
+  --head-font:"Montserrat",sans-serif;
+  --e-out:cubic-bezier(.22,1,.36,1);
+  --e-spring:cubic-bezier(.3,1.25,.5,1);
+}
+[data-theme=dark]{
+  --bg:#0E0E0F;--card:#151517;--surface2:#1C1C1F;--text:#ECECEA;--muted:#85858A;--faint:#4A4A4E;--line:#232326;
+  --rec:#FF5A2E;--warn:#F5B82E;--ask:#5C8DFF;--ok:#33C27A;--graphite:#242428;
+}
+/* live mark: the lines take currentColor, the lamp takes the signal color */
+.mk .m-l{stroke:currentColor;stroke-linecap:round;transition:stroke .3s}
+.mk .m-dot{fill:var(--rec);transition:fill .3s}
+.mk[data-tone=warn] .m-l{stroke:var(--warn)}
+.mk[data-tone=warn] .m-dot{fill:var(--warn)}
+.mk[data-tone=ask] .m-l{stroke:var(--ask)}
+.mk[data-tone=ask] .m-dot,.mk[data-tone=askrec] .m-dot{fill:var(--ask)}
+.mk[data-tone=mono] .m-dot{fill:currentColor}

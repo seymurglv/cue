@@ -1,0 +1,9 @@
+@font-face{font-family:"Bebas Neue";src:url("./design/fonts/BebasNeue-Regular.ttf") format("truetype");font-display:block}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:transparent;overflow:hidden;font-family:var(--win-font);-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;border:0;background:none;padding:0;cursor:default}
+#stage{position:fixed;inset:0;--anchor:0px}
+body.idle-hidden .drop[data-s=idle]{opacity:0!important;pointer-events:none}
+.drop.shake{animation:dropShake .46s}
+@keyframes dropShake{0%,100%{transform:translateX(0)}20%{transform:translateX(-3px)}40%{transform:translateX(3px)}60%{transform:translateX(-2px)}80%{transform:translateX(1px)}}
+@media (prefers-reduced-motion: reduce){*,*::before,*::after{transition:none!important;animation:none!important}}

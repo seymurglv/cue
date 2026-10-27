@@ -1,0 +1,124 @@
+/* CUE — the Drop and the tray card. Ported from the original CUE design; the motion is unchanged.
+   Differences from the original: the "empty" state (quietly fold into a cross), a close button on errors on hover,
+   an error without "retry" (Claude key), the error label from api.errLabel(), all button and label texts from api.text
+   (the language is chosen outside this file). Parts only the design's own demo pages used are removed.
+   No recording timer: while recording the Drop shows only the mark, 28 px instead of 24 (--mk in drop.css), and stays a circle.
+   Also: buttons and icons open to their own 28/20 px, not to the 16 px icon width (this.nat);
+   with prefers-reduced-motion the mark's spring has almost no inertia (k=20, d=.05) and the tray card folds at once.
+   The idle key hint is two thin keys, "Ctrl" and the Windows logo ("fn" on mac), with the screen-reader name in aria-label. */
+(function(){
+const el=h=>{const t=document.createElement('template');t.innerHTML=h.trim();return t.content.firstElementChild};
+const SV=d=>`<svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+const IC={
+ x:SV('<path d="M6 6l8 8M14 6l-8 8"/>'),
+ ok:SV('<path d="M4.8 10.4l3.3 3.3 7.1-7.4"/>'),
+ undo:SV('<path d="M7.8 4.6 4.4 8l3.4 3.4"/><path d="M4.9 8h7.3a3.6 3.6 0 0 1 0 7.2H9.8"/>'),
+ retry:SV('<path d="M15.4 10.2a5.4 5.4 0 1 1-1.7-4"/><path d="M14.3 3.2v3.3H11"/>'),
+ net:SV('<path d="M2.8 7.6a10.2 10.2 0 0 1 14.4 0M5.5 10.4a6.4 6.4 0 0 1 9 0"/><path d="M10 14.4h.01" stroke-width="2.6"/><path d="M3.6 3.6l12.8 12.8"/>'),
+ mic:SV('<rect x="7.4" y="2.8" width="5.2" height="9" rx="2.6"/><path d="M4.8 9.6a5.2 5.2 0 0 0 10.4 0M10 14.8v2.4"/><path d="M3.6 3.6l12.8 12.8"/>'),
+ tr:SV('<path d="M4 7h11.5M12.5 4l3 3-3 3M16 13H4.5M7.5 10l-3 3 3 3"/>'),
+ ask:SV('<path d="M10 3.8v12.4M4.6 6.9l10.8 6.2M15.4 6.9 4.6 13.1"/>'),
+ book:SV('<path d="M4 4.8A1.8 1.8 0 0 1 5.8 3H16v11.5H5.8A1.8 1.8 0 0 0 4 16.3zM4 16.3A1.8 1.8 0 0 0 5.8 18H16"/><path d="M10 6.2v5M7.5 8.7h5"/>'),
+ copy:SV('<rect x="7" y="7" width="9.5" height="10" rx="2"/><path d="M13 7V5a2 2 0 0 0-2-2H5.5a2 2 0 0 0-2 2v6.5a2 2 0 0 0 2 2H7"/>'),
+ key:SV('<rect x="2.8" y="5.5" width="14.4" height="9" rx="2"/><path d="M6 8.6h.01M9 8.6h.01M12 8.6h.01M14.4 8.6h.01M6.8 11.6h6.4"/>'),
+ timer:SV('<circle cx="10" cy="11" r="6"/><path d="M10 8v3.2l2 1.3M8 2.8h4"/>'),
+ gear:SV('<circle cx="10" cy="10" r="2.6"/><path d="M10 2.5v2.2M10 15.3v2.2M2.5 10h2.2M15.3 10h2.2M4.7 4.7l1.5 1.5M13.8 13.8l1.5 1.5M4.7 15.3l1.5-1.5M13.8 6.2l1.5-1.5"/>')
+};
+/* Windows key logo for the idle hint: four squares in 10 × 10, current color */
+const WIN='<svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" style="display:block" aria-hidden="true"><rect x="0" y="0" width="4.4" height="4.4"/><rect x="5.6" y="0" width="4.4" height="4.4"/><rect x="0" y="5.6" width="4.4" height="4.4"/><rect x="5.6" y="5.6" width="4.4" height="4.4"/></svg>';
+const RING='<svg class="ring" viewBox="0 0 28 28" width="28" height="28"><circle cx="14" cy="14" r="12.4" pathLength="100"/></svg>';
+const RM='(prefers-reduced-motion: reduce)';
+const reduced=()=>!!(window.matchMedia&&window.matchMedia(RM).matches);
+/* parts whose width depends on text: their width is still taken from scrollWidth on every layout */
+const TXT=new Set(['chip','lab','act','kc']);
+/* While a text part is folded, its scrollWidth misses the right padding of its inner block (.chip>span 7, .act>span 12):
+   the text overflows that block's zero-width content box. Add it back so the open chip and button are not clipped.
+   The other text parts have no such padding (0). */
+const padEnd=(k,e)=>TXT.has(k)&&e.firstElementChild?(parseFloat(getComputedStyle(e.firstElementChild).paddingRight)||0):0;
+
+class Drop{
+ constructor(host,api,fx=null){
+  this.api=api;this.fx=fx;this.live=!fx;
+  this.root=el('<div class="pv"><div class="drop" data-s="idle"></div></div>');host.append(this.root);this.p=this.root.firstElementChild;
+  this.parts={};this.s='idle';this.hov=!!(fx&&fx.hov);
+  const P=(k,h)=>{const e=el(h);e.classList.add('pt');this.parts[k]=e;this.p.append(e);return e};
+  const T=api.text;
+  P('bx',`<button class="ib soft" title="${T.cancel}" aria-label="${T.cancelName}">${IC.x}</button>`);
+  const mk=P('mk','<span class="mkw"><svg viewBox="0 0 24 24" width="24" height="24"><g></g></svg></span>');this.morph=new CUE.Morph(mk.querySelector('g'));
+  P('mi','<span class="mi"></span>');P('chip','<span class="chip"></span>');P('why','<span class="why"></span>');
+  P('lab','<span class="lab"></span>');P('act','<button class="act"></button>');
+  P('undo',`<button class="ib solid" title="${T.restore}" aria-label="${T.restore}">${RING}${IC.undo}</button>`);
+  P('retry',`<button class="ib solid" title="${T.retry}" aria-label="${T.retry}">${IC.retry}</button>`);
+  P('kc','<span class="kc"></span>');P('ok',`<button class="ib solid" title="${T.done}" aria-label="${T.done}">${IC.ok}</button>`);
+  /* Natural width of fixed-size parts (buttons 28, icons 20, mark 24), once, while nothing is visible:
+     a folded part's scrollWidth sees only the 16 px icon, and the button would open as an oval.
+     The mark's width depends on the state; layout() takes it from --mk instead. */
+  this.nat={};
+  for(const [k,e] of Object.entries(this.parts)){if(TXT.has(k)){this.nat[k]=0;continue}e.style.maxWidth='none';this.nat[k]=e.getBoundingClientRect().width;e.style.maxWidth=''}
+  const spring=()=>{const r=reduced();this.morph.k=r?20:.17;this.morph.d=r?.05:.7};
+  spring();
+  if(window.matchMedia){const mq=window.matchMedia(RM);if(mq.addEventListener)mq.addEventListener('change',spring)}
+  if(this.live){
+   this.parts.bx.addEventListener('click',()=>api.onEsc());this.parts.ok.addEventListener('click',()=>api.onPress());
+   for(const k of ['act','undo','retry'])this.parts[k].addEventListener('click',()=>api.onAction());
+   this.p.addEventListener('mouseenter',()=>{this.hov=true;this.layout()});this.p.addEventListener('mouseleave',()=>{this.hov=false;this.layout()});
+  }
+  this.enter(fx?fx.state:'idle');
+ }
+ get mode(){return this.fx?(this.fx.mode||'dictate'):this.api.mode()}
+ get err(){return this.fx?(this.fx.err||'net'):this.api.err()}
+ enter(s){
+  this.s=s;this.p.dataset.s=s;const m=this.mode,now=performance.now();
+  if(s==='start')this.morph.set(m==='ask'?'ask':m==='translate'?'translate':'start',now);
+  else if(s==='listen')this.morph.set('listen',now,m==='ask'?'askrec':'');
+  else this.morph.set(s==='empty'?'cancel':s,now);
+  this.layout();
+ }
+ layout(){
+  const s=this.s,h=this.hov,m=this.mode,ic=(this.api.lbl?this.api.lbl():'icons')==='icons',p=this.parts,T=this.api.text;
+  this.p.classList.toggle('hov',h);
+  p.kc.innerHTML=this.api.os()==='mac'?'<span role="img" aria-label="fn"><span class="key">fn</span></span>'
+   :`<span role="img" aria-label="Ctrl + Win"><span class="key">Ctrl</span><span class="key w">${WIN}</span></span>`;
+  p.mi.innerHTML=m==='translate'?IC.tr:m==='ask'?IC.ask:'';p.mi.classList.toggle('ask',m==='ask');
+  p.chip.innerHTML=`<span>${m==='translate'?'EN':T.ask}</span>`;
+  p.why.innerHTML=this.err==='mic'?IC.mic:IC.net;
+  if(s==='cancel'){CUE.setLabel(p.lab,T.cancelled);p.act.innerHTML=`<span>${T.restore}</span>`}
+  if(s==='error'){CUE.setLabel(p.lab,this.api.errLabel?this.api.errLabel():'');p.act.innerHTML=`<span>${T.retry}</span>`}
+  const md=m!=='dictate',why=this.err!=='key',rt=this.api.retry?this.api.retry():true;
+  const V=ic?{idle:{mk:h,kc:h},start:{mk:1},listen:{bx:h,mk:1,mi:md,ok:h},think:{mk:1},done:{mk:1},empty:{mk:1},cancel:{mk:1,lab:h,undo:1},error:{bx:h,mk:1,why,lab:h,retry:rt}}
+           :{idle:{mk:h,kc:h},start:{mk:1},listen:{bx:h,mk:1,chip:md,ok:h},think:{mk:1},done:{mk:1},empty:{mk:1},cancel:{mk:1,lab:1,act:1},error:{bx:h,mk:1,lab:1,act:rt}};
+  const vis=V[s]||{};
+  /* The mark opens to its size in this state alone (--mk: 24, 28 while recording), never to its measured width:
+     custom properties are not animated, so --mk is already the target, while the svg is still animating toward it. */
+  const mk=parseFloat(getComputedStyle(this.p).getPropertyValue('--mk'))||this.nat.mk||0;
+  const open=(k,e)=>k==='mk'?mk:Math.max(e.scrollWidth+padEnd(k,e),this.nat[k]||0);
+  for(const [k,e] of Object.entries(p)){const on=!!vis[k];e.classList.toggle('on',on);e.style.maxWidth=on?(open(k,e)+2)+'px':'0px'}
+ }
+ away(b){this.p.classList.toggle('away',b)}
+ size(){return {w:this.p.offsetWidth,h:this.p.offsetHeight}}
+ frame(now){const v=this.api.voice;this.morph.tick(now,v.lvl,v.jit)}
+}
+
+/* The tray card: grows out of the Drop and folds back into it, starting from and ending in the Drop's own shape
+   (radius h/2: the 44 px recording circle too, not only the 40 px Drop). */
+class Tray{
+ constructor(stage,drop,o={}){
+  this.drop=drop;this.w=o.width||300;this.isOpen=false;
+  this.box=el(`<div class="tray ${o.cls||''}" hidden><div class="in" style="width:${this.w}px"></div></div>`);stage.append(this.box);this.in=this.box.querySelector('.in');
+ }
+ open(html){
+  if(html!=null)this.in.innerHTML=html;
+  if(!this.isOpen){const {w,h}=this.drop.size();Object.assign(this.box.style,{width:w+'px',height:h+'px',borderRadius:h/2+'px'});this.box.hidden=false;this.box.classList.remove('open');this.drop.away(true);void this.box.offsetWidth}
+  this.isOpen=true;requestAnimationFrame(()=>this.fit());return this.in;
+ }
+ fit(){if(!this.isOpen)return;Object.assign(this.box.style,{width:this.w+'px',height:this.in.offsetHeight+'px',borderRadius:'20px'});this.box.classList.add('open')}
+ width(w){this.w=w;this.in.style.width=w+'px';this.fit()}
+ close(){
+  if(!this.isOpen)return;this.isOpen=false;const {w,h}=this.drop.size();this.box.classList.remove('open');
+  Object.assign(this.box.style,{width:w+'px',height:h+'px',borderRadius:h/2+'px'});
+  setTimeout(()=>{if(!this.isOpen){this.box.hidden=true;this.drop.away(false)}},reduced()?0:430);
+ }
+}
+
+Object.assign(window.CUE,{el,IC,SV,RING,Drop,Tray});
+})();
