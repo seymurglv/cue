@@ -244,7 +244,16 @@ impl Chord {
                 }
             }
             VK_LSHIFT | VK_RSHIFT | VK_SHIFT | VK_LMENU | VK_RMENU | VK_MENU => {
-                if down && self.active && !self.aborted {
+                if down && self.active && self.shift != 0 && self.alt != 0 {
+                    // The Office key: Windows must see it as is, the Start menu and Office included. Also when Alt has
+                    // already cancelled the chord ("Ask" off): the result must not depend on the press order.
+                    self.win_needs_mask = false;
+                    self.alt_needs_mask = false;
+                    if !self.aborted {
+                        self.aborted = true;
+                        d.event = Some(HotkeyEvent::ChordAborted);
+                    }
+                } else if down && self.active && !self.aborted {
                     match self.mode_now() {
                         // A press switches the mode; a release never does: the order of releases must not change the result.
                         Some(mode) if mode != self.mode && mode != Mode::Dictate => {
@@ -253,13 +262,9 @@ impl Chord {
                             d.event = Some(HotkeyEvent::ModeChange(mode));
                         }
                         Some(_) => {}
+                        // Alt while "Ask" is off: a system shortcut, like any other third key.
                         None => {
                             self.aborted = true;
-                            if self.shift != 0 && self.alt != 0 {
-                                // The Office key: Windows must see it as is, the Start menu and Office included.
-                                self.win_needs_mask = false;
-                                self.alt_needs_mask = false;
-                            }
                             d.event = Some(HotkeyEvent::ChordAborted);
                         }
                     }
@@ -741,5 +746,26 @@ mod tests {
         assert_eq!(c.resync(|_| false), Some(ChordUp));
         press(&mut c, VK_LMENU);
         assert_eq!(release(&mut c, VK_LMENU), Decision::default());
+    }
+
+    #[test]
+    fn office_key_inside_the_chord_does_not_depend_on_press_order() {
+        for ask in [false, true] {
+            for order in [[VK_LSHIFT, VK_LMENU], [VK_LMENU, VK_LSHIFT]] {
+                let case = format!("ask={ask} order={order:x?}");
+                let mut c = Chord::default();
+                c.set_ask(ask);
+                press(&mut c, VK_LCONTROL);
+                assert_eq!(press(&mut c, VK_LWIN).event, Some(DOWN));
+                let events: Vec<HotkeyEvent> = order.iter().filter_map(|&vk| press(&mut c, vk).event).collect();
+                assert_eq!(events.iter().filter(|&&e| e == ChordAborted).count(), 1, "{case}: {events:?}");
+                assert_eq!(events.last(), Some(&ChordAborted), "{case}: {events:?}");
+                assert_eq!(release(&mut c, VK_LMENU), Decision::default(), "{case}: no Alt mask");
+                release(&mut c, VK_LSHIFT);
+                let d = release(&mut c, VK_LWIN);
+                assert_eq!(d.event, Some(ChordUp), "{case}");
+                assert!(!d.inject_mask_first, "{case}: Windows sees the Office key as is");
+            }
+        }
     }
 }
