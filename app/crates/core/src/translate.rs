@@ -237,9 +237,10 @@ fn weighted(letters: &[char]) -> f32 {
 /// How many letters one digit is worth in the length check, in the speech and in the result alike. A translation often
 /// writes the speech's number words as digits, and Soniox writes some numbers in digits itself: "sixty thousand" (13
 /// letters) becomes "60 000" (5 digits), "three thirty" (11) "15:30" (4), "сто двадцать пять" (15) "125" (3). Two and a
-/// half letters a digit is at the low end of that: a number in digits weighs no more than the words it stands for, so it
-/// never pushes a result over the upper bound, and enough that a sentence with its numbers in digits stays above the
-/// lower one.
+/// half letters a digit is at the low end of that, enough that a sentence with its numbers in digits stays above the
+/// lower bound. A number usually weighs no more in digits than in the words it stands for, but not always: a large
+/// round number said in one word ("миллиард", 8 letters) and written in many digits ("1 000 000 000", 10 digits, 25)
+/// can push a short result over the upper bound, and that translation then fails safely (Retry).
 const DIGIT_WEIGHT: f32 = 2.5;
 
 /// The length of a text for the length check: its letters ([`weighted`]) and its digits ([`DIGIT_WEIGHT`]).
@@ -270,6 +271,8 @@ const MIN_LETTERS_FOR_RATIO: usize = 20;
 /// of digits alone ("сто двадцать пять" → "125") is checked by length only too: no untranslated word can be pasted. The
 /// word overlap check of dictation does not apply: a translation shares no words with the speech. `terms` is the user's
 /// dictionary (`dictionary.terms`).
+/// Known limit: a short question answered with a bare number ("какой год" → "2026") passes the digits-only path, as a
+/// worded answer to a short question passes the script check.
 pub fn translation_ok(raw: &str, out: &str, terms: &[String], to: &str) -> bool {
     let letters = |t: &str| t.chars().filter(|c| c.is_alphabetic()).collect::<Vec<_>>();
     let (src, dst) = (letters(raw), letters(out));
@@ -301,6 +304,8 @@ pub fn translation_ok(raw: &str, out: &str, terms: &[String], to: &str) -> bool 
 /// translation passes, and so does English with one word in the target script; a phrase of names alone around one word
 /// of the speech ("кубернетес и докер" → "Kubernetes и Docker.") passes into English unless the names are listed; a
 /// translation made only of dictionary terms ("Sberbank" → "Сбербанк" with that term listed) fails.
+/// A translation made only of target-script words the speech already has fails ("сделай git push" → "Git push."):
+/// nothing in it shows a translation.
 fn written_in(target: Script, raw: &str, out: &str, terms: &[String]) -> bool {
     let lowercase = |words: Vec<(Option<Script>, String)>| words.into_iter().map(|(_, w)| w.to_lowercase());
     let listed: HashSet<String> =

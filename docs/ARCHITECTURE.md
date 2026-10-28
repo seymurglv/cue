@@ -90,7 +90,8 @@ shows the `translate` error (`claudeKey` for a key, balance or limit problem) wi
   off, are held when the pair forms, it is a system shortcut: no events, no swallowed `V`, no mask, and Windows sees
   every key as is.
 - Every fresh Shift press (left or right; not its auto-repeat, not an injected one) toggles the mode while the chord
-  is held, and also after the chord was released while CUE is starting or recording: the core sets `hook::RECORDING`
+  is held, and also after the chord was released while CUE is starting or recording (then only a Shift on its own, and
+  a key pressed while it is held takes the toggle back: see the guards below): the core sets `hook::RECORDING`
   for that (not `ESC_ACTIVE`, which also covers thinking and errors, when every capital letter typed would wake the
   core for nothing), and refreshes the flags right after the flow decides, before the effects run, so a Shift pressed
   just after a tap already counts. Inside a held chord the event goes out without the flag (the core may not have
@@ -235,6 +236,9 @@ recording in progress.
   bound ("one thousand nine hundred ninety nine" → "1999" fails); inside a sentence the other words carry it. The
   check does not read meaning: a self-correction can come back turned around and pass ("Отправь отчёт Олегу, точнее,
   Игорю" came back as "…to Igor, I mean Oleg" in every bench run).
+  A translation made only of target-script words the speech already has fails ("сделай git push" → "Git push."), and so
+  does a large round number said in one word and written in many digits ("миллиард" → "1 000 000 000"): both safely,
+  with Retry. A short question answered with a bare number ("какой год" → "2026") passes.
 - **Failure.** A network error, a timeout, a refusal, `max_tokens`, a response off the schema or a failed check pastes
   nothing: the flow shows "Couldn't translate" with Retry, which translates the saved transcript again. No Anthropic
   key, or a key, balance or limit problem, shows "Claude key problem" with Retry instead. The log gets one line with the

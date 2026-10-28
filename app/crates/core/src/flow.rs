@@ -380,9 +380,12 @@ impl Flow {
     }
 
     /// A fresh Shift press while starting or recording, with the chord still held or after a tap: dictation and
-    /// translation swap ("Ask" becomes a translation), and the Drop changes its icon at once. The user often taps the
-    /// chord and decides on the translation only while speaking, and a second Shift takes a slip back. The finishing
-    /// press has already moved the flow to "thinking", so a later Shift changes nothing.
+    /// translation swap ("Ask" becomes a translation), and the Drop changes its icon at once. After a tap the hook
+    /// sends it only for a Shift pressed on its own, and sends one more to take it back when another key goes down
+    /// while that Shift is held (`chord::Decision::undo_toggle`): a capital letter or the finishing chord never
+    /// switches the mode. The user often taps the chord and decides on the translation only while speaking, and a
+    /// second Shift takes a slip back. The finishing press has already moved the flow to "thinking", so a later Shift
+    /// changes nothing.
     fn on_mode_toggle(&mut self, fx: &mut Vec<Effect>) {
         if self.recording_now() {
             self.mode = match self.mode {

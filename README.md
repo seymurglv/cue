@@ -273,6 +273,8 @@ it. It does not tune the thresholds.
   (English and German) only the length is checked, so untranslated text can pass there. English speech with a word in
   the target script (a Cyrillic name, translated into Russian) counts as such a pair too and gets the length check
   only. Other limits are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+  A short question answered with a bare number can be pasted; a translation made only of words the speech already has
+  ("сделай git push" → "Git push."), or of a large number said in one word, fails and offers Retry.
 - A translation can turn a self-correction around: "Отправь отчёт Олегу, точнее, Игорю" ("to Oleg, I mean Igor")
   came back as "…to Igor, I mean Oleg" in every bench run. The check cannot see it, so read a translated correction
   before sending it.
