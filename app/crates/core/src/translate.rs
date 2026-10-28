@@ -177,9 +177,10 @@ fn script_of(c: char) -> Option<Script> {
         0xC80..=0xCFF => Kannada,
         0xD00..=0xD7F => Malayalam,
         0xE00..=0xE7F => Thai,
-        0x1100..=0x11FF | 0x3130..=0x318F | 0xAC00..=0xD7AF => Hangul,
-        // Kana goes with Han: Japanese writes both, and only Japanese and Chinese use them.
-        0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF => Han,
+        0x1100..=0x11FF | 0x3130..=0x318F | 0xAC00..=0xD7AF | 0xFFA0..=0xFFDC => Hangul,
+        // Kana goes with Han: Japanese writes both, and only Japanese and Chinese use them. Full- and halfwidth.
+        0x3040..=0x30FF | 0x31F0..=0x31FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0xFF66..=0xFF9F
+        | 0x20000..=0x323AF => Han,
         _ => return None,
     })
 }
@@ -208,8 +209,8 @@ fn script_of_language(code: &str) -> Option<Script> {
     })
 }
 
-/// How many Latin letters one letter of the script is worth: Han and Hangul pack a word into fewer characters. Both the
-/// length check and the script share weigh letters by it.
+/// How many Latin letters one letter of the script is worth: Han and Hangul pack a word into fewer characters. Every
+/// letter weighs by its own script, in the length check ([`weighted`]) and in the script share ([`written_in`]).
 fn density(s: Option<Script>) -> f32 {
     match s {
         Some(Script::Han) => 3.0,
@@ -218,21 +219,27 @@ fn density(s: Option<Script>) -> f32 {
     }
 }
 
-/// The share of the result's new letters ([`written_in`]: words neither said nor kept from the dictionary, weighted by
-/// [`density`]) in the target script, from which the result counts as written in it.
-const MIN_TARGET_SCRIPT: f32 = 0.6;
-/// Length bounds of the translation against the speech, in weighted letters ([`density`]); checked from
-/// `MIN_LETTERS_FOR_RATIO` letters of speech: a short phrase legitimately changes length more and keeps a larger share
-/// of names and code. For a pair with different scripts the lower bound applies to the new target-script letters alone
-/// as well ([`written_in`]).
+/// The weight of the letters, each by its own script ([`density`]): Latin code inside Chinese speech weighs as Latin.
+fn weighted(letters: &[char]) -> f32 {
+    letters.iter().map(|c| density(script_of(*c))).sum()
+}
+
+/// The share of the counted letters of the result ([`written_in`], weighted by [`density`]) in the target script, from
+/// which the result counts as written in it. A cleanup that respells a few names in the target script stays below it.
+const MIN_TARGET_SCRIPT: f32 = 0.8;
+/// Length bounds of the translation against the speech, in weighted letters ([`weighted`]); checked from
+/// `MIN_LETTERS_FOR_RATIO` letters of speech: a short phrase legitimately changes length more.
 const MIN_RATIO: f32 = 0.35;
 const MAX_RATIO: f32 = 2.8;
 const MIN_LETTERS_FOR_RATIO: usize = 20;
 
-/// The translation can be pasted (spec 2 §5): not empty; its length is within bounds of what was said; when the speech
-/// and the target language use different scripts, the result is written in the target one ([`written_in`]). The word
-/// overlap check of dictation does not apply: a translation shares no words with the speech. `terms` is the user's
-/// dictionary (`dictionary.terms`).
+/// The translation can be pasted (spec 2 §5: untranslated text is never pasted silently): not empty; its length is
+/// within bounds of what was said; when the speech is in another script than the target language, the result is
+/// written in the target script ([`written_in`]). Latin is the script of names, product names and code in any language,
+/// so the speech's script is its main non-Latin one when it has any ([`speech_script`]). A pair in one script (English
+/// into German) is checked by length only: there the script cannot tell a translation from a cleanup. The word overlap
+/// check of dictation does not apply: a translation shares no words with the speech. `terms` is the user's dictionary
+/// (`dictionary.terms`).
 pub fn translation_ok(raw: &str, out: &str, terms: &[String], to: &str) -> bool {
     let out = out.trim();
     if out.is_empty() {
@@ -243,45 +250,42 @@ pub fn translation_ok(raw: &str, out: &str, terms: &[String], to: &str) -> bool 
     if dst.is_empty() {
         return false;
     }
-    let src_script = dominant_script(&src);
-    let to_script = script_of_language(to);
-    let long = src.len() >= MIN_LETTERS_FOR_RATIO;
-    let speech = src.len() as f32 * density(src_script);
-    if long {
-        let ratio = dst.len() as f32 * density(to_script) / speech;
+    if src.len() >= MIN_LETTERS_FOR_RATIO {
+        let ratio = weighted(&dst) / weighted(&src);
         if !(MIN_RATIO..=MAX_RATIO).contains(&ratio) {
             return false;
         }
     }
-    let min_new = if long { MIN_RATIO * speech } else { 0.0 };
-    match to_script {
-        Some(t) if src_script != Some(t) => written_in(t, raw, out, terms, min_new),
+    match script_of_language(to) {
+        Some(t) if speech_script(&src) != Some(t) => written_in(t, out, terms),
         _ => true,
     }
 }
 
-/// The result is written in the `target` script (spec 2 §5: untranslated text is never pasted silently). Names, product
-/// names and code stay as written (the instruction asks for it), so a result word found (any case) among the words of
-/// the speech, or among the dictionary's words in another script, is left out; a dictionary term in the target script
-/// is the translation itself and counts. Of the remaining words at least one is in the target script, at least
-/// [`MIN_TARGET_SCRIPT`] of their weighted letters ([`density`]) are, and those target-script letters come to at least
-/// `min_new`: [`MIN_RATIO`] of the weighted speech from `MIN_LETTERS_FOR_RATIO` letters of it, so a cleanup that only
-/// respells a name in the target script fails. An echo of the speech leaves no word and fails.
+/// The result is written in the `target` script. Only words that can show a translation count: never the words of the
+/// dictionary, in any script (the model writes them as listed), and into a non-Latin target no Latin word (names,
+/// product names and code stay in Latin). Of the counted words at least one is in the target script, and at least
+/// [`MIN_TARGET_SCRIPT`] of their letters, weighted by [`density`], are. An echo of the speech has no word in the target
+/// script and fails; so does a cleanup that respells a few names in Latin.
 ///
-/// Known limit: a short phrase (under `MIN_LETTERS_FOR_RATIO` letters) that keeps the speech and adds one target-script
-/// name, and an answer of the original plus its translation, are not caught.
-fn written_in(target: Script, raw: &str, out: &str, terms: &[String], min_new: f32) -> bool {
-    let listed = crate::refine::usable_terms(terms).into_iter().flat_map(script_words).filter(|(s, _)| *s != Some(target));
-    let kept: HashSet<String> = script_words(raw).into_iter().chain(listed).map(|(_, w)| w.to_lowercase()).collect();
-    let new: Vec<(Option<Script>, String)> =
-        script_words(out).into_iter().filter(|(_, w)| !kept.contains(&w.to_lowercase())).collect();
-    if !new.iter().any(|(s, _)| *s == Some(target)) {
+/// Known limits: into a non-Latin target Latin text shows nothing either way, so the English original followed by its
+/// translation passes, and so does English with one word in the target script; a phrase of names alone around one word
+/// of the speech ("кубернетес и докер" → "Kubernetes и Docker.") passes into English unless the names are listed; a
+/// translation made only of dictionary terms ("Sberbank" → "Сбербанк" with that term listed) fails.
+fn written_in(target: Script, out: &str, terms: &[String]) -> bool {
+    let listed: HashSet<String> =
+        crate::refine::usable_terms(terms).into_iter().flat_map(script_words).map(|(_, w)| w.to_lowercase()).collect();
+    let counted: Vec<(Option<Script>, String)> = script_words(out)
+        .into_iter()
+        .filter(|(s, w)| (target == Script::Latin || *s != Some(Script::Latin)) && !listed.contains(&w.to_lowercase()))
+        .collect();
+    if !counted.iter().any(|(s, _)| *s == Some(target)) {
         return false;
     }
     let weight = |(s, w): &(Option<Script>, String)| w.chars().count() as f32 * density(*s);
-    let all: f32 = new.iter().map(weight).sum();
-    let in_target: f32 = new.iter().filter(|(s, _)| *s == Some(target)).map(weight).sum();
-    in_target >= min_new && in_target / all >= MIN_TARGET_SCRIPT
+    let all: f32 = counted.iter().map(weight).sum();
+    let in_target: f32 = counted.iter().filter(|(s, _)| *s == Some(target)).map(weight).sum();
+    in_target / all >= MIN_TARGET_SCRIPT
 }
 
 /// Words for the script check: maximal runs of letters of one script, so "检查CUE的GitHub" is four words and a name
@@ -304,16 +308,18 @@ fn script_words(text: &str) -> Vec<(Option<Script>, String)> {
     words
 }
 
-/// The script most letters are written in; `None` when no letter belongs to a known script.
-fn dominant_script(letters: &[char]) -> Option<Script> {
+/// The script of the speech: its main non-Latin script when it has any, else Latin; `None` when no letter belongs to a
+/// known script. Latin stands for names and code in any language, so "запусти cargo test" is Cyrillic speech.
+fn speech_script(letters: &[char]) -> Option<Script> {
+    let scripts = || letters.iter().filter_map(|c| script_of(*c));
     let mut counts: Vec<(Script, usize)> = Vec::new();
-    for s in letters.iter().filter_map(|c| script_of(*c)) {
+    for s in scripts().filter(|s| *s != Script::Latin) {
         match counts.iter_mut().find(|(x, _)| *x == s) {
             Some((_, n)) => *n += 1,
             None => counts.push((s, 1)),
         }
     }
-    counts.into_iter().max_by_key(|(_, n)| *n).map(|(s, _)| s)
+    counts.into_iter().max_by_key(|(_, n)| *n).map(|(s, _)| s).or_else(|| scripts().find(|s| *s == Script::Latin))
 }
 
 #[cfg(test)]
@@ -413,69 +419,103 @@ mod tests {
         assert_eq!(resolve_home(Some("klingon"), Some("fr-FR"), &hints, "en"), Some("fr"));
     }
 
-    #[test]
-    fn translation_in_the_target_script_passes() {
-        assert!(translation_ok("напомни мне завтра позвонить Ане в десять", "Remind me to call Anya at ten tomorrow.", &[], "en"));
-        assert!(translation_ok("remind me to call Anya tomorrow at ten", "Напомни мне завтра в десять позвонить Ане.", &[], "ru"));
-        assert!(translation_ok("открой Soniox и проверь ключ", "Open Soniox and check the key.", &[], "en"));
+    /// A case of the check: speech, result, dictionary, target language, verdict.
+    type Case = (&'static str, &'static str, &'static [&'static str], &'static str, bool);
+    const PASS: bool = true;
+    const FAIL: bool = false;
+
+    /// The cases whose verdict differs from the expected one.
+    fn wrong_verdicts(cases: &[Case]) -> Vec<String> {
+        cases
+            .iter()
+            .filter_map(|&(raw, out, terms, to, ok)| {
+                let terms: Vec<String> = terms.iter().map(|t| t.to_string()).collect();
+                (translation_ok(raw, out, &terms, to) != ok).then(|| format!("expected {ok} for {to}: {raw:?} → {out:?} {terms:?}"))
+            })
+            .collect()
     }
 
     #[test]
-    fn untranslated_text_fails_for_a_pair_with_another_script() {
-        assert!(!translation_ok("напомни мне завтра позвонить Ане", "Напомни мне завтра позвонить Ане.", &[], "en"));
-        assert!(!translation_ok("call Anya tomorrow at ten please", "Call Anya tomorrow at ten, please.", &[], "ru"));
+    fn translation_verdicts() {
+        let cases: &[Case] = &[
+            // Translations, with names and code kept as written in Latin.
+            ("напомни мне завтра позвонить Ане в десять", "Remind me to call Anya at ten tomorrow.", &[], "en", PASS),
+            ("remind me to call Anya tomorrow at ten", "Напомни мне завтра в десять позвонить Ане.", &[], "ru", PASS),
+            ("открой Soniox и проверь ключ", "Open Soniox and check the key.", &[], "en", PASS),
+            ("open Slack", "Открой Slack.", &[], "ru", PASS),
+            ("run cargo test", "Запусти cargo test", &[], "ru", PASS),
+            ("запусти cargo test", "Run cargo test.", &[], "en", PASS),
+            ("check the GitHub pull request for CUE", "检查CUE的GitHub拉取请求", &[], "zh", PASS),
+            ("run npm install then npm run build and npm test", "Запусти npm install, затем npm run build и npm test", &[], "ru", PASS),
+            ("run cargo fmt then cargo clippy and cargo test", "Запусти cargo fmt, затем cargo clippy и cargo test.", &[], "ru", PASS),
+            ("run git pull then git rebase main and git push force", "Выполни git pull, затем git rebase main и git push force.", &[], "ru", PASS),
+            ("запусти пожалуйста npm install а потом npm run build", "Please run npm install and then npm run build.", &[], "en", PASS),
+            ("first npm install then npm run build and npm test", "先npm install，再npm run build和npm test", &[], "zh", PASS),
+            ("run npm install, npm run build and npm test", "npm install、npm run build、npm testを実行", &[], "ja", PASS),
+            ("after npm install run npm run build and npm test", "npm install 후 npm run build와 npm test 실행", &[], "ko", PASS),
+            // Mostly code: each Latin letter weighs as one, not as Han, so the result is not "three times longer".
+            ("run npm install lodash express typescript", "npm install lodash express typescriptを実行", &[], "ja", PASS),
+            // Latin code inside Chinese speech weighs as Latin.
+            ("请帮我在终端里运行cargo clippy命令吧", "Please run cargo clippy in the terminal.", &[], "en", PASS),
+            ("deploy this to cuber netis", "Разверни это в Kubernetes.", &["Kubernetes"], "ru", PASS),
+            ("deploy this to cuber netis", "Разверни это в Kubernetes.", &[], "ru", PASS),
+            ("短い", "Short.", &[], "en", PASS),
+            (
+                "我明天早上十点给你打电话然后我们讨论这个计划的细节",
+                "I'll call you tomorrow at ten in the morning and we'll go over the details of this plan.",
+                &[],
+                "en",
+                PASS,
+            ),
+            // One script: the length only.
+            ("call me when you are home", "Ruf mich an, wenn du zu Hause bist.", &[], "de", PASS),
+            // Cleanups instead of translations, with names respelled in Latin.
+            ("открой гитхаб и проверь пул реквест", "Открой GitHub и проверь пул реквест.", &[], "en", FAIL),
+            ("открой гитхаб и проверь пул реквест", "Открой GitHub и проверь pull request.", &[], "en", FAIL),
+            ("открой гитхаб и проверь пул реквест", "Открой GitHub и проверь pull request.", &["GitHub", "pull request"], "en", FAIL),
+            ("проверь пул реквест в гитхабе и открой клод код", "Проверь pull request в GitHub и открой Claude Code.", &[], "en", FAIL),
+            ("запусти докер компоуз апп", "Запусти Docker Compose апп.", &[], "en", FAIL),
+            ("открой сониокс и проверь ключ", "Открой Soniox и проверь ключ.", &[], "en", FAIL),
+            ("открой сониокс и проверь ключ", "Открой Soniox и проверь ключ.", &["Soniox"], "en", FAIL),
+            ("запусти cargo test", "Запусти cargo test.", &[], "en", FAIL),
+            ("pay the bill in sberbank", "Pay the bill in Сбербанк.", &["Сбербанк"], "ru", FAIL),
+            // A listed name is no evidence of translation.
+            ("кубернетес и докер", "Kubernetes и Docker.", &["Kubernetes", "Docker"], "en", FAIL),
+            // The original with its translation, echoes, the wrong language, nothing.
+            ("напомни мне завтра позвонить маме", "Напомни мне завтра позвонить маме. Remind me to call mom tomorrow.", &[], "en", FAIL),
+            ("напомни мне завтра позвонить Ане", "Напомни мне завтра позвонить Ане.", &[], "en", FAIL),
+            ("call Anya tomorrow at ten please", "Call Anya tomorrow at ten, please.", &[], "ru", FAIL),
+            ("открой Slack", "Открой Slack.", &[], "en", FAIL),
+            ("open Slack and check the messages", "打开Slack并检查消息", &[], "ru", FAIL),
+            ("hello", "   ", &[], "ru", FAIL),
+        ];
+        let wrong = wrong_verdicts(cases);
+        assert!(wrong.is_empty(), "{} wrong verdicts:\n{}", wrong.len(), wrong.join("\n"));
     }
 
-    /// Names, product names and code stay as said (the instruction asks for it): they do not count against the script.
+    /// Known limits of the rule (see `written_in`), pinned as they are.
     #[test]
-    fn names_kept_from_the_speech_do_not_count_against_the_script() {
-        assert!(translation_ok("open Slack", "Открой Slack.", &[], "ru"));
-        assert!(translation_ok("run cargo test", "Запусти cargo test", &[], "ru"));
-        assert!(translation_ok("check the GitHub pull request for CUE", "检查CUE的GitHub拉取请求", &[], "zh"));
+    fn known_limits() {
+        // A translation made only of listed terms leaves nothing to show it.
+        assert!(!translation_ok("Sberbank", "Сбербанк", &["Сбербанк".to_owned()], "ru"));
+        // Into a non-Latin target Latin text shows nothing either way: the English original followed by its translation
+        // passes, and so does English with one word in the target script.
+        let both = "Remind me to call mom tomorrow. Напомни мне завтра позвонить маме.";
+        assert!(translation_ok("remind me to call mom tomorrow", both, &[], "ru"));
+        assert!(translation_ok("pay the bill in sberbank", "Pay the bill in Сбербанк.", &[], "ru"));
+        // A phrase of names alone: without the dictionary the respelled names read as English.
+        assert!(translation_ok("кубернетес и докер", "Kubernetes и Docker.", &[], "en"));
     }
 
+    /// Japanese writes kana and kanji, Korean Hangul syllables and jamo, full- or halfwidth.
     #[test]
-    fn a_copied_name_does_not_pass_an_untranslated_result() {
-        assert!(!translation_ok("открой Slack", "Открой Slack.", &[], "en"));
-        assert!(translation_ok("открой Slack", "Open Slack.", &[], "en"));
-    }
-
-    /// The speech may spell a listed term otherwise; the model writes it as listed.
-    #[test]
-    fn a_dictionary_term_kept_as_written_passes() {
-        let raw = "deploy this to cuber netis";
-        let out = "Разверни это в Kubernetes.";
-        assert!(translation_ok(raw, out, &["Kubernetes".to_owned()], "ru"));
-        assert!(!translation_ok(raw, out, &[], "ru"), "without the dictionary the name is 10 of 22 letters");
-    }
-
-    /// A cleanup instead of a translation: only the name the model respelled is in the target script, far too little of
-    /// what was said, whether or not the name is in the dictionary.
-    #[test]
-    fn a_cleanup_with_a_respelled_name_fails() {
-        assert!(!translation_ok("открой гитхаб и проверь пул реквест", "Открой GitHub и проверь пул реквест.", &[], "en"));
-        let (raw, out) = ("открой сониокс и проверь ключ", "Открой Soniox и проверь ключ.");
-        assert!(!translation_ok(raw, out, &[], "en"));
-        assert!(!translation_ok(raw, out, &["Soniox".to_owned()], "en"), "a term in the target script is no translation of the rest");
-    }
-
-    /// A term in the target script is the translation itself, not a name kept as written.
-    #[test]
-    fn a_translation_into_a_dictionary_term_passes() {
-        assert!(translation_ok("Sberbank", "Сбербанк", &["Сбербанк".to_owned()], "ru"));
-    }
-
-    /// A short phrase keeps a larger share of code and names.
-    #[test]
-    fn a_short_phrase_keeps_its_code() {
-        assert!(translation_ok("запусти cargo test", "Run cargo test", &[], "en"));
-    }
-
-    /// A Han letter stands for about three Latin ones: by plain count a name the speech spelled in Cyrillic would be
-    /// 6 of 14 letters, too many.
-    #[test]
-    fn the_script_share_is_weighted_by_density() {
-        assert!(translation_ok("проверь пул реквест на гитхабе", "检查GitHub上的拉取请求", &[], "zh"));
+    fn japanese_and_korean_letters_are_in_their_languages_scripts() {
+        for c in "ひらがなカタカナー漢字ㇰｶﾀｶﾅ".chars() {
+            assert_eq!(script_of(c), script_of_language("ja"), "{c} U+{:04X}", c as u32);
+        }
+        for c in "한국어ᄀㄱㅏﾡ".chars() {
+            assert_eq!(script_of(c), script_of_language("ko"), "{c} U+{:04X}", c as u32);
+        }
     }
 
     #[test]
@@ -483,14 +523,6 @@ mod tests {
         let raw = "какая сегодня погода в Москве";
         let answer = "I can't check the weather, but you can open a weather site or app and search for Moscow to see the current forecast and temperature for today.";
         assert!(!translation_ok(raw, answer, &[], "en"));
-    }
-
-    #[test]
-    fn same_script_pairs_check_only_length() {
-        assert!(translation_ok("call me when you are home", "Ruf mich an, wenn du zu Hause bist.", &[], "de"));
-        assert!(translation_ok("短い", "Short.", &[], "en"), "short speech: no length check");
-        assert!(translation_ok("我明天早上十点给你打电话然后我们讨论这个计划的细节", "I'll call you tomorrow at ten in the morning and we'll go over the details of this plan.", &[], "en"));
-        assert!(!translation_ok("hello", "   ", &[], "ru"));
     }
 
     #[test]

@@ -705,16 +705,16 @@ mod tests {
         assert_one_warning(&lines, "translation failed the check");
     }
 
+    /// A listed name is no evidence of translation: respelling the listed names is a cleanup, not a translation.
     #[tokio::test]
     async fn translate_checks_the_answer_against_the_dictionary_too() {
-        let api = fake_api(|_, _, _| reply(200, &message("Разверни это в Kubernetes.", "end_turn"))).await;
+        let api = fake_api(|_, _, _| reply(200, &message("Kubernetes и Docker.", "end_turn"))).await;
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let url = format!("{}/v1/messages", api.base);
-        let (s, raw, job) = (RefineSettings::default(), "deploy this to cuber netis", Job::Translate("ru"));
-        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", raw, &ctx(), &["Kubernetes".to_owned()], &s, job).await;
-        assert_eq!((r.text.as_str(), r.outcome), ("Разверни это в Kubernetes.", RefineOutcome::Refined));
-        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", raw, &ctx(), &[], &s, job).await;
-        assert_eq!((r.text.as_str(), r.outcome), (raw, RefineOutcome::RawFallback), "without the dictionary the name outweighs the rest");
+        let (s, raw, job) = (RefineSettings::default(), "кубернетес и докер", Job::Translate("en"));
+        let terms = ["Kubernetes".to_owned(), "Docker".to_owned()];
+        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", raw, &ctx(), &terms, &s, job).await;
+        assert_eq!((r.text.as_str(), r.outcome), (raw, RefineOutcome::RawFallback));
     }
 
     #[tokio::test]
