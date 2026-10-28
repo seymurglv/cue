@@ -16,9 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
 };
 
-use crate::chord::{
-    Chord, Decision, HotkeyEvent, VK_ESCAPE, VK_LCONTROL, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RSHIFT, VK_RWIN, VK_V,
-};
+use crate::chord::{Chord, Decision, HotkeyEvent, VK_ESCAPE, VK_LCONTROL, VK_LWIN, VK_RCONTROL, VK_RWIN, VK_V};
 use crate::input::{key_held, send_mask_key, MODIFIERS};
 
 /// Swallow Esc — while CUE is recording, thinking or showing an error. Set by the core.
@@ -170,10 +168,11 @@ fn after_gap(chord: &mut Chord, paused: bool, held: impl Fn(u16) -> bool) -> Opt
 /// Timer resync while the chord is held: it ends even if the Ctrl and Win releases never reached the hook
 /// (UAC prompt, Ctrl+Alt+Del, lock screen, elevated window) and there are no new presses.
 /// A key counts as released only if it is not seen held on this tick or the previous one: a tick may come
-/// between `Chord` seeing the press and Windows updating `GetAsyncKeyState`.
+/// between `Chord` seeing the press and Windows updating `GetAsyncKeyState`. A key the hook saw pressed since the last
+/// tick counts as seen (`pressed`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Debounce {
-    /// Whether the modifier (`MODIFIERS`) was held on the previous tick.
+    /// Whether the modifier (`MODIFIERS`) was held on the previous tick or pressed since.
     prev: [bool; 8],
 }
 
@@ -181,16 +180,20 @@ impl Debounce {
     /// A freshly set timer: nothing is released on the first tick.
     const ARMED: Self = Self { prev: [true; 8] };
 
+    /// A modifier the hook has just seen go down counts as held on the next tick: Windows may not have recorded the press
+    /// yet when the tick reads `GetAsyncKeyState`, and a tick that dropped it would lose what the key did — a Shift's toggle
+    /// (its auto-repeat would toggle back) or the Alt of an "Ask" chord (its release would open the app's menu, unmasked).
+    fn pressed(&mut self, vk: u16) {
+        if let Some(i) = MODIFIERS.iter().position(|&m| m == vk) {
+            self.prev[i] = true;
+        }
+    }
+
     /// Like `after_gap`, but taking the previous tick into account. While paused `Chord` resyncs, no events.
     fn tick(&mut self, chord: &mut Chord, paused: bool, held: impl Fn(u16) -> bool) -> Option<HotkeyEvent> {
         let now = MODIFIERS.map(&held);
         let prev = std::mem::replace(&mut self.prev, now);
         let seen = |vk| match MODIFIERS.iter().position(|&m| m == vk) {
-            // Shift is never dropped here. A Shift pressed inside the held chord is new to the previous tick as well, so
-            // a tick that comes before Windows updates its state would drop it, and its auto-repeat would toggle the mode
-            // back. The timer only has to end a stuck chord; a Shift whose release was lost is dropped by the resync
-            // before the next press, the only place that reads it.
-            _ if vk == VK_LSHIFT || vk == VK_RSHIFT => true,
             Some(i) => now[i] || prev[i],
             None => held(vk),
         };
@@ -284,6 +287,11 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             });
             if let Some((out, active, chord_down)) = outcome {
                 follow_chord(active, chord_down);
+                if ev.down {
+                    let mut debounce = DEBOUNCE.get();
+                    debounce.pressed(ev.vk);
+                    DEBOUNCE.set(debounce);
+                }
                 // Outside the STATE borrow: SendInput from this thread calls the procedure again right away
                 // (for the injected mask, which goes past `Chord`), and the mask reaches the system before this event.
                 // The result is not checked: there is no logging in the procedure.
@@ -434,7 +442,7 @@ pub fn installed() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chord::{VK_MASK, VK_RMENU};
+    use crate::chord::{VK_LMENU, VK_LSHIFT, VK_MASK, VK_RMENU, VK_RSHIFT};
     use cue_core::flow::{Effect, Flow, Input, Ms};
     use cue_core::ui::Mode;
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -476,6 +484,9 @@ mod tests {
             let how = route(&ev).expect("the event goes into Chord");
             let (out, chord_down) = feed(&mut self.chord, &ev, how, false, false, held);
             self.follow(chord_down);
+            if ev.down {
+                self.debounce.pressed(ev.vk);
+            }
             out
         }
 
@@ -972,6 +983,40 @@ mod tests {
         assert_eq!(g.tick(held_set(&[VK_LCONTROL, VK_LWIN, VK_LSHIFT])), None);
         let repeat = g.key(key(VK_LSHIFT, true), held_set(&[VK_LCONTROL, VK_LWIN, VK_LSHIFT]));
         assert_eq!(repeat.events, [None, None, None], "the held Shift's auto-repeat does not toggle back");
+    }
+
+    #[test]
+    fn timer_does_not_drop_a_fresh_alt_or_its_mask() {
+        let mut g = Glue::new();
+        g.chord.set_ask(true);
+        let pair = [VK_LCONTROL, VK_LWIN];
+        g.key(key(VK_LCONTROL, true), held_set(&[]));
+        g.key(key(VK_LWIN, true), held_set(&[VK_LCONTROL]));
+        assert_eq!(g.tick(held_set(&pair)), None);
+        assert_eq!(g.key(key(VK_LMENU, true), held_set(&pair)).events, [None, None, Some(ModeChange(Mode::Ask))]);
+        // The tick came before Windows recorded the Alt press, and the previous tick did not see Alt either.
+        assert_eq!(g.tick(held_set(&pair)), None);
+        let up = g.key(key(VK_LMENU, false), held_set(&[VK_LCONTROL, VK_LWIN, VK_LMENU]));
+        assert!(up.inject_mask_first, "the Alt release is masked: the app's menu does not open");
+    }
+
+    #[test]
+    fn timer_still_drops_an_alt_whose_release_was_lost() {
+        let mut g = Glue::new();
+        g.chord.set_ask(true);
+        let pair = [VK_LCONTROL, VK_LWIN];
+        g.key(key(VK_LCONTROL, true), held_set(&[]));
+        g.key(key(VK_LWIN, true), held_set(&[VK_LCONTROL]));
+        assert_eq!(g.tick(held_set(&pair)), None);
+        g.key(key(VK_LMENU, true), held_set(&pair));
+        // Alt's release never reached the hook: not seen on two ticks in a row, it is dropped.
+        assert_eq!(g.tick(held_set(&pair)), None);
+        assert_eq!(g.tick(held_set(&pair)), None);
+        assert_eq!(
+            g.key(key(VK_LMENU, true), held_set(&pair)).events,
+            [None, None, Some(ModeChange(Mode::Ask))],
+            "a new Alt press is fresh again"
+        );
     }
 
     #[test]

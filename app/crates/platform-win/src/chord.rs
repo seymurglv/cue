@@ -900,10 +900,16 @@ mod tests {
 
     #[test]
     fn alt_held_when_the_pair_forms_asks_only_when_enabled() {
+        let mut off = Chord::default();
+        press(&mut off, VK_LMENU);
+        press(&mut off, VK_LCONTROL);
+        assert_eq!(press(&mut off, VK_LWIN), Decision::default(), "\"Ask\" off: a system shortcut");
         let mut c = ask_chord();
         press(&mut c, VK_LMENU);
         press(&mut c, VK_LCONTROL);
         assert_eq!(press(&mut c, VK_LWIN).event, Some(ChordDown(Mode::Ask)));
+        assert_eq!(release(&mut c, VK_LMENU), MASK_ONLY, "the Alt the chord formed with is masked too");
+        assert_eq!(release(&mut c, VK_LWIN).event, Some(ChordUp));
     }
 
     #[test]
