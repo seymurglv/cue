@@ -16,7 +16,8 @@ pub enum LastFiles {
     Commit,
     /// Failure: the audio stays in `current.wav` for "retry"; the previous dictation is not touched.
     KeepForRetry,
-    /// Cancel, empty text, discard: the attempt's audio is deleted; the previous dictation is not touched.
+    /// Cancel, empty text, discard, an "Ask" answer: nothing pasted, the attempt's audio is deleted; the previous
+    /// result stays.
     Discard,
 }
 
@@ -24,7 +25,7 @@ pub fn last_files(outcome: Outcome) -> LastFiles {
     match outcome {
         Outcome::Inserted | Outcome::NoField => LastFiles::Commit,
         Outcome::Failed => LastFiles::KeepForRetry,
-        Outcome::Cancelled | Outcome::Empty | Outcome::Discarded => LastFiles::Discard,
+        Outcome::Cancelled | Outcome::Empty | Outcome::Discarded | Outcome::Answered => LastFiles::Discard,
     }
 }
 
@@ -91,6 +92,7 @@ mod tests {
         assert_eq!(last_files(Outcome::Cancelled), LastFiles::Discard);
         assert_eq!(last_files(Outcome::Empty), LastFiles::Discard);
         assert_eq!(last_files(Outcome::Discarded), LastFiles::Discard);
+        assert_eq!(last_files(Outcome::Answered), LastFiles::Discard);
     }
 
     #[test]

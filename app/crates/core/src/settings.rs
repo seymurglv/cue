@@ -1,5 +1,5 @@
 //! settings.json: engine and models, refine thresholds, the hint counter, bench, interface language, where the Drop
-//! sits, the user's dictionary, the translation pair, prices for usage accounting.
+//! sits, the user's dictionary, the translation pair, "Ask", prices for usage accounting.
 use crate::translate;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::io::Write;
@@ -200,6 +200,72 @@ fn target_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Optio
     Ok(language_or_nothing(deserializer)?.filter(|code| code != DEFAULT_TARGET))
 }
 
+/// "Ask" (spec 2 §9). Every field is optional: a missing or invalid value reads as the default, and a default — also one
+/// the file states — is never written back, like `translate`.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AskSettings {
+    /// "Ask" as a whole (a paid feature later); on by default.
+    #[serde(deserialize_with = "off_or_nothing", skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Web search in answers ($0.01 a search); on by default.
+    #[serde(deserialize_with = "off_or_nothing", skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<bool>,
+    #[serde(deserialize_with = "ask_model_or_nothing", skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(deserialize_with = "searches_or_nothing", skip_serializing_if = "Option::is_none")]
+    pub max_searches: Option<u32>,
+}
+
+const DEFAULT_ASK_MODEL: &str = "claude-haiku-5-5";
+const DEFAULT_MAX_SEARCHES: u32 = 2;
+/// More searches a question than this is a typo: each one costs money.
+const MAX_SEARCHES_LIMIT: u32 = 10;
+
+impl AskSettings {
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    pub fn web_search(&self) -> bool {
+        self.web_search.unwrap_or(true)
+    }
+
+    pub fn model(&self) -> &str {
+        self.model.as_deref().unwrap_or(DEFAULT_ASK_MODEL)
+    }
+
+    pub fn max_searches(&self) -> u32 {
+        self.max_searches.unwrap_or(DEFAULT_MAX_SEARCHES)
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// `false` turns a switch off; `true` (the default) and anything else (a string, a number, `null`) read as nothing.
+fn off_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok((value == serde_json::Value::Bool(false)).then_some(false))
+}
+
+/// A model name, trimmed; empty, not a string, or the default reads as nothing.
+fn ask_model_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_str().map(str::trim).filter(|m| !m.is_empty() && *m != DEFAULT_ASK_MODEL).map(str::to_owned))
+}
+
+/// A whole number of searches from 1 to `MAX_SEARCHES_LIMIT`; anything else, or the default, reads as nothing.
+fn searches_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_u64()
+        .filter(|n| (1..=u64::from(MAX_SEARCHES_LIMIT)).contains(n))
+        .map(|n| n as u32)
+        .filter(|&n| n != DEFAULT_MAX_SEARCHES))
+}
+
 /// A section that is not an object (`"translate": "en"`, a number) reads as the default section instead of making the
 /// whole file unreadable.
 fn section_or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -249,6 +315,9 @@ pub struct Settings {
     /// Not written while every field is the default, like `ui`.
     #[serde(deserialize_with = "section_or_default", skip_serializing_if = "TranslateSettings::is_default")]
     pub translate: TranslateSettings,
+    /// Not written while every field is the default, like `translate`.
+    #[serde(deserialize_with = "section_or_default", skip_serializing_if = "AskSettings::is_default")]
+    pub ask: AskSettings,
     /// Default prices are not written to the file, so a price fix in the code also reaches existing installs.
     /// If the user changed even one price, the whole block is written.
     #[serde(skip_serializing_if = "Pricing::is_default")]
@@ -311,6 +380,7 @@ impl Default for Settings {
             drop: DropSettings::default(),
             dictionary: DictionarySettings::default(),
             translate: TranslateSettings::default(),
+            ask: AskSettings::default(),
             pricing: Pricing::default(),
         }
     }
@@ -423,6 +493,7 @@ mod tests {
         assert_eq!(s.pricing.claude_price("claude-sonnet-5-5").unwrap().cache_read_per_mtok, 0.10);
         assert_eq!(s.pricing.claude_price("claude-opus-5-5").unwrap().cache_read_per_mtok, 0.20);
         assert_eq!(s.pricing.web_search_usd, 0.01);
+        assert_eq!(s.ask, AskSettings::default());
     }
 
     #[test]
@@ -866,6 +937,70 @@ mod tests {
         save(&s, &p).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
         assert_eq!(json["translate"], serde_json::json!({ "target": "de", "speech": "ru" }));
+        assert_eq!(load(&p).unwrap(), s);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ask_defaults_and_reading() {
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert!(s.ask.enabled() && s.ask.web_search());
+        assert_eq!((s.ask.model(), s.ask.max_searches()), ("claude-haiku-5-5", 2));
+        let s: Settings = serde_json::from_str(
+            r#"{"ask":{"enabled":false,"web_search":false,"model":" claude-sonnet-5-5 ","max_searches":5}}"#,
+        )
+        .unwrap();
+        assert!(!s.ask.enabled() && !s.ask.web_search());
+        assert_eq!((s.ask.model(), s.ask.max_searches()), ("claude-sonnet-5-5", 5));
+    }
+
+    /// A typo in `ask` reads as the default and never makes the file unreadable.
+    #[test]
+    fn bad_ask_values_read_as_defaults() {
+        for json in [
+            r#"{"ask":"off"}"#,
+            r#"{"ask":5}"#,
+            r#"{"ask":{"enabled":"no","web_search":0,"model":"","max_searches":0}}"#,
+            r#"{"ask":{"enabled":null,"model":7,"max_searches":11}}"#,
+            r#"{"ask":{"max_searches":-1}}"#,
+            r#"{"ask":{"max_searches":2.5}}"#,
+            r#"{"ask":{"max_searches":"3"}}"#,
+        ] {
+            let s: Settings = serde_json::from_str(json).unwrap_or_else(|e| panic!("{json}: {e}"));
+            assert_eq!(s.ask, AskSettings::default(), "{json}");
+        }
+    }
+
+    /// Like `translate.target`: a default, also one the file states, is not written back.
+    #[test]
+    fn default_ask_values_are_not_written_back() {
+        let dir = tmp("default-ask");
+        let p = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &p,
+            r#"{"ask":{"enabled":true,"web_search":true,"model":"claude-haiku-5-5","max_searches":2},"hold_hints_left":2}"#,
+        )
+        .unwrap();
+        let s = load(&p).unwrap();
+        assert_eq!(s.ask, AskSettings::default());
+        save(&s, &p).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        assert!(json.get("ask").is_none(), "{json}");
+        assert!(!serde_json::to_string(&Settings::default()).unwrap().contains("\"ask\""));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn chosen_ask_fields_are_written_and_survive_roundtrip() {
+        let dir = tmp("ask");
+        let p = dir.join("settings.json");
+        let mut s = Settings::default();
+        s.ask.web_search = Some(false);
+        s.ask.max_searches = Some(4);
+        save(&s, &p).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        assert_eq!(json["ask"], serde_json::json!({ "web_search": false, "max_searches": 4 }));
         assert_eq!(load(&p).unwrap(), s);
         std::fs::remove_dir_all(dir).unwrap();
     }

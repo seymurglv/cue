@@ -12,7 +12,8 @@
 //!
 //! The last three columns, `mode`, `web_searches` and `search_usd`, came with the modes (spec 2 §10). Old rows
 //! without these columns read as dictation; the header of an existing file is not rewritten. A refine cache warm-up
-//! is a row of its own (`warmup`, outcome `discarded`, no audio): it costs money but is not a dictation.
+//! is a row of its own (`warmup`, outcome `discarded`, no audio): it costs money but is not a dictation; `answered`
+//! (an "Ask" answer shown in full) is not a dictation either.
 //!
 //! `ts` is UTC, and the summary month is a UTC month too: that way it matches the providers' invoices.
 //!
@@ -143,6 +144,7 @@ pub fn outcome_name(o: Outcome) -> &'static str {
         Outcome::Empty => "empty",
         Outcome::Failed => "failed",
         Outcome::Discarded => "discarded",
+        Outcome::Answered => "answered",
     }
 }
 
@@ -503,6 +505,19 @@ mod tests {
         assert_eq!(s.dictations, 0);
         assert!(s.refine_usd > 0.0);
         assert_eq!(s.modes.iter().map(|m| (m.mode.as_str(), m.rows)).collect::<Vec<_>>(), vec![("warmup", 1)]);
+    }
+
+    #[test]
+    fn answered_rows_cost_money_but_are_not_dictations() {
+        let p = Pricing::default();
+        let mut r = rec_with("2026-11-01T10:00:00Z", Outcome::Answered);
+        (r.mode, r.web_searches) = (UsageMode::Ask, 1);
+        let l = line(&r, &p);
+        assert!(l.contains(",answered,ask,1,0.010000"), "{l}");
+        let s = summarize(&format!("{HEADER}\n{l}\n"), "2026-11");
+        assert_eq!(s.dictations, 0);
+        assert!((s.search_usd - 0.01).abs() < 1e-9);
+        assert_eq!(s.modes.iter().map(|m| (m.mode.as_str(), m.rows)).collect::<Vec<_>>(), vec![("ask", 1)]);
     }
 
     /// A file started before the modes keeps its old header: old and new rows are summed together, modes in the order

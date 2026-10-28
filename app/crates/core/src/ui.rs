@@ -12,6 +12,8 @@ pub enum UiPhase {
     Empty,
     Cancel,
     Error,
+    /// An "Ask" answer is open (in the tray or the card) and nothing records: the Drop rests.
+    Answer,
 }
 
 /// What the dictation does with the speech, picked by the chord (spec 2 §4): `Ctrl + Win` dictates, `+ Shift` translates,
@@ -64,6 +66,14 @@ pub enum UiAction {
     Dismiss,
     TrayAction,
     TrayClose,
+    /// Buttons of an "Ask" answer (spec 2 §7): paste it at the caret, below the selection, over the selection; copy it;
+    /// ask again after a failure; close it.
+    AnswerInsert,
+    AnswerReplace,
+    AnswerBelow,
+    AnswerCopy,
+    AnswerRetry,
+    AnswerClose,
 }
 
 #[cfg(test)]
@@ -96,6 +106,7 @@ mod tests {
             (UiPhase::Empty, "empty"),
             (UiPhase::Cancel, "cancel"),
             (UiPhase::Error, "error"),
+            (UiPhase::Answer, "answer"),
         ];
         for (v, name) in phases {
             assert_eq!(json(v), format!("\"{name}\""));
@@ -126,6 +137,12 @@ mod tests {
             ("dismiss", UiAction::Dismiss),
             ("trayAction", UiAction::TrayAction),
             ("trayClose", UiAction::TrayClose),
+            ("answerInsert", UiAction::AnswerInsert),
+            ("answerReplace", UiAction::AnswerReplace),
+            ("answerBelow", UiAction::AnswerBelow),
+            ("answerCopy", UiAction::AnswerCopy),
+            ("answerRetry", UiAction::AnswerRetry),
+            ("answerClose", UiAction::AnswerClose),
         ];
         for (name, v) in actions {
             assert_eq!(serde_json::from_str::<UiAction>(&format!("\"{name}\"")).unwrap(), v);

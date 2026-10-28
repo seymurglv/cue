@@ -435,6 +435,12 @@ impl Runtime {
                     task.abort();
                 }
             }
+            // "Ask" is off (`hook::ASK_ENABLED` is false): Alt never picks it, and these effects never come.
+            Effect::Ask { .. }
+            | Effect::AskAgain { .. }
+            | Effect::AbortAsk { .. }
+            | Effect::AskPaste { .. }
+            | Effect::CloseAnswer => {}
             Effect::Insert { id, text } => self.insert(id, text),
             Effect::PasteLast => self.paste_last(),
             Effect::Ui(s) => self.emit_state(&s),

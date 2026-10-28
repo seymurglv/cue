@@ -49,6 +49,23 @@ pub enum InsertOutcome {
     NoField,
 }
 
+/// Where "Ask" puts text (spec 2 §6.2, §7): at the caret (the tray's Insert; a write with nothing selected), over the
+/// selection (Replace), or on a new line after it (the card's Insert below; a write that adds to the selection).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasteHow {
+    AtCaret,
+    Replace,
+    Below,
+}
+
+/// How an "Ask" request failed: a key, balance or limit problem the user has to fix, or anything else (the network, a
+/// timeout, the service), which Retry may help (spec 2 §8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AskError {
+    Key,
+    Failed,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Inserted,
@@ -57,6 +74,8 @@ pub enum Outcome {
     Empty,
     Failed,
     Discarded,
+    /// An "Ask" answer was shown in full (a refusal too): paid for, nothing pasted.
+    Answered,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -82,6 +101,13 @@ pub enum Input {
     Refined { id: DictationId, text: String, outcome: RefineOutcome },
     Inserted { id: DictationId, outcome: InsertOutcome },
     Timer(TimerKind),
+    /// The "Ask" answer of `id` has something to show (a search began, its sources came, the first words): it opens.
+    AskOpened { id: DictationId },
+    /// The "Ask" answer of `id` is complete (a refusal, or a write shown instead of written, too).
+    AskAnswered { id: DictationId },
+    /// The model wrote text for the field; the runtime holds it, `how` says where it goes.
+    AskWrite { id: DictationId, how: PasteHow },
+    AskFailed { id: DictationId, error: AskError },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,6 +122,15 @@ pub enum Effect {
     /// "Retry" after a failed translation: the same text is refined again; a new usage row without audio (spec 2 §5).
     RefineAgain { id: DictationId, raw: String, mode: Mode },
     AbortRefine { id: DictationId },
+    /// Ask the model (spec 2 §6.2): the first question of a conversation, or a follow-up while the answer is open.
+    Ask { id: DictationId, question: String, follow_up: bool },
+    /// Retry after a failed "Ask" request: the same question again; a new usage row without audio.
+    AskAgain { id: DictationId },
+    AbortAsk { id: DictationId },
+    /// Paste the answer, or the text the model wrote, as `how` says; the runtime holds the text.
+    AskPaste { id: DictationId, how: PasteHow },
+    /// The answer closes and its conversation is forgotten (spec 2 §6.2: it lives while the answer is open).
+    CloseAnswer,
     Insert { id: DictationId, text: String },
     PasteLast,
     Ui(UiState),
@@ -118,6 +153,8 @@ enum Phase {
     Empty,
     Cancelled,
     Error { cause: ErrorCause, retry: bool },
+    /// An "Ask" answer is open and nothing records: Esc closes it, a chord records a follow-up.
+    Answer,
 }
 
 pub struct Flow {
@@ -147,6 +184,19 @@ pub struct Flow {
     mode: Mode,
     hold_hints_left: u8,
     has_last: bool,
+    /// The dictation whose "Ask" request is in flight (its answer may already be on screen). It can be an earlier one than
+    /// `id`: a follow-up is recorded while the answer it follows still prints (decision 12).
+    asking: Option<DictationId>,
+    /// A follow-up's question, transcribed while the answer it follows still prints: it goes once that answer has ended.
+    held: Option<String>,
+    /// The runtime holds an "Ask" conversation: from the first `Ask` effect until `CloseAnswer`.
+    conversation: bool,
+    /// The answer (tray or card) is on screen: Esc closes it, a chord records a follow-up.
+    answer_open: bool,
+    /// The last request of the open answer failed: it shows the error with Retry.
+    ask_failed: bool,
+    /// The paste under way is of an answer already counted (`Finished` went out when it was complete).
+    paste_counted: bool,
 }
 
 impl Flow {
@@ -167,6 +217,12 @@ impl Flow {
             mode: Mode::Dictate,
             hold_hints_left,
             has_last,
+            asking: None,
+            held: None,
+            conversation: false,
+            answer_open: false,
+            ask_failed: false,
+            paste_counted: false,
         }
     }
 
@@ -178,12 +234,16 @@ impl Flow {
         self.mode
     }
 
+    pub fn answer_open(&self) -> bool {
+        self.answer_open
+    }
+
     /// Swallow Esc: while CUE is starting, recording, thinking (including pasting, when the Drop shows
-    /// "thinking"; Esc does nothing there) or showing an error.
+    /// "thinking"; Esc does nothing there), showing an error or an "Ask" answer.
     pub fn esc_active(&self) -> bool {
         matches!(
             self.phase,
-            Phase::Starting | Phase::Recording | Phase::Thinking | Phase::Inserting | Phase::Error { .. }
+            Phase::Starting | Phase::Recording | Phase::Thinking | Phase::Inserting | Phase::Error { .. } | Phase::Answer
         )
     }
 
@@ -197,6 +257,7 @@ impl Flow {
             Phase::Empty => (UiPhase::Empty, None, false),
             Phase::Cancelled => (UiPhase::Cancel, None, false),
             Phase::Error { cause, retry } => (UiPhase::Error, Some(cause), retry),
+            Phase::Answer => (UiPhase::Answer, None, false),
         };
         UiState { phase, error, retry, paused: self.paused, mode: self.mode }
     }
@@ -239,7 +300,13 @@ impl Flow {
             Input::Ui(UiAction::Retry) => self.on_retry(&mut fx),
             Input::Ui(UiAction::Dismiss) => {
                 if matches!(self.phase, Phase::Error { .. }) {
-                    self.enter_idle(&mut fx);
+                    if self.answer_open {
+                        // The error of a follow-up that could not be transcribed: back to the answer (decision 7).
+                        self.phase = Phase::Answer;
+                        self.push_ui(&mut fx);
+                    } else {
+                        self.enter_idle(&mut fx);
+                    }
                 }
             }
             // The tray card carries out its own buttons; they do not change the flow.
@@ -304,9 +371,81 @@ impl Flow {
                 self.has_last = true;
                 self.on_inserted(outcome, &mut fx);
             }
+            Input::Ui(UiAction::AnswerClose) => {
+                if self.phase == Phase::Answer {
+                    self.close_answer(&mut fx);
+                }
+            }
+            Input::Ui(UiAction::AnswerInsert) => self.on_answer_paste(PasteHow::AtCaret, &mut fx),
+            Input::Ui(UiAction::AnswerReplace) => self.on_answer_paste(PasteHow::Replace, &mut fx),
+            Input::Ui(UiAction::AnswerBelow) => self.on_answer_paste(PasteHow::Below, &mut fx),
+            Input::Ui(UiAction::AnswerRetry) => self.on_answer_retry(&mut fx),
+            // The runtime copies the answer: the flow does not change.
+            Input::Ui(UiAction::AnswerCopy) => {}
+            // The first visible step of a request of the current dictation — a follow-up's too: its answer shows.
+            Input::AskOpened { id } if self.ask_for(id) && id == self.id && self.phase == Phase::Thinking => self.open_answer(&mut fx),
+            Input::AskAnswered { id } if self.ask_for(id) => {
+                self.asking = None;
+                fx.push(Effect::Finished { id, outcome: Outcome::Answered });
+                if id == self.id && self.phase == Phase::Thinking {
+                    self.open_answer(&mut fx);
+                }
+                self.send_held(&mut fx);
+            }
+            Input::AskWrite { id, how } if self.ask_for(id) && id == self.id && self.asking_now() => {
+                self.asking = None;
+                self.paste_counted = false;
+                self.phase = Phase::Inserting;
+                // The text lives in the conversation: the paste is asked for before the conversation goes.
+                fx.push(Effect::AskPaste { id, how });
+                self.end_conversation(&mut fx);
+                self.push_ui(&mut fx);
+            }
+            // A write that ended the answer a follow-up follows: the runtime shows it instead (decision 12) and says
+            // `AskAnswered`; if a write comes all the same, it counts as answered.
+            Input::AskWrite { id, .. } if self.ask_for(id) && id != self.id => {
+                self.asking = None;
+                fx.push(Effect::Finished { id, outcome: Outcome::Answered });
+                self.send_held(&mut fx);
+            }
+            Input::AskFailed { id, error } if self.ask_for(id) => {
+                self.asking = None;
+                fx.push(Effect::Finished { id, outcome: Outcome::Failed });
+                match error {
+                    // Retry would fail the same way: the Drop's "Claude key problem"; the answer closes, and a follow-up
+                    // under way goes with it (spec 2 §8).
+                    AskError::Key => {
+                        if id != self.id {
+                            self.drop_pending_follow_up(&mut fx);
+                        }
+                        self.end_conversation(&mut fx);
+                        self.phase = Phase::Error { cause: ErrorCause::ClaudeKey, retry: false };
+                        self.push_ui(&mut fx);
+                    }
+                    AskError::Failed => {
+                        self.ask_failed = true;
+                        self.answer_open = true;
+                        if id == self.id {
+                            // The answer shows the error with Retry; the question is kept (spec 2 §8).
+                            self.phase = Phase::Answer;
+                            self.push_ui(&mut fx);
+                        } else {
+                            // A follow-up waiting for this answer goes now, in place of the failed question.
+                            self.send_held(&mut fx);
+                        }
+                    }
+                }
+            }
             Input::Timer(kind) => self.on_timer(kind, &mut fx),
             // Results of another (earlier) dictation, and repeats of ones already received.
-            Input::SttFinal { .. } | Input::SttFailed { .. } | Input::Refined { .. } | Input::Inserted { .. } => {}
+            Input::SttFinal { .. }
+            | Input::SttFailed { .. }
+            | Input::Refined { .. }
+            | Input::Inserted { .. }
+            | Input::AskOpened { .. }
+            | Input::AskAnswered { .. }
+            | Input::AskWrite { .. }
+            | Input::AskFailed { .. } => {}
         }
         fx
     }
@@ -320,6 +459,110 @@ impl Flow {
     /// The transcription result belongs to the current dictation and is still awaited.
     fn stt_for(&self, id: DictationId) -> bool {
         id == self.id && self.stt_pending
+    }
+
+    /// The "Ask" request of dictation `id` is awaited.
+    fn ask_for(&self, id: DictationId) -> bool {
+        self.asking == Some(id)
+    }
+
+    /// Waiting for the request or showing its answer: where a write of the current dictation is accepted.
+    fn asking_now(&self) -> bool {
+        matches!(self.phase, Phase::Thinking | Phase::Answer)
+    }
+
+    /// A follow-up transcribed while the answer it follows printed goes now that the answer has ended (decision 12).
+    fn send_held(&mut self, fx: &mut Vec<Effect>) {
+        if let Some(question) = self.held.take() {
+            self.ask_failed = false;
+            self.asking = Some(self.id);
+            fx.push(Effect::Ask { id: self.id, question, follow_up: true });
+        }
+    }
+
+    fn open_answer(&mut self, fx: &mut Vec<Effect>) {
+        self.answer_open = true;
+        self.phase = Phase::Answer;
+        self.push_ui(fx);
+    }
+
+    /// Aborts the request in flight, if any. `counted` — its attempt ends "cancelled" now (an open answer closing), not
+    /// later (a first question cancelled with "restore", finished when "restore" expires).
+    fn abort_asking(&mut self, counted: bool, fx: &mut Vec<Effect>) {
+        if let Some(id) = self.asking.take() {
+            fx.push(Effect::AbortAsk { id });
+            if counted {
+                fx.push(Effect::Finished { id, outcome: Outcome::Cancelled });
+            }
+        }
+    }
+
+    /// Esc or the cross while the answer is open: a request still under way is aborted (its attempt ends "cancelled"), the
+    /// conversation is forgotten (spec 2 §6.2) and the Drop rests.
+    fn close_answer(&mut self, fx: &mut Vec<Effect>) {
+        self.abort_asking(true, fx);
+        self.end_conversation(fx);
+        self.enter_idle(fx);
+    }
+
+    /// The runtime forgets the conversation, if there is one, and the answer leaves the screen.
+    fn end_conversation(&mut self, fx: &mut Vec<Effect>) {
+        if self.conversation {
+            fx.push(Effect::CloseAnswer);
+        }
+        self.conversation = false;
+        self.answer_open = false;
+        self.ask_failed = false;
+        self.held = None;
+    }
+
+    /// The follow-up under way goes without a trace — the conversation it belongs to ended (a key problem of the answer it
+    /// follows): its recording, its transcription or its waiting question.
+    fn drop_pending_follow_up(&mut self, fx: &mut Vec<Effect>) {
+        self.held = None;
+        match self.phase {
+            Phase::Starting | Phase::Recording => self.drop_follow_up(Outcome::Discarded, fx),
+            Phase::Thinking => {
+                self.abort_stt(fx);
+                fx.push(Effect::Finished { id: self.id, outcome: Outcome::Discarded });
+            }
+            _ => {}
+        }
+    }
+
+    /// A follow-up recording is dropped (Esc, a system chord, Ctrl+Win+V, a lock): the open answer stays, with no
+    /// "restore" (spec 2 §7).
+    fn drop_follow_up(&mut self, outcome: Outcome, fx: &mut Vec<Effect>) {
+        fx.push(Effect::StopMic { id: self.id, keep: false });
+        self.abort_stt(fx);
+        self.cancel_record_timers(fx);
+        self.chord_held = false;
+        self.hold_mode = false;
+        fx.push(Effect::Finished { id: self.id, outcome });
+        self.phase = Phase::Answer;
+        self.push_ui(fx);
+    }
+
+    /// Insert, Insert below or Replace: only for an answer complete on screen. The answer closes; its attempt was counted
+    /// when it was complete, so the paste brings no second `Finished`.
+    fn on_answer_paste(&mut self, how: PasteHow, fx: &mut Vec<Effect>) {
+        if self.phase != Phase::Answer || self.asking.is_some() || self.ask_failed {
+            return;
+        }
+        self.paste_counted = true;
+        self.phase = Phase::Inserting;
+        fx.push(Effect::AskPaste { id: self.id, how });
+        self.end_conversation(fx);
+        self.push_ui(fx);
+    }
+
+    /// Retry in an answer whose last request failed: the same question again (a new attempt without audio).
+    fn on_answer_retry(&mut self, fx: &mut Vec<Effect>) {
+        if self.phase == Phase::Answer && self.ask_failed && self.asking.is_none() {
+            self.ask_failed = false;
+            self.asking = Some(self.id);
+            fx.push(Effect::AskAgain { id: self.id });
+        }
     }
 
     fn on_chord_down(&mut self, mode: Mode, now: Ms, fx: &mut Vec<Effect>) {
@@ -341,11 +584,19 @@ impl Flow {
                 self.close_cancelled(fx);
                 self.start(mode, fx);
             }
+            // A chord while the answer is open records a follow-up at once, also while the answer still prints (decision 12,
+            // the approved design): the follow-up goes once both have ended. A dictation needs the answer closed first (§7).
+            Phase::Answer => self.start(Mode::Ask, fx),
+            // A follow-up that could not be transcribed: a new chord records another.
+            Phase::Error { .. } if self.answer_open => self.start(Mode::Ask, fx),
             Phase::Idle | Phase::Done | Phase::Empty | Phase::Error { .. } => self.start(mode, fx),
         }
     }
 
     fn start(&mut self, mode: Mode, fx: &mut Vec<Effect>) {
+        if !self.answer_open {
+            self.end_conversation(fx);
+        }
         self.id = DictationId(self.id.0.wrapping_add(1));
         self.mode = mode;
         self.phase = Phase::Starting;
@@ -357,6 +608,8 @@ impl Flow {
         self.stt_pending = true;
         self.refine_pending = false;
         self.retry_text = false;
+        self.held = None;
+        self.paste_counted = false;
         for kind in [TimerKind::DoneHide, TimerKind::EmptyHide, TimerKind::UndoExpire] {
             fx.push(Effect::CancelTimer(kind));
         }
@@ -373,7 +626,7 @@ impl Flow {
     /// Alt pressed while the starting chord is still held (hold mode included): the dictation switches to the mode Alt
     /// picks. After the release Alt no longer counts; the finishing press has already moved the flow to "thinking".
     fn on_mode_change(&mut self, mode: Mode, fx: &mut Vec<Effect>) {
-        if self.chord_held && self.recording_now() && self.mode != mode {
+        if self.chord_held && self.recording_now() && self.mode != mode && !self.answer_open {
             self.mode = mode;
             self.push_ui(fx);
         }
@@ -385,9 +638,9 @@ impl Flow {
     /// while that Shift is held (`chord::Decision::undo_toggle`): a capital letter or the finishing chord never
     /// switches the mode. The user often taps the chord and decides on the translation only while speaking, and a
     /// second Shift takes a slip back. The finishing press has already moved the flow to "thinking", so a later Shift
-    /// changes nothing.
+    /// changes nothing. A follow-up stays "Ask".
     fn on_mode_toggle(&mut self, fx: &mut Vec<Effect>) {
-        if self.recording_now() {
+        if self.recording_now() && !self.answer_open {
             self.mode = match self.mode {
                 Mode::Translate => Mode::Dictate,
                 Mode::Dictate | Mode::Ask => Mode::Translate,
@@ -410,6 +663,10 @@ impl Flow {
     /// Quietly, with no error and no "restore": a system chord (see `SYSTEM_CHORD_MS`), Ctrl+Win+V in the first 380 ms,
     /// a pause or a session lock during recording.
     fn discard(&mut self, fx: &mut Vec<Effect>) {
+        if self.answer_open {
+            self.drop_follow_up(Outcome::Discarded, fx);
+            return;
+        }
         self.drop_recording(fx);
         fx.push(Effect::Finished { id: self.id, outcome: Outcome::Discarded });
         self.push_ui(fx);
@@ -432,6 +689,8 @@ impl Flow {
     /// Returns `true` if we stayed in "thinking" (the caller then updates the Drop if needed).
     fn advance(&mut self, fx: &mut Vec<Effect>) -> bool {
         if let Some(error) = self.stt_error.take() {
+            // The conversation stays: an open answer keeps a follow-up's error with Retry (decision 7), and a first
+            // question has none yet.
             fx.push(Effect::Finished { id: self.id, outcome: Outcome::Failed });
             self.retry_text = false;
             self.phase = Phase::Error { cause: cause_of(error), retry: true };
@@ -445,6 +704,21 @@ impl Flow {
             self.enter_empty(fx);
             return false;
         }
+        if self.mode == Mode::Ask {
+            match self.asking {
+                // Already asked (`advance` runs again).
+                Some(id) if id == self.id => {}
+                // The answer this follow-up follows still prints: the question waits for it (decision 12).
+                Some(_) => self.held = Some(raw.to_owned()),
+                None => {
+                    fx.push(Effect::Ask { id: self.id, question: raw.to_owned(), follow_up: self.answer_open });
+                    self.asking = Some(self.id);
+                    self.conversation = true;
+                    self.ask_failed = false;
+                }
+            }
+            return true;
+        }
         if !self.refine_pending {
             fx.push(Effect::Refine { id: self.id, raw: raw.to_owned(), mode: self.mode });
             self.refine_pending = true;
@@ -454,6 +728,7 @@ impl Flow {
 
     fn on_cancel(&mut self, fx: &mut Vec<Effect>) {
         match self.phase {
+            Phase::Starting | Phase::Recording if self.answer_open => self.drop_follow_up(Outcome::Cancelled, fx),
             Phase::Starting | Phase::Recording => {
                 // The audio is kept and the text is still fetched, for "restore".
                 fx.push(Effect::StopMic { id: self.id, keep: true });
@@ -463,13 +738,35 @@ impl Flow {
                 self.cancel_record_timers(fx);
                 self.enter_cancelled(fx);
             }
+            Phase::Thinking if self.answer_open => {
+                // A follow-up being transcribed, waiting or asked: it goes, the answer stays — and keeps printing if it
+                // still does (no "restore": spec 2 §7).
+                self.held = None;
+                if self.asking == Some(self.id) {
+                    self.abort_asking(false, fx);
+                }
+                self.abort_stt(fx);
+                fx.push(Effect::Finished { id: self.id, outcome: Outcome::Cancelled });
+                self.phase = Phase::Answer;
+                self.push_ui(fx);
+            }
             Phase::Thinking => {
                 if self.refine_pending {
                     fx.push(Effect::AbortRefine { id: self.id });
                     self.refine_pending = false;
                 }
+                // A first question before its answer showed: cancelled like a dictation; "restore" asks again, in a new
+                // conversation with the same context (decision 28).
+                self.abort_asking(false, fx);
+                self.end_conversation(fx);
                 self.enter_cancelled(fx);
             }
+            // The error of a follow-up that could not be transcribed: back to the answer, still open (decision 7).
+            Phase::Error { .. } if self.answer_open => {
+                self.phase = Phase::Answer;
+                self.push_ui(fx);
+            }
+            Phase::Answer => self.close_answer(fx),
             Phase::Error { .. } => self.enter_idle(fx),
             // The paste is already under way and cannot be cancelled; Esc is only swallowed.
             Phase::Inserting => {}
@@ -513,6 +810,7 @@ impl Flow {
     /// The "restore" window is over (it expired or a new recording started): the cancel is final.
     fn close_cancelled(&mut self, fx: &mut Vec<Effect>) {
         self.abort_stt(fx);
+        self.end_conversation(fx);
         fx.push(Effect::Finished { id: self.id, outcome: Outcome::Cancelled });
     }
 
@@ -543,10 +841,20 @@ impl Flow {
             self.paused = false;
             fx.push(Effect::CancelTimer(TimerKind::PauseEnd));
         } else {
-            // Keys do nothing during a pause: an ongoing recording is thrown away, with no "restore".
+            // Keys do nothing during a pause: an ongoing recording is thrown away, with no "restore", and an open answer
+            // closes (Esc would not reach it) — with a follow-up being transcribed or waiting, and the request in flight.
             if self.recording_now() {
                 self.drop_recording(fx);
                 fx.push(Effect::Finished { id: self.id, outcome: Outcome::Discarded });
+            } else if self.answer_open && self.phase == Phase::Thinking && self.asking != Some(self.id) {
+                self.held = None;
+                self.abort_stt(fx);
+                fx.push(Effect::Finished { id: self.id, outcome: Outcome::Discarded });
+            }
+            if self.answer_open {
+                self.abort_asking(true, fx);
+                self.end_conversation(fx);
+                self.set_idle();
             }
             self.paused = true;
             self.chord_held = false;
@@ -563,6 +871,9 @@ impl Flow {
             Phase::Starting | Phase::Recording => {
                 self.drop_recording(fx);
                 fx.push(Effect::Finished { id: self.id, outcome: Outcome::Failed });
+                // One card at a time: the microphone card replaces an open answer, and the answer still printing stops.
+                self.abort_asking(true, fx);
+                self.end_conversation(fx);
                 self.push_ui(fx);
                 fx.push(Effect::Tray(Some(TrayKind::MicSilent)));
             }
@@ -573,7 +884,9 @@ impl Flow {
     fn on_inserted(&mut self, outcome: InsertOutcome, fx: &mut Vec<Effect>) {
         match outcome {
             InsertOutcome::Pasted => {
-                fx.push(Effect::Finished { id: self.id, outcome: Outcome::Inserted });
+                if !std::mem::take(&mut self.paste_counted) {
+                    fx.push(Effect::Finished { id: self.id, outcome: Outcome::Inserted });
+                }
                 if self.refine_outcome == Some(RefineOutcome::RawKeyProblem) {
                     self.phase = Phase::Error { cause: ErrorCause::ClaudeKey, retry: false };
                     self.push_ui(fx);
@@ -589,7 +902,9 @@ impl Flow {
                 }
             }
             InsertOutcome::NoField => {
-                fx.push(Effect::Finished { id: self.id, outcome: Outcome::NoField });
+                if !std::mem::take(&mut self.paste_counted) {
+                    fx.push(Effect::Finished { id: self.id, outcome: Outcome::NoField });
+                }
                 self.enter_idle(fx);
                 fx.push(Effect::Tray(Some(TrayKind::NoField)));
             }
@@ -608,7 +923,7 @@ impl Flow {
                     self.hold_mode = true;
                 }
             }
-            (TimerKind::WarnLastMinute, Phase::Recording) => fx.push(Effect::Tray(Some(TrayKind::LastMinute))),
+            (TimerKind::WarnLastMinute, Phase::Recording) if !self.answer_open => fx.push(Effect::Tray(Some(TrayKind::LastMinute))),
             (TimerKind::AutoFinish, Phase::Recording) => self.finish(fx),
             (TimerKind::DoneHide, Phase::Done) | (TimerKind::EmptyHide, Phase::Empty) => self.enter_idle(fx),
             (TimerKind::UndoExpire, Phase::Cancelled) => {
@@ -643,6 +958,12 @@ impl Flow {
 
     fn enter_empty(&mut self, fx: &mut Vec<Effect>) {
         fx.push(Effect::Finished { id: self.id, outcome: Outcome::Empty });
+        if self.answer_open {
+            // A follow-up nobody said anything in: back to the answer, still open.
+            self.phase = Phase::Answer;
+            self.push_ui(fx);
+            return;
+        }
         self.phase = Phase::Empty;
         self.push_ui(fx);
         fx.push(Effect::SetTimer { kind: TimerKind::EmptyHide, after: EMPTY_MS });
@@ -703,6 +1024,30 @@ mod tests {
         f.handle(I::ChordUp, t + 5_100);
         f.handle(I::SttFinal { id, text: raw.into() }, t + 5_300);
         id
+    }
+
+    /// An "Ask" question recorded by tap and transcribed: its request is in flight.
+    fn asking(f: &mut Flow, t: Ms, question: &str) -> DictationId {
+        let id = recording_in(f, t, Mode::Ask);
+        f.handle(I::ChordDown(Mode::Dictate), t + 5_000);
+        f.handle(I::ChordUp, t + 5_100);
+        f.handle(I::SttFinal { id, text: question.into() }, t + 5_300);
+        id
+    }
+
+    /// As `asking`, and the answer has opened (its first words came).
+    fn answer_open(f: &mut Flow, t: Ms) -> DictationId {
+        let id = asking(f, t, "что такое HTTP 418");
+        f.handle(I::AskOpened { id }, t + 6_000);
+        id
+    }
+
+    /// While the answer is open: a follow-up recorded by tap (its start-up done), not yet finished.
+    fn follow_up(f: &mut Flow, t: Ms) -> DictationId {
+        f.handle(I::ChordDown(Mode::Dictate), t);
+        f.handle(I::ChordUp, t + 100);
+        f.handle(I::Timer(TimerKind::StartingDone), t + STARTING_MS);
+        f.current_id()
     }
 
     #[test]
@@ -1718,6 +2063,356 @@ mod tests {
         assert!(!fx.iter().any(|e| matches!(e, E::RefineAgain { .. })));
     }
 
+    // ---- "Ask": the answer, follow-ups, pastes (spec 2 §6.2, §7, §8) ----
+
+    #[test]
+    fn ask_chord_asks_the_model_instead_of_refine() {
+        let mut f = Flow::new(2, false);
+        let id = recording_in(&mut f, 0, Mode::Ask);
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
+        let fx = f.handle(I::SttFinal { id, text: "что такое HTTP 418".into() }, 5_300);
+        assert!(has(&fx, &E::Ask { id, question: "что такое HTTP 418".into(), follow_up: false }));
+        assert!(!fx.iter().any(|e| matches!(e, E::Refine { .. })), "an \"Ask\" question is not cleaned up");
+        assert_eq!(f.ui_state().phase, UiPhase::Think);
+        assert!(!f.answer_open());
+    }
+
+    #[test]
+    fn the_answer_opens_on_its_first_words_and_is_counted_once_complete() {
+        let mut f = Flow::new(2, false);
+        let id = asking(&mut f, 0, "что такое HTTP 418");
+        let fx = f.handle(I::AskOpened { id }, 6_000);
+        assert_eq!(last_ui(&fx).map(|s| (s.phase, s.mode)), Some((UiPhase::Answer, Mode::Ask)));
+        assert!(f.answer_open() && f.esc_active(), "Esc closes an open answer");
+        assert!(!f.recording_now());
+        assert!(f.handle(I::AskOpened { id }, 6_100).is_empty(), "it opens once");
+        assert_eq!(f.handle(I::AskAnswered { id }, 7_000), vec![E::Finished { id, outcome: Outcome::Answered }], "it stays open");
+        assert!(f.handle(I::AskAnswered { id }, 7_100).is_empty(), "a repeat is ignored");
+    }
+
+    #[test]
+    fn an_answer_that_ends_before_it_showed_opens_complete() {
+        let mut f = Flow::new(2, false);
+        let id = asking(&mut f, 0, "спасибо");
+        let fx = f.handle(I::AskAnswered { id }, 6_000);
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::Answered }));
+        assert_eq!(phase(&fx), Some(UiPhase::Answer));
+    }
+
+    #[test]
+    fn esc_closes_the_answer_and_forgets_the_conversation() {
+        let mut f = Flow::new(2, false);
+        let id = answer_open(&mut f, 0);
+        f.handle(I::AskAnswered { id }, 7_000);
+        let idle = UiState { phase: UiPhase::Idle, error: None, retry: false, paused: false, mode: Mode::Dictate };
+        assert_eq!(f.handle(I::Esc, 8_000), vec![E::CloseAnswer, E::Ui(idle)]);
+        assert!(!f.answer_open() && !f.esc_active());
+        assert!(f.handle(I::Ui(UiAction::AnswerClose), 8_100).is_empty(), "already closed");
+    }
+
+    #[test]
+    fn closing_an_answer_that_still_streams_aborts_it() {
+        let mut f = Flow::new(2, false);
+        let id = answer_open(&mut f, 0);
+        let fx = f.handle(I::Ui(UiAction::AnswerClose), 6_500);
+        assert_eq!(&fx[..3], &[E::AbortAsk { id }, E::Finished { id, outcome: Outcome::Cancelled }, E::CloseAnswer]);
+        assert_eq!(phase(&fx), Some(UiPhase::Idle));
+        assert!(f.handle(I::AskAnswered { id }, 7_000).is_empty(), "the late end of the aborted request is ignored");
+    }
+
+    #[test]
+    fn a_chord_while_the_answer_is_open_records_a_follow_up() {
+        let mut f = Flow::new(2, false);
+        let first = answer_open(&mut f, 0);
+        f.handle(I::AskAnswered { id: first }, 7_000);
+        let fx = f.handle(I::ChordDown(Mode::Dictate), 10_000);
+        let id = f.current_id();
+        assert_ne!(id, first, "a follow-up is a recording of its own");
+        assert!(has(&fx, &E::OpenMic { id }) && has(&fx, &E::StartStt { id }));
+        assert!(!fx.contains(&E::CloseAnswer), "the answer stays open");
+        assert_eq!(last_ui(&fx).map(|s| (s.phase, s.mode)), Some((UiPhase::Start, Mode::Ask)));
+        f.handle(I::ChordUp, 10_100);
+        f.handle(I::Timer(TimerKind::StartingDone), 10_380);
+        assert!(f.handle(I::ModeToggle, 11_000).is_empty(), "Shift does not turn a follow-up into a translation");
+        assert!(f.handle(I::ModeChange(Mode::Ask), 11_100).is_empty());
+        f.handle(I::ChordDown(Mode::Dictate), 14_000);
+        let fx = f.handle(I::SttFinal { id, text: "а для пяти серверов".into() }, 14_300);
+        assert!(has(&fx, &E::Ask { id, question: "а для пяти серверов".into(), follow_up: true }));
+        assert_eq!(phase(&f.handle(I::AskOpened { id }, 15_000)), Some(UiPhase::Answer));
+        assert_eq!(f.handle(I::AskAnswered { id }, 16_000), vec![E::Finished { id, outcome: Outcome::Answered }]);
+    }
+
+    /// Decision 12 (the approved design): a chord while the answer still prints records a follow-up at once; the answer
+    /// keeps printing, and the follow-up goes when both have ended — no abort, a clean history.
+    #[test]
+    fn a_chord_while_the_answer_still_comes_records_a_follow_up_that_waits_for_it() {
+        let mut f = Flow::new(2, false);
+        let first = answer_open(&mut f, 0);
+        let fx = f.handle(I::ChordDown(Mode::Dictate), 7_000);
+        let id = f.current_id();
+        assert_ne!(id, first);
+        assert!(has(&fx, &E::OpenMic { id }) && !has(&fx, &E::AbortAsk { id: first }), "the answer keeps printing");
+        f.handle(I::ChordUp, 7_100);
+        f.handle(I::Timer(TimerKind::StartingDone), 7_000 + STARTING_MS);
+        f.handle(I::ChordDown(Mode::Dictate), 9_000);
+        let fx = f.handle(I::SttFinal { id, text: "а подробнее".into() }, 9_300);
+        assert!(!fx.iter().any(|e| matches!(e, E::Ask { .. })), "it waits for the answer it follows");
+        assert_eq!(f.ui_state().phase, UiPhase::Think);
+        let fx = f.handle(I::AskAnswered { id: first }, 10_000);
+        assert_eq!(
+            fx,
+            vec![E::Finished { id: first, outcome: Outcome::Answered }, E::Ask { id, question: "а подробнее".into(), follow_up: true }]
+        );
+        assert_eq!(phase(&f.handle(I::AskOpened { id }, 11_000)), Some(UiPhase::Answer), "a follow-up's first step");
+    }
+
+    #[test]
+    fn esc_drops_a_waiting_follow_up_and_the_answer_goes_on() {
+        let mut f = Flow::new(2, false);
+        let first = answer_open(&mut f, 0);
+        let id = follow_up(&mut f, 7_000);
+        f.handle(I::ChordDown(Mode::Dictate), 9_000);
+        f.handle(I::SttFinal { id, text: "а подробнее".into() }, 9_300);
+        let fx = f.handle(I::Esc, 9_500);
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::Cancelled }) && !has(&fx, &E::AbortAsk { id: first }));
+        assert_eq!(phase(&fx), Some(UiPhase::Answer));
+        assert_eq!(
+            f.handle(I::AskAnswered { id: first }, 10_000),
+            vec![E::Finished { id: first, outcome: Outcome::Answered }],
+            "nothing waits any more"
+        );
+    }
+
+    #[test]
+    fn a_key_problem_while_a_follow_up_records_drops_it_too() {
+        let mut f = Flow::new(2, false);
+        let first = answer_open(&mut f, 0);
+        let id = follow_up(&mut f, 7_000);
+        let fx = f.handle(I::AskFailed { id: first, error: AskError::Key }, 8_000);
+        assert!(has(&fx, &E::Finished { id: first, outcome: Outcome::Failed }));
+        assert!(has(&fx, &E::StopMic { id, keep: false }) && has(&fx, &E::Finished { id, outcome: Outcome::Discarded }));
+        assert!(has(&fx, &E::CloseAnswer));
+        assert_eq!(last_ui(&fx).map(|s| (s.phase, s.error)), Some((UiPhase::Error, Some(ErrorCause::ClaudeKey))));
+        assert!(!f.answer_open());
+    }
+
+    #[test]
+    fn esc_drops_a_follow_up_and_keeps_the_answer() {
+        let mut f = Flow::new(2, false);
+        let first = answer_open(&mut f, 0);
+        f.handle(I::AskAnswered { id: first }, 7_000);
+        let id = follow_up(&mut f, 10_000);
+        let fx = f.handle(I::Esc, 11_000);
+        assert!(has(&fx, &E::StopMic { id, keep: false }) && has(&fx, &E::AbortStt { id }));
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::Cancelled }));
+        assert!(!fx.contains(&E::CloseAnswer));
+        assert!(!fx.iter().any(|e| matches!(e, E::SetTimer { kind: TimerKind::UndoExpire, .. })), "no restore for a follow-up");
+        assert_eq!(phase(&fx), Some(UiPhase::Answer));
+        assert!(f.answer_open());
+        // A follow-up being asked: the request goes, the answer stays.
+        let id = follow_up(&mut f, 20_000);
+        f.handle(I::ChordDown(Mode::Dictate), 23_000);
+        f.handle(I::SttFinal { id, text: "а подробнее".into() }, 23_300);
+        let fx = f.handle(I::Esc, 23_500);
+        assert!(has(&fx, &E::AbortAsk { id }) && has(&fx, &E::Finished { id, outcome: Outcome::Cancelled }));
+        assert!(!fx.contains(&E::CloseAnswer));
+        assert_eq!(phase(&fx), Some(UiPhase::Answer));
+    }
+
+    #[test]
+    fn an_empty_follow_up_goes_back_to_the_answer() {
+        let mut f = Flow::new(2, false);
+        let first = answer_open(&mut f, 0);
+        f.handle(I::AskAnswered { id: first }, 7_000);
+        let id = follow_up(&mut f, 10_000);
+        f.handle(I::ChordDown(Mode::Dictate), 12_000);
+        let fx = f.handle(I::SttFinal { id, text: " ".into() }, 12_300);
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::Empty }));
+        assert!(!fx.iter().any(|e| matches!(e, E::SetTimer { kind: TimerKind::EmptyHide, .. })));
+        assert_eq!(phase(&fx), Some(UiPhase::Answer));
+    }
+
+    #[test]
+    fn a_write_pastes_like_a_dictation_and_ends_the_conversation() {
+        let mut f = Flow::new(2, false);
+        let id = asking(&mut f, 0, "напиши письмо Ане");
+        let fx = f.handle(I::AskWrite { id, how: PasteHow::AtCaret }, 6_000);
+        assert_eq!(&fx[..2], &[E::AskPaste { id, how: PasteHow::AtCaret }, E::CloseAnswer], "the text is taken before the conversation goes");
+        assert_eq!(phase(&fx), Some(UiPhase::Think));
+        let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 6_300);
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::Inserted }));
+        assert_eq!(phase(&fx), Some(UiPhase::Done));
+    }
+
+    #[test]
+    fn a_write_after_words_already_shown_closes_the_answer() {
+        let mut f = Flow::new(2, false);
+        let id = answer_open(&mut f, 0);
+        let fx = f.handle(I::AskWrite { id, how: PasteHow::Below }, 6_500);
+        assert_eq!(&fx[..2], &[E::AskPaste { id, how: PasteHow::Below }, E::CloseAnswer]);
+        assert!(!f.answer_open());
+        let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::NoField }, 7_000);
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::NoField }) && has(&fx, &E::Tray(Some(TrayKind::NoField))));
+    }
+
+    #[test]
+    fn answer_buttons_paste_once_the_answer_is_complete() {
+        for (action, how) in [
+            (UiAction::AnswerInsert, PasteHow::AtCaret),
+            (UiAction::AnswerReplace, PasteHow::Replace),
+            (UiAction::AnswerBelow, PasteHow::Below),
+        ] {
+            let mut f = Flow::new(2, false);
+            let id = answer_open(&mut f, 0);
+            assert!(f.handle(I::Ui(action), 6_100).is_empty(), "not while it streams: {action:?}");
+            f.handle(I::AskAnswered { id }, 7_000);
+            assert!(f.handle(I::Ui(UiAction::AnswerCopy), 7_500).is_empty(), "the runtime copies; the flow stays");
+            let fx = f.handle(I::Ui(action), 8_000);
+            assert_eq!(&fx[..2], &[E::AskPaste { id, how }, E::CloseAnswer], "{action:?}");
+            let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 8_300);
+            assert!(!fx.iter().any(|e| matches!(e, E::Finished { .. })), "the answer was counted when it was complete");
+            assert_eq!(phase(&fx), Some(UiPhase::Done));
+        }
+        let mut f = Flow::new(2, false);
+        let id = answer_open(&mut f, 0);
+        f.handle(I::AskAnswered { id }, 7_000);
+        f.handle(I::Ui(UiAction::AnswerInsert), 8_000);
+        let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::NoField }, 8_300);
+        assert!(has(&fx, &E::Tray(Some(TrayKind::NoField))));
+        assert!(!fx.iter().any(|e| matches!(e, E::Finished { .. })));
+    }
+
+    #[test]
+    fn a_failed_request_shows_retry_inside_the_answer() {
+        let mut f = Flow::new(2, false);
+        let id = asking(&mut f, 0, "курс евро");
+        let fx = f.handle(I::AskFailed { id, error: AskError::Failed }, 8_000);
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::Failed }));
+        assert_eq!(phase(&fx), Some(UiPhase::Answer));
+        assert!(f.handle(I::Ui(UiAction::AnswerInsert), 8_100).is_empty(), "nothing to paste");
+        assert_eq!(f.handle(I::Ui(UiAction::AnswerRetry), 9_000), vec![E::AskAgain { id }]);
+        assert!(f.handle(I::Ui(UiAction::AnswerRetry), 9_100).is_empty(), "one request at a time");
+        assert_eq!(f.handle(I::AskAnswered { id }, 10_000), vec![E::Finished { id, outcome: Outcome::Answered }]);
+    }
+
+    #[test]
+    fn a_key_problem_closes_the_answer_and_shows_the_key_error() {
+        let mut f = Flow::new(2, false);
+        let id = answer_open(&mut f, 0);
+        let fx = f.handle(I::AskFailed { id, error: AskError::Key }, 6_500);
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::Failed }) && has(&fx, &E::CloseAnswer));
+        let ui = last_ui(&fx).unwrap();
+        assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::ClaudeKey), false));
+        assert!(!f.answer_open());
+    }
+
+    #[test]
+    fn esc_before_the_answer_shows_cancels_with_restore_like_a_dictation() {
+        let mut f = Flow::new(2, false);
+        let id = asking(&mut f, 0, "что такое HTTP 418");
+        let fx = f.handle(I::Esc, 5_600);
+        assert!(has(&fx, &E::AbortAsk { id }) && has(&fx, &E::CloseAnswer));
+        assert_eq!(phase(&fx), Some(UiPhase::Cancel));
+        let fx = f.handle(I::Ui(UiAction::Undo), 6_000);
+        assert!(has(&fx, &E::Ask { id, question: "что такое HTTP 418".into(), follow_up: false }), "restore asks again");
+        f.handle(I::Esc, 6_200);
+        let fx = f.handle(I::Timer(TimerKind::UndoExpire), 9_800);
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::Cancelled }));
+        assert_eq!(phase(&fx), Some(UiPhase::Idle));
+    }
+
+    #[test]
+    fn pause_closes_an_open_answer_and_drops_a_follow_up() {
+        let mut f = Flow::new(2, false);
+        let id = answer_open(&mut f, 0);
+        let fx = f.handle(I::TogglePause, 6_500);
+        assert!(has(&fx, &E::AbortAsk { id }) && has(&fx, &E::CloseAnswer));
+        assert_eq!(last_ui(&fx).map(|s| (s.phase, s.paused)), Some((UiPhase::Idle, true)));
+
+        let mut f = Flow::new(2, false);
+        let first = answer_open(&mut f, 0);
+        f.handle(I::AskAnswered { id: first }, 7_000);
+        let id = follow_up(&mut f, 10_000);
+        let fx = f.handle(I::TogglePause, 10_500);
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::Discarded }) && has(&fx, &E::CloseAnswer));
+        assert_eq!(f.ui_state().phase, UiPhase::Idle);
+
+        // A follow-up being transcribed (K-M13): it goes, and the answer closes.
+        let mut f = Flow::new(2, false);
+        let first = answer_open(&mut f, 0);
+        f.handle(I::AskAnswered { id: first }, 7_000);
+        let id = follow_up(&mut f, 10_000);
+        f.handle(I::ChordDown(Mode::Dictate), 12_000);
+        let fx = f.handle(I::TogglePause, 12_100);
+        assert!(has(&fx, &E::AbortStt { id }) && has(&fx, &E::Finished { id, outcome: Outcome::Discarded }));
+        assert!(has(&fx, &E::CloseAnswer));
+        assert!(!f.answer_open() && f.ui_state().phase == UiPhase::Idle);
+    }
+
+    /// Decision 7: a follow-up that could not be transcribed keeps the answer; the error shows as in dictation, Retry
+    /// transcribes it again and asks it in the same conversation, Esc goes back to the answer.
+    #[test]
+    fn a_follow_up_that_could_not_be_transcribed_keeps_the_answer() {
+        let mut f = Flow::new(2, false);
+        let first = answer_open(&mut f, 0);
+        f.handle(I::AskAnswered { id: first }, 7_000);
+        let id = follow_up(&mut f, 10_000);
+        f.handle(I::ChordDown(Mode::Dictate), 12_000);
+        let fx = f.handle(I::SttFailed { id, error: SttError::Network }, 12_300);
+        assert!(!fx.contains(&E::CloseAnswer) && has(&fx, &E::Finished { id, outcome: Outcome::Failed }));
+        let ui = last_ui(&fx).unwrap();
+        assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::Net), true));
+        assert!(f.answer_open() && f.esc_active());
+        assert!(has(&f.handle(I::Ui(UiAction::Retry), 13_000), &E::TranscribeSaved { id }));
+        let fx = f.handle(I::SttFinal { id, text: "а подробнее".into() }, 14_000);
+        assert!(has(&fx, &E::Ask { id, question: "а подробнее".into(), follow_up: true }), "the same conversation");
+
+        let mut f = Flow::new(2, false);
+        let first = answer_open(&mut f, 0);
+        f.handle(I::AskAnswered { id: first }, 7_000);
+        let id = follow_up(&mut f, 10_000);
+        f.handle(I::ChordDown(Mode::Dictate), 12_000);
+        f.handle(I::SttFailed { id, error: SttError::Network }, 12_300);
+        assert_eq!(phase(&f.handle(I::Esc, 13_000)), Some(UiPhase::Answer), "back to the answer, still open");
+        assert!(f.answer_open());
+        assert!(has(&f.handle(I::ChordDown(Mode::Dictate), 14_000), &E::OpenMic { id: DictationId(id.0 + 1) }), "another follow-up");
+    }
+
+    #[test]
+    fn a_silent_microphone_in_a_follow_up_closes_the_answer_for_its_card() {
+        let mut f = Flow::new(2, false);
+        let first = answer_open(&mut f, 0);
+        f.handle(I::AskAnswered { id: first }, 7_000);
+        let id = follow_up(&mut f, 10_000);
+        let fx = f.handle(I::MicDead, 14_000);
+        let close = fx.iter().position(|e| *e == E::CloseAnswer).expect("the answer closes");
+        let card = fx.iter().position(|e| *e == E::Tray(Some(TrayKind::MicSilent))).expect("the microphone card");
+        assert!(close < card, "one card at a time");
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::Failed }));
+    }
+
+    #[test]
+    fn paste_last_while_the_answer_is_open_keeps_it() {
+        let mut f = Flow::new(2, true);
+        let first = answer_open(&mut f, 0);
+        f.handle(I::AskAnswered { id: first }, 7_000);
+        f.handle(I::ChordDown(Mode::Dictate), 10_000);
+        let id = f.current_id();
+        let fx = f.handle(I::PasteLast, 10_050);
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::Discarded }) && has(&fx, &E::PasteLast));
+        assert!(!fx.contains(&E::CloseAnswer));
+        assert_eq!(f.ui_state().phase, UiPhase::Answer);
+    }
+
+    #[test]
+    fn no_last_minute_card_over_an_open_answer() {
+        let mut f = Flow::new(2, false);
+        let first = answer_open(&mut f, 0);
+        f.handle(I::AskAnswered { id: first }, 7_000);
+        follow_up(&mut f, 10_000);
+        assert!(f.handle(I::Timer(TimerKind::WarnLastMinute), 10_000 + WARN_MS).is_empty());
+    }
+
     /// Random input sequences, dictations and translations: no panic; the microphone is open exactly while recording;
     /// every transcription, refine and paste is closed by a result or an abort; a dictation has one `Finished`
     /// (plus one per "retry"), and it arrives before the next dictation starts; a timer is armed again
@@ -1902,7 +2597,10 @@ mod tests {
                     assert_eq!(ui.phase, UiPhase::Think, "{input:?}");
                 }
                 if f.esc_active() {
-                    assert!(matches!(ui.phase, UiPhase::Start | UiPhase::Listen | UiPhase::Think | UiPhase::Error));
+                    assert!(matches!(
+                        ui.phase,
+                        UiPhase::Start | UiPhase::Listen | UiPhase::Think | UiPhase::Error | UiPhase::Answer
+                    ));
                 }
                 if ui.phase == UiPhase::Idle {
                     assert_eq!(ui.mode, Mode::Dictate, "the idle Drop shows a mode ({input:?})");
@@ -1913,6 +2611,137 @@ mod tests {
             steps == 120_000 && seen_finished > 1_000 && seen_translate_errors > 10 && mode_changes > 100 && toggles > 100,
             "sequences reach outcomes: {seen_finished}, failed translations: {seen_translate_errors}, \
              mode changes: {mode_changes}, Shift toggles while recording: {toggles}"
+        );
+    }
+
+    /// "Ask" under random input, with the invariants of an open answer: one request at a time; a conversation starts with
+    /// a first question and ends with one `CloseAnswer`; a paste of the answer comes in the same step as its close; an open
+    /// answer always has its conversation and catches Esc; idle has neither a conversation nor a request; `Finished` once
+    /// per attempt (plus one per retry).
+    #[test]
+    fn random_ask_inputs_keep_the_answer_invariants() {
+        use std::collections::HashMap;
+        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move |n: u64| {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % n
+        };
+        let hows = [PasteHow::AtCaret, PasteHow::Replace, PasteHow::Below];
+        let actions = [
+            UiAction::AnswerInsert,
+            UiAction::AnswerReplace,
+            UiAction::AnswerBelow,
+            UiAction::AnswerCopy,
+            UiAction::AnswerRetry,
+            UiAction::AnswerClose,
+            UiAction::Cancel,
+            UiAction::Undo,
+            UiAction::Retry,
+            UiAction::Dismiss,
+        ];
+        let timers = [
+            TimerKind::StartingDone,
+            TimerKind::DoneHide,
+            TimerKind::EmptyHide,
+            TimerKind::UndoExpire,
+            TimerKind::WarnLastMinute,
+            TimerKind::PauseEnd,
+        ];
+        let (mut opened, mut follow_ups, mut pastes, mut closes) = (0u64, 0u64, 0u64, 0u64);
+        for round in 0..300u64 {
+            let mut f = Flow::new(2, round % 2 == 0);
+            let mut now: Ms = 0;
+            let mut conversation = false;
+            let mut ask: Option<DictationId> = None;
+            let mut finished: HashMap<u64, u32> = HashMap::new();
+            let mut retries: HashMap<u64, u32> = HashMap::new();
+            for _ in 0..400 {
+                now += next(1_500);
+                let id = DictationId(f.current_id().0.saturating_sub(next(2)));
+                let text = if next(5) == 0 { " ".to_string() } else { "вопрос".to_string() };
+                let input = match next(16) {
+                    0 | 1 => I::ChordDown([Mode::Ask, Mode::Ask, Mode::Dictate, Mode::Translate][next(4) as usize]),
+                    2 => I::ChordUp,
+                    3 => I::Esc,
+                    4 => I::Ui(actions[next(actions.len() as u64) as usize]),
+                    5 => I::SttFinal { id, text },
+                    6 => I::SttFailed { id, error: SttError::Network },
+                    7 => I::AskOpened { id },
+                    8 => I::AskAnswered { id },
+                    9 => I::AskWrite { id, how: hows[next(3) as usize] },
+                    10 => I::AskFailed { id, error: if next(3) == 0 { AskError::Key } else { AskError::Failed } },
+                    11 => I::Inserted { id, outcome: if next(2) == 0 { InsertOutcome::Pasted } else { InsertOutcome::NoField } },
+                    12 => [I::ModeToggle, I::PasteLast, I::TogglePause, I::MicDead][next(4) as usize].clone(),
+                    _ => I::Timer(timers[next(timers.len() as u64) as usize]),
+                };
+                let open_before = f.answer_open();
+                let fx = f.handle(input.clone(), now);
+                let mut pasted = false;
+                for e in &fx {
+                    match e {
+                        E::Ask { id, follow_up, .. } => {
+                            assert_eq!(ask, None, "two requests at once ({input:?})");
+                            assert_eq!(*follow_up, open_before, "a follow-up exactly while the answer is open ({input:?})");
+                            assert!(*follow_up || !conversation, "a first question while a conversation lives ({input:?})");
+                            assert_eq!(f.mode(), Mode::Ask);
+                            follow_ups += u64::from(*follow_up);
+                            conversation = true;
+                            ask = Some(*id);
+                        }
+                        E::AskAgain { id } => {
+                            assert_eq!(ask, None, "a retry while a request is in flight ({input:?})");
+                            assert!(conversation);
+                            *retries.entry(id.0).or_default() += 1;
+                            ask = Some(*id);
+                        }
+                        E::AbortAsk { id } => {
+                            assert_eq!(ask, Some(*id), "abort of nothing ({input:?})");
+                            ask = None;
+                        }
+                        E::AskPaste { id, .. } => {
+                            assert!(conversation, "a paste needs the conversation's text ({input:?})");
+                            // A write ends its request here.
+                            if ask == Some(*id) {
+                                ask = None;
+                            }
+                            pasted = true;
+                            pastes += 1;
+                        }
+                        E::CloseAnswer => {
+                            assert!(conversation, "a close without a conversation ({input:?})");
+                            conversation = false;
+                            closes += 1;
+                        }
+                        E::TranscribeSaved { id } => *retries.entry(id.0).or_default() += 1,
+                        E::Finished { id, .. } => {
+                            // A request ends with its answer, its write or its failure, when the flow accepted it — before a
+                            // follow-up that waited for it goes out in the same step.
+                            if ask == Some(*id) && matches!(input, I::AskAnswered { .. } | I::AskWrite { .. } | I::AskFailed { .. }) {
+                                ask = None;
+                            }
+                            let n = finished.entry(id.0).or_default();
+                            *n += 1;
+                            assert!(*n <= 1 + retries.get(&id.0).copied().unwrap_or(0), "extra Finished for {id:?} ({input:?})");
+                        }
+                        _ => {}
+                    }
+                }
+                if pasted {
+                    assert!(!conversation, "the paste closes the answer in the same step ({input:?})");
+                }
+                if f.answer_open() {
+                    opened += 1;
+                    assert!(conversation, "an open answer without its conversation ({input:?})");
+                    assert!(f.esc_active());
+                }
+                if f.ui_state().phase == UiPhase::Idle {
+                    assert!(!conversation && ask.is_none(), "idle with a conversation or a request ({input:?})");
+                }
+            }
+        }
+        assert!(
+            opened > 100 && follow_ups > 5 && pastes > 5 && closes > 20,
+            "sequences reach the answer: open steps {opened}, follow-ups {follow_ups}, pastes {pastes}, closes {closes}"
         );
     }
 }
