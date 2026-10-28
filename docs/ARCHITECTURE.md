@@ -73,14 +73,14 @@ that crashes still reports: transcription as a network error (so Retry is offere
 **Modes.** `Flow` keeps the mode of the dictation (`Mode`: `Dictate`, `Translate`, `Ask`; "Ask" cannot be picked in
 this version). `ChordDown(mode)` starts a dictation in the mode the chord picked. `ModeToggle` (a fresh Shift press)
 swaps dictation and translation ("Ask" becomes a translation) while starting or recording, whether the chord is still
-held or was tapped: people often tap the chord and decide on a translation only while speaking, and a second Shift
-takes a slip back. `ModeChange(mode)` (Alt, for "Ask") counts only while the starting chord is still held (in hold
-mode too). Once the finishing press has moved the flow to thinking, neither changes the mode, and neither does
-anything outside a recording. The mode reaches the Drop in `UiState` and the runtime in `Refine { mode }`
-and `RefineAgain { mode }`; every path into Idle resets it to `Dictate`. A translation that comes back as anything
-but a refined, non-empty text is never pasted: the attempt ends as `failed`, and the flow shows the `translate` error
-(`claudeKey` for a key, balance or limit problem) with Retry. That Retry emits `RefineAgain` with the saved
-transcript: the text is translated again, the audio is not transcribed again.
+held or was tapped (then only a Shift on its own, see below): people often tap the chord and decide on a translation
+only while speaking, and a second Shift takes a slip back. `ModeChange(mode)` (Alt, for "Ask") counts only while the
+starting chord is still held (in hold mode too). Once the finishing press has moved the flow to thinking, neither
+changes the mode, and neither does anything outside a recording. The mode reaches the Drop in `UiState` and the
+runtime in `Refine { mode }` and `RefineAgain { mode }`; every path into Idle resets it to `Dictate`. A translation
+that comes back as anything but a refined, non-empty text is never pasted: the attempt ends as `failed`, and the flow
+shows the `translate` error (`claudeKey` for a key, balance or limit problem) with Retry. That Retry emits
+`RefineAgain` with the saved transcript: the text is translated again, the audio is not transcribed again.
 
 ### Hotkey chord
 
@@ -96,11 +96,20 @@ transcript: the text is translated again, the audio is not transcribed again.
   just after a tap already counts. Inside a held chord the event goes out without the flag (the core may not have
   heard of the new recording yet), and the flow drops it when nothing records. A press is fresh when its side's bit
   was not set yet; the resync before every press drops a Shift whose release was lost. A release never toggles, so
-  the order in which the keys come up does not matter. The Drop changes its icon at once. After a tap, a Shift that is
-  part of another shortcut (Alt + Shift, Ctrl + Shift + a key, the Office key) toggles as well. An Alt press inside a held
-  chord, once "Ask" is on, picks "Ask". Shift and Alt together inside a held chord (the Office key pressed late) count
-  as a third key (below) and also drop the Win and Alt masks whatever the order of the presses, so Windows sees the
-  Office key as is.
+  the order in which the keys come up does not matter. The Drop changes its icon at once.
+- After a tap, two guards keep a Shift that belongs to other keys from switching the mode; a finishing chord pressed
+  in any order (Shift + Ctrl + Win, Ctrl + Shift + Win, Win + Shift + Ctrl) must not turn a translation into a
+  dictation. First, Shift toggles only on its own: with Ctrl, Win or Alt down (the finishing chord started with Ctrl
+  or Win, Ctrl + Shift + a key, Alt + Shift, Win + Shift + S) it changes nothing. Second, when any other key goes down
+  while the Shift that toggled is still held (a capital letter, Shift + Alt, a finishing chord started with Shift,
+  Shift + Esc), the chord takes the toggle back: `Decision::undo_toggle` puts a second `ModeToggle` before that key's
+  own event, so the flow is back in its mode before the finishing `ChordDown` or the cancel. Each Shift press is taken
+  back at most once (both Shifts held: two toggles cancel out); a released Shift's toggle stands, also when the
+  release was lost and the resync drops it. The Drop shows the brief switch and back. Inside a held chord neither
+  guard applies.
+- An Alt press inside a held chord, once "Ask" is on, picks "Ask". Shift and Alt together inside a held chord (the
+  Office key pressed late) count as a third key (below) and also drop the Win and Alt masks whatever the order of the
+  presses, so Windows sees the Office key as is.
 - Ctrl, Win, Shift and Alt always pass through to Windows. CUE swallows only `V` while the chord is held (paste last;
   the Windows `Ctrl + Win + V` panel does not open) and `Esc` while CUE is starting, recording, thinking, pasting or
   showing an error. A swallowed key's auto-repeat and release are swallowed too.

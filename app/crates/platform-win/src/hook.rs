@@ -124,8 +124,9 @@ fn resync(chord: &mut Chord, how: Resync, held: impl Fn(u16) -> bool) -> Option<
 /// What the hook procedure should do with the event.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Outcome {
-    /// Events for the core, in order: first from the resync, then from the event itself.
-    events: [Option<HotkeyEvent>; 2],
+    /// Events for the core, in order: first from the resync, then the undo of a Shift toggle (`Decision::undo_toggle`),
+    /// then from the event itself.
+    events: [Option<HotkeyEvent>; 3],
     swallow: bool,
     inject_mask_first: bool,
 }
@@ -154,7 +155,8 @@ fn feed(
     if paused {
         return (Outcome::default(), chord_down);
     }
-    let outcome = Outcome { events: [first, d.event], swallow: d.swallow, inject_mask_first: d.inject_mask_first };
+    let undo = d.undo_toggle.then_some(HotkeyEvent::ModeToggle);
+    let outcome = Outcome { events: [first, undo, d.event], swallow: d.swallow, inject_mask_first: d.inject_mask_first };
     (outcome, chord_down)
 }
 
@@ -433,6 +435,7 @@ pub fn installed() -> bool {
 mod tests {
     use super::*;
     use crate::chord::{VK_MASK, VK_RMENU};
+    use cue_core::flow::{Effect, Flow, Input, Ms};
     use cue_core::ui::Mode;
     use windows::Win32::UI::WindowsAndMessaging::{
         KBDLLHOOKSTRUCT_FLAGS, LLKHF_LOWER_IL_INJECTED, LLKHF_UP, WM_KEYUP, WM_SYSKEYUP,
@@ -505,11 +508,11 @@ mod tests {
     }
 
     fn events(a: Option<HotkeyEvent>, b: Option<HotkeyEvent>) -> Outcome {
-        Outcome { events: [a, b], swallow: false, inject_mask_first: false }
+        Outcome { events: [a, None, b], swallow: false, inject_mask_first: false }
     }
 
-    const PASS: Outcome = Outcome { events: [None, None], swallow: false, inject_mask_first: false };
-    const SWALLOW: Outcome = Outcome { events: [None, None], swallow: true, inject_mask_first: false };
+    const PASS: Outcome = Outcome { events: [None, None, None], swallow: false, inject_mask_first: false };
+    const SWALLOW: Outcome = Outcome { events: [None, None, None], swallow: true, inject_mask_first: false };
 
     fn kb(vk: u16, scan: u32, flags: KBDLLHOOKSTRUCT_FLAGS) -> KBDLLHOOKSTRUCT {
         KBDLLHOOKSTRUCT { vkCode: u32::from(vk), scanCode: scan, flags, time: 0, dwExtraInfo: 0 }
@@ -635,6 +638,112 @@ mod tests {
     }
 
     #[test]
+    fn a_key_after_a_lost_shift_release_takes_nothing_back() {
+        let mut c = Chord::default();
+        c.set_recording(true);
+        let toggle = Some(events(None, Some(ModeToggle)));
+        assert_eq!(hook(&mut c, key(VK_LSHIFT, true), held_set(&[])), toggle);
+        assert_eq!(hook(&mut c, key(VK_A, true), held_set(&[VK_LSHIFT])), Some(undo(None)), "Shift is still held");
+        assert_eq!(hook(&mut c, key(VK_LSHIFT, true), held_set(&[VK_A])), toggle, "A was released, Shift pressed again");
+        // The Shift release went to the secure desktop: the resync before A drops it, and the toggle stands.
+        assert_eq!(hook(&mut c, key(VK_A, true), held_set(&[])), Some(PASS));
+    }
+
+    /// A Shift toggle taken back by this event, then the event's own `event`.
+    fn undo(event: Option<HotkeyEvent>) -> Outcome {
+        Outcome { events: [None, Some(ModeToggle), event], swallow: false, inject_mask_first: false }
+    }
+
+    /// Keys through the hook into a real `Flow`, joined the way the runtime joins them: the flow's answer sets the
+    /// hook flags before the next key.
+    struct Live {
+        chord: Chord,
+        flow: Flow,
+        now: Ms,
+        held: Vec<u16>,
+    }
+
+    impl Live {
+        /// A recording started with a tap of `keys` (Shift among them makes it a translation).
+        fn tapped(keys: &[u16]) -> Self {
+            let mut live = Self { chord: Chord::default(), flow: Flow::new(0, false), now: 0, held: vec![] };
+            live.keys(keys);
+            live.now += 2_000;
+            live
+        }
+
+        fn key(&mut self, vk: u16, down: bool) {
+            self.now += 40;
+            self.chord.set_recording(self.flow.recording_now());
+            let held = self.held.clone();
+            let ev = key(vk, down);
+            let how = route(&ev).expect("the event goes into Chord");
+            let (out, _) = feed(&mut self.chord, &ev, how, self.flow.esc_active(), false, |k| held.contains(&k));
+            for event in out.events.into_iter().flatten() {
+                self.flow.handle(input(event), self.now);
+            }
+            self.held.retain(|&k| k != vk);
+            if down {
+                self.held.push(vk);
+            }
+        }
+
+        /// Presses the keys in order, then releases them in the same order.
+        fn keys(&mut self, keys: &[u16]) {
+            keys.iter().for_each(|&vk| self.key(vk, true));
+            keys.iter().for_each(|&vk| self.key(vk, false));
+        }
+
+        /// The mode the recording is refined in, once the finishing chord has been pressed.
+        fn refined_in(&mut self) -> Option<Mode> {
+            let id = self.flow.current_id();
+            let fx = self.flow.handle(Input::SttFinal { id, text: "текст".into() }, self.now + 200);
+            fx.into_iter().find_map(|e| if let Effect::Refine { mode, .. } = e { Some(mode) } else { None })
+        }
+    }
+
+    /// What `runtime::input_of` does.
+    fn input(event: HotkeyEvent) -> Input {
+        match event {
+            ChordDown(mode) => Input::ChordDown(mode),
+            ModeChange(mode) => Input::ModeChange(mode),
+            ModeToggle => Input::ModeToggle,
+            ChordUp => Input::ChordUp,
+            ChordAborted => Input::ChordAborted,
+            Esc => Input::Esc,
+            PasteLast => Input::PasteLast,
+        }
+    }
+
+    #[test]
+    fn the_finishing_chord_keeps_the_mode_whatever_the_order() {
+        let starts = [(&[VK_LCONTROL, VK_LWIN][..], Mode::Dictate), (&[VK_LCONTROL, VK_LSHIFT, VK_LWIN][..], Mode::Translate)];
+        let finishes = [[VK_LSHIFT, VK_LCONTROL, VK_LWIN], [VK_LCONTROL, VK_LSHIFT, VK_LWIN], [VK_LWIN, VK_LSHIFT, VK_LCONTROL]];
+        for (start, mode) in starts {
+            for finish in finishes {
+                let mut live = Live::tapped(start);
+                assert_eq!(live.flow.mode(), mode, "{start:x?}");
+                live.keys(&finish);
+                assert_eq!(live.refined_in(), Some(mode), "started with {start:x?}, finished with {finish:x?}");
+            }
+        }
+    }
+
+    #[test]
+    fn shift_alone_switches_a_tapped_recording_and_shift_with_a_key_does_not() {
+        let mut live = Live::tapped(&[VK_LCONTROL, VK_LWIN]);
+        live.keys(&[VK_LSHIFT, VK_A]);
+        assert_eq!(live.flow.mode(), Mode::Dictate, "a capital letter");
+        live.keys(&[VK_LSHIFT]);
+        assert_eq!(live.flow.mode(), Mode::Translate, "Shift on its own");
+        live.keys(&[VK_RMENU, VK_LSHIFT]);
+        live.keys(&[VK_LSHIFT, VK_RMENU]);
+        assert_eq!(live.flow.mode(), Mode::Translate, "Alt + Shift and Shift + Alt");
+        live.keys(&[VK_LCONTROL, VK_LWIN]);
+        assert_eq!(live.refined_in(), Some(Mode::Translate));
+    }
+
+    #[test]
     fn resync_event_comes_before_key_event() {
         let mut c = Chord::default();
         assert_eq!(hook(&mut c, key(VK_LCONTROL, true), held_set(&[])), Some(PASS));
@@ -661,9 +770,9 @@ mod tests {
         let mut c = Chord::default();
         hook(&mut c, key(VK_LCONTROL, true), held_set(&[]));
         hook(&mut c, key(VK_LWIN, true), held_set(&[VK_LCONTROL]));
-        let paste = Outcome { events: [None, Some(PasteLast)], swallow: true, inject_mask_first: false };
+        let paste = Outcome { events: [None, None, Some(PasteLast)], swallow: true, inject_mask_first: false };
         assert_eq!(hook(&mut c, key(VK_V, true), held_set(&[VK_LCONTROL, VK_LWIN])), Some(paste));
-        let up = Outcome { events: [None, Some(ChordUp)], swallow: false, inject_mask_first: true };
+        let up = Outcome { events: [None, None, Some(ChordUp)], swallow: false, inject_mask_first: true };
         assert_eq!(hook(&mut c, key(VK_LWIN, false), held_set(&[VK_LCONTROL, VK_LWIN])), Some(up));
         assert_eq!(hook(&mut c, key(VK_LCONTROL, false), held_set(&[VK_LCONTROL])), Some(PASS));
         // V is still held; GetAsyncKeyState did not see the swallowed press.
@@ -675,7 +784,7 @@ mod tests {
     #[test]
     fn esc_and_mask_are_carried_out() {
         let mut c = Chord::default();
-        let esc = Outcome { events: [None, Some(Esc)], swallow: true, inject_mask_first: false };
+        let esc = Outcome { events: [None, None, Some(Esc)], swallow: true, inject_mask_first: false };
         assert_eq!(hook_with(&mut c, key(VK_ESCAPE, true), true, false, held_set(&[])), Some(esc));
         assert_eq!(hook_with(&mut c, key(VK_ESCAPE, false), true, false, held_set(&[])), Some(SWALLOW));
         assert_eq!(hook_with(&mut c, key(VK_ESCAPE, true), false, false, held_set(&[])), Some(PASS));
@@ -704,7 +813,7 @@ mod tests {
         // Pause; the Ctrl release was lost, Ctrl is pressed again.
         assert_eq!(hook_with(&mut c, key(VK_LCONTROL, true), false, true, held_set(&[VK_LWIN])), Some(PASS));
         // Chord resynced during the pause: after it the Win release gives ChordUp for the chord formed during the pause.
-        let up = Outcome { events: [None, Some(ChordUp)], swallow: false, inject_mask_first: true };
+        let up = Outcome { events: [None, None, Some(ChordUp)], swallow: false, inject_mask_first: true };
         assert_eq!(hook(&mut c, key(VK_LWIN, false), held_set(&[VK_LCONTROL, VK_LWIN])), Some(up));
     }
 
@@ -745,7 +854,7 @@ mod tests {
         let mut c = Chord::default();
         hook(&mut c, key(VK_LCONTROL, true), held_set(&[]));
         hook(&mut c, key(VK_LWIN, true), held_set(&[VK_LCONTROL]));
-        assert_eq!(hook(&mut c, key(VK_V, true), held_set(&[VK_LCONTROL, VK_LWIN])).unwrap().events[1], Some(PasteLast));
+        assert_eq!(hook(&mut c, key(VK_V, true), held_set(&[VK_LCONTROL, VK_LWIN])).unwrap().events[2], Some(PasteLast));
         hook(&mut c, key(VK_LWIN, false), held_set(&[VK_LCONTROL, VK_LWIN]));
         hook(&mut c, key(VK_LCONTROL, false), held_set(&[VK_LCONTROL]));
         // Pause; V is released during the pause — Chord sees it.
@@ -838,11 +947,11 @@ mod tests {
     fn chord_restarted_in_one_event_rearms_debounce() {
         let mut g = Glue::new();
         g.key(key(VK_LCONTROL, true), held_set(&[]));
-        assert_eq!(g.key(key(VK_LWIN, true), held_set(&[VK_LCONTROL])).events, [None, Some(ChordDown(Mode::Dictate))]);
+        assert_eq!(g.key(key(VK_LWIN, true), held_set(&[VK_LCONTROL])).events, [None, None, Some(ChordDown(Mode::Dictate))]);
         // The Ctrl release was lost; the tick already saw Ctrl released.
         assert_eq!(g.tick(held_set(&[VK_LWIN])), None);
         // Ctrl is pressed again: the resync ends the old chord, the press forms a new one — same timer.
-        assert_eq!(g.key(key(VK_LCONTROL, true), held_set(&[VK_LWIN])).events, [Some(ChordUp), Some(ChordDown(Mode::Dictate))]);
+        assert_eq!(g.key(key(VK_LCONTROL, true), held_set(&[VK_LWIN])).events, [Some(ChordUp), None, Some(ChordDown(Mode::Dictate))]);
         // The tick came before Windows updated the Ctrl state.
         assert_eq!(g.tick(held_set(&[VK_LWIN])), None, "no false ChordUp right after ChordDown");
         assert!(g.chord.active());
@@ -857,12 +966,12 @@ mod tests {
         g.key(key(VK_LCONTROL, true), held_set(&[]));
         g.key(key(VK_LWIN, true), held_set(&[VK_LCONTROL]));
         assert_eq!(g.tick(held_set(&pair)), None);
-        assert_eq!(g.key(key(VK_LSHIFT, true), held_set(&pair)).events, [None, Some(ModeToggle)]);
+        assert_eq!(g.key(key(VK_LSHIFT, true), held_set(&pair)).events, [None, None, Some(ModeToggle)]);
         // The tick came before Windows updated the Shift state, and the previous tick did not see Shift either.
         assert_eq!(g.tick(held_set(&pair)), None);
         assert_eq!(g.tick(held_set(&[VK_LCONTROL, VK_LWIN, VK_LSHIFT])), None);
         let repeat = g.key(key(VK_LSHIFT, true), held_set(&[VK_LCONTROL, VK_LWIN, VK_LSHIFT]));
-        assert_eq!(repeat.events, [None, None], "the held Shift's auto-repeat does not toggle back");
+        assert_eq!(repeat.events, [None, None, None], "the held Shift's auto-repeat does not toggle back");
     }
 
     #[test]
@@ -881,7 +990,7 @@ mod tests {
         hook(&mut c, key(VK_RCONTROL, true), held_set(&[]));
         hook(&mut c, key(VK_RWIN, true), held_set(&[VK_RCONTROL]));
         assert_eq!(after_gap(&mut c, false, held_set(&[VK_RCONTROL, VK_RWIN])), None);
-        let up = Outcome { events: [None, Some(ChordUp)], swallow: false, inject_mask_first: true };
+        let up = Outcome { events: [None, None, Some(ChordUp)], swallow: false, inject_mask_first: true };
         assert_eq!(hook(&mut c, key(VK_RWIN, false), held_set(&[VK_RCONTROL, VK_RWIN])), Some(up));
     }
 }

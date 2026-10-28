@@ -12,11 +12,12 @@ is built for personal use with your own Soniox and Anthropic API keys.
 ## Features
 
 - **Two chords.** `Ctrl + Win` (left or right keys, any order) starts dictation; `Ctrl + Win + Shift` (any order too)
-  starts a translated one. Tap and release: CUE records until you press `Ctrl + Win` again. Hold for 0.6 s or
-  longer: recording ends when you let go. While CUE records, every press of `Shift` (left or right; on its own after
-  a tap, or with `Ctrl + Win` still held) switches between dictation and translation, and the Drop changes its icon at
-  once: a second press takes it back. Letting go of `Shift` changes nothing, and outside a recording `Shift` does
-  nothing.
+  starts a translated one. Tap and release: CUE records until you press the chord again (with or without `Shift`; the
+  finishing chord does not change the mode). Hold for 0.6 s or longer: recording ends when you let go. While CUE
+  records, a press of `Shift` (left or right; on its own after a tap, or added while the starting chord is still held)
+  switches between dictation and translation, and the Drop changes its icon at once: a second press takes it back.
+  A `Shift` pressed together with other keys (a capital letter, a shortcut) does not switch the mode; letting go of
+  `Shift` changes nothing, and outside a recording `Shift` does nothing.
   `Ctrl + Win` with `Shift` and `Alt` together is the Office key, and `Ctrl + Win + Alt` is kept for the "Ask" mode
   of a later version: CUE leaves both to Windows.
 - **Translation** (`Ctrl + Win + Shift`). Speech that is not in your target language (`translate.target`, English

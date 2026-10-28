@@ -31,8 +31,10 @@ pub enum HotkeyEvent {
     ChordDown(Mode),
     /// Alt pressed while the chord is held, with "Ask" on: the dictation asks (spec 2 §4).
     ModeChange(Mode),
-    /// A fresh Shift press (not its auto-repeat) while the chord is held or while CUE records
+    /// A fresh Shift press (not its auto-repeat) while the chord is held, or on its own while CUE records
     /// (`Chord::set_recording`): dictation and translation swap. The core keeps the mode; a release changes nothing.
+    /// After a tap, a key pressed while that Shift is still held takes the toggle back with one more `ModeToggle`
+    /// (`Decision::undo_toggle`).
     ModeToggle,
     /// The pair broke up after `ChordDown`; also comes after `ChordAborted`.
     ChordUp,
@@ -54,6 +56,10 @@ pub struct Decision {
     /// Before passing this event on, send `VK_MASK` (press and release):
     /// then the Win release will not open the Start menu.
     pub inject_mask_first: bool,
+    /// Before `event`, give the core one more `HotkeyEvent::ModeToggle`: this key went down while a Shift that toggled
+    /// the mode after a tap is still held, so that Shift was part of a shortcut, a capital letter or the next chord,
+    /// and its toggle is taken back.
+    pub undo_toggle: bool,
 }
 
 /// Chord state. Modifiers as `LEFT` / `RIGHT` bits.
@@ -70,8 +76,11 @@ pub struct Chord {
     aborted: bool,
     /// Ctrl + Win + Alt is a chord: "Ask" is on.
     ask: bool,
-    /// CUE is starting or recording: a fresh Shift press toggles the mode after the chord was released too.
+    /// CUE is starting or recording: a fresh Shift press on its own toggles the mode after the chord was released too.
     recording: bool,
+    /// Shift keys (`LEFT` / `RIGHT` bits) that toggled the mode on their own after a tap and are still held: the next
+    /// other key takes their toggle back.
+    undo_shift: u8,
     /// This Win press had a `ChordDown`: the last Win release is masked.
     win_needs_mask: bool,
     /// Alt took part in an "Ask" chord: its last release is masked.
@@ -94,6 +103,7 @@ impl Default for Chord {
             aborted: false,
             ask: false,
             recording: false,
+            undo_shift: 0,
             win_needs_mask: false,
             alt_needs_mask: false,
             swallowed: [false; 256],
@@ -137,6 +147,8 @@ impl Chord {
                 self.set(vk, false);
             }
         }
+        // A Shift whose release never came was released: its toggle stands.
+        self.undo_shift &= self.shift;
         for vk in [VK_V, VK_ESCAPE] {
             let idx = usize::from(vk);
             if self.swallowed[idx] && !held(vk) {
@@ -206,10 +218,11 @@ impl Chord {
     /// The chord is Ctrl + Win and at most one of Shift / Alt (spec 2 §4): Shift translates, Alt asks (only while "Ask"
     /// is on). If Shift and Alt together (the Office key), or Alt while "Ask" is off, are held when the pair forms, this
     /// is a system shortcut — no events, no swallowed V, no mask: Windows sees everything as is. Every fresh Shift press
-    /// while the chord is held or while CUE records (`set_recording`) toggles the mode, its auto-repeat and its release
-    /// do not; an Alt press inside a held chord picks "Ask". Shift and Alt together inside a held chord cancel it and
-    /// drop the masks. Any other third key (Alt while "Ask" is off included) cancels the chord, and the mask stays: this
-    /// Win press had a `ChordDown`.
+    /// while the chord is held toggles the mode, its auto-repeat and its release do not. While CUE records with the chord
+    /// released (`set_recording`), only Shift on its own toggles (Ctrl, Win and Alt up), and the next other key pressed
+    /// while that Shift is still held takes the toggle back (`Decision::undo_toggle`). An Alt press inside a held chord
+    /// picks "Ask". Shift and Alt together inside a held chord cancel it and drop the masks. Any other third key (Alt
+    /// while "Ask" is off included) cancels the chord, and the mask stays: this Win press had a `ChordDown`.
     pub fn on_key(&mut self, vk: u16, down: bool, injected: bool, esc_active: bool) -> Decision {
         let mut d = Decision::default();
         if injected {
@@ -232,6 +245,14 @@ impl Chord {
         }
         let was_paired = self.paired();
         let fresh = self.set(vk, down) && down;
+        if down && !matches!(vk, VK_LSHIFT | VK_RSHIFT | VK_SHIFT) && self.undo_shift != 0 {
+            // A key went down while a Shift that toggled after a tap is still held: that Shift was part of a shortcut, a
+            // capital letter or the next chord (Shift + Ctrl + Win), not a switch. Each such toggle is taken back once,
+            // before this key's own event (a finishing chord then ends in the mode it started with), and two of them
+            // cancel out.
+            d.undo_toggle = self.undo_shift.count_ones() % 2 == 1;
+            self.undo_shift = 0;
+        }
         match vk {
             VK_LCONTROL | VK_RCONTROL | VK_CONTROL | VK_LWIN | VK_RWIN => {
                 let paired = self.paired();
@@ -282,12 +303,23 @@ impl Chord {
                         self.alt_needs_mask = false;
                         d.inject_mask_first = true;
                     }
-                } else if fresh && (self.active || self.recording) {
-                    // Shift toggles: the core keeps the mode, so the chord need not know it, and the chord may already be
-                    // released (a tap). A release never toggles: the order of releases must not change the result. Inside
-                    // a held chord the event goes out even before the core has said it records: the flow drops it when
-                    // nothing records (the press finished the recording, or a system shortcut already dropped it).
-                    d.event = Some(HotkeyEvent::ModeToggle);
+                } else {
+                    // Shift toggles: the core keeps the mode, so the chord need not know it. A release never toggles: the
+                    // order of releases must not change the result.
+                    if fresh && self.active {
+                        // Inside a held chord the event goes out even before the core has said it records: the flow
+                        // drops it when nothing records (the press finished the recording, or a system shortcut already
+                        // dropped it).
+                        d.event = Some(HotkeyEvent::ModeToggle);
+                    } else if fresh && self.recording && self.ctrl == 0 && self.win == 0 && self.alt == 0 {
+                        // After a tap only Shift on its own counts. With Ctrl, Win or Alt down it belongs to another
+                        // shortcut or to the finishing chord (Ctrl + Shift + Win), which must not turn a translation into
+                        // a dictation. A Shift pressed before the other keys is caught by the next key (`undo_shift`).
+                        self.undo_shift |= if vk == VK_RSHIFT { RIGHT } else { LEFT };
+                        d.event = Some(HotkeyEvent::ModeToggle);
+                    }
+                    // A released Shift's toggle stands: no key can take it back any more.
+                    self.undo_shift &= self.shift;
                 }
             }
             VK_V if down && self.active => {
@@ -390,8 +422,8 @@ mod tests {
         press(&mut c, VK_LCONTROL);
         press(&mut c, VK_LWIN);
         let d = press(&mut c, VK_V);
-        assert_eq!(d, Decision { swallow: true, event: Some(PasteLast), inject_mask_first: false });
-        assert_eq!(press(&mut c, VK_V), Decision { swallow: true, event: None, inject_mask_first: false });
+        assert_eq!(d, Decision { swallow: true, event: Some(PasteLast), inject_mask_first: false, undo_toggle: false });
+        assert_eq!(press(&mut c, VK_V), Decision { swallow: true, event: None, inject_mask_first: false, undo_toggle: false });
         release(&mut c, VK_LWIN);
         assert!(release(&mut c, VK_V).swallow, "the release of a swallowed V is swallowed too");
         assert!(!press(&mut c, VK_V).swallow, "a normal V passes");
@@ -403,7 +435,7 @@ mod tests {
         assert_eq!(c.on_key(VK_ESCAPE, true, false, false), Decision::default());
         c.on_key(VK_ESCAPE, false, false, false);
         let d = c.on_key(VK_ESCAPE, true, false, true);
-        assert_eq!(d, Decision { swallow: true, event: Some(Esc), inject_mask_first: false });
+        assert_eq!(d, Decision { swallow: true, event: Some(Esc), inject_mask_first: false, undo_toggle: false });
         assert!(c.on_key(VK_ESCAPE, false, false, true).swallow);
     }
 
@@ -414,8 +446,8 @@ mod tests {
         assert_eq!(c.on_key(VK_LWIN, true, true, false), Decision::default());
     }
 
-    const SWALLOWED: Decision = Decision { swallow: true, event: None, inject_mask_first: false };
-    const MASK_ONLY: Decision = Decision { swallow: false, event: None, inject_mask_first: true };
+    const SWALLOWED: Decision = Decision { swallow: true, event: None, inject_mask_first: false, undo_toggle: false };
+    const MASK_ONLY: Decision = Decision { swallow: false, event: None, inject_mask_first: true, undo_toggle: false };
 
     #[test]
     fn swallowed_key_stays_swallowed_until_release() {
@@ -637,7 +669,7 @@ mod tests {
         release(&mut c, VK_LWIN);
         assert_eq!(c.resync(|vk| vk == VK_LCONTROL), None);
         press(&mut c, VK_LWIN);
-        let fresh = Decision { swallow: true, event: Some(PasteLast), inject_mask_first: false };
+        let fresh = Decision { swallow: true, event: Some(PasteLast), inject_mask_first: false, undo_toggle: false };
         assert_eq!(press(&mut c, VK_V), fresh, "a new V press is \"paste last\" again");
         assert_eq!(release(&mut c, VK_V), SWALLOWED);
     }
@@ -663,10 +695,10 @@ mod tests {
         press(&mut c, VK_LCONTROL);
         press(&mut c, VK_LWIN);
         let d = c.on_key(VK_ESCAPE, true, false, true);
-        assert_eq!(d, Decision { swallow: true, event: Some(Esc), inject_mask_first: false }, "CUE is recording — Esc cancels");
+        assert_eq!(d, Decision { swallow: true, event: Some(Esc), inject_mask_first: false, undo_toggle: false }, "CUE is recording — Esc cancels");
         c.on_key(VK_ESCAPE, false, false, true);
         let d = press(&mut c, VK_ESCAPE);
-        assert_eq!(d, Decision { swallow: false, event: Some(ChordAborted), inject_mask_first: false }, "otherwise Esc is a third key");
+        assert_eq!(d, Decision { swallow: false, event: Some(ChordAborted), inject_mask_first: false, undo_toggle: false }, "otherwise Esc is a third key");
     }
 
     // ---- Modes: Shift translates, Alt asks (spec 2 §4) ----
@@ -685,7 +717,7 @@ mod tests {
         assert_eq!(press(&mut c, VK_LWIN).event, Some(ChordDown(Mode::Translate)));
     }
 
-    const TOGGLE: Decision = Decision { swallow: false, event: Some(ModeToggle), inject_mask_first: false };
+    const TOGGLE: Decision = Decision { swallow: false, event: Some(ModeToggle), inject_mask_first: false, undo_toggle: false };
 
     #[test]
     fn every_fresh_shift_press_inside_the_chord_toggles() {
@@ -709,7 +741,7 @@ mod tests {
         let mut c = Chord::default();
         press(&mut c, VK_LCONTROL);
         assert_eq!(press(&mut c, VK_LWIN).event, Some(DOWN));
-        assert_eq!(release(&mut c, VK_LWIN), Decision { swallow: false, event: Some(ChordUp), inject_mask_first: true });
+        assert_eq!(release(&mut c, VK_LWIN), Decision { swallow: false, event: Some(ChordUp), inject_mask_first: true, undo_toggle: false });
         release(&mut c, VK_LCONTROL);
         // The core has started the recording.
         c.set_recording(true);
@@ -742,6 +774,98 @@ mod tests {
         release(&mut c, VK_LCONTROL);
         c.set_recording(true);
         assert_eq!(press(&mut c, VK_LSHIFT), TOGGLE, "after the release");
+    }
+
+    const NOTHING: [HotkeyEvent; 0] = [];
+
+    /// The events a decision gives the core, in order: the undo of a Shift toggle comes first.
+    fn sent(d: Decision) -> Vec<HotkeyEvent> {
+        d.undo_toggle.then_some(ModeToggle).into_iter().chain(d.event).collect()
+    }
+
+    /// A chord whose tap started a recording: the pair is up again, and the core says it records.
+    fn tapped() -> Chord {
+        let mut c = Chord::default();
+        press(&mut c, VK_LCONTROL);
+        press(&mut c, VK_LWIN);
+        release(&mut c, VK_LWIN);
+        release(&mut c, VK_LCONTROL);
+        c.set_recording(true);
+        c
+    }
+
+    /// Presses the keys in order, then releases them in the same order: the events the core gets.
+    fn keys(c: &mut Chord, keys: &[u16]) -> Vec<HotkeyEvent> {
+        let mut out: Vec<HotkeyEvent> = keys.iter().flat_map(|&vk| sent(press(c, vk))).collect();
+        out.extend(keys.iter().flat_map(|&vk| sent(release(c, vk))));
+        out
+    }
+
+    #[test]
+    fn shift_in_the_finishing_chord_after_a_tap_leaves_the_mode_alone() {
+        let finish = [ChordDown(Mode::Translate), ChordUp];
+        let undone = [ModeToggle, ModeToggle, ChordDown(Mode::Translate), ChordUp];
+        assert_eq!(keys(&mut tapped(), &[VK_LSHIFT, VK_LCONTROL, VK_LWIN]), undone, "Shift first: toggled, then undone");
+        assert_eq!(keys(&mut tapped(), &[VK_RSHIFT, VK_RWIN, VK_RCONTROL]), undone);
+        assert_eq!(keys(&mut tapped(), &[VK_LCONTROL, VK_LSHIFT, VK_LWIN]), finish, "Shift after Ctrl does not toggle");
+        assert_eq!(keys(&mut tapped(), &[VK_LWIN, VK_RSHIFT, VK_LCONTROL]), finish, "Shift after Win does not toggle");
+    }
+
+    #[test]
+    fn shift_with_other_keys_after_a_tap_leaves_the_mode_alone() {
+        assert_eq!(keys(&mut tapped(), &[VK_LSHIFT, VK_D]), [ModeToggle, ModeToggle], "a capital letter");
+        assert_eq!(keys(&mut tapped(), &[VK_LSHIFT, VK_LMENU]), [ModeToggle, ModeToggle], "Shift + Alt");
+        assert_eq!(keys(&mut tapped(), &[VK_LMENU, VK_LSHIFT]), NOTHING, "Alt + Shift");
+        assert_eq!(keys(&mut tapped(), &[VK_LCONTROL, VK_LSHIFT, VK_D]), NOTHING, "Ctrl + Shift + a key");
+        assert_eq!(keys(&mut tapped(), &[VK_LWIN, VK_LSHIFT, VK_L]), NOTHING, "Win + Shift + a key");
+        let mut c = tapped();
+        assert_eq!(press(&mut c, VK_LSHIFT), TOGGLE);
+        assert_eq!(sent(press(&mut c, VK_D)), [ModeToggle], "the first key takes the toggle back");
+        release(&mut c, VK_D);
+        assert_eq!(sent(press(&mut c, VK_B)), NOTHING, "the next ones do not: once per Shift press");
+        release(&mut c, VK_B);
+        assert_eq!(release(&mut c, VK_LSHIFT), Decision::default());
+    }
+
+    #[test]
+    fn a_lone_shift_after_a_tap_toggles_for_good() {
+        let mut c = tapped();
+        assert_eq!(keys(&mut c, &[VK_LSHIFT]), [ModeToggle]);
+        assert_eq!(keys(&mut c, &[VK_D]), NOTHING, "a key after the Shift release takes nothing back");
+        assert_eq!(keys(&mut c, &[VK_RSHIFT]), [ModeToggle]);
+        assert_eq!(keys(&mut c, &[VK_LCONTROL, VK_LWIN]), [ChordDown(Mode::Dictate), ChordUp], "the finishing tap");
+    }
+
+    #[test]
+    fn each_toggling_shift_is_taken_back_once() {
+        // Both Shifts held: two toggles, so the key takes back two, which is no toggle at all.
+        let mut c = tapped();
+        assert_eq!(keys(&mut c, &[VK_LSHIFT, VK_RSHIFT, VK_D]), [ModeToggle, ModeToggle]);
+        // The right Shift was released first: its toggle stands, the left one's is taken back.
+        let mut c = tapped();
+        assert_eq!(press(&mut c, VK_LSHIFT), TOGGLE);
+        assert_eq!(press(&mut c, VK_RSHIFT), TOGGLE);
+        release(&mut c, VK_RSHIFT);
+        assert_eq!(sent(press(&mut c, VK_D)), [ModeToggle]);
+    }
+
+    #[test]
+    fn esc_with_the_toggling_shift_held_takes_the_toggle_back_first() {
+        let mut c = tapped();
+        assert_eq!(press(&mut c, VK_LSHIFT), TOGGLE);
+        let d = c.on_key(VK_ESCAPE, true, false, true);
+        assert_eq!(d, Decision { swallow: true, event: Some(Esc), inject_mask_first: false, undo_toggle: true });
+        assert_eq!(sent(d), [ModeToggle, Esc], "the mode is back before the cancel, so Restore refines in it");
+    }
+
+    #[test]
+    fn inside_a_held_chord_other_keys_do_not_take_the_toggle_back() {
+        let mut c = Chord::default();
+        c.set_recording(true);
+        press(&mut c, VK_LCONTROL);
+        press(&mut c, VK_LWIN);
+        assert_eq!(press(&mut c, VK_LSHIFT), TOGGLE);
+        assert_eq!(sent(press(&mut c, VK_D)), [ChordAborted], "a third key aborts, as before");
     }
 
     #[test]

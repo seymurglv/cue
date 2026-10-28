@@ -65,7 +65,8 @@ pub enum Input {
     ChordDown(Mode),
     /// Alt was pressed while the chord is held: the mode it picks ("Ask"; switched off in this version).
     ModeChange(Mode),
-    /// A fresh Shift press, with the chord held or after a tap: dictation and translation swap while recording.
+    /// A fresh Shift press, with the chord held or on its own after a tap: dictation and translation swap while
+    /// recording. The hook sends one more to take it back when that Shift turns out to be part of other keys.
     ModeToggle,
     ChordUp,
     ChordAborted,
@@ -310,7 +311,8 @@ impl Flow {
         fx
     }
 
-    /// Starting or recording: the microphone is open, and Shift toggles the mode (the keyboard hook asks this too).
+    /// Starting or recording: the microphone is open, and Shift toggles the mode. The runtime publishes it to the
+    /// keyboard hook as `hook::RECORDING`.
     pub fn recording_now(&self) -> bool {
         matches!(self.phase, Phase::Starting | Phase::Recording)
     }

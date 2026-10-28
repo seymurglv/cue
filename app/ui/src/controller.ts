@@ -3,7 +3,8 @@ import { DICTS, TRAYS, type Dict, type ErrorCause, type Lang, type TrayKind } fr
 import { trayHtml } from './trays';
 
 export type Phase = 'idle' | 'start' | 'listen' | 'think' | 'done' | 'empty' | 'cancel' | 'error';
-/** What the dictation does with the speech; the core picks it from the chord (Shift — translate, Alt — ask). */
+/** What the dictation does with the speech. The core keeps it: the chord picks it (Shift — translate, Alt — ask),
+ *  and Shift switches dictation and translation while recording; the Drop only shows it. */
 export type Mode = 'dictate' | 'translate' | 'ask';
 export interface UiState { phase: Phase; error: ErrorCause | null; retry: boolean; paused: boolean; mode: Mode }
 export type UiAction = 'cancel' | 'finish' | 'undo' | 'retry' | 'dismiss' | 'trayAction' | 'trayClose';
