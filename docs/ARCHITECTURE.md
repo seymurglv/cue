@@ -8,14 +8,18 @@ a real clock.
 ## Crates
 
 - **`cue-core`** (`app/crates/core`): no Windows APIs, no network, no clock (time is passed in).
-  - `flow`: the dictation state machine `Flow`. `handle(input, now_ms)` returns a list of `Effect`s.
-  - `ui`: `UiState`, `UiPhase`, `ErrorCause`, `TrayKind`, `UiAction`, shared with TypeScript as JSON.
+  - `flow`: the dictation state machine `Flow`, one for every mode. `handle(input, now_ms)` returns a list of
+    `Effect`s.
+  - `ui`: `UiState`, `UiPhase`, `Mode`, `ErrorCause`, `TrayKind`, `UiAction`, shared with TypeScript as JSON.
   - `refine`: the system prompt, the dictionary block, the user message, timeout and token budget, the sanity check,
     Markdown stripping, list tidying, and the join space before a paste.
+  - `translate`: the languages Soniox recognizes, the speech-language tally, the translation direction, the
+    instruction block, the timeout and the translation check.
   - `audio`: resampling to 16 kHz mono, voice level, the "microphone is silent" detector.
   - `settings`, `usage` (CSV rows, costs, monthly summary), `paths`.
 - **`cue-engines`** (`app/crates/engines`): `stt` (session facade, ~100 ms chunks, batch fallback), `soniox`
-  (WebSocket stream) and `soniox::batch` (REST, with cleanup of uploads), `claude` (refine request and response),
+  (WebSocket stream) and `soniox::batch` (REST, with cleanup of uploads), `claude` (refine and translation requests
+  and responses, the cache warm-up),
   `keys` (Windows Credential Manager), `check` (free key probes), `error`. `openrouter` serves only the
   `refine_compare` example.
 - **`cue-platform-win`** (`app/crates/platform-win`): `hook` and `chord` (keyboard), `input` (`SendInput`, modifier
@@ -59,23 +63,41 @@ a real clock.
 ```
 
 `Flow` emits effects (`OpenMic`, `StopMic`, `StartStt`, `FinishStt`, `AbortStt`, `TranscribeSaved`, `Refine`,
-`AbortRefine`, `Insert`, `PasteLast`, `Ui`, `Shake`, `Tray`, `SetTimer`, `CancelTimer`, `HoldHintShown`, `Finished`)
-and the runtime executes them. Late results never reach `Flow`: every timer kind and every transcription or refine
-task has a generation number, microphone frames are tagged with the dictation id and dropped after `StopMic`, and a
-transcription result is accepted only after `FinishStt` or `TranscribeSaved`. A task that crashes still reports:
-transcription as a network error (so Retry is offered), refine as the raw text, paste as "no field".
+`RefineAgain`, `AbortRefine`, `Insert`, `PasteLast`, `Ui`, `Shake`, `Tray`, `SetTimer`, `CancelTimer`,
+`HoldHintShown`, `Finished`) and the runtime executes them. Late results never reach `Flow`: every timer kind and
+every transcription or refine task has a generation number, microphone frames are tagged with the dictation id and
+dropped after `StopMic`, and a transcription result is accepted only after `FinishStt` or `TranscribeSaved`. A task
+that crashes still reports: transcription as a network error (so Retry is offered), refine as the raw text, paste as
+"no field".
+
+**Modes.** `Flow` keeps the mode of the dictation (`Mode`: `Dictate`, `Translate`, `Ask`; "Ask" cannot be picked in
+this version). `ChordDown(mode)` starts a dictation in the mode the chord picked, and `ModeChange(mode)` switches it
+while the starting chord is still held (in hold mode too); after the release, and once the finishing press has moved
+the flow to thinking, the mode is fixed. The mode reaches the Drop in `UiState` and the runtime in `Refine { mode }`
+and `RefineAgain { mode }`; every path into Idle resets it to `Dictate`. A translation that comes back as anything
+but a refined, non-empty text is never pasted: the attempt ends as `failed`, and the flow shows the `translate` error
+(`claudeKey` for a key, balance or limit problem) with Retry. That Retry emits `RefineAgain` with the saved
+transcript: the text is translated again, the audio is not transcribed again.
 
 ### Hotkey chord
 
-- The chord is exactly Ctrl + Win (left or right, any order). If Shift or Alt is already held when the pair forms, it
-  is a system shortcut and CUE stays out of it.
-- Ctrl and Win always pass through to Windows. CUE swallows only `V` while Ctrl + Win are held (paste last; the
-  Windows `Ctrl + Win + V` panel does not open) and `Esc` while CUE is starting, recording, thinking, pasting or
+- The chord is Ctrl + Win (left or right, any order) and at most one of Shift / Alt, pressed in any order: Ctrl + Win
+  alone dictates, with Shift it translates. Alt would pick "Ask", which is switched off in this version
+  (`hook::ASK_ENABLED`). If Shift and Alt together (Ctrl + Shift + Alt + Win is the Office key), or Alt while "Ask" is
+  off, are held when the pair forms, it is a system shortcut: no events, no swallowed `V`, no mask, and Windows sees
+  every key as is.
+- While the chord is held, a Shift press (or Alt, once "Ask" is on) switches the mode, and the Drop changes its icon
+  at once. A release never switches it, so the order in which the keys come up does not matter, and nothing goes back
+  to dictation. Shift and Alt together inside a held chord (the Office key pressed late) count as a third key (below)
+  and also drop the Win and Alt masks whatever the order of the presses, so Windows sees the Office key as is.
+- Ctrl, Win, Shift and Alt always pass through to Windows. CUE swallows only `V` while the chord is held (paste last;
+  the Windows `Ctrl + Win + V` panel does not open) and `Esc` while CUE is starting, recording, thinking, pasting or
   showing an error. A swallowed key's auto-repeat and release are swallowed too.
 - Before the Win key-up passes after a chord, CUE sends an unused key (VK `0xE8`), so Windows does not open Start.
-- A third key while the starting chord is still held, within 1.5 s of the press (`Ctrl + Win + D`, arrows), means
-  a system shortcut: the recording is dropped silently and the key reaches Windows. A later key is taken as a slip
-  during a held dictation, and the recording goes on.
+  Alt that took part in an "Ask" chord gets the same key before its key-up, so the app's menu does not open.
+- A third key while the starting chord is still held, within 1.5 s of the press (`Ctrl + Win + D`, arrows, Alt while
+  "Ask" is off), means a system shortcut: the recording is dropped silently and the key reaches Windows. A later key
+  is taken as a slip during a held dictation, and the recording goes on.
 - Tap and release starts tap mode: the next chord press finishes. A chord held for 0.6 s starts hold mode: releasing
   finishes, and the first two times a "Press and release" card follows. Presses within 0.3 s of the last are ignored.
   A chord while thinking only makes the Drop shake.
@@ -102,6 +124,15 @@ recording in progress.
   detection off, the focused app's name as context); audio follows in ~100 ms binary frames, with keepalives in pauses.
 - On finish CUE sends 200 ms of silence, `finalize`, waits for the `<fin>` token, then ends the audio. The text is
   built from final tokens.
+- Language identification is on for every dictation, stream and batch alike: the mode can still change after the
+  stream config is sent, and Soniox prices it into the hourly rate. Each token carries its language, and the speech
+  language is the one of the most words among the final tokens (`translate::LanguageTally`): a word starts at the
+  first letter after whitespace and belongs to the language of the token it starts in, so a word split over several
+  tokens counts once and a long foreign name does not outweigh a short phrase ("Открой Telegram" is Russian).
+  Punctuation starts no word; in scripts written without spaces (Chinese, Japanese, Thai, Lao, Khmer, Myanmar) every
+  character counts as a word; tokens without a known language are skipped; a tie goes to the language heard first.
+- The language hints are `stt.language_hints`, except for a translation with `translate.speech` fixed: then that code
+  is the only hint, on the stream, the batch fallback and Retry. The stream takes the mode the dictation started in.
 - If the stream has no result within 5 s of the second press, or fails for any reason other than the key or a cancel,
   the saved WAV goes to the batch model `stt-async-v5`: upload, create a transcription, poll every 400 ms, fetch the
   text, delete the transcription and the file. Deletions that fail (still processing, network, rate limit) are
@@ -138,6 +169,59 @@ recording in progress.
   ("открой гитхаб" → "Открой GitHub.") is not taken for an invention. An empty result always fails. A failed check pastes the raw transcript.
 - A key, balance or limit problem at Anthropic pastes the raw transcript and then shows "Claude key problem" without
   Retry.
+
+### Translation
+
+- **Direction** (`translate::output_language`). The speech language is `translate.speech` when fixed, else the one
+  Soniox heard most (see Transcription). Speech that is not in `translate.target` goes to the target; speech in the
+  target goes to the home language; unknown speech goes to the target; with no home language, speech in the target is
+  only cleaned up. The home language (`translate::resolve_home`) is decided once at startup: `translate.home`, else
+  the Windows display language, else the first language hint, skipping any equal to the target. Settings example:
+  `"translate": { "target": "en", "home": "ru", "speech": "auto" }` sends Russian (or German) speech to English and
+  English speech to Russian.
+- **Request** (`claude::Job::Translate(code)`, `request_body_for`). The refine request as is, plus one more system block
+  after the cache mark (`translate::instruction`): clean up the transcript by the rules above, then write the whole
+  result in the target language (its English name), which replaces the rules to keep the spoken language and never
+  translate; keep the meaning, the tone and the formatting rules (plain text, the list rules, one line in terminals);
+  dictionary terms, product names and code stay as written. The cached prefix is the one plain dictation uses, so a
+  translation never writes a cache of its own, and a request without a translation is byte for byte what it was.
+  `max_tokens` doubles (another alphabet may take more tokens), up to 16 000. Timeout: 4 s plus 1 s per 100 words,
+  a second more than a cleanup.
+- **Check** (`translation_ok`), instead of the sanity check, on the text after Markdown stripping and list tidying.
+  The result is not empty. From 20 letters of speech, its length is 0.35–2.8 times the speech's, counted in letters,
+  each weighted by its script: a Han or kana character counts as 3 Latin letters, a Hangul one as 2. When the speech
+  is in another script than the target language, the result must be written in the target script. Latin is the script
+  of names, product names and code in every language, so the speech's script is its main non-Latin one when it has
+  any. The result is split into words (runs of letters of one script); words of `dictionary.terms` never count, and
+  into a non-Latin target no Latin word counts. Of the counted words at least one is in the target script, and so is at
+  least 80 % of their weighted letters. A pair in one script (English into German) is checked by length only, since
+  there the script cannot tell a translation from a cleanup; Serbian, written in both Cyrillic and Latin, is checked
+  by length only too. The word overlap of the sanity check does not apply: a translation shares no words with the
+  speech.
+- **Known limits of the check.** A translation made only of dictionary terms fails ("Sberbank" → "Сбербанк" with that
+  term listed). Into a non-Latin target, Latin text shows nothing either way, so the English original followed by its
+  translation passes, and so does English with one word in the target script. A phrase of names around one word of
+  speech ("кубернетес и докер" → "Kubernetes и Docker.") passes into English unless the names are listed. In a
+  same-script pair the untranslated speech passes. Number words in the speech count as letters and digits in the
+  result do not, so a short phrase whose numbers turn into digits can fall under the length bound ("The budget is
+  fifty, sorry, sixty thousand dollars." → "Бюджет — 60 000 долларов." fails).
+- **Failure.** No key, a network error, a timeout, a refusal, `max_tokens`, a response off the schema or a failed check
+  pastes nothing: the flow shows "Couldn't translate" ("Claude key problem" for a key, balance or limit problem) with
+  Retry, which translates the saved transcript again. The log gets one line with the reason and the outcome, and
+  the target code when a translation starts; never the text.
+
+### Cache warm-up
+
+When a dictation starts (on `StartStt`, in any mode but "Ask") and no refine or warm-up has started in the last
+4 minutes (`CACHE_WARM_AFTER_MS`: the 5-minute cache lifetime counts from the start of a request, and the recording
+takes time), the runtime sends a warm-up (`claude::warm`): the refine request with the same system blocks and
+dictionary, a one-character transcript, no app, no text before the caret and `max_tokens: 1` (`warm_body`; the API
+refuses `max_tokens: 0` together with the output format, and the format must stay for the prefix to match).
+Dictation and translation share the prefix, so one warm-up serves both. A model whose thinking cannot be turned off
+(Opus 5.5) gets no warm-up: a one-token answer leaves it no thinking budget. The warm-up has a 5 s timeout; a failure
+writes one log line with the reason, and the dictation's own refine writes the cache. After waking from sleep or an
+unlock the next dictation warms the cache again. The tokens are paid for and get a usage row of their own
+(`warmup`); a recording cancelled after the press has paid for its warm-up.
 
 ### Paste
 
@@ -238,9 +322,9 @@ when that cannot help; always-on-top windows above the Drop are never answered a
 
 ### Events and sizes
 
-Core → window events: `cue://state` (phase, error cause, retry, paused), `cue://level`, `cue://tray` (card kind or
-none), `cue://shake`, `cue://idle-hidden`, `cue://place`. Window → core commands: `drop_action` (`cancel`, `finish`,
-`undo`, `retry`, `dismiss`, `trayAction`, `trayClose`), `drop_hit_rects`, `drop_drag` (`start`, `end`), and
+Core → window events: `cue://state` (phase, error cause, retry, paused, mode), `cue://level`, `cue://tray` (card kind
+or none), `cue://shake`, `cue://idle-hidden`, `cue://place`. Window → core commands: `drop_action` (`cancel`,
+`finish`, `undo`, `retry`, `dismiss`, `trayAction`, `trayClose`), `drop_hit_rects`, `drop_drag` (`start`, `end`), and
 `drop_ready`, after which the core resends the current state, card, `idle-hidden` and place. The place also comes in an
 initialization script, so the first frame is already laid out for it. No dictation text crosses this boundary.
 
@@ -254,6 +338,11 @@ Phases: `idle` (a thin strip; on hover the mark and the hotkey), `start`, `liste
 and done buttons on hover), `think` (three dots), `done` (a check, gone after 1.5 s), `empty`, `cancel` (Restore with
 a 3.6 s ring), `error` (amber "!", the cause on hover, Retry when available). The frame loop sleeps when nothing moves;
 with reduced motion turned on in Windows, states change instantly.
+
+The mode shows while recording: in a translation the mark of `start` takes the translation shape and `listen` adds
+the arrows icon next to the voice bars; a mode change re-enters the phase, so the icon changes at once. The error of a
+failed translation reads "Couldn't translate" with the network cause icon and Retry. The idle Drop shows no mode, and
+its hint stays `Ctrl + Win`.
 
 Tray cards grow out of the Drop, one at a time; a new card replaces the old one, a new recording closes it, and hovering
 pauses the countdown ring:
@@ -296,28 +385,41 @@ block is written. `ui.language` (`auto`, `en`, `ru`, in any case and with spaces
 and with spaces trimmed; any other value, or a `drop` that is not an object, reads as `bottom`) only when it is not
 `bottom`, and `dictionary` only when its list is not empty. `dictionary.terms` is kept as written; a value that is not a
 list reads as an empty list and items that are not strings are skipped, so a typo there never makes the file unreadable.
-Model names are settings, so a new model version needs no code change.
+The `translate` fields (`target`, `home`, `speech`) go through `translate::known`: trimmed, lowercased, the first
+subtag of a locale name (`ru-RU`, `zh-Hans-CN`), the aliases `nb`/`nn` → `no`, `fil` → `tl`, `iw` → `he`, `in` → `id`;
+anything else (`auto`, an unknown code, a number) reads as nothing, that is the default, and a `translate` that is not
+an object reads as the default section. A `target` of `en` reads as nothing too, so the default is never written
+back, and the block is written only when one of its fields is set. Model names are settings, so a new model version
+needs no code change.
 
 ## Usage accounting
 
 An attempt is a recording and its transcription; Retry starts a second attempt of the same dictation, and each gets
 its own row in `%LOCALAPPDATA%\CUE\usage.csv`:
 `ts, audio_ms, stt_engine, stt_path, stt_usd, refine_model, input_tokens, cache_read_tokens, cache_write_tokens,
-output_tokens, refine_usd, latency_ms, outcome`. `stt_path` is `stream`, `stream+batch` or `batch`; outcomes are
-`inserted`, `no_field`, `cancelled`, `empty`, `failed`, `discarded` (written only when audio ran past 380 ms).
-Latency runs from the second press to Ctrl+V (from Retry or Restore when used); the target for a ~30-word phrase is
-1.5 s or less. Rows that fail to write, for example
-while the file is open in Excel, wait in memory and go out before the next one. `cue-cli usage` sums a UTC month:
-dictations are `inserted` plus `no_field` rows, average latency counts only `inserted` rows, and a separate average
-covers recordings of 20 s or less.
+output_tokens, refine_usd, latency_ms, outcome, mode, web_searches, search_usd`. `stt_path` is `stream`,
+`stream+batch` or `batch`; outcomes are `inserted`, `no_field`, `cancelled`, `empty`, `failed`, `discarded` (written
+only when audio ran past 380 ms). `mode` is `dictate` or `translate` as the dictation's refine started (the mode it
+started in, for an attempt that ends before refine; `ask` is reserved), or `warmup`. `web_searches` and `search_usd`
+(searches × `pricing.web_search_usd`) are for "Ask" and are 0 for now. The Retry of a failed translation
+re-translates the saved text: a new row with no audio. A cache warm-up is a row of its own: its tokens and cost, no
+audio, latency 0, outcome `discarded`, mode `warmup`. Rows written before the last three columns existed read as
+dictation, and the header of an existing file is never rewritten (new files get the 16-column header). Latency runs
+from the second press to Ctrl+V (from Retry or Restore when used); the target for a ~30-word phrase is 1.5 s or less.
+Rows that fail to write, for example while the file is open in Excel, wait in memory and go out before the next one.
+`cue-cli usage` sums a UTC month: dictations are `inserted` plus `no_field` rows, average latency counts only
+`inserted` rows, and a separate average covers recordings of 20 s or less. The cost includes failed attempts and
+warm-ups; web search is shown only when there was some, and the rows and dollars of each `mode` value follow, in the
+order they first appear.
 
 ## Logging and privacy rules
 
 - Logs go to `%LOCALAPPDATA%\CUE\logs\cue.log.YYYY-MM-DD` through a non-blocking writer at `info` level; old files are
   pruned at startup and daily (7 days, 10 MB).
 - Logged: events, per-stage timings (`stt_ms`, `refine_ms`, `insert_ms`, `latency_ms`), outcomes and error kinds;
-  at startup, how many dictionary terms are used and skipped. Never logged: dictation text, text before the caret,
-  dictionary terms, audio, API keys, response bodies.
+  at startup, how many dictionary terms are used and skipped, and the translation pair (two language codes); the
+  target code of each translation; the token counts of each cache warm-up. Never logged: dictation text, text before
+  the caret, translations, dictionary terms, audio, API keys, response bodies.
 - WebSocket handshake tracing is switched off by a fixed filter, since it would include the `Authorization` header.
 - The panic hook is installed first and records only the thread and code location, never the message, which could
   contain dictated text. Debug output of focus results and microphone frames shows only lengths.
@@ -335,3 +437,11 @@ warm-up call per model is excluded from the report but counted in spend. A `--ma
 `report.html` are rewritten after each recording in `%LOCALAPPDATA%\CUE\bench\runs\<timestamp>`. The report is a
 single HTML page with blind A/B pairs for transcription and for refine, scores, latency and cost per dictation, and
 saves the answers as `choices.json`.
+
+`refine_compare` (an example in `cue-engines`) works on text instead of recordings: a phrase file
+(`{id, app, raw, before_cursor?, to?}`) goes through OpenRouter models and the direct Haiku path with the app's prompt,
+context and checks, sequentially, under a `--max-usd` budget. A phrase with `to` is translated, on the direct path
+only (`claude::translate`, the translation check, the 4 s timeout); OpenRouter models skip it, and the skip is listed
+in `out.json`. `out.json` holds every call (the text that would be pasted, the outcome, `to`) and per-model medians,
+p90 and cost; the console gets only ids and numbers. A translation that fails its check counts as `raw_fallback`,
+where the app says "Couldn't translate".

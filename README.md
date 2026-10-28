@@ -3,14 +3,28 @@
 CUE is a voice-dictation app for Windows 11. Press `Ctrl + Win`, speak, and the cleaned-up text appears at the caret
 in whatever app you are typing in. Speech is transcribed in real time by Soniox, then lightly edited by Claude Haiku 5.5
 (filler words, self-corrections, punctuation, lists, numbers) while keeping your own words, tone and mix of languages.
-It runs quietly in the background: a small indicator at the bottom of the screen (the Drop; drag it to the top or to
-either side if you prefer) shows what CUE is doing, and a tray icon next to the clock holds a short menu. This first
-version is built for personal use with your own Soniox and Anthropic API keys.
+Add `Shift` (`Ctrl + Win + Shift`) and the text is pasted translated: into English, and English into your home
+language (Russian, say); any pair of the languages Soniox recognizes can be set. It runs quietly in the background:
+a small indicator at the bottom of the screen (the Drop; drag it to the top or to either side if you prefer) shows
+what CUE is doing, and a tray icon next to the clock holds a short menu. This first version is built for personal use
+with your own Soniox and Anthropic API keys.
 
 ## Features
 
-- **One hotkey.** `Ctrl + Win` (left or right keys, any order) starts dictation. Tap and release: CUE records until
-  you press the chord again. Hold for 0.6 s or longer: recording ends when you let go.
+- **Two chords.** `Ctrl + Win` (left or right keys, any order) starts dictation; `Ctrl + Win + Shift` (any order too)
+  starts a translated one. Tap and release: CUE records until you press the chord again (with or without `Shift`; the
+  mode no longer changes then). Hold for 0.6 s or longer: recording ends when you let go. While the starting chord is
+  still held, adding `Shift` turns the dictation into a translation and the Drop changes its icon at once; once you
+  let go, the mode stays until the recording ends.
+  `Ctrl + Win` with `Shift` and `Alt` together is the Office key, and `Ctrl + Win + Alt` is kept for the "Ask" mode
+  of a later version: CUE leaves both to Windows.
+- **Translation** (`Ctrl + Win + Shift`). Speech that is not in your target language (`translate.target`, English
+  by default) is translated into it; speech in the target language goes to your home language (`translate.home`, by
+  default the Windows display language). The speech language is the one most of your words were in, so
+  "Открой Telegram" counts as Russian. The cleanup rules stay as in dictation (self-corrections, lists, numbers, one
+  line in terminals), and names from `dictionary.terms`, product names and code are kept as written. If the
+  translation fails (no network, a timeout, or an answer that does not look like a translation), nothing is pasted:
+  the Drop shows "Couldn't translate", and **Retry** translates the saved text again.
 - **Text at the caret in any app**, pasted through the clipboard. Your previous clipboard content comes back about
   half a second later, and dictated text is kept out of Windows clipboard history and the cloud clipboard.
 - **Russian, English, and both mixed** in one sentence.
@@ -21,7 +35,7 @@ version is built for personal use with your own Soniox and Anthropic API keys.
   Soniox stream drops, the saved recording is transcribed as a whole. If there is no network, the recording is kept
   and **Retry** sends it again.
 - **`Esc`** cancels; **Restore** (for 3.6 s) brings the dictation back. **`Ctrl + Win + V`** pastes the last result
-  again.
+  again, a translation included.
 - **Nowhere to paste?** When the focus is clearly not a text field (desktop, File Explorer's file list), the text
   stays in the clipboard and a card offers to copy it.
 - **Recording limit:** at 8:00 a card says one minute is left, at 9:00 recording ends on its own and the text is pasted
@@ -34,11 +48,13 @@ version is built for personal use with your own Soniox and Anthropic API keys.
 - **Tray icon menu:** Pause for an hour, Start at sign-in, Open log, Quit.
 - **Interface language:** English, or Russian when the Windows display language is Russian; `ui.language` in
   `settings.json` can fix it to either.
-- **Usage accounting:** every dictation's cost is recorded locally; `cue-cli usage` shows a monthly summary.
+- **Usage accounting:** every dictation's cost is recorded locally, with its mode; `cue-cli usage` shows a monthly
+  summary.
 - **Comparison bench** (a developer tool): runs your saved recordings through Soniox stream and batch and through
   several Claude models, and builds a blind A/B report.
 
-Not in this version: a settings window, history, a custom vocabulary, an installer, macOS.
+Not in this version: the "Ask" mode (`Ctrl + Win + Alt`), a settings window, history, a custom vocabulary, an
+installer, macOS.
 
 ## Requirements
 
@@ -143,10 +159,25 @@ session and does not overwrite it. The defaults:
   which would roughly double the cost of recognition. Entries are trimmed; empty ones, ones with a line break, ones
   longer than 60 characters and exact repeats (case-sensitive) are skipped, and only the first 200 are used. A value
   that is not a list reads as an empty list. The block is kept in the file only when the list is not empty.
+- `translate`: the language pair of `Ctrl + Win + Shift`, as the ISO 639-1 codes of the 60 languages Soniox
+  recognizes (`en`, `ru`, `de`, `zh`, …). Case and surrounding spaces do not matter, and a locale name reads as its
+  language (`"ru-RU"` is `ru`).
+  - `target` (default `en`): speech in any other language is translated into it.
+  - `home`: speech in the target language is translated into it. By default the Windows display language, else the
+    first `stt.language_hints` entry; one equal to the target is skipped. With no home language, speech in the target
+    language is only cleaned up.
+  - `speech`: `"auto"` (the default) lets Soniox name the language of every word, and the language of most words
+    decides the direction. A code fixes the speech language and goes to Soniox as the only language hint of a
+    translation (dictation keeps `stt.language_hints`).
+
+  An unknown code reads as the default, and defaults are not written to the file. Example for a Russian speaker who
+  writes to German colleagues: `"translate": { "target": "de", "home": "ru" }`. Russian (or English) speech is pasted
+  in German, German speech in Russian.
 - `pricing` (not written unless you change it): `soniox_rt_per_hour`, `soniox_async_per_hour`, and a `claude` list
   of `{model, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok}` in USD. Defaults:
   Soniox $0.12 / hour (stream) and $0.10 / hour (batch); Haiku 5.5 $0.10 / $0.50, Sonnet 5.5 $2 / $10,
-  Opus 5.5 $4 / $20 per million input / output tokens.
+  Opus 5.5 $4 / $20 per million input / output tokens. `web_search_usd` ($0.01) prices a web search of the "Ask"
+  mode to come.
 
 Start at sign-in is not a setting: it is the Windows `Run` registry entry, toggled from the tray menu.
 
@@ -159,7 +190,7 @@ Everything else lives in `%LOCALAPPDATA%\CUE`:
 | `last\audio.wav`, `last\result.txt` | The last successful dictation (16 kHz mono WAV and the final text), for `Ctrl + Win + V` and Copy. Replaced by the next one. |
 | `last\current.wav` | Audio of the dictation in progress; after a failure it waits there for Retry. Deleted when a dictation is cancelled or comes out empty. |
 | `logs\cue.log.YYYY-MM-DD` | Daily log: events, per-stage timings, error kinds. No dictation text, no audio, no keys. Kept 7 days and 10 MB at most. **Open log** in the tray menu opens this folder. |
-| `usage.csv` | One row per attempt: time (UTC), audio length, transcription path, cost, refine model, tokens, latency, outcome. No text. |
+| `usage.csv` | One row per attempt: time (UTC), audio length, transcription path, cost, refine model, tokens, latency, outcome, mode. A refine cache warm-up gets a row of its own. No text. |
 | `bench\recordings\` | Recordings for the bench, only when `bench.save_recordings` is `true`. |
 | `bench\runs\<timestamp>\` | Bench runs: `results.json` and `report.html`. |
 
@@ -174,8 +205,16 @@ cargo run -p cue-cli -- usage 2026-10
 ```
 
 The summary shows the number of dictations, minutes of audio, transcription and refine cost, the cost per dictation
-and per hour of audio, and the average latency from the second key press to the paste (overall and for recordings of
-20 s or less). Prices come from `settings.json`. A Retry is a second paid attempt and gets its own row.
+and per hour of audio, the average latency from the second key press to the paste (overall and for recordings of
+20 s or less), and the rows and dollars of each mode. Prices come from `settings.json`. A Retry is a second paid
+attempt and gets its own row; the Retry of a failed translation translates the saved text again, so its row has no
+audio.
+
+The last three columns of `usage.csv` are `mode`, `web_searches` and `search_usd`. `mode` is `dictate`, `translate`
+or `warmup`. A `warmup` row is a refine cache warm-up (see Privacy): paid tokens, no audio, outcome `discarded`; it
+counts in the cost, not as a dictation. `web_searches` and `search_usd` belong to the "Ask" mode to come and stay 0.
+Rows written before these columns existed read as dictation, and the header of an existing file is not rewritten:
+it keeps the 13 old names while new rows have 16 fields.
 
 `usage.csv` is comma-separated. In Excel with a locale whose list separator is not a comma (Russian, for example), do not
 open the file directly; use **Data → From Text/CSV** and choose the comma delimiter.
@@ -209,8 +248,11 @@ it. It does not tune the thresholds.
   transcription right after use and retries the deletion in the background for about 15 minutes if it fails.
 - **Anthropic** receives the transcript, the app name, up to `refine.context_chars` (500) characters of text
   before the caret, and your `dictionary.terms`. Nothing is read from password fields, and the window title is never
-  sent. While you record, CUE also sends an empty `HEAD` request without a key to open the connection early, so
-  cleanup starts faster.
+  sent. A translation goes in the same cleanup request, with the target language added. While you record, CUE also
+  sends an empty `HEAD` request without a key to open the connection early, so cleanup starts faster. When a
+  dictation starts four minutes or more after the last cleanup, CUE sends a cache warm-up: the cleanup request with
+  your `dictionary.terms` and a one-character placeholder instead of a transcript, without the app name or any text
+  before the caret, so the first cleanup after a pause reads the prompt from Anthropic's cache.
 - The microphone is open only while CUE is recording.
 - **Stays on this computer:** the last dictation's audio and text, recordings saved for the bench, settings, logs and
   usage rows. Logs and `usage.csv` never contain dictation text; a crash records only the thread and code location,
@@ -224,6 +266,9 @@ it. It does not tune the thresholds.
 - Clipboard restore covers text, HTML, RTF, images (PNG and DIB) and file lists; rarer formats are not restored.
 - The terminal one-line rule recognizes Windows Terminal, PowerShell, Command Prompt, conhost, mintty and WSL by
   name; the VS Code integrated terminal looks like the editor.
+- A translation is checked by length and by script, not by meaning. Between two languages written in the same script
+  (English and German) only the length is checked, so untranslated text can pass there; other limits are in
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Repository layout
 
@@ -231,8 +276,9 @@ it. It does not tune the thresholds.
 Cargo.toml                Cargo workspace
 app/
   package.json            front-end tooling: Vite, TypeScript, Vitest, Tauri CLI
-  crates/core/            cue-core: dictation state machine, settings, refine rules, audio helpers, usage
-  crates/engines/         cue-engines: Soniox stream and batch, Claude refine, API keys and checks
+  crates/core/            cue-core: dictation state machine, settings, refine and translation rules, audio helpers,
+                          usage
+  crates/engines/         cue-engines: Soniox stream and batch, Claude refine and translation, API keys and checks
   crates/platform-win/    cue-platform-win: keyboard hook, clipboard paste, focus via UI Automation,
                           microphone, Drop window styles and placement, sleep and lock events
   crates/cli/             cue-cli: API keys and monthly usage
@@ -245,7 +291,9 @@ docs/ARCHITECTURE.md      how CUE works inside
 `app/crates/platform-win/examples` and `app/crates/engines/examples` hold small probes for checking the keyboard
 hook, microphone, focus, paste, sleep events, the Drop's z-order (`zorder_probe`, run while CUE is running), Soniox
 and refine on a real machine
-(`cargo run -p <crate> --example <name>`).
+(`cargo run -p <crate> --example <name>`). `refine_compare` (in `cue-engines`) runs a phrase file of your own through
+cleanup models with the app's prompt and checks; a phrase with `"to": "en"` is translated on the app's own path
+instead (see the example's header).
 
 ## License
 

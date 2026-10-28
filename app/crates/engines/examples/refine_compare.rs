@@ -1,12 +1,19 @@
-//! Comparing refine models through OpenRouter: speed, price and outcome on a set of synthetic dictations.
+//! Comparing refine models through OpenRouter: speed, price and outcome on a set of synthetic dictations; and the
+//! app's translation on the direct path.
 //!
 //! Run:
 //! cargo run -p cue-engines --example refine_compare -- phrases.json out.json [--models a,b,…] [--runs 3] [--max-usd 1.00]
 //!   [--terms a,b,…] [--dry-run]
 //!
-//! - `phrases.json` is an array of `{id, app, raw, before_cursor?}`; `out.json` gets all calls and the summary.
+//! - `phrases.json` is an array of `{id, app, raw, before_cursor?, to?}`; `out.json` gets all calls and the summary.
 //! - Models are OpenRouter ids (`openai/gpt-6-luna`) and `claude-haiku-5-5` — the app's current path (Anthropic direct,
 //!   `claude::refine`, total time only). By default, the built-in candidate set (`DEFAULT_MODELS`).
+//! - `to` translates the phrase into that language, as `Ctrl + Win + Shift` does in the app: a Soniox code
+//!   (`translate::known`; `"EN"` reads as `en`, an unknown code stops the run before any request). It runs only on the
+//!   direct path (`claude::translate`, the translation check, the 4 s timeout); the OpenRouter models skip such a phrase,
+//!   and `out.json` lists it under `skipped` ("translation is direct-only"). Each call in `out.json` carries `to`
+//!   (`null` for a cleanup). A translation that fails its check is `raw_fallback`, where the app says "Couldn't
+//!   translate".
 //! - Each phrase → run 1..runs → each model in turn; everything is sequential. A model's first call is the warm-up
 //!   (cold), reported separately in the summary; medians and p90 are over warm calls.
 //! - The prompt, the context and the response check are the same as in the app: `cue_core::refine`, then `strip_markup`,
@@ -26,6 +33,7 @@ use anyhow::{anyhow, bail, Context};
 use cue_core::flow::RefineOutcome;
 use cue_core::refine::{timeout_ms, RefineContext};
 use cue_core::settings::{Pricing, RefineSettings};
+use cue_core::translate;
 use cue_engines::claude::{self, Parsed};
 use cue_engines::keys::{self, KeyName};
 use cue_engines::openrouter::{self, Failure, ModelInfo, Profile, Routing};
@@ -113,23 +121,41 @@ struct Phrase {
     raw: String,
     #[serde(default)]
     before_cursor: Option<String>,
+    /// `to` as written in the file; [`read_phrases`] checks it and fills [`Phrase::to`].
+    #[serde(default, rename = "to")]
+    to_code: Option<String>,
+    /// Translate into this language instead of cleaning up: the Soniox code (`translate::known`), the form the app
+    /// sends.
+    #[serde(skip)]
+    to: Option<&'static str>,
 }
 
 fn read_phrases(path: &Path) -> anyhow::Result<Vec<Phrase>> {
     let bytes = std::fs::read(path).with_context(|| format!("could not read {}", path.display()))?;
     // A parse error gives only the position: serde quotes values.
-    let phrases: Vec<Phrase> = serde_json::from_slice(&bytes)
+    let mut phrases: Vec<Phrase> = serde_json::from_slice(&bytes)
         .map_err(|e| anyhow!("{}: cannot parse (line {}, column {})", path.display(), e.line(), e.column()))?;
     if phrases.is_empty() {
         bail!("{}: no phrases", path.display());
     }
-    for (i, p) in phrases.iter().enumerate() {
+    for i in 0..phrases.len() {
+        let p = &phrases[i];
         if p.id.trim().is_empty() || p.raw.trim().is_empty() {
             bail!("{}: phrase #{} has an empty id or raw", path.display(), i + 1);
         }
         if phrases[..i].iter().any(|q| q.id == p.id) {
             bail!("{}: id {} is repeated", path.display(), p.id);
         }
+        // In settings.json an unknown code reads as the default; in a phrase file it is a typo, and the run would
+        // measure another pair than the one meant.
+        let to = match p.to_code.as_deref() {
+            None => None,
+            Some(code) => Some(
+                translate::known(code)
+                    .with_context(|| format!("{}: phrase {} has `to` that is not a Soniox language code", path.display(), p.id))?,
+            ),
+        };
+        phrases[i].to = to;
     }
     Ok(phrases)
 }
@@ -138,6 +164,20 @@ fn read_phrases(path: &Path) -> anyhow::Result<Vec<Phrase>> {
 enum Engine {
     Direct,
     Router { info: Box<ModelInfo>, profile: Profile },
+}
+
+/// Why a model does not run a phrase, if it does not: a translation runs only on the direct path, the app's own
+/// (comparing models for translation is not this bench's job). `direct` — the model is [`DIRECT`].
+fn skip_reason(direct: bool, p: &Phrase) -> Option<&'static str> {
+    (p.to.is_some() && !direct).then_some("translation is direct-only")
+}
+
+/// A phrase a model does not run, once per phrase and model — for `out.json`.
+#[derive(Debug, Serialize)]
+struct Skipped {
+    model: String,
+    phrase: String,
+    reason: &'static str,
 }
 
 struct Lane {
@@ -149,12 +189,21 @@ struct Lane {
     calls: usize,
 }
 
+impl Lane {
+    /// [`skip_reason`] for this model.
+    fn skips(&self, p: &Phrase) -> Option<&'static str> {
+        skip_reason(matches!(self.engine, Engine::Direct), p)
+    }
+}
+
 /// One call — one entry in `out.json`.
 #[derive(Clone, Debug, Default, Serialize)]
 struct Call {
     seq: usize,
     model: String,
     phrase: String,
+    /// The phrase's `to`: a translation into this language; `None` for a cleanup.
+    to: Option<&'static str>,
     run: usize,
     /// A model's first call is the warm-up.
     cold: bool,
@@ -172,9 +221,10 @@ struct Call {
     finish_reason: Option<String>,
     /// `text`, `truncated`, `refusal`, `malformed`, `error`; for the direct path, `n/a`.
     parsed: &'static str,
-    /// As in the app: `refined`, `raw_fallback`, `raw_key_problem`.
+    /// As in the app: `refined`, `raw_fallback`, `raw_key_problem`. A translation that fails its check is
+    /// `raw_fallback`: the app shows "Couldn't translate" there.
     outcome: &'static str,
-    /// Longer than the app's timeout (`timeout_ms`: 3 s for phrases under 100 words).
+    /// Longer than the app's timeout (`timeout_ms`: 3 s for phrases under 100 words; a translation gets a second more).
     over_timeout: bool,
     /// What would be pasted at the caret.
     output: String,
@@ -237,10 +287,14 @@ fn ms(d: Duration) -> u64 {
     d.as_millis() as u64
 }
 
-/// The app's direct path — `claude::refine` as is (its timeout is `timeout_ms`, 3 s); total time only.
+/// The app's direct path — `claude::refine` as is (its timeout is `timeout_ms`, 3 s), or `claude::translate` for a
+/// phrase with `to` (`translate::timeout_ms`, a second more); total time only.
 async fn direct_call(http: &reqwest::Client, key: &str, p: &Phrase, ctx: &RefineContext, terms: &[String], s: &RefineSettings) -> Call {
     let t0 = Instant::now();
-    let r = claude::refine(http, Some(key), DIRECT, &p.raw, ctx, terms, s).await;
+    let (r, timeout) = match p.to {
+        None => (claude::refine(http, Some(key), DIRECT, &p.raw, ctx, terms, s).await, timeout_ms(&p.raw)),
+        Some(to) => (claude::translate(http, Some(key), DIRECT, &p.raw, ctx, terms, s, to).await, translate::timeout_ms(&p.raw)),
+    };
     let total_ms = ms(t0.elapsed());
     let u = r.usage;
     let cost = cue_core::usage::refine_cost(
@@ -260,7 +314,7 @@ async fn direct_call(http: &reqwest::Client, key: &str, p: &Phrase, ctx: &Refine
         cost_source: "pricing",
         parsed: "n/a",
         outcome: outcome_name(r.outcome),
-        over_timeout: total_ms > timeout_ms(&p.raw),
+        over_timeout: total_ms > timeout,
         output: r.text,
         provider: Some("anthropic-direct".into()),
         served_model: Some(DIRECT.into()),
@@ -456,6 +510,7 @@ struct Report<'a> {
     args: &'a Args,
     lanes: &'a [Lane],
     calls: &'a [Call],
+    skipped: &'a [Skipped],
     planned: usize,
     spent: f64,
     stopped_by_budget: bool,
@@ -481,6 +536,7 @@ impl Report<'_> {
             "stopped_by_budget": self.stopped_by_budget,
             "models": lanes_meta(self.lanes),
             "summary": self.summaries(),
+            "skipped": self.skipped,
             "calls": self.calls,
         });
         let path = &self.args.out;
@@ -509,6 +565,9 @@ fn call_line(c: &Call, planned: usize) -> String {
         c.outcome,
         c.cost_usd
     );
+    if let Some(to) = c.to {
+        line.push_str(&format!(" to {to}"));
+    }
     if c.cold {
         line.push_str(" cold");
     }
@@ -586,9 +645,10 @@ async fn main() -> anyhow::Result<()> {
         lanes.push(Lane { id: id.clone(), engine, routing: Routing::STRICT, calls: 0 });
     }
 
-    let planned = phrases.len() * args.runs * lanes.len();
+    let planned = args.runs * phrases.iter().map(|p| lanes.iter().filter(|l| l.skips(p).is_none()).count()).sum::<usize>();
+    let translations = phrases.iter().filter(|p| p.to.is_some()).count();
     println!(
-        "phrases {}, models {}, runs {} — up to {planned} calls; budget ${:.2}",
+        "phrases {} ({translations} to translate), models {}, runs {} — up to {planned} calls; budget ${:.2}",
         phrases.len(),
         lanes.len(),
         args.runs,
@@ -599,7 +659,7 @@ async fn main() -> anyhow::Result<()> {
     }
     for l in &lanes {
         match &l.engine {
-            Engine::Direct => println!("  {:<30} Anthropic direct (claude::refine)", l.id),
+            Engine::Direct => println!("  {:<30} Anthropic direct (claude::refine, claude::translate)", l.id),
             Engine::Router { profile, .. } => println!(
                 "  {:<30} schema {}, reasoning {}, cache mark {}",
                 l.id,
@@ -616,12 +676,22 @@ async fn main() -> anyhow::Result<()> {
 
     let s = RefineSettings::default();
     let (mut calls, mut spent, mut stopped_by_budget) = (Vec::new(), 0.0, false);
+    let mut skipped = Vec::new();
     // An empty report right away: the output path is checked before the first paid request.
-    Report { args: &args, lanes: &lanes, calls: &calls, planned, spent, stopped_by_budget }.write()?;
+    Report { args: &args, lanes: &lanes, calls: &calls, skipped: &skipped, planned, spent, stopped_by_budget }.write()?;
     'phrases: for p in &phrases {
         let ctx = RefineContext::new(p.app.as_str(), p.before_cursor.as_deref(), s.context_chars);
+        for lane in &lanes {
+            if let Some(reason) = lane.skips(p) {
+                println!("          {} {:<30} skipped: {reason}", p.id, lane.id);
+                skipped.push(Skipped { model: lane.id.clone(), phrase: p.id.clone(), reason });
+            }
+        }
         for run in 1..=args.runs {
             for lane in lanes.iter_mut() {
+                if lane.skips(p).is_some() {
+                    continue;
+                }
                 let cold = lane.calls == 0;
                 lane.calls += 1;
                 let mut call = match &lane.engine {
@@ -634,6 +704,7 @@ async fn main() -> anyhow::Result<()> {
                 call.seq = calls.len() + 1;
                 call.model = lane.id.clone();
                 call.phrase = p.id.clone();
+                call.to = p.to;
                 call.run = run;
                 call.cold = cold;
                 spent += call.cost_usd;
@@ -646,9 +717,9 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Report { args: &args, lanes: &lanes, calls: &calls, planned, spent, stopped_by_budget }.write()?;
+        Report { args: &args, lanes: &lanes, calls: &calls, skipped: &skipped, planned, spent, stopped_by_budget }.write()?;
     }
-    let report = Report { args: &args, lanes: &lanes, calls: &calls, planned, spent, stopped_by_budget };
+    let report = Report { args: &args, lanes: &lanes, calls: &calls, skipped: &skipped, planned, spent, stopped_by_budget };
     report.write()?;
     print_summary(&report.summaries());
     println!("\n{} of {planned} calls, spent ${spent:.4}; report: {}", calls.len(), args.out.display());
@@ -769,6 +840,7 @@ mod tests {
             seq: 7,
             model: "openai/gpt-6-luna".into(),
             phrase: "chat-time-fix".into(),
+            to: Some("en"),
             run: 2,
             ttft_ms: Some(312),
             total_ms: 640,
@@ -785,7 +857,7 @@ mod tests {
         };
         let line = call_line(&c, 600);
         assert!(line.contains("7/600") && line.contains("chat-time-fix") && line.contains("312") && line.contains("http_503"), "{line}");
-        assert!(line.contains("retries 1, routing allow+require"), "{line}");
+        assert!(line.contains("retries 1, routing allow+require") && line.contains(" to en"), "{line}");
         assert!(!line.contains("SECRET"), "neither text nor the error message: {line}");
     }
 
@@ -811,5 +883,28 @@ mod tests {
         let broken = read_phrases(&write("broken.json", r#"[{"id":"a","app":"X","raw":SECRET}]"#)).unwrap_err().to_string();
         assert!(broken.contains("line 1") && !broken.contains("SECRET"), "{broken}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn phrase_target_language_is_normalized_or_refused() {
+        let dir = std::env::temp_dir().join(format!("cue-refine-compare-to-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = dir.join("ok.json");
+        std::fs::write(&ok, r#"[{"id":"a","app":"X","raw":"привет","to":"EN"},{"id":"b","app":"X","raw":"hello"}]"#).unwrap();
+        let got = read_phrases(&ok).unwrap();
+        assert_eq!((got[0].to, got[1].to), (Some("en"), None), "the code is normalized; no `to` means a cleanup");
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, r#"[{"id":"a","app":"X","raw":"x"},{"id":"q7","app":"X","raw":"y","to":"xx"}]"#).unwrap();
+        let e = read_phrases(&bad).unwrap_err().to_string();
+        assert!(e.contains("q7"), "the error names the phrase: {e}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn translations_run_only_on_the_direct_path() {
+        let phrase = |to| Phrase { id: "a".into(), app: "X".into(), raw: "x".into(), before_cursor: None, to_code: None, to };
+        assert_eq!(skip_reason(true, &phrase(Some("en"))), None);
+        assert_eq!(skip_reason(false, &phrase(Some("en"))), Some("translation is direct-only"));
+        assert_eq!((skip_reason(true, &phrase(None)), skip_reason(false, &phrase(None))), (None, None), "a cleanup runs everywhere");
     }
 }
