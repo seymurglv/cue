@@ -5,6 +5,8 @@ pub type Ms = u64;
 
 pub const STARTING_MS: Ms = 380;
 pub const HOLD_MS: Ms = 600;
+/// A third key while the starting chord is still held, sooner than this after the press: a system shortcut.
+pub const SYSTEM_CHORD_MS: Ms = 1_500;
 pub const DEBOUNCE_MS: Ms = 300;
 pub const DONE_MS: Ms = 1_500;
 pub const EMPTY_MS: Ms = 1_000;
@@ -197,7 +199,11 @@ impl Flow {
                 }
             }
             Input::ChordAborted => {
-                if self.phase == Phase::Starting {
+                // Ctrl+Win+D or Ctrl+Win+arrows: the third key often comes after the start-up is over.
+                // Later than SYSTEM_CHORD_MS it is taken as a slip during a held dictation, and the recording goes on.
+                let fresh = self.chord_held
+                    && self.last_chord_down.is_some_and(|t| now.saturating_sub(t) < SYSTEM_CHORD_MS);
+                if self.phase == Phase::Starting || (self.phase == Phase::Recording && fresh) {
                     self.discard(&mut fx);
                 }
             }
@@ -339,7 +345,7 @@ impl Flow {
         self.hold_mode = false;
     }
 
-    /// Quietly, with no error and no "restore": a system chord or Ctrl+Win+V in the first 380 ms,
+    /// Quietly, with no error and no "restore": a system chord (see `SYSTEM_CHORD_MS`), Ctrl+Win+V in the first 380 ms,
     /// a pause or a session lock during recording.
     fn discard(&mut self, fx: &mut Vec<Effect>) {
         self.drop_recording(fx);
@@ -699,6 +705,50 @@ mod tests {
         let mut f = Flow::new(2, false);
         recording(&mut f, 0);
         assert!(f.handle(I::ChordAborted, 2_000).is_empty());
+    }
+
+    /// Ctrl+Win held a moment before the arrow: the start-up is over, the chord is still held.
+    #[test]
+    fn system_shortcut_while_chord_held_discards_after_start() {
+        let mut f = Flow::new(2, false);
+        f.handle(I::ChordDown, 0);
+        let id = f.current_id();
+        f.handle(I::Timer(TimerKind::StartingDone), STARTING_MS);
+        f.handle(I::Timer(TimerKind::HoldCheck), HOLD_MS);
+        let fx = f.handle(I::ChordAborted, SYSTEM_CHORD_MS - 1);
+        assert!(has(&fx, &E::StopMic { id, keep: false }));
+        assert!(has(&fx, &E::AbortStt { id }));
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::Discarded }));
+        assert_eq!(phase(&fx), Some(UiPhase::Idle));
+        assert!(f.handle(I::ChordUp, SYSTEM_CHORD_MS + 100).is_empty(), "the release does not finish anything");
+        assert_eq!(f.ui_state().phase, UiPhase::Idle);
+    }
+
+    /// The arrow after the start-up and a short release: no tap-mode recording is left running.
+    #[test]
+    fn system_shortcut_before_hold_check_leaves_nothing_running() {
+        let mut f = Flow::new(2, false);
+        f.handle(I::ChordDown, 0);
+        let id = f.current_id();
+        f.handle(I::Timer(TimerKind::StartingDone), STARTING_MS);
+        let fx = f.handle(I::ChordAborted, 450);
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::Discarded }));
+        assert!(f.handle(I::ChordUp, 550).is_empty());
+        assert!(f.handle(I::Timer(TimerKind::HoldCheck), HOLD_MS).is_empty());
+        assert_eq!(f.ui_state().phase, UiPhase::Idle);
+    }
+
+    /// A third key late in a held dictation is a slip: the recording goes on and the release finishes it.
+    #[test]
+    fn late_third_key_in_held_dictation_keeps_recording() {
+        let mut f = Flow::new(2, false);
+        f.handle(I::ChordDown, 0);
+        let id = f.current_id();
+        f.handle(I::Timer(TimerKind::StartingDone), STARTING_MS);
+        f.handle(I::Timer(TimerKind::HoldCheck), HOLD_MS);
+        assert!(f.handle(I::ChordAborted, SYSTEM_CHORD_MS).is_empty());
+        assert_eq!(f.ui_state().phase, UiPhase::Listen);
+        assert!(has(&f.handle(I::ChordUp, 4_000), &E::FinishStt { id }));
     }
 
     #[test]
@@ -1074,6 +1124,7 @@ mod tests {
     #[test]
     fn flow_timings_are_armed() {
         assert_eq!((STARTING_MS, HOLD_MS, DEBOUNCE_MS, DONE_MS, UNDO_MS), (380, 600, 300, 1_500, 3_600));
+        assert_eq!(SYSTEM_CHORD_MS, 1_500);
         assert_eq!((WARN_MS, AUTO_FINISH_MS, PAUSE_MS), (480_000, 540_000, 3_600_000));
         let mut f = Flow::new(2, false);
         let fx = f.handle(I::ChordDown, 0);

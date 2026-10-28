@@ -71,8 +71,9 @@ transcription as a network error (so Retry is offered), refine as the raw text, 
   Windows `Ctrl + Win + V` panel does not open) and `Esc` while CUE is starting, recording, thinking, pasting or
   showing an error. A swallowed key's auto-repeat and release are swallowed too.
 - Before the Win key-up passes after a chord, CUE sends an unused key (VK `0xE8`), so Windows does not open Start.
-- A third key during the first 380 ms (`Ctrl + Win + D`, arrows) means a system shortcut: the start is dropped
-  silently and the key reaches Windows.
+- A third key while the starting chord is still held, within 1.5 s of the press (`Ctrl + Win + D`, arrows), means
+  a system shortcut: the recording is dropped silently and the key reaches Windows. A later key is taken as a slip
+  during a held dictation, and the recording goes on.
 - Tap and release starts tap mode: the next chord press finishes. A chord held for 0.6 s starts hold mode: releasing
   finishes, and the first two times a "Press and release" card follows. Presses within 0.3 s of the last are ignored.
   A chord while thinking only makes the Drop shake.

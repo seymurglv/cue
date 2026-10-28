@@ -170,8 +170,8 @@ pub fn log_finished(outcome: Outcome, a: &Attempt) {
 }
 
 /// Whether the attempt needs a usage.csv row. A discard (`Discarded`) gets one only if the audio ran longer than the
-/// start-up: a discard mid-recording (lock, pause) has already been paid for by the stream, a system chord in the first
-/// 380 ms has not.
+/// start-up: a discard mid-recording (lock, pause, a system chord after the start-up) has already been paid for by
+/// the stream, a system chord during the start-up has not.
 pub fn needs_row(outcome: Outcome, audio_ms: u64) -> bool {
     outcome != Outcome::Discarded || audio_ms >= STARTING_MS
 }
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn discarded_rows_only_after_starting() {
         assert!(!needs_row(Outcome::Discarded, 0));
-        assert!(!needs_row(Outcome::Discarded, STARTING_MS - 1), "a system chord in the first 380 ms");
+        assert!(!needs_row(Outcome::Discarded, STARTING_MS - 1), "a system chord during the start-up");
         assert!(needs_row(Outcome::Discarded, STARTING_MS), "lock or pause mid-recording: the stream is paid for");
         for o in [Outcome::Inserted, Outcome::NoField, Outcome::Cancelled, Outcome::Empty, Outcome::Failed] {
             assert!(needs_row(o, 0), "{o:?}");
