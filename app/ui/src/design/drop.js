@@ -4,7 +4,7 @@
    (the language is chosen outside this file). Parts only the design's own demo pages used are removed.
    No recording timer: while recording the Drop shows only the mark and stays a circle of the same size.
    Sizes come from drop.css (--h, the Drop's height in every state); nothing here assumes a size.
-   Also: the mark, buttons and icons open to their own size, not to the 16 px icon width (this.nat);
+   Also: the mark, buttons and icons open to their own size measured once (this.nat), not to their scrollWidth;
    with prefers-reduced-motion the mark's spring has almost no inertia (k=20, d=.05) and the tray card folds at once.
    The idle key hint is two thin keys, "Ctrl" and the Windows logo ("fn" on mac), with the screen-reader name in aria-label. */
 (function(){
@@ -52,8 +52,9 @@ class Drop{
   P('retry',`<button class="ib solid" title="${T.retry}" aria-label="${T.retry}">${IC.retry}</button>`);
   P('kc','<span class="kc"></span>');P('ok',`<button class="ib solid" title="${T.done}" aria-label="${T.done}">${IC.ok}</button>`);
   /* Natural width of fixed-size parts (the mark, buttons, icons: fractions of --h in drop.css), once, while nothing
-     is visible: a folded part's scrollWidth sees only the icon inside, and the button would open as an oval.
-     The mark has one size in every state, so it is measured here like the rest. */
+     is visible. These parts open to it, never to their scrollWidth: a folded button's sees only the icon inside (the
+     button would open as an oval), and the mark's sees its svg, which is as large as the circle and overflows the
+     part (the part would open too far, and fold and unfold at another pace). */
   this.nat={};
   for(const [k,e] of Object.entries(this.parts)){if(TXT.has(k)){this.nat[k]=0;continue}e.style.maxWidth='none';this.nat[k]=e.getBoundingClientRect().width;e.style.maxWidth=''}
   const spring=()=>{const r=reduced();this.morph.k=r?20:.17;this.morph.d=r?.05:.7};
@@ -89,7 +90,7 @@ class Drop{
   const V=ic?{idle:{mk:h,kc:h},start:{mk:1},listen:{bx:h,mk:1,mi:md,ok:h},think:{mk:1},done:{mk:1},empty:{mk:1},cancel:{mk:1,lab:h,undo:1},error:{bx:h,mk:1,why,lab:h,retry:rt}}
            :{idle:{mk:h,kc:h},start:{mk:1},listen:{bx:h,mk:1,chip:md,ok:h},think:{mk:1},done:{mk:1},empty:{mk:1},cancel:{mk:1,lab:1,act:1},error:{bx:h,mk:1,lab:1,act:rt}};
   const vis=V[s]||{};
-  const open=(k,e)=>Math.max(e.scrollWidth+padEnd(k,e),this.nat[k]||0);
+  const open=(k,e)=>TXT.has(k)?Math.max(e.scrollWidth+padEnd(k,e),this.nat[k]||0):this.nat[k]||0;
   for(const [k,e] of Object.entries(p)){const on=!!vis[k];e.classList.toggle('on',on);e.style.maxWidth=on?(open(k,e)+2)+'px':'0px'}
  }
  away(b){this.p.classList.toggle('away',b)}

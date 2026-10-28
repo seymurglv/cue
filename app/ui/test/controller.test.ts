@@ -484,6 +484,14 @@ describe('The mark opens to its own size, the same in every state', () => {
       const w = this.classList.contains('mkw') ? 21.6 : 0;
       return { x: 0, y: 0, width: w, height: w, left: 0, top: 0, right: w, bottom: w, toJSON() {} };
     };
+    // The mark's svg is as large as the circle and overflows its part: scrollWidth sees more than the part's width.
+    const sw = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollWidth');
+    Object.defineProperty(HTMLElement.prototype, 'scrollWidth', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains('mkw') ? 29 : 0;
+      },
+    });
     try {
       document.body.innerHTML = '<div id="stage"></div>';
       const c = new DropController(document.getElementById('stage')!, { send() {}, rects() {} });
@@ -494,6 +502,8 @@ describe('The mark opens to its own size, the same in every state', () => {
       }
     } finally {
       proto.getBoundingClientRect = bcr;
+      delete (HTMLElement.prototype as any).scrollWidth;
+      if (sw) Object.defineProperty(Element.prototype, 'scrollWidth', sw);
     }
   });
 });

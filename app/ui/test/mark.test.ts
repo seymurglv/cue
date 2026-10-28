@@ -102,29 +102,75 @@ describe('The mark in the circle', () => {
     // At the loudest level, drawn straight: r 2.5 at x 21, so 0.5 from the grid's right edge, 2 from its top.
     const d = dotBox(still('listen', 1))!;
     expect([d.right, d.top]).toEqual([23.5, 2]);
-    // Live, driven the way the Drop drives it: the voice level starts at 0 when recording starts (the controller resets
-    // it) and is smoothed by Voice, here jumping between silence and the loudest level again and again, with the bars'
-    // jitter at its highest. The spring never takes anything out of the grid.
+  });
+
+  /** Drives the live mark the way the Drop does: `from` until it has settled, then (after `startMs` in start, when
+   *  given) listen, the voice level starting at 0 (the controller resets it) and smoothed by Voice, here jumping between
+   *  silence and the loudest level again and again, with the bars' jitter at its highest. The farthest the mark's
+   *  paint reaches. */
+  function intoListen(from: string, startMs: number | null) {
     const g = group();
-    const m = new (CUE().Morph)(g, { state: 'start' });
+    const m = new (CUE().Morph)(g, { state: from });
     const voice = new (CUE().Voice)();
     let worst = { left: 24, top: 24, right: 0, bottom: 0 };
+    const track = () => {
+      const b = paintedBox(g);
+      worst = { left: Math.min(worst.left, b.left), top: Math.min(worst.top, b.top), right: Math.max(worst.right, b.right), bottom: Math.max(worst.bottom, b.bottom) };
+    };
     let t = 0;
     for (; t < 1000; t += 16) m.tick(t, 0, voice.jit);
+    if (startMs != null) {
+      m.set('start', t);
+      for (const end = t + startMs; t < end; t += 16) {
+        m.tick(t, 0, voice.jit);
+        track();
+      }
+    }
     m.set('listen', t);
     for (let i = 0; i < 20; i++) {
       voice.ext = i % 2 ? 0 : 1;
       for (const end = t + 300; t <= end; t += 16) {
         voice.step(t, true);
         m.tick(t, voice.lvl, [1, 1, 1, 1]);
-        const b = paintedBox(g);
-        worst = { left: Math.min(worst.left, b.left), top: Math.min(worst.top, b.top), right: Math.max(worst.right, b.right), bottom: Math.max(worst.bottom, b.bottom) };
+        track();
       }
     }
-    expect(worst.left).toBeGreaterThanOrEqual(0.5);
-    expect(worst.top).toBeGreaterThanOrEqual(0.5);
-    expect(worst.right).toBeLessThanOrEqual(23.5);
-    expect(worst.bottom).toBeLessThanOrEqual(23.5);
+    return worst;
+  }
+
+  // Into listen: from start (a dictation), from ask and translate (their start poses), and from every other pose
+  // through a start of any length, short ones included (a new dictation right after the last one ended). Everything
+  // stays 0.5 inside the grid: the shapes by their own geometry, the lamp also by being drawn no closer to the edge.
+  const ways: [string, number | null][] = [
+    ['start', null], ['ask', null], ['translate', null],
+    ...['idle', 'think', 'done', 'cancel', 'error', 'ask', 'translate'].flatMap((s) => [0, 50, 150, 400].map((ms): [string, number] => [s, ms])),
+  ];
+  it.each(ways)('from %s (through start for %s ms) the spring keeps everything inside the grid', (from, startMs) => {
+    const worst = intoListen(from, startMs);
+    // The attributes are written to 3 decimals.
+    const eps = 1e-3;
+    expect(worst.left).toBeGreaterThanOrEqual(0.5 - eps);
+    expect(worst.top).toBeGreaterThanOrEqual(0.5 - eps);
+    expect(worst.right).toBeLessThanOrEqual(23.5 + eps);
+    expect(worst.bottom).toBeLessThanOrEqual(23.5 + eps);
+  });
+
+  it('ask and translate park their hidden lamp at the start lamp\'s spot, so no clamp is needed on their way in', () => {
+    for (const state of ['ask', 'translate']) {
+      const dot = still(state).querySelector('circle')!;
+      expect([num(dot, 'cx'), num(dot, 'cy'), num(dot, 'opacity')], state).toEqual([18.4, 6.2, 0]);
+    }
+  });
+
+  it('the lamp is drawn where its pose puts it in every still pose: the edge line is for overshoots only', () => {
+    for (const state of ['idle', 'start', 'listen', 'think', 'done', 'cancel', 'error', 'ask', 'translate']) {
+      for (const lvl of [0, 1]) {
+        const g = group();
+        const m = new (CUE().Morph)(g, { state, static: true, lvl });
+        const dot = g.querySelector('circle')!;
+        expect([num(dot, 'cx'), num(dot, 'cy')], state).toEqual([+m.x.dx.toFixed(3), +m.x.dy.toFixed(3)]);
+      }
+    }
   });
 
   it.each(['think', 'done', 'cancel', 'error', 'ask', 'translate'])('%s is centered on x = 12 within 0.3', (state) => {

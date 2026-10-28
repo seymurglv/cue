@@ -5,7 +5,11 @@
    In start and listen the bars are centered in the circle: the start bar on x = 12, the three voice bars on 7.5 / 12 /
    16.5 growing from y = 12, so they stay centered at every level. The lamp is an accent at their side, not part of the
    centering, at its original offset from the bars: start (+6.4, 6.2), listen (+9 from the middle bar, 7.5 above the
-   bars' center line). Even at its largest (r 2.5 in listen) it stays inside the 24 grid, which the Drop clips to.
+   bars' center line). The Drop clips the mark to the 24 grid. Every still pose lies 0.5 or more inside it (the listen
+   lamp at its largest, r 2.5, reaches 23.5). Between poses the spring overshoots: the hidden lamp of ask and translate
+   is parked at the start lamp's spot, so their way into listen stays inside, and wherever the lamp flies from (the
+   error lamp, or the hidden one of think and cancel, both near the middle, into listen through a short start) it is
+   drawn no closer than 0.5 to the grid's edge, a line no still pose crosses. A test runs every way into listen.
    idle is not centered: the hover capsule's margins in drop.css are measured from where its bar and lamp are painted. */
 (function(){
 const TAU=Math.PI*2;
@@ -29,8 +33,8 @@ function pose(s,c){
   case 'done':return pack([L(6,12.5,10,16.5),L(10,16.5,18,8.5),PT(10,16.5),PT(12,12)],{dx:18,dy:8.5,dr:0,do:0});
   case 'error':{const sh=shake(t),l=L(12+sh,5,12+sh,14);return pack([l,{...l},{...l},PT(12,12)],{dx:12+sh,dy:19.2,dr:1.6,do:1})}
   case 'cancel':return pack([L(7,7,17,17),L(17,7,7,17),PT(12,12),PT(12,12)],{dx:12,dy:12,dr:0,do:0});
-  case 'ask':{const a=c.static?0:now/1600;return pack([ROT(12,12,14,a),ROT(12,12,14,a+Math.PI/3),ROT(12,12,14,a+2*Math.PI/3),PT(12,12)],{dx:12,dy:12,dr:0,do:0})}
-  case 'translate':return pack([L(5,9,19,9),L(19,9,15.5,5.5),L(19,15,5,15),L(5,15,8.5,18.5)],{dx:12,dy:12,dr:0,do:0});
+  case 'ask':{const a=c.static?0:now/1600;return pack([ROT(12,12,14,a),ROT(12,12,14,a+Math.PI/3),ROT(12,12,14,a+2*Math.PI/3),PT(12,12)],{dx:18.4,dy:6.2,dr:0,do:0})}
+  case 'translate':return pack([L(5,9,19,9),L(19,9,15.5,5.5),L(19,15,5,15),L(5,15,8.5,18.5)],{dx:18.4,dy:6.2,dr:0,do:0});
  }
 }
 const toneOf=s=>s==='error'?'warn':s==='ask'?'ask':'';
@@ -57,7 +61,8 @@ class Morph{
  render(){
   const x=this.x;
   this.lines.forEach((l,i)=>{l.setAttribute('x1',x['a'+i].toFixed(3));l.setAttribute('y1',x['b'+i].toFixed(3));l.setAttribute('x2',x['c'+i].toFixed(3));l.setAttribute('y2',x['d'+i].toFixed(3));l.setAttribute('opacity',Math.min(1,Math.max(0,x['o'+i])).toFixed(3))});
-  this.dot.setAttribute('cx',x.dx.toFixed(3));this.dot.setAttribute('cy',x.dy.toFixed(3));this.dot.setAttribute('r',Math.max(0,x.dr).toFixed(3));this.dot.setAttribute('opacity',Math.min(1,Math.max(0,x.do)).toFixed(3));
+  const r=Math.max(0,x.dr),inside=v=>Math.min(Math.max(v,r+.5),24-r-.5);
+  this.dot.setAttribute('cx',inside(x.dx).toFixed(3));this.dot.setAttribute('cy',inside(x.dy).toFixed(3));this.dot.setAttribute('r',Math.max(0,x.dr).toFixed(3));this.dot.setAttribute('opacity',Math.min(1,Math.max(0,x.do)).toFixed(3));
  }
 }
 
