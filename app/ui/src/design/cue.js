@@ -1,7 +1,12 @@
 /* CUE — the live "Cursor" mark and shared helpers, ported from the original CUE design.
    The mark is built from 4 lines and a lamp dot. Each state is a position of these primitives;
    unused lines shrink into an invisible point. Every frame the values are pulled toward the target by a spring.
-   The "thinking" dots sit 1 to the right (center 12, like the circle); their jump is unchanged. */
+   The "thinking" dots sit 1 to the right (center 12, like the circle); their jump is unchanged.
+   In start and listen the joint box of the bars (with half the stroke) and the lamp is centered on x = 12, so the mark
+   sits in the middle of the circle: start for the lamp's full size while live (r 2.3; the static 1.9 sits 0.2 left),
+   listen at the middle level (the lamp grows with the level, so the box moves by 0.25 at levels 0 and 1). In listen the
+   bars grow from y = 12 and the lamp keeps its place at their top right. idle is not centered: the hover capsule's
+   margins in drop.css are measured from where its bar and lamp are painted. */
 (function(){
 const TAU=Math.PI*2;
 const L=(x1,y1,x2,y2,o=1)=>({x1,y1,x2,y2,o});
@@ -18,8 +23,8 @@ function pose(s,c){
  const {t,lvl,jit,now}=c;
  switch(s){
   case 'idle':{const b=c.static?1:(Math.floor(t/560)%2?.12:1),l=L(11,5,11,19,b);return pack([l,{...l},{...l},PT(11,12)],{dx:17.4,dy:6.2,dr:1.9,do:1})}
-  case 'start':{const b=c.static?1:(Math.floor(t/140)%2?.4:1),l=L(11,5,11,19,b);return pack([l,{...l},{...l},PT(11,12)],{dx:17.4,dy:6.2,dr:c.static?1.9:Math.min(2.3,.4+t/180),do:1})}
-  case 'listen':{const h=i=>3+11.5*lvl*[.72,1,.8][i]*(.5+.5*jit[i]);return pack([BAR(6.5,12.5,h(0)),BAR(11,12.5,h(1)),BAR(15.5,12.5,h(2)),PT(11,12)],{dx:20,dy:5,dr:1.5+lvl,do:1})}
+  case 'start':{const b=c.static?1:(Math.floor(t/140)%2?.4:1),l=L(8.2,5,8.2,19,b);return pack([l,{...l},{...l},PT(8.2,12)],{dx:14.6,dy:6.2,dr:c.static?1.9:Math.min(2.3,.4+t/180),do:1})}
+  case 'listen':{const h=i=>3+11.5*lvl*[.72,1,.8][i]*(.5+.5*jit[i]);return pack([BAR(4.8,12,h(0)),BAR(9.3,12,h(1)),BAR(13.8,12,h(2)),PT(9.3,12)],{dx:18.3,dy:4.5,dr:1.5+lvl,do:1})}
   case 'think':{const y=i=>12.5-2.4*Math.max(0,Math.sin(now/150-i*.9));return pack([DOT(7.5,y(0)),DOT(12,y(1)),DOT(16.5,y(2)),PT(12,12)],{dx:12,dy:12.5,dr:0,do:0})}
   case 'done':return pack([L(6,12.5,10,16.5),L(10,16.5,18,8.5),PT(10,16.5),PT(12,12)],{dx:18,dy:8.5,dr:0,do:0});
   case 'error':{const sh=shake(t),l=L(12+sh,5,12+sh,14);return pack([l,{...l},{...l},PT(12,12)],{dx:12+sh,dy:19.2,dr:1.6,do:1})}

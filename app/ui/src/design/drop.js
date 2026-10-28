@@ -45,7 +45,7 @@ class Drop{
   const P=(k,h)=>{const e=el(h);e.classList.add('pt');this.parts[k]=e;this.p.append(e);return e};
   const T=api.text;
   P('bx',`<button class="ib soft" title="${T.cancel}" aria-label="${T.cancelName}">${IC.x}</button>`);
-  const mk=P('mk','<span class="mkw"><svg viewBox="0 0 24 24" width="24" height="24"><g></g></svg></span>');this.morph=new CUE.Morph(mk.querySelector('g'));
+  const mk=P('mk','<span class="mkw"><svg viewBox="-8 -8 40 40" width="40" height="40"><g></g></svg></span>');this.morph=new CUE.Morph(mk.querySelector('g'));
   P('mi','<span class="mi"></span>');P('chip','<span class="chip"></span>');P('why','<span class="why"></span>');
   P('lab','<span class="lab"></span>');P('act','<button class="act"></button>');
   P('undo',`<button class="ib solid" title="${T.restore}" aria-label="${T.restore}">${RING}${IC.undo}</button>`);

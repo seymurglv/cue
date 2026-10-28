@@ -305,11 +305,17 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
   const drop = () => document.querySelector('.drop') as HTMLElement;
   const part = (sel: string) => document.querySelector(`.drop ${sel}`) as HTMLElement;
   const H = 36;
+  /** The mark part's box (what the layout sees): its svg, as large as the circle, with its negative margins. */
+  const markBox = (axis: 'x' | 'y' = 'x') => {
+    const svg = part('.mkw svg');
+    return axis === 'x'
+      ? size(svg, 'width') + size(svg, 'margin-left') + size(svg, 'margin-right')
+      : size(svg, 'height') + size(svg, 'margin-top') + size(svg, 'margin-bottom');
+  };
   /** The width of a Drop that shows only the mark: the mark, its margins and the Drop's padding. */
   const circleWidth = () => {
     const mark = part('.mkw');
-    return size(mark.querySelector('svg')!, 'width') + size(mark, 'margin-left') + size(mark, 'margin-right')
-      + size(drop(), 'padding-left') + size(drop(), 'padding-right');
+    return markBox() + size(mark, 'margin-left') + size(mark, 'margin-right') + size(drop(), 'padding-left') + size(drop(), 'padding-right');
   };
 
   it('--h is 36 px', () => {
@@ -330,10 +336,26 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
 
   it.each(['start', 'listen', 'think', 'done', 'empty'] as const)('%s is a circle of --h with the 0.6 h mark', (phase) => {
     ctl.apply({ ...base, phase });
-    expect(size(part('.mkw svg'), 'width')).toBeCloseTo(0.6 * H, 6);
-    expect(size(part('.mkw svg'), 'height')).toBeCloseTo(0.6 * H, 6);
+    expect(markBox('x')).toBeCloseTo(0.6 * H, 6);
+    expect(markBox('y')).toBeCloseTo(0.6 * H, 6);
     expect(circleWidth()).toBeCloseTo(H, 6);
     expect(size(drop(), 'min-width')).toBe(H);
+  });
+
+  it("the mark's svg is the circle's own box, and its viewBox keeps the 24 grid on the 0.6 h part", () => {
+    ctl.apply({ ...base, phase: 'listen' });
+    const svg = part('.mkw svg');
+    // As large as the circle, starting at the Drop's own edge: padding, the part's margin and the svg's margin add to 0.
+    expect([size(svg, 'width'), size(svg, 'height')]).toEqual([H, H]);
+    expect(size(drop(), 'padding-left') + size(part('.mkw'), 'margin-left') + size(svg, 'margin-left')).toBeCloseTo(0, 6);
+    // Grid x = 0 and x = 24 land on the part's two edges.
+    const [vx, vy, vw, vh] = svg.getAttribute('viewBox')!.split(' ').map(Number);
+    expect(vw).toBe(vh);
+    expect(vx).toBe(vy);
+    const unit = size(svg, 'width') / vw;
+    const at = (x: number) => size(svg, 'margin-left') + (x - vx) * unit;
+    expect(at(0)).toBeCloseTo(0, 6);
+    expect(at(24)).toBeCloseTo(markBox(), 6);
   });
 
   it('derived sizes: buttons 0.7 h, small icons 0.5 h, keys and label text 0.9 of the 40 px drawing', () => {
@@ -352,8 +374,65 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
     const key = part('.kc .key');
     expect(size(key, 'height')).toBeCloseTo(18 * 0.9, 6);
     expect(size(key, 'font-size')).toBeCloseTo(13 * 0.9, 6);
-    expect(size(drop(), 'padding-left')).toBeCloseTo(3 * 0.9, 6);
-    expect(size(drop(), 'padding-right')).toBeCloseTo(9 * 0.9, 6);
+  });
+
+  /** The four visible gaps of the idle capsule on hover, CSS px: capsule edge to the bar's left stroke edge, the lamp
+   *  dot to the first key, between the keys, the last key to the capsule edge. Where the bar and the dot are painted is
+   *  read from the idle mark itself (cue.js), not from drop.css. */
+  const idleGaps = () => {
+    const mark = part('.mkw svg');
+    const line = mark.querySelector('line')!;
+    const dot = mark.querySelector('circle')!;
+    const n = (el: Element, a: string) => parseFloat(el.getAttribute(a)!);
+    const box = markBox();
+    const barL = ((n(line, 'x1') - n(line, 'stroke-width') / 2) / 24) * box;
+    const dotR = ((n(dot, 'cx') + n(dot, 'r')) / 24) * box;
+    const mk = part('.mkw');
+    const kc = part('.kc');
+    return {
+      left: size(drop(), 'padding-left') + size(mk, 'margin-left') + barL,
+      dotToKey: box - dotR + size(mk, 'margin-right') + size(kc, 'margin-left'),
+      keys: size(part('.kc > span'), 'gap'),
+      right: size(kc, 'margin-right') + size(drop(), 'padding-right'),
+    };
+  };
+
+  it('idle on hover: 0.3 h at both ends to what is painted, 0.2 h from the lamp to the keys, at every place and size', () => {
+    ctl.apply(base);
+    hover(true);
+    // The idle mark the margins are measured from: the bar at x 11 with a 2.2 stroke, the lamp at 17.4 with r 1.9.
+    const line = part('.mkw svg line');
+    expect([line.getAttribute('x1'), line.getAttribute('stroke-width')]).toEqual(['11.000', '2.2']);
+    const dot = part('.mkw svg circle');
+    expect([dot.getAttribute('cx'), dot.getAttribute('r')]).toEqual(['17.400', '1.900']);
+    const check = (h: number, at: string) => {
+      const g = idleGaps();
+      expect(g.left, `${at} left`).toBeCloseTo(0.3 * h, 6);
+      expect(g.right, `${at} right`).toBeCloseTo(0.3 * h, 6);
+      expect(g.dotToKey, `${at} lamp to key`).toBeCloseTo(0.2 * h, 6);
+      expect(g.keys, `${at} keys`).toBeCloseTo(0.1 * h, 6);
+    };
+    for (const place of ['bottom', 'top', 'left', 'right'] as const) {
+      ctl.place(place);
+      check(H, place);
+    }
+    // 36 px: no padding on the left, 7.2 on the right; the mark's margins 1.89 and 0, the keys' 2.97 and 3.6.
+    ctl.place('bottom');
+    expect(size(drop(), 'padding-left')).toBe(0);
+    expect(size(drop(), 'padding-right')).toBeCloseTo(7.2, 6);
+    expect([size(part('.mkw'), 'margin-left'), size(part('.mkw'), 'margin-right')].map((v) => +v.toFixed(4))).toEqual([1.89, 0]);
+    expect([size(part('.kc'), 'margin-left'), size(part('.kc'), 'margin-right')].map((v) => +v.toFixed(4))).toEqual([2.97, 3.6]);
+    const big = document.createElement('style');
+    big.textContent = ':root{--h:48px}';
+    document.head.append(big);
+    try {
+      check(48, '48 px');
+    } finally {
+      big.remove();
+    }
+    // Not on hover, and in other states, the parts keep the usual 4u margins.
+    ctl.apply({ ...base, phase: 'listen' });
+    expect(size(part('.mkw'), 'margin-left')).toBeCloseTo(3.6, 6);
   });
 
   it('idle strip: as long as the Drop is high, a fifth of it thick; upright at the side places', () => {
@@ -380,7 +459,7 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
     try {
       ctl.apply({ ...base, phase: 'listen' });
       expect(size(drop(), 'height')).toBe(48);
-      expect(size(part('.mkw svg'), 'width')).toBeCloseTo(28.8, 6);
+      expect(markBox()).toBeCloseTo(28.8, 6);
       expect(circleWidth()).toBeCloseTo(48, 6);
     } finally {
       big.remove();
