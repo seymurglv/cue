@@ -33,30 +33,48 @@ pub fn name(code: &str) -> &'static str {
     LANGUAGES.iter().find(|(c, _)| *c == code).map_or("the target language", |(_, n)| n)
 }
 
-/// Letters of the final tokens per language: the speech language is the one with the most letters (spec 2 §5 — "by the
-/// language of most words"; tokens are pieces of words, letters weigh them fairly). Tokens without a known language are
-/// skipped.
+/// Words of the final tokens per language: the speech language is the one with the most words (spec 2 §5 — "by the
+/// language of most words"). Tokens come in order and are pieces of words: a word starts at the first letter after
+/// whitespace (or the first letter of all) and belongs to the language of the token it starts in, so a word split over
+/// several tokens counts once, and a short phrase is not outweighed by one long foreign name. Punctuation starts no
+/// word. In scripts written without spaces (Chinese, Japanese, Thai…) every character counts as a word. Tokens without
+/// a known language are skipped.
 #[derive(Debug, Default, Clone)]
 pub struct LanguageTally {
-    letters: Vec<(&'static str, usize)>,
+    words: Vec<(&'static str, usize)>,
+    /// The last letter had no whitespace after it yet: the next letter continues its word.
+    in_word: bool,
 }
 
 impl LanguageTally {
     pub fn add(&mut self, language: &str, text: &str) {
         let Some(code) = known(language) else { return };
-        let n = text.chars().filter(|c| c.is_alphabetic()).count();
+        let mut n = 0;
+        for c in text.chars() {
+            if c.is_whitespace() {
+                self.in_word = false;
+            } else if c.is_alphabetic() {
+                if unspaced(c) {
+                    n += 1;
+                    self.in_word = false;
+                } else if !self.in_word {
+                    n += 1;
+                    self.in_word = true;
+                }
+            }
+        }
         if n == 0 {
             return;
         }
-        match self.letters.iter_mut().find(|(c, _)| *c == code) {
+        match self.words.iter_mut().find(|(c, _)| *c == code) {
             Some((_, count)) => *count += n,
-            None => self.letters.push((code, n)),
+            None => self.words.push((code, n)),
         }
     }
 
-    /// The language with the most letters; on a tie, the one heard first.
+    /// The language with the most words; on a tie, the one heard first.
     pub fn dominant(&self) -> Option<&'static str> {
-        self.letters
+        self.words
             .iter()
             .fold(None, |best: Option<(&'static str, usize)>, &(c, n)| match best {
                 Some((_, m)) if m >= n => best,
@@ -64,6 +82,24 @@ impl LanguageTally {
             })
             .map(|(c, _)| c)
     }
+}
+
+/// Scripts written without spaces between words, where a word boundary cannot be seen: Han, Hiragana, Katakana, Thai,
+/// Lao, Myanmar, Khmer.
+fn unspaced(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x0E00..=0x0EFF // Thai, Lao
+            | 0x1000..=0x109F // Myanmar
+            | 0x1780..=0x17FF // Khmer
+            | 0x3040..=0x30FF // Hiragana, Katakana
+            | 0x31F0..=0x31FF // Katakana phonetic extensions
+            | 0x3400..=0x4DBF // CJK extension A
+            | 0x4E00..=0x9FFF // CJK unified ideographs
+            | 0xF900..=0xFAFF // CJK compatibility ideographs
+            | 0xFF66..=0xFF9F // halfwidth Katakana
+            | 0x20000..=0x323AF // CJK extensions B–H
+    )
 }
 
 /// The language to write the result in (spec 2 §5): speech not in the target language goes to the target; speech in the
@@ -114,20 +150,54 @@ mod tests {
         assert_eq!(name("xx"), "the target language");
     }
 
+    /// Tokens as Soniox gives them: one per word or piece of a word, a word's first token with its leading space.
+    fn tally(tokens: &[(&str, &str)]) -> Option<&'static str> {
+        let mut t = LanguageTally::default();
+        for (language, text) in tokens {
+            t.add(language, text);
+        }
+        t.dominant()
+    }
+
     #[test]
-    fn tally_picks_the_language_with_most_letters() {
-        let mut t = LanguageTally::default();
-        t.add("ru", "Скажи");
-        t.add("en", " Soniox");
-        t.add("ru", " что всё готово");
-        assert_eq!(t.dominant(), Some("ru"));
-        let mut t = LanguageTally::default();
-        t.add("en", "ok");
-        t.add("ru", "ок");
-        assert_eq!(t.dominant(), Some("en"), "a tie goes to the language heard first");
-        t.add("xx", "aaaaaaaaaa");
-        assert_eq!(t.dominant(), Some("en"), "unknown codes are skipped");
+    fn tally_picks_the_language_with_most_words() {
+        assert_eq!(tally(&[("ru", "Скажи"), ("en", " Soniox"), ("ru", " что всё готово")]), Some("ru"));
+        assert_eq!(tally(&[("en", "ok"), ("ru", " ок")]), Some("en"), "a tie goes to the language heard first");
+        assert_eq!(tally(&[("en", "ok"), ("ru", " ок"), ("xx", " a b c d")]), Some("en"), "unknown codes are skipped");
         assert_eq!(LanguageTally::default().dominant(), None);
+    }
+
+    /// A short phrase with a long foreign name: by letters it would be English and go untranslated.
+    #[test]
+    fn a_foreign_name_does_not_outweigh_a_word() {
+        assert_eq!(tally(&[("ru", "Открой"), ("en", " Telegram")]), Some("ru"));
+        assert_eq!(tally(&[("ru", "Напиши"), ("en", " Alexander")]), Some("ru"));
+    }
+
+    #[test]
+    fn a_word_split_across_tokens_counts_once() {
+        let tokens = [
+            ("ru", "Да"), ("ru", " нет"), ("ru", " да"),
+            ("en", " Tele"), ("en", "gram"), ("en", " web"), ("en", "site"),
+        ];
+        assert_eq!(tally(&tokens), Some("ru"), "ru 3 words, en 2");
+        // The word belongs to the language of the token it starts in.
+        assert_eq!(tally(&[("en", "Tele"), ("ru", "грам"), ("ru", " да")]), Some("en"), "en 1, ru 1: a tie");
+    }
+
+    #[test]
+    fn scripts_without_spaces_count_every_character() {
+        assert_eq!(tally(&[("ru", "Привет"), ("zh", "你好")]), Some("zh"), "ru 1 word, zh 2 characters");
+        assert_eq!(tally(&[("en", "Tokyo"), ("en", " station"), ("ja", " 東京に")]), Some("ja"));
+        assert_eq!(tally(&[("en", "in"), ("en", " English"), ("th", " ไทย")]), Some("th"));
+    }
+
+    #[test]
+    fn punctuation_counts_nothing() {
+        assert_eq!(tally(&[("en", "?"), ("en", " —"), ("en", " ...")]), None);
+        assert_eq!(tally(&[("ru", "Да"), ("en", ","), ("en", " !"), ("en", " ?")]), Some("ru"));
+        // Punctuation between two pieces does not split a word; whitespace after it does start one.
+        assert_eq!(tally(&[("en", "Wi"), ("en", "-"), ("en", "Fi"), ("ru", " да"), ("ru", ", "), ("ru", "нет")]), Some("ru"));
     }
 
     #[test]

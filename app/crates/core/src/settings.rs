@@ -160,7 +160,7 @@ fn strings_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<
 #[serde(default)]
 pub struct TranslateSettings {
     /// The language of the pair the speech goes to; default `en`.
-    #[serde(deserialize_with = "language_or_nothing", skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "target_or_nothing", skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
     /// The other language of the pair.
     #[serde(deserialize_with = "language_or_nothing", skip_serializing_if = "Option::is_none")]
@@ -172,7 +172,7 @@ pub struct TranslateSettings {
 
 impl TranslateSettings {
     pub fn target(&self) -> &'static str {
-        self.target.as_deref().and_then(translate::known).unwrap_or("en")
+        self.target.as_deref().and_then(translate::known).unwrap_or(DEFAULT_TARGET)
     }
 
     pub fn speech(&self) -> Option<&'static str> {
@@ -189,6 +189,15 @@ impl TranslateSettings {
 fn language_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(value.as_str().and_then(translate::known).map(str::to_owned))
+}
+
+/// The translation target when the settings name none.
+const DEFAULT_TARGET: &str = "en";
+
+/// Like [`language_or_nothing`], and the default target also reads as nothing: like an explicit `ui.language` `"auto"`,
+/// it is not written back.
+fn target_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    Ok(language_or_nothing(deserializer)?.filter(|code| code != DEFAULT_TARGET))
 }
 
 /// A section that is not an object (`"translate": "en"`, a number) reads as the default section instead of making the
@@ -818,6 +827,28 @@ mod tests {
     fn default_translate_is_not_written() {
         let text = serde_json::to_string(&Settings::default()).unwrap();
         assert!(!text.contains("translate"), "{text}");
+    }
+
+    /// Like an explicit `ui.language` `"auto"`: an explicit default target (`en`, in any spelling) reads as the default
+    /// and is not written back; the other fields are kept.
+    #[test]
+    fn explicit_default_target_is_not_written_back() {
+        let dir = tmp("default-target");
+        let p = dir.join("settings.json");
+        let written = |p: &Path| serde_json::from_slice::<serde_json::Value>(&std::fs::read(p).unwrap()).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        for target in ["en", " EN ", "en-US"] {
+            let text = serde_json::json!({ "translate": { "target": target }, "hold_hints_left": 2 }).to_string();
+            std::fs::write(&p, text).unwrap();
+            let s = load(&p).unwrap();
+            assert_eq!(s.translate, TranslateSettings::default(), "{target:?}");
+            save(&s, &p).unwrap();
+            assert!(written(&p).get("translate").is_none(), "an explicit {target:?} was written back");
+        }
+        std::fs::write(&p, r#"{"translate":{"target":"en","home":"ru"}}"#).unwrap();
+        save(&load(&p).unwrap(), &p).unwrap();
+        assert_eq!(written(&p)["translate"], serde_json::json!({ "home": "ru" }));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Only the fields that were set are written, and they read back the same.

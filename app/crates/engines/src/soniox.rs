@@ -463,17 +463,27 @@ mod tests {
     }
 
     #[test]
-    fn transcript_reports_the_language_of_most_letters() {
+    fn transcript_reports_the_language_of_most_words() {
         let mut tr = Transcript::default();
         let r: RtResponse = serde_json::from_str(
             r#"{"tokens":[{"text":"Скажи","is_final":true,"language":"ru"},{"text":" Soniox","is_final":true,"language":"en"},
-                {"text":" что","is_final":true,"language":"ru"},{"text":" everything","is_final":false,"language":"en"},
-                {"text":"<fin>","is_final":true}]}"#,
+                {"text":" всё","is_final":false,"language":"ru"},{"text":"<fin>","is_final":true}]}"#,
         ).unwrap();
         tr.apply(&r).unwrap();
-        // Final letters: ru 8, en 6. Counting the non-final token would make it en.
+        // One final word each: a tie goes to the language heard first.
         assert_eq!(tr.language().as_deref(), Some("ru"));
         assert!(Transcript::default().language().is_none());
+    }
+
+    #[test]
+    fn transcript_language_skips_non_final_tokens() {
+        let mut tr = Transcript::default();
+        let r: RtResponse = serde_json::from_str(
+            r#"{"tokens":[{"text":"Да","is_final":true,"language":"ru"},{"text":" Soniox","is_final":false,"language":"en"},
+                {"text":" rocks","is_final":false,"language":"en"}]}"#,
+        ).unwrap();
+        tr.apply(&r).unwrap();
+        assert_eq!(tr.language().as_deref(), Some("ru"), "counting the non-final tokens would make it en");
     }
 
     #[test]
