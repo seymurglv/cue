@@ -31,7 +31,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use cue_core::audio::{Silence, SilenceDetector};
 use cue_core::flow::{DictationId, Effect, Flow, InsertOutcome, Input, Outcome, SttError, TimerKind};
 use cue_core::refine::{RefineContext, join_for_insert};
-use cue_core::settings::{self, Settings};
+use cue_core::settings::{self, DropPosition, Settings};
 use cue_core::ui::{TrayKind, UiAction, UiPhase, UiState};
 use cue_core::usage::{self, SttPath};
 use cue_engines::EngineError;
@@ -86,6 +86,8 @@ pub enum CoreEvent {
     TimerFired { kind: TimerKind, generation: u64 },
     /// Wake from sleep or unlock: the pooled connections are most likely dead.
     Wake,
+    /// The Drop was dragged to a new place: saved in settings.json.
+    DropMoved(DropPosition),
 }
 
 pub fn input_of(ev: HotkeyEvent) -> Input {
@@ -265,6 +267,7 @@ impl Runtime {
                 self.emit_state(&s);
                 self.ui.tray(self.tray);
                 self.ui.resend_idle_hidden();
+                self.ui.resend_place();
             }
             CoreEvent::Mic { id, ev } => self.on_mic(id, ev),
             CoreEvent::SttDone { id, task, result, path } => self.on_stt_done(id, task, result, path),
@@ -294,6 +297,10 @@ impl Runtime {
                 }
             }
             CoreEvent::Wake => self.warm.reset(),
+            CoreEvent::DropMoved(place) => {
+                self.settings.drop.position = place;
+                self.save_settings();
+            }
         }
     }
 
@@ -709,6 +716,12 @@ impl Runtime {
 
     fn hold_hint_shown(&mut self) {
         self.settings.hold_hints_left = self.settings.hold_hints_left.saturating_sub(1);
+        self.save_settings();
+    }
+
+    /// The whole settings file at once, so the hint counter and the Drop's place never overwrite each other. Not when
+    /// the file could not be read at startup: the user's file stays as it is.
+    fn save_settings(&self) {
         if !self.can_save_settings {
             return;
         }

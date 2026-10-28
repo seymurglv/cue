@@ -1,7 +1,25 @@
 <!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><link rel="icon" href="data:,"><title>CUE — Drop preview</title>
-<style>body{margin:0;background:#c6d9f7;font-family:system-ui}.cell{position:relative;height:120px;border-bottom:1px solid #0001}.cell>span{position:absolute;left:12px;top:8px;font-size:12px;color:#333}.cell.tcell{height:210px}.tcell .tray .xb .ring circle{animation:none}</style>
+<style>
+body{margin:0;background:#c6d9f7;font-family:system-ui}
+h2{font:600 13px system-ui;color:#223;margin:18px 16px 8px}
+.row{display:flex;flex-wrap:wrap;gap:10px;padding:0 16px}
+.cell{position:relative;width:300px;height:110px;background:#ffffff38;box-shadow:inset 0 0 0 1px #0002}
+.cell.left,.cell.right{width:340px;height:120px}
+.cell.tcell{width:420px;height:230px}
+.cell>span,.win>span{position:absolute;left:8px;top:6px;font-size:11px;color:#333}
+.cell.bottom>span{top:6px}.cell.top>span{top:auto;bottom:6px}.cell.left>span{left:auto;right:8px}
+.tcell .tray .xb .ring circle{animation:none}
+/* The real window: centered on the Drop's center (--ax, --ay default to 50 %). */
+.win{position:relative;outline:1px dashed #0006;background:#ffffff20}
+.win .tray .xb .ring circle{animation:none}
+.win .edge{position:absolute;background:#000a}
+.win.bottom .edge{left:0;right:0;height:1px;top:calc(50% + 12px + var(--h) / 2)}
+.win.top .edge{left:0;right:0;height:1px;top:calc(50% - 12px - var(--h) / 2)}
+.win.left .edge{top:0;bottom:0;width:1px;left:calc(50% - 12px - var(--h) / 2)}
+.win.right .edge{top:0;bottom:0;width:1px;left:calc(50% + 12px + var(--h) / 2)}
+</style>
 </head>
 <body><div id="grid"></div><script type="module" src="./src/preview.ts"></script></body>
 </html>

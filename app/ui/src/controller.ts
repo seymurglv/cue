@@ -6,12 +6,24 @@ export type Phase = 'idle' | 'start' | 'listen' | 'think' | 'done' | 'empty' | '
 export interface UiState { phase: Phase; error: ErrorCause | null; retry: boolean; paused: boolean }
 export type UiAction = 'cancel' | 'finish' | 'undo' | 'retry' | 'dismiss' | 'trayAction' | 'trayClose';
 export interface Rect { x: number; y: number; w: number; h: number }
+/** Where the Drop sits on the screen; the layout follows it (drop.css, [data-place]). */
+export type Place = 'bottom' | 'top' | 'left' | 'right';
+export const PLACES: readonly Place[] = ['bottom', 'top', 'left', 'right'];
+export type DragPhase = 'start' | 'end';
+
+/** The place the core sent; anything else (missing, unknown) is the default, bottom. */
+export function pickPlace(v: unknown): Place {
+  return PLACES.find((p) => p === v) ?? 'bottom';
+}
 
 export interface DropIo {
   send(a: UiAction): void;
   rects(r: Rect[]): void;
   /** The frame loop went to sleep (frame returned false) and something on screen changes again — restart it. */
   wake?(): void;
+  /** The Drop is dragged ('start': the core moves the window after the cursor) or let go ('end': the core snaps it to
+   *  the nearest place). The core answers every drag, ended or refused, with the place (see place()). */
+  drag?(phase: DragPhase): void;
 }
 
 /** How long "Copied" stays before the tray card folds back (as in the original design). */
@@ -20,6 +32,9 @@ const DONE_HOLD_MS = 1100;
  *  tray card (430 ms) and labels fading in (420 ms + 16 ms per letter). */
 const QUIET_AFTER_MS = 1000;
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
+/** A press on the Drop becomes a drag once the pointer has moved more than this (CSS px) with the button down;
+ *  a press that moves less is an ordinary click. */
+export const DRAG_THRESHOLD = 4;
 
 export class DropController {
   private state: UiState = { phase: 'idle', error: null, retry: false, paused: false };
@@ -41,6 +56,11 @@ export class DropController {
   /** Quiet mode: false — the frame loop is asleep. calmSince — the frame since which nothing on screen can change. */
   private awake = true;
   private calmSince: number | null = null;
+  /** The primary button went down on the open idle Drop: where, for the drag threshold. */
+  private press: { id: number; x: number; y: number } | null = null;
+  /** The Drop is being dragged: the core moves the window, the pointer is captured. */
+  private dragging = false;
+  private captured: number | null = null;
 
   constructor(private host: HTMLElement, private io: DropIo, lang: Lang = 'en') {
     this.t = DICTS[lang];
@@ -60,6 +80,7 @@ export class DropController {
       onPress: () => this.io.send('finish'),
       onAction: () => this.io.send(this.state.phase === 'cancel' ? 'undo' : 'retry'),
     };
+    this.host.dataset.place = 'bottom';
     this.drop = new (CUE().Drop)(host, api);
     this.trayBox = new (CUE().Tray)(host, this.drop, { width: 300 });
     this.dropEl = this.drop.p;
@@ -72,6 +93,15 @@ export class DropController {
     this.trayEl.addEventListener('mouseleave', () => { this.trayHovered = false; this.runTtl(); this.wake(); });
     // drop.js changes the mark's spring with this setting — frames are needed for the mark to settle the new way.
     window.matchMedia?.(REDUCED_MOTION)?.addEventListener?.('change', wake);
+    // Dragging: only the open idle Drop (under the mouse), with the primary mouse button.
+    this.dropEl.addEventListener('pointerdown', (e) => this.onPointerDown(e));
+    this.dropEl.addEventListener('pointermove', (e) => this.onPointerMove(e));
+    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture'] as const) {
+      this.dropEl.addEventListener(type, (e) => this.onPointerUp(e));
+    }
+    // While dragged the Drop keeps its open look even if the window lags a frame behind the cursor. This listener runs
+    // before the one in drop.js: capture listeners run first at the target.
+    this.dropEl.addEventListener('mouseleave', (e) => { if (this.dragging) e.stopImmediatePropagation(); }, true);
   }
 
   /** Any event: the quiet period starts over; a sleeping frame loop is started. */
@@ -85,11 +115,21 @@ export class DropController {
   apply(s: UiState) {
     const prev = this.state.phase;
     this.state = s;
+    // Dragging is for the idle Drop only: a dictation or a pause ends it, and the core snaps the Drop to a place.
+    if (s.phase !== 'idle' || s.paused) this.endDrag(true);
     // A new recording does not drift to the last level of the previous one, and the level does not linger after recording.
     if (s.phase !== prev && (s.phase === 'listen' || prev === 'listen')) this.resetVoice();
     if (s.phase !== prev || s.phase === 'error') this.drop.enter(s.phase);
     else this.drop.layout();
     this.syncIdle();
+    this.wake();
+  }
+
+  /** The core's place for the Drop; the layout follows (drop.css). It is also the core's answer to every drag, so a
+   *  drag the page still thinks is going on is over. */
+  place(p: unknown) {
+    this.host.dataset.place = pickPlace(p);
+    this.endDrag(false);
     this.wake();
   }
 
@@ -104,6 +144,66 @@ export class DropController {
     document.body.classList.toggle('idle-hidden', this.fullscreen || this.state.paused);
   }
 
+  /** The Drop can be picked up: idle, shown (not paused, not over a full-screen app), open under the mouse, no tray card. */
+  private draggable(): boolean {
+    return this.state.phase === 'idle' && !this.state.paused && !this.fullscreen && this.drop.hov
+      && this.trayEl.hidden && !this.trayBox.isOpen;
+  }
+
+  private onPointerDown(e: PointerEvent) {
+    this.press = null;
+    if (e.button !== 0 || e.pointerType !== 'mouse' || !e.isPrimary || this.dragging || !this.draggable()) return;
+    this.press = { id: e.pointerId, x: e.clientX, y: e.clientY };
+    this.wake();
+  }
+
+  private onPointerMove(e: PointerEvent) {
+    const p = this.press;
+    if (!p || e.pointerId !== p.id || this.dragging) return;
+    if (Math.hypot(e.clientX - p.x, e.clientY - p.y) <= DRAG_THRESHOLD) return;
+    if (!this.draggable()) {
+      this.press = null;
+      return;
+    }
+    // Only now, past the threshold: a press without movement stays an ordinary click, untouched.
+    this.dragging = true;
+    try {
+      this.dropEl.setPointerCapture?.(e.pointerId);
+      this.captured = e.pointerId;
+    } catch {
+      // The pointer is already up: the core sees the button up and ends the drag itself.
+    }
+    document.body.classList.add('dragging');
+    this.io.drag?.('start');
+    this.wake();
+  }
+
+  private onPointerUp(e: PointerEvent) {
+    const p = this.press;
+    if (!p || e.pointerId !== p.id) return;
+    this.press = null;
+    this.endDrag(true);
+  }
+
+  /** tellCore: the page ends the drag (button up, the Drop left idle, a tray card came); otherwise the core already has. */
+  private endDrag(tellCore: boolean) {
+    this.press = null;
+    if (!this.dragging) return;
+    this.dragging = false;
+    document.body.classList.remove('dragging');
+    const id = this.captured;
+    this.captured = null;
+    if (id != null) {
+      try {
+        if (this.dropEl.hasPointerCapture?.(id)) this.dropEl.releasePointerCapture(id);
+      } catch {
+        // Already released.
+      }
+    }
+    if (tellCore) this.io.drag?.('end');
+    this.wake();
+  }
+
   level(v: number) {
     this.voice.ext = Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0;
     this.wake();
@@ -113,6 +213,8 @@ export class DropController {
   tray(kind: TrayKind | null) {
     // Markup first, before touching the open card: if it throws, the old card keeps its timer and close button.
     const html = kind == null ? null : trayHtml(kind, this.t);
+    // No tray card while dragging: the drag ends first.
+    if (html != null) this.endDrag(true);
     this.stopTtl();
     const gen = ++this.trayGen;
     this.wake();
@@ -187,6 +289,7 @@ export class DropController {
 
   idleHidden(b: boolean) {
     this.fullscreen = b;
+    if (b) this.endDrag(true);
     this.syncIdle();
     this.wake();
   }
@@ -198,7 +301,10 @@ export class DropController {
     this.drop.frame(now);
     const rects: Rect[] = [];
     const idleHidden = this.state.phase === 'idle' && (this.fullscreen || this.state.paused);
-    if (!idleHidden && !this.dropEl.classList.contains('away')) pushRect(rects, this.dropEl);
+    // While dragged the whole window takes the mouse: the window follows the cursor a frame late and must not let a
+    // click through to the app below in that frame.
+    if (this.dragging) rects.push({ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight });
+    else if (!idleHidden && !this.dropEl.classList.contains('away')) pushRect(rects, this.dropEl);
     if (!this.trayEl.hidden) pushRect(rects, this.trayEl);
     const key = JSON.stringify(rects);
     if (key !== this.lastRects) {
@@ -207,7 +313,7 @@ export class DropController {
     }
     // The latest rectangles were sent above — click-through stays correct while asleep.
     const calm = (this.state.phase === 'idle' || this.state.phase === 'error')
-      && !this.drop.hov && !this.trayBox.isOpen && this.trayEl.hidden;
+      && !this.drop.hov && !this.trayBox.isOpen && this.trayEl.hidden && !this.dragging && this.press == null;
     if (!calm) {
       this.calmSince = null;
       return true;

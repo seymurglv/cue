@@ -44,7 +44,12 @@ fn main() {
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .manage(drop_window::HitState::default())
         .manage(ipc::CoreTx(core_tx))
-        .invoke_handler(tauri::generate_handler![drop_window::drop_hit_rects, ipc::drop_action, ipc::drop_ready])
+        .invoke_handler(tauri::generate_handler![
+            drop_window::drop_hit_rects,
+            drop_window::drop_drag,
+            ipc::drop_action,
+            ipc::drop_ready
+        ])
         .setup(move |app| {
             // We log the reason ourselves: Tauri turns a `setup` error into a panic, and the panic hook does not
             // print its message. The app then closes: without the tray icon CUE must not keep running invisibly.
@@ -88,10 +93,18 @@ fn setup(
     // Counts only: the terms themselves stay out of the log.
     let terms = cue_core::refine::usable_terms(&settings.dictionary.terms).len();
     tracing::info!(terms, skipped = settings.dictionary.terms.len() - terms, "dictionary");
-    let ui = ipc::Ui::new(app.handle().clone());
-    let win = drop_window::create(app.handle(), lang)?;
+    // Where the Drop sits: settings.json, then changed only by dragging the Drop (saved by the core).
+    let place = settings.drop.position;
+    tracing::info!(place = place.code(), "Drop place");
+    let ui = ipc::Ui::new(app.handle().clone(), place);
+    let win = drop_window::create(app.handle(), lang, place)?;
     drop_window::spawn_hit_test(win.clone(), app.state::<drop_window::HitState>().inner().clone());
-    drop_window::spawn_placement(win, ui.clone());
+    let (drag_tx, drag_rx) = std::sync::mpsc::channel();
+    app.manage(drop_window::Placer::new(drag_tx));
+    let tx = core_tx.clone();
+    drop_window::spawn_placement(win, ui.clone(), place, drag_rx, move |p| {
+        let _ = tx.send(CoreEvent::DropMoved(p));
+    });
     // Without the icon there is no way to quit or pause: if it is not created, CUE does not start (reason in the log).
     tray::create(app.handle(), core_tx.clone(), paths.logs.clone(), lang).context("tray icon not created")?;
 

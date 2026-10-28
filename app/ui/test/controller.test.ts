@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DropController, type UiState, type UiAction, type Rect } from '../src/controller';
+import { DRAG_THRESHOLD, DropController, PLACES, pickPlace, type UiState, type UiAction, type Rect } from '../src/controller';
 import { trayHtml } from '../src/trays';
 import { DICTS, KEY_NAME, TRAYS, en, pickLang, ru, type TrayKind } from '../src/strings';
 
@@ -246,8 +246,54 @@ describe('Which Drop parts are visible in each state', () => {
   });
 });
 
-describe('Recording: a 28 px mark in a round Drop (with drop.css)', () => {
-  // jsdom has no layout, but it does cascade a style sheet: enough to check the sizes the CSS gives each state.
+/** A length in px from a computed value. jsdom cascades drop.css and inherits custom properties, but leaves var() and
+ *  calc() as written: this resolves var() through the element's custom properties and does the arithmetic. */
+function resolvePx(el: Element, value: string, depth = 0): number {
+  if (depth > 8) throw new Error(`var() nested too deep in ${value}`);
+  const cs = getComputedStyle(el);
+  const flat = value.replace(/var\((--[\w-]+)\)/g, (_, name: string) => {
+    const v = cs.getPropertyValue(name).trim();
+    if (!v) throw new Error(`${name} is not set on ${el.className}`);
+    return `(${resolvePx(el, v, depth + 1)}px)`;
+  });
+  return evalCalc(flat);
+}
+
+/** + - * / and parentheses over px lengths and plain numbers (calc( counts as a parenthesis). */
+function evalCalc(src: string): number {
+  const toks = src.replace(/calc\(/g, '(').match(/\d*\.?\d+(?:px)?|[-+*/()]/g) ?? [];
+  let i = 0;
+  const atom = (): number => {
+    const t = toks[i++];
+    if (t === '(') {
+      const v = sum();
+      if (toks[i++] !== ')') throw new Error(`unbalanced: ${src}`);
+      return v;
+    }
+    if (t === '-') return -atom();
+    const n = parseFloat(t ?? '');
+    if (Number.isNaN(n)) throw new Error(`cannot read ${src}`);
+    return n;
+  };
+  const product = (): number => {
+    let v = atom();
+    while (toks[i] === '*' || toks[i] === '/') v = toks[i++] === '*' ? v * atom() : v / atom();
+    return v;
+  };
+  const sum = (): number => {
+    let v = product();
+    while (toks[i] === '+' || toks[i] === '-') v = toks[i++] === '+' ? v + product() : v - product();
+    return v;
+  };
+  const v = sum();
+  if (i !== toks.length) throw new Error(`cannot read ${src}`);
+  return v;
+}
+
+/** The resolved px value of a property, e.g. size(drop(), 'height'). */
+const size = (el: Element, prop: string) => resolvePx(el, getComputedStyle(el).getPropertyValue(prop));
+
+describe('One size: every Drop size comes from --h (with drop.css)', () => {
   const css = readFileSync(join(__dirname, '../src/design/drop.css'), 'utf8');
   let sheet: HTMLStyleElement;
   beforeEach(() => {
@@ -257,57 +303,340 @@ describe('Recording: a 28 px mark in a round Drop (with drop.css)', () => {
   });
   afterEach(() => sheet.remove());
   const drop = () => document.querySelector('.drop') as HTMLElement;
-  const mark = () => document.querySelector('.drop .mkw') as HTMLElement;
-  const px = (v: string) => parseFloat(v);
+  const part = (sel: string) => document.querySelector(`.drop ${sel}`) as HTMLElement;
+  const H = 36;
+  /** The width of a Drop that shows only the mark: the mark, its margins and the Drop's padding. */
+  const circleWidth = () => {
+    const mark = part('.mkw');
+    return size(mark.querySelector('svg')!, 'width') + size(mark, 'margin-left') + size(mark, 'margin-right')
+      + size(drop(), 'padding-left') + size(drop(), 'padding-right');
+  };
 
-  it('the mark is 24 px, 28 px while recording, and its max-width follows that size at once', () => {
-    const sizes: Record<string, [string, string]> = {};
-    for (const phase of ['start', 'listen', 'think', 'done', 'listen', 'cancel', 'listen', 'error', 'empty'] as const) {
+  it('--h is 36 px', () => {
+    expect(size(drop(), '--h')).toBe(H);
+  });
+
+  it('the same height in every state: idle on hover, start, recording, thinking, done, empty, cancelled, error', () => {
+    const heights: Record<string, number> = {};
+    for (const phase of ['start', 'listen', 'think', 'done', 'empty', 'cancel', 'error'] as const) {
       ctl.apply({ ...base, phase, error: phase === 'error' ? 'net' : null });
-      sizes[phase] = [getComputedStyle(drop()).getPropertyValue('--mk'), mark().style.maxWidth];
+      heights[phase] = size(drop(), 'height');
     }
-    expect(sizes).toEqual({
-      start: ['24px', '26px'], listen: ['28px', '30px'], think: ['24px', '26px'], done: ['24px', '26px'],
-      cancel: ['24px', '26px'], error: ['24px', '26px'], empty: ['24px', '26px'],
+    ctl.apply(base);
+    hover(true);
+    heights['idle · hover'] = size(drop(), 'height');
+    expect(Object.values(heights).every((h) => h === H), JSON.stringify(heights)).toBe(true);
+  });
+
+  it.each(['start', 'listen', 'think', 'done', 'empty'] as const)('%s is a circle of --h with the 0.6 h mark', (phase) => {
+    ctl.apply({ ...base, phase });
+    expect(size(part('.mkw svg'), 'width')).toBeCloseTo(0.6 * H, 6);
+    expect(size(part('.mkw svg'), 'height')).toBeCloseTo(0.6 * H, 6);
+    expect(circleWidth()).toBeCloseTo(H, 6);
+    expect(size(drop(), 'min-width')).toBe(H);
+  });
+
+  it('derived sizes: buttons 0.7 h, small icons 0.5 h, keys and label text 0.9 of the 40 px drawing', () => {
+    ctl.apply({ ...base, phase: 'error', error: 'net', retry: true });
+    hover(true);
+    expect(size(part('.ib'), 'width')).toBeCloseTo(0.7 * H, 6);
+    expect(size(part('.ib'), 'height')).toBeCloseTo(0.7 * H, 6);
+    expect(size(part('.why'), 'width')).toBeCloseTo(0.5 * H, 6);
+    expect(size(part('.ib > svg:not(.ring)'), 'width')).toBeCloseTo(16 * 0.9, 6);
+    expect(size(part('.lab'), 'font-size')).toBeCloseTo(13.5 * 0.9, 6);
+    expect(size(part('.lab'), 'line-height')).toBeCloseTo(24 * 0.9, 6);
+    expect(size(part('.act'), 'height')).toBeCloseTo(28 * 0.9, 6);
+    expect(size(part('.pt.on'), 'margin-left')).toBeCloseTo(4 * 0.9, 6);
+    ctl.apply(base);
+    hover(true);
+    const key = part('.kc .key');
+    expect(size(key, 'height')).toBeCloseTo(18 * 0.9, 6);
+    expect(size(key, 'font-size')).toBeCloseTo(13 * 0.9, 6);
+    expect(size(drop(), 'padding-left')).toBeCloseTo(3 * 0.9, 6);
+    expect(size(drop(), 'padding-right')).toBeCloseTo(9 * 0.9, 6);
+  });
+
+  it('idle strip: as long as the Drop is high, a fifth of it thick; upright at the side places', () => {
+    ctl.apply(base);
+    for (const place of ['bottom', 'top'] as const) {
+      ctl.place(place);
+      expect([size(drop(), 'min-width'), size(drop(), 'height')], place).toEqual([H, H / 5]);
+    }
+    for (const place of ['left', 'right'] as const) {
+      ctl.place(place);
+      expect([size(drop(), 'min-width'), size(drop(), 'height')], place).toEqual([H / 5, H]);
+      expect([size(drop(), 'padding-left'), size(drop(), 'padding-right')], place).toEqual([0, 0]);
+      // On hover it is the usual capsule, the same as at the bottom.
+      hover(true);
+      expect([size(drop(), 'min-width'), size(drop(), 'height')], `${place} · hover`).toEqual([H, H]);
+      hover(false);
+    }
+  });
+
+  it('a new --h resizes everything with it', () => {
+    const big = document.createElement('style');
+    big.textContent = ':root{--h:48px}';
+    document.head.append(big);
+    try {
+      ctl.apply({ ...base, phase: 'listen' });
+      expect(size(drop(), 'height')).toBe(48);
+      expect(size(part('.mkw svg'), 'width')).toBeCloseTo(28.8, 6);
+      expect(circleWidth()).toBeCloseTo(48, 6);
+    } finally {
+      big.remove();
+    }
+  });
+
+  it('the size and place transitions: height, min-width and padding together, the place over .3 s', () => {
+    const t = getComputedStyle(drop()).transition;
+    for (const prop of ['height .45s var(--e-spring)', 'min-width .45s var(--e-spring)', 'padding .45s var(--e-spring)']) {
+      expect(t).toContain(prop);
+    }
+    const pv = getComputedStyle(document.querySelector('.pv')!).transition;
+    for (const prop of ['left', 'top', 'transform']) expect(pv).toContain(`${prop} .3s`);
+  });
+});
+
+describe('The mark opens to its own size, the same in every state', () => {
+  it("max-width is the mark's natural width (measured once) plus the 2 px every part gets", () => {
+    const proto = HTMLElement.prototype as any;
+    const bcr = proto.getBoundingClientRect;
+    proto.getBoundingClientRect = function (this: HTMLElement) {
+      const w = this.classList.contains('mkw') ? 21.6 : 0;
+      return { x: 0, y: 0, width: w, height: w, left: 0, top: 0, right: w, bottom: w, toJSON() {} };
+    };
+    try {
+      document.body.innerHTML = '<div id="stage"></div>';
+      const c = new DropController(document.getElementById('stage')!, { send() {}, rects() {} });
+      const mark = () => document.querySelector('.drop .mkw') as HTMLElement;
+      for (const phase of ['start', 'listen', 'think', 'done', 'cancel', 'error', 'empty'] as const) {
+        c.apply({ ...base, phase, error: phase === 'error' ? 'net' : null });
+        expect(mark().style.maxWidth, phase).toBe('23.6px');
+      }
+    } finally {
+      proto.getBoundingClientRect = bcr;
+    }
+  });
+});
+
+describe('Places', () => {
+  const css = readFileSync(join(__dirname, '../src/design/drop.css'), 'utf8');
+  let sheet: HTMLStyleElement;
+  beforeEach(() => {
+    sheet = document.createElement('style');
+    sheet.textContent = css;
+    document.head.append(sheet);
+  });
+  afterEach(() => sheet.remove());
+  const host = () => document.getElementById('stage')!;
+  const flat = (v: string) => v.replace(/\s+/g, '');
+
+  it('bottom by default; the core sets the place; anything else is bottom', () => {
+    expect(host().dataset.place).toBe('bottom');
+    for (const place of ['top', 'left', 'right', 'bottom'] as const) {
+      ctl.place(place);
+      expect(host().dataset.place).toBe(place);
+    }
+    for (const v of ['LEFT', 'middle', '', null, undefined, 3, {}]) {
+      ctl.place('left');
+      ctl.place(v);
+      expect(host().dataset.place, String(v)).toBe('bottom');
+    }
+    expect(PLACES).toEqual(['bottom', 'top', 'left', 'right']);
+    expect(pickPlace('right')).toBe('right');
+  });
+
+  it('the Drop and the tray card are pinned on the edge side and grow toward the center', () => {
+    const pv = () => getComputedStyle(document.querySelector('.pv')!);
+    const tray = () => getComputedStyle(document.querySelector('.tray')!);
+    const inner = () => getComputedStyle(document.querySelector('.tray .in')!);
+    const expected: Record<string, { left: string; top: string; transform: string; in: Record<string, string> }> = {
+      // Bottom: the Drop's bottom on the anchor line, centered; the card's content sits at its bottom.
+      bottom: { left: 'var(--ax,50%)', top: 'calc(var(--ay,50%)+var(--h)/2)', transform: 'translate(-50%,-100%)', in: { bottom: '0px', left: '50%' } },
+      top: { left: 'var(--ax,50%)', top: 'calc(var(--ay,50%)-var(--h)/2)', transform: 'translate(-50%,0)', in: { top: '0px', left: '50%' } },
+      // Sides: the outer end pinned half a Drop from the center, vertically centered; the card beside it, centered on it.
+      left: { left: 'calc(var(--ax,50%)-var(--h)/2)', top: 'var(--ay,50%)', transform: 'translate(0,-50%)', in: { left: '0px', top: '50%' } },
+      right: { left: 'calc(var(--ax,50%)+var(--h)/2)', top: 'var(--ay,50%)', transform: 'translate(-100%,-50%)', in: { right: '0px', top: '50%' } },
+    };
+    for (const [place, want] of Object.entries(expected)) {
+      ctl.place(place);
+      for (const s of [pv(), tray()]) {
+        expect([flat(s.left), flat(s.top), flat(s.transform)], place).toEqual([want.left, want.top, want.transform]);
+      }
+      const zero = (v: string) => (v === '0' ? '0px' : v);
+      for (const [prop, v] of Object.entries(want.in)) expect(zero(inner().getPropertyValue(prop)), `${place} .in ${prop}`).toBe(v);
+    }
+  });
+});
+
+describe('Dragging the Drop', () => {
+  let drags: string[];
+  beforeEach(() => {
+    drags = [];
+    document.body.innerHTML = '<div id="stage"></div>';
+    document.body.className = '';
+    sent = [];
+    rectsSent = [];
+    ctl = new DropController(document.getElementById('stage')!, {
+      send: (a) => sent.push(a),
+      rects: (r) => rectsSent.push(r),
+      drag: (p) => drags.push(p),
     });
   });
+  const dropEl = () => document.querySelector('.drop') as HTMLElement;
+  const ptr = (type: string, x: number, y: number, o: PointerEventInit = {}) =>
+    dropEl().dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, clientX: x, clientY: y, ...o }));
+  const stub = (el: Element, x: number, y: number, width: number, height: number) => {
+    (el as any).getBoundingClientRect = () => ({ x, y, width, height, left: x, top: y, right: x + width, bottom: y + height, toJSON() {} });
+  };
+  /** Idle with the mouse over it: the capsule is open and can be picked up. */
+  const ready = () => {
+    ctl.apply(base);
+    hover(true);
+  };
 
-  it("the mark's max-width is its size in the new state, not its current (still animating) width", () => {
-    ctl.apply({ ...base, phase: 'listen' });
-    // jsdom measures every element as 0 wide: give the mark the width it has right after recording ends.
-    Object.defineProperty(mark(), 'scrollWidth', { configurable: true, get: () => 28 });
-    ctl.apply({ ...base, phase: 'think' });
-    expect(mark().style.maxWidth).toBe('26px');
-    ctl.apply({ ...base, phase: 'listen' });
-    expect(mark().style.maxWidth).toBe('30px');
+  it('a press without movement is a click: no drag', () => {
+    ready();
+    ptr('pointerdown', 100, 50);
+    ptr('pointerup', 100, 50);
+    dropEl().click();
+    expect(drags).toEqual([]);
+    expect(sent).toEqual([]);
   });
 
-  it('while recording the Drop is a circle: its height is the mark plus padding and margin on both sides', () => {
-    ctl.apply({ ...base, phase: 'listen' });
-    const d = getComputedStyle(drop()), m = getComputedStyle(mark());
-    const width = px(d.getPropertyValue('--mk')) + px(d.paddingLeft) + px(d.paddingRight) + px(m.marginLeft) + px(m.marginRight);
-    expect(px(d.height)).toBe(44);
-    expect(width).toBe(44);
+  it(`moving up to ${DRAG_THRESHOLD} px is still a click; beyond it the drag starts once`, () => {
+    ready();
+    ptr('pointerdown', 100, 50);
+    ptr('pointermove', 104, 50);
+    ptr('pointermove', 100, 46);
+    expect(drags).toEqual([]);
+    ptr('pointermove', 103, 53); // 4.24 px
+    expect(drags).toEqual(['start']);
+    ptr('pointermove', 300, 200);
+    ptr('pointermove', 10, 10);
+    expect(drags).toEqual(['start']);
+    expect(document.body.classList.contains('dragging')).toBe(true);
+    ptr('pointerup', 10, 10);
+    expect(drags).toEqual(['start', 'end']);
+    expect(document.body.classList.contains('dragging')).toBe(false);
+    // A later move without a press does nothing.
+    ptr('pointermove', 400, 400);
+    expect(drags).toEqual(['start', 'end']);
   });
 
-  it('the other mark-only states stay 40 px circles with the 24 px mark', () => {
-    for (const phase of ['start', 'think', 'done', 'empty'] as const) {
-      ctl.apply({ ...base, phase });
-      const d = getComputedStyle(drop()), m = getComputedStyle(mark());
-      const width = px(d.getPropertyValue('--mk')) + px(d.paddingLeft) + px(d.paddingRight) + px(m.marginLeft) + px(m.marginRight);
-      expect([px(d.height), width], phase).toEqual([40, 40]);
+  it('only the open idle Drop, only with the primary mouse button', () => {
+    const tryDrag = (o: PointerEventInit = {}) => {
+      ptr('pointerdown', 100, 50, o);
+      ptr('pointermove', 140, 50, o);
+      ptr('pointerup', 140, 50, o);
+    };
+    ctl.apply(base);
+    tryDrag(); // the strip without hover: nothing to grab
+    hover(true);
+    tryDrag({ button: 2 });
+    tryDrag({ pointerType: 'touch' });
+    tryDrag({ pointerType: 'pen' });
+    tryDrag({ isPrimary: false });
+    for (const phase of ['start', 'listen', 'think', 'done', 'empty', 'cancel', 'error'] as const) {
+      ctl.apply({ ...base, phase, error: phase === 'error' ? 'net' : null });
+      tryDrag();
+    }
+    ctl.apply({ ...base, paused: true });
+    tryDrag();
+    ctl.apply(base);
+    ctl.idleHidden(true);
+    tryDrag();
+    ctl.idleHidden(false);
+    ctl.tray('lastMinute');
+    tryDrag();
+    expect(drags).toEqual([]);
+  });
+
+  it("the core's place ends the drag without another end; the button going up later does nothing", () => {
+    ready();
+    ptr('pointerdown', 100, 50);
+    ptr('pointermove', 120, 50);
+    ctl.place('left');
+    expect(drags).toEqual(['start']);
+    expect(document.body.classList.contains('dragging')).toBe(false);
+    ptr('pointerup', 120, 50);
+    expect(drags).toEqual(['start']);
+  });
+
+  it('a dictation, a pause, full screen or a tray card while dragging ends the drag first', () => {
+    const cases: [string, () => void][] = [
+      ['listen', () => ctl.apply({ ...base, phase: 'start' })],
+      ['pause', () => ctl.apply({ ...base, paused: true })],
+      ['full screen', () => ctl.idleHidden(true)],
+      ['tray card', () => ctl.tray('noField')],
+    ];
+    for (const [name, interrupt] of cases) {
+      ctl.apply(base);
+      ctl.idleHidden(false);
+      ctl.tray(null);
+      (document.querySelector('.tray') as HTMLElement).hidden = true;
+      hover(true);
+      drags = [];
+      ptr('pointerdown', 100, 50);
+      ptr('pointermove', 120, 50);
+      interrupt();
+      expect(drags, name).toEqual(['start', 'end']);
+      ptr('pointerup', 120, 50);
+      expect(drags, name).toEqual(['start', 'end']);
     }
   });
 
-  it("the mark's size and the Drop's height change with the same curve, so the Drop is round during the change too", () => {
-    ctl.apply({ ...base, phase: 'listen' });
-    const svg = getComputedStyle(mark().querySelector('svg')!);
-    expect([svg.width, svg.height]).toEqual(['var(--mk)', 'var(--mk)']);
-    const height = /(?:^|,)\s*height ([^,]+)/;
-    const curve = getComputedStyle(drop()).transition.match(height)?.[1];
-    expect(curve).toBe('.45s var(--e-spring)');
-    expect(svg.transition).toContain(`width ${curve}`);
-    expect(svg.transition.match(height)?.[1]).toBe(curve);
+  it('while dragged the whole window catches the mouse; then the capsule again', () => {
+    ready();
+    stub(dropEl(), 302, 182, 110, 36);
+    ctl.frame(0);
+    expect(rectsSent.at(-1)).toEqual([{ x: 302, y: 182, w: 110, h: 36 }]);
+    ptr('pointerdown', 330, 200);
+    ptr('pointermove', 340, 200);
+    ctl.frame(16);
+    expect(rectsSent.at(-1)).toEqual([{ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight }]);
+    ptr('pointerup', 340, 200);
+    ctl.frame(32);
+    expect(rectsSent.at(-1)).toEqual([{ x: 302, y: 182, w: 110, h: 36 }]);
+  });
+
+  it('the Drop keeps its open look while dragged, and folds when the mouse leaves after', () => {
+    ready();
+    ptr('pointerdown', 100, 50);
+    ptr('pointermove', 120, 50);
+    hover(false);
+    expect(dropEl().classList.contains('hov')).toBe(true);
+    ptr('pointerup', 120, 50);
+    hover(false);
+    expect(dropEl().classList.contains('hov')).toBe(false);
+  });
+
+  it('the frame loop does not sleep while the button is down or the Drop is dragged', () => {
+    ready();
+    ptr('pointerdown', 100, 50);
+    hover(false); // the strip folds under a still-held button: still pressed
+    let t = 0;
+    for (; t < 3000; t += 16) expect(ctl.frame(t)).toBe(true);
+    ptr('pointerup', 100, 50);
+    for (; t < 6000 && ctl.frame(t); t += 16);
+    expect(t).toBeLessThan(6000);
+  });
+});
+
+describe('Rectangles for click-through at the side places', () => {
+  it.each(['left', 'right', 'top'] as const)('%s: the Drop sends its own rectangle, the tray card its own', (place) => {
+    const stub = (el: Element, x: number, y: number, width: number, height: number) => {
+      (el as any).getBoundingClientRect = () => ({ x, y, width, height, left: x, top: y, right: x + width, bottom: y + height, toJSON() {} });
+    };
+    ctl.place(place);
+    const d = document.querySelector('.drop')!;
+    stub(d, 302, 182, 7.2, 36); // the upright strip at the left
+    ctl.frame(0);
+    expect(rectsSent.at(-1)).toEqual([{ x: 302, y: 182, w: 8, h: 36 }]);
+    ctl.tray('noField');
+    stub(document.querySelector('.tray')!, 302, 130, 300, 140);
+    ctl.frame(16);
+    expect(rectsSent.at(-1)).toEqual([{ x: 302, y: 130, w: 300, h: 140 }]);
   });
 });
 
@@ -379,16 +708,16 @@ describe('Rectangles for click-through', () => {
   };
 
   it('sent only on a change; a hidden bar does not catch the mouse, a recording does', () => {
-    stub(document.querySelector('.drop')!, 163, 232, 34, 8);
+    stub(document.querySelector('.drop')!, 162, 233, 36, 7);
     ctl.frame(0);
     ctl.frame(16);
-    expect(rectsSent).toEqual([[{ x: 163, y: 232, w: 34, h: 8 }]]);
+    expect(rectsSent).toEqual([[{ x: 162, y: 233, w: 36, h: 7 }]]);
     ctl.idleHidden(true);
     ctl.frame(32);
     expect(rectsSent.at(-1)).toEqual([]);
     ctl.apply({ ...base, phase: 'listen' });
     ctl.frame(48);
-    expect(rectsSent.at(-1)).toEqual([{ x: 163, y: 232, w: 34, h: 8 }]);
+    expect(rectsSent.at(-1)).toEqual([{ x: 162, y: 233, w: 36, h: 7 }]);
     expect(rectsSent.length).toBe(3);
   });
 
@@ -403,7 +732,7 @@ describe('Rectangles for click-through', () => {
   });
 
   it('while a tray card is open — its rectangle instead of the Drop', () => {
-    stub(document.querySelector('.drop')!, 163, 232, 34, 8);
+    stub(document.querySelector('.drop')!, 162, 233, 36, 7);
     ctl.tray('lastMinute');
     stub(document.querySelector('.tray')!, 30, 140, 300, 100);
     ctl.frame(0);
@@ -430,7 +759,7 @@ describe('Tray card', () => {
     expect(sent).toEqual(['trayClose']);
   });
 
-  it('grows out of the Drop\'s own shape and folds back into it: the 44 px recording circle too', () => {
+  it('grows out of the Drop\'s own shape and folds back into it: the circle, a wider capsule, the upright strip', () => {
     vi.useFakeTimers();
     try {
       const d = document.querySelector('.drop') as HTMLElement;
@@ -439,7 +768,7 @@ describe('Tray card', () => {
         Object.defineProperty(d, 'offsetWidth', { configurable: true, value: w });
         Object.defineProperty(d, 'offsetHeight', { configurable: true, value: h });
       };
-      for (const [w, h] of [[44, 44], [40, 40], [116, 44]]) {
+      for (const [w, h] of [[36, 36], [116, 36], [7, 36]]) {
         size(w, h);
         ctl.tray('lastMinute');
         expect([box.style.width, box.style.height, box.style.borderRadius], `open ${w}×${h}`).toEqual([`${w}px`, `${h}px`, `${h / 2}px`]);
@@ -772,9 +1101,9 @@ describe('Quiet mode: frames stop when nothing on screen can change', () => {
     const d = document.querySelector('.drop')!;
     stub(d, 122.5, 206, 115, 34); // still folding after hover
     ctl.frame(0);
-    stub(d, 163, 232, 34, 8); // the transition has ended
+    stub(d, 162, 233, 36, 7); // the transition has ended
     expect(ctl.frame(1000)).toBe(false);
-    expect(rectsSent.at(-1)).toEqual([{ x: 163, y: 232, w: 34, h: 8 }]);
+    expect(rectsSent.at(-1)).toEqual([{ x: 162, y: 233, w: 36, h: 7 }]);
   });
 
   it('a prefers-reduced-motion change wakes it', () => {

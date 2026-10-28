@@ -19,7 +19,8 @@ a real clock.
   `keys` (Windows Credential Manager), `check` (free key probes), `error`. `openrouter` serves only the
   `refine_compare` example.
 - **`cue-platform-win`** (`app/crates/platform-win`): `hook` and `chord` (keyboard), `input` (`SendInput`, modifier
-  state), `clipboard`, `focus` (UI Automation), `mic` (cpal), `wav`, `dropwin` (window styles), `placement`, `power`.
+  state), `clipboard`, `focus` (UI Automation), `mic` (cpal), `wav`, `dropwin` (window styles, moves, the z-order
+  guard), `placement` (the four places, the nearest place, monitors), `power`.
 - **`cue`** (`app/src-tauri`): startup, the `runtime` actor, `ipc`, `drop_window`, `tray` and `trayicon`, `logging`.
 - **`app/ui`**: `main.ts` (events, commands, frame loop), `controller.ts` (`DropController`), `trays.ts`,
   `strings.ts`, and `design/` (Drop, tray card and animation code, styles, the Bebas Neue font).
@@ -42,7 +43,8 @@ a real clock.
   10 s watchdog.
 - **`cue-mic`** (cpal) with `cue-mic-events` forwarding frames; `cue-mic-stop` closes a microphone off the core thread.
 - **`cue-power`**: a hidden top-level window for `WM_POWERBROADCAST` and session lock notifications.
-- **`cue-hit-test`** (~60 Hz while the Drop is shown), **`cue-placement`** (every 0.5 s), **`cue-tray-watch`**
+- **`cue-hit-test`** (~60 Hz while the Drop is shown), **`cue-placement`** (every 0.5 s; every 8 ms while the Drop
+  is dragged or snapping into place), **`cue-tray-watch`**
   (every 5 s), **`cue-log-prune`** (daily).
 
 ## Dictation flow
@@ -162,21 +164,79 @@ if the keys are not released in time, if Ctrl+V is not delivered (an elevated wi
 
 The Drop window is transparent, borderless, always on top, absent from the taskbar and Alt+Tab, and never takes focus:
 `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW` are enforced by a window subclass, because the windowing library rebuilds the
-extended style on every flag change. The window is larger than the capsule; the UI reports the capsule and card
-rectangles (`drop_hit_rects`) and `cue-hit-test` lets the mouse through everywhere else. `cue-placement` keeps the
-Drop centered 12 px above the bottom of the work area on the monitor of the foreground window, follows DPI changes,
-and hides the idle strip over full-screen apps (`SHQueryUserNotificationState`) and while paused.
+extended style on every flag change, and the subclass adds `SWP_NOACTIVATE` to every move, show and z-order change.
+The window is larger than the capsule; the UI reports the capsule and card rectangles (`drop_hit_rects`) and
+`cue-hit-test` lets the mouse through everywhere else.
+
+### Places
+
+The Drop sits at one of four places on the work area of the monitor with the foreground window (`drop.position`):
+`bottom` (the default) and `top` are centered on that edge, `left` and `right` halfway up it; in each the Drop's outer
+edge is 12 px from the work area's edge. The window (640 × 400 logical px) is always centered on the Drop's center (the
+center of its circle), and the page draws the Drop at the window's center. A new place therefore moves only the window,
+never the Drop inside it; the rest of the layout changes with CSS transitions. The window reaches far enough every way
+for the widest Drop and the largest tray card growing toward the screen center; the part past the edge of the work area
+(over the taskbar, or off the screen) is transparent and lets the mouse through like the rest.
+
+At the bottom and the top the Drop is centered and grows both ways along the edge, and tray cards open above it (at
+the bottom) or below it (at the top). At the sides its outer end is pinned at the edge and it grows toward the center;
+the idle strip stands upright against the edge, and on hover and in every other state it is the usual capsule or
+circle. Tray cards open beside it, toward the center, centered on it.
+
+`cue-placement` is the only thread that moves the window, always with `SetWindowPos(SWP_NOACTIVATE |
+SWP_ASYNCWINDOWPOS)`. At rest it checks every 0.5 s that the window is centered on its place's anchor on the foreground
+window's monitor (per-monitor DPI; after a scale change Windows resizes the window and the next check re-centers it),
+runs the z-order guard, and hides the idle strip over full-screen apps (`SHQueryUserNotificationState`) and while
+paused.
+
+**Dragging.** Only the idle Drop can be dragged, once hover has opened it. The page watches a press of the primary
+mouse button on it: a move of more than 4 px with the button down starts a drag (`drop_drag` `start`); a press that
+moves less stays an ordinary click. No tray card is open during a drag: none can be open when it starts, and one that
+arrives ends the drag first, as do a dictation, a pause and full screen. While dragging, the page captures the pointer
+and reports the whole window as its hit rectangle, so no click falls through while the window catches up with the
+cursor. `cue-placement` moves the window
+itself every 8 ms so the Drop's center keeps its distance from the cursor (`GetCursorPos`); it ends the drag on
+`drop_drag` `end` or as soon as the primary button is physically up (`GetAsyncKeyState`, which also covers a release
+the page never saw and the secure desktop). On release it picks the place whose center is nearest to the Drop's center
+on the monitor under it, saves it through the core (`settings.json`), sends `cue://place` (also when the place did not
+change: that answers the page and ends its dragging state), and snaps the window to that place on the foreground
+window's monitor: 200 ms eased out, or at once when Windows animation effects are off (`SPI_GETCLIENTAREAANIMATION`,
+the setting WebView2 reports as `prefers-reduced-motion`).
+
+The core drives these moves instead of starting the system move loop (`WM_NCLBUTTONDOWN` with `HTCAPTION`): that loop
+is modal on the window thread, can bring up Snap Assist, resizes on DPI changes on its own terms and leaves no room for
+the snap. A move from another thread never activates the window, the mouse press does not either
+(`WS_EX_NOACTIVATE`), and the app the user is typing in keeps the focus.
+
+### Z-order guard
+
+`WS_EX_TOPMOST` is set once, at creation, and Windows has been seen to put an ordinary (not always-on-top) window of
+another app above the Drop and above other always-on-top windows: the Drop was drawn but hidden. Every 0.5 s at rest
+`cue-placement` walks the windows above the Drop (`GW_HWNDPREV`), skipping hidden ones and noting for each whether it is
+always on top and whether DWM cloaks it (closed Start and Search panels, windows on other virtual desktops). If an
+ordinary, uncloaked window above the Drop overlaps the Drop window (`covered_by_ordinary_window`, a pure function), the
+Drop is put back on top with `SetWindowPos(HWND_TOPMOST, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)`. Always-on-top
+windows above the Drop are never answered, so it does not fight other always-on-top apps. The event is logged once per
+occurrence, without window titles. `zorder_probe` (an example in `cue-platform-win`) prints what the guard sees.
+
+### Events and sizes
 
 Core → window events: `cue://state` (phase, error cause, retry, paused), `cue://level`, `cue://tray` (card kind or
-none), `cue://shake`, `cue://idle-hidden`. Window → core commands: `drop_action` (`cancel`, `finish`, `undo`, `retry`,
-`dismiss`, `trayAction`, `trayClose`), `drop_hit_rects`, and `drop_ready`, after which the core resends the current
-state. No dictation text crosses this boundary.
+none), `cue://shake`, `cue://idle-hidden`, `cue://place`. Window → core commands: `drop_action` (`cancel`, `finish`,
+`undo`, `retry`, `dismiss`, `trayAction`, `trayClose`), `drop_hit_rects`, `drop_drag` (`start`, `end`), and
+`drop_ready`, after which the core resends the current state, card, `idle-hidden` and place. The place also comes in an
+initialization script, so the first frame is already laid out for it. No dictation text crosses this boundary.
 
-Phases: `idle` (a thin strip; on hover the mark and the hotkey), `start`, `listen` (voice bars and no timer: the mark
-grows from 24 to 28 px and the Drop stays a circle, 44 px instead of 40; cancel and done buttons on hover), `think`
-(three dots), `done` (a check, gone after 1.5 s), `empty`, `cancel` (Restore with a 3.6 s ring), `error` (amber "!",
-the cause on hover, Retry when available). The frame loop sleeps when nothing moves; with reduced motion turned on in
-Windows, states change instantly.
+One size: the Drop is 36 px high in every state (`--h` in `drop.css`; `DROP_SIZE` in `drop_window.rs` places it, and a
+test keeps them equal). The circle states are 36 × 36. Everything inside is the original 40 px drawing scaled by
+`--h / 40`: the mark 0.6 h (the same while recording), buttons 0.7 h, small icons 0.5 h, keys and label text 0.9 of
+the drawing, paddings and gaps alike. The idle strip is 36 × 7 (upright at the sides), so starting a dictation grows it
+into a circle of the same diameter. Tray cards keep their own sizes.
+
+Phases: `idle` (a thin strip; on hover the mark and the hotkey), `start`, `listen` (voice bars and no timer; cancel
+and done buttons on hover), `think` (three dots), `done` (a check, gone after 1.5 s), `empty`, `cancel` (Restore with
+a 3.6 s ring), `error` (amber "!", the cause on hover, Retry when available). The frame loop sleeps when nothing moves;
+with reduced motion turned on in Windows, states change instantly.
 
 Tray cards grow out of the Drop, one at a time; a new card replaces the old one, a new recording closes it, and hovering
 pauses the countdown ring:
@@ -209,15 +269,17 @@ A second launch of `cue.exe` does nothing.
 
 ## Settings
 
-`%APPDATA%\CUE\settings.json` is read once at startup. Missing fields take defaults, unknown fields are ignored, a
-UTF-8 BOM is accepted, and any engine name reads as `soniox`. If the file cannot be read, CUE runs on defaults and
-never writes it during that session. Writes (the hold-hint counter) are atomic: a temp file in the same folder, then a
-rename. Default prices are not written to the file, so price fixes in code reach existing installs; once any price is
-edited, the whole block is written. `ui.language` (`auto`, `en`, `ru`, in any case and with spaces trimmed; any other
-value reads as `auto`) is likewise written only when it is not `auto`, and `dictionary` only when its list is not
-empty. `dictionary.terms` is kept as written; a value that is not a list reads as an empty list and items that are
-not strings are skipped, so a typo there never makes the file unreadable. Model names are settings, so a new model
-version needs no code change.
+`%APPDATA%\CUE\settings.json` is read once at startup. Missing fields take defaults, unknown fields are ignored, a UTF-8
+BOM is accepted, and any engine name reads as `soniox`. If the file cannot be read, CUE runs on defaults and never
+writes it during that session. Writes (the hold-hint counter, the Drop's place) always write the whole file from the
+core's copy, so they never undo each other, and are atomic: a temp file in the same folder, then a rename. Default
+prices are not written to the file, so price fixes in code reach existing installs; once any price is edited, the whole
+block is written. `ui.language` (`auto`, `en`, `ru`, in any case and with spaces trimmed; any other value reads as
+`auto`) is likewise written only when it is not `auto`, `drop.position` (`bottom`, `top`, `left`, `right`, in any case
+and with spaces trimmed; any other value, or a `drop` that is not an object, reads as `bottom`) only when it is not
+`bottom`, and `dictionary` only when its list is not empty. `dictionary.terms` is kept as written; a value that is not a
+list reads as an empty list and items that are not strings are skipped, so a typo there never makes the file unreadable.
+Model names are settings, so a new model version needs no code change.
 
 ## Usage accounting
 

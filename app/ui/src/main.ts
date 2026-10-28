@@ -7,7 +7,7 @@ import './design/cue.js';
 import './design/drop.js';
 import { invoke, type InvokeArgs } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { DropController, type UiState, type UiAction } from './controller';
+import { DropController, type DragPhase, type UiState, type UiAction } from './controller';
 import { pickLang, type TrayKind } from './strings';
 
 /** A core command without unhandled rejections. The log gets only the command name and the error, never the call data. */
@@ -43,7 +43,10 @@ const ctl = new DropController(document.getElementById('stage')!, {
   send: (action: UiAction) => void call('drop_action', { action }),
   rects: (rects) => void call('drop_hit_rects', { rects }),
   wake,
+  drag: (phase: DragPhase) => void call('drop_drag', { phase }),
 }, lang);
+// The place comes the same way as the language, before the first frame; later changes come as cue://place.
+ctl.place((window as any).__CUE_PLACE__);
 wake();
 
 /** Subscribe to every core event first, then drop_ready: otherwise the first state could arrive before the subscriptions. */
@@ -54,6 +57,7 @@ async function start() {
     listen<TrayKind | null>('cue://tray', (e) => ctl.tray(e.payload)),
     listen('cue://shake', () => ctl.shake()),
     listen<boolean>('cue://idle-hidden', (e) => ctl.idleHidden(e.payload)),
+    listen<string>('cue://place', (e) => ctl.place(e.payload)),
   ]);
   for (const s of subs) if (s.status === 'rejected') console.error('CUE: subscribing to a core event failed:', s.reason);
   await call('drop_ready');

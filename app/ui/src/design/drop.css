@@ -1,49 +1,61 @@
 /* CUE — the Drop and the tray card. Ported from the original CUE design; only the rule for the design's static sheets
-   `.static .drop[data-s=cancel] .ib .ring circle{animation-iteration-count:infinite}` is removed. The other Drop and tray card rules are unchanged.
-   The idle key hint on hover is two thin keys without a plate (.kc, .key); the idle Drop on hover is lower (30 px instead of 34) with even side padding;
-   padding is in the .drop transition (the same .45s as the height) so the padding change does not jolt the Drop.
-   No recording timer (.t is gone): while recording the mark is 28 px instead of 24 and the Drop is a 44 px circle. */
-.pv{position:absolute;left:50%;bottom:var(--anchor,84px);z-index:6;transform:translateX(-50%);display:flex;justify-content:center;align-items:flex-end;pointer-events:none}
-.drop{--mk:24px;pointer-events:auto;display:flex;align-items:center;flex:none;white-space:nowrap;height:40px;min-width:34px;padding:0 4px;border-radius:999px;background:rgba(18,18,20,.9);color:#fff;--rec:#FF4A1C;--warn:#F5B82E;--ask:#5C8DFF;box-shadow:0 10px 26px -8px rgba(0,0,0,.45),inset 0 0 0 .5px rgba(255,255,255,.14);backdrop-filter:blur(20px) saturate(1.6);-webkit-backdrop-filter:blur(20px) saturate(1.6);overflow:hidden;transition:height .45s var(--e-spring),opacity .3s,padding .45s var(--e-spring)}
-.drop[data-s=idle]{height:8px;opacity:.55}
-/* Recording: the mark grows to 28 px and the Drop stays a circle — 44 = 28 + 2 × (padding 4 + the mark's margin 4).
-   The mark's size and the Drop's height change with the same .45s curve, so the Drop is round at every frame of the change. */
-.drop[data-s=listen]{--mk:28px;height:44px}
-/* the mark part has its own 4px inset, so idle on hover uses padding 3/9 — the visible left and right margins are equal;
-   other states and idle without hover keep 4/4, and the change between them is smooth (padding in the .drop transition) */
-.drop[data-s=idle].hov{height:30px;opacity:1;padding:0 9px 0 3px}
+   `.static .drop[data-s=cancel] .ib .ring circle{animation-iteration-count:infinite}` is removed.
+   One size: --h is the Drop's height in every state (idle on hover, start, recording, thinking, done, cancelled, error,
+   empty) and the diameter of its circle. The original drawing was 40 px high; every size inside the Drop is that drawing
+   scaled by --u = --h / 40: the mark 0.6 h, buttons 0.7 h, small icons 0.5 h, keys and label text 0.9 of the original,
+   paddings and gaps alike. To resize the Drop, change --h (and DROP_SIZE in app/src-tauri/src/drop_window.rs, which
+   places it; a test keeps the two equal). Tray cards keep their own sizes.
+   The idle strip is as long as the Drop is high and a fifth of it thick, so starting a dictation grows it into a circle
+   of the same diameter. Idle on hover uses padding 3/9 (scaled): the mark part has its own inset, so the visible left and
+   right margins are equal; padding is in the .drop transition (the same .45s as the height) so the change does not jolt.
+   No recording timer (.t is gone): while recording the Drop is the same circle with the same mark, only the bars move.
+   Places: the page gives the Drop's center (--ax, --ay; the window's center by default) and data-place on an ancestor.
+   bottom (the default) and top keep the Drop centered on the edge and growing both ways along it; left and right pin
+   the Drop's end at the screen edge and let it grow toward the center, and there the idle strip stands upright.
+   The tray card grows out of the Drop toward the screen center: above it at the bottom, below it at the top, beside it
+   (centered on it) at the sides. */
+:root{--h:36px}
+.pv{z-index:6;display:flex;justify-content:center;align-items:flex-end;pointer-events:none}
+.drop{--u:calc(var(--h) / 40);--mk:calc(var(--h) * .6);pointer-events:auto;display:flex;align-items:center;flex:none;white-space:nowrap;height:var(--h);min-width:var(--h);padding-left:calc(4 * var(--u));padding-right:calc(4 * var(--u));border-radius:999px;background:rgba(18,18,20,.9);color:#fff;--rec:#FF4A1C;--warn:#F5B82E;--ask:#5C8DFF;box-shadow:0 10px 26px -8px rgba(0,0,0,.45),inset 0 0 0 .5px rgba(255,255,255,.14);backdrop-filter:blur(20px) saturate(1.6);-webkit-backdrop-filter:blur(20px) saturate(1.6);overflow:hidden;transition:height .45s var(--e-spring),min-width .45s var(--e-spring),opacity .3s,padding .45s var(--e-spring)}
+.drop[data-s=idle]{height:calc(var(--h) / 5);opacity:.55}
+.drop[data-s=idle].hov{height:var(--h);opacity:1;padding-left:calc(3 * var(--u));padding-right:calc(9 * var(--u))}
+/* at the side places the idle strip stands upright against the edge: as high as the Drop, a fifth of it wide */
+:is([data-place=left],[data-place=right]) .drop[data-s=idle]:not(.hov){height:var(--h);min-width:calc(var(--h) / 5);padding-left:0;padding-right:0}
 .drop.away{opacity:0!important;transition:opacity .18s}
 .drop svg{display:block;overflow:visible}
-.pt{flex:none;overflow:hidden;max-width:0;opacity:0;margin:0;transition:max-width .5s var(--e-spring),opacity .22s,margin .4s var(--e-out)}
-.pt.on{opacity:1;margin:0 4px;transition:max-width .5s var(--e-spring),opacity .3s .06s,margin .4s var(--e-out)}
-.mkw svg{width:var(--mk);height:var(--mk);transition:width .45s var(--e-spring),height .45s var(--e-spring)}
-.lab{font-size:13.5px;font-weight:550;letter-spacing:-.01em;line-height:24px}
+.pt{flex:none;overflow:hidden;max-width:0;opacity:0;margin-left:0;margin-right:0;transition:max-width .5s var(--e-spring),opacity .22s,margin .4s var(--e-out)}
+.pt.on{opacity:1;margin-left:calc(4 * var(--u));margin-right:calc(4 * var(--u));transition:max-width .5s var(--e-spring),opacity .3s .06s,margin .4s var(--e-out)}
+.mkw svg{width:var(--mk);height:var(--mk)}
+.lab{font-size:calc(13.5 * var(--u));font-weight:550;letter-spacing:-.01em;line-height:calc(24 * var(--u))}
 .lab span,.lbl span{display:inline-block}
 .ch-in{animation:chIn .42s var(--e-out) both;animation-delay:calc(var(--i)*16ms)}
 @keyframes chIn{from{opacity:0;transform:translateY(5px);filter:blur(2px)}to{opacity:1;transform:none;filter:none}}
-.chip{font-size:11.5px;font-weight:600;line-height:20px;border-radius:999px;background:rgba(255,255,255,.14)}
-.chip>span{display:block;padding:0 7px}
-.act{height:28px;line-height:28px;border-radius:999px;font-size:13px;font-weight:600;background:#fff;color:#111}
-.act>span{display:block;padding:0 12px}
-.ib{position:relative;width:28px;height:28px;border-radius:50%;display:grid;place-items:center}
+.chip{font-size:calc(11.5 * var(--u));font-weight:600;line-height:calc(20 * var(--u));border-radius:999px;background:rgba(255,255,255,.14)}
+.chip>span{display:block;padding-left:calc(7 * var(--u));padding-right:calc(7 * var(--u))}
+.act{height:calc(28 * var(--u));line-height:calc(28 * var(--u));border-radius:999px;font-size:calc(13 * var(--u));font-weight:600;background:#fff;color:#111}
+.act>span{display:block;padding-left:calc(12 * var(--u));padding-right:calc(12 * var(--u))}
+.ib{position:relative;width:calc(28 * var(--u));height:calc(28 * var(--u));border-radius:50%;display:grid;place-items:center}
 .ib.soft{background:rgba(255,255,255,.14)}
 .ib.solid{background:#fff;color:#111}
-.ring{position:absolute;inset:0;transform:rotate(-90deg);pointer-events:none}
+/* the icons inside the Drop's buttons and small icons scale with it (16 px in the 40 px drawing) */
+.drop .ib>svg:not(.ring),.drop .mi svg,.drop .why svg{width:calc(16 * var(--u));height:calc(16 * var(--u))}
+.ring{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg);pointer-events:none}
 .ring circle{fill:none;stroke:currentColor;stroke-width:1.7;stroke-dasharray:100;stroke-dashoffset:0;opacity:.5}
 .drop[data-s=cancel] .ib .ring circle{animation:deplete 3.6s linear forwards}
 @keyframes deplete{to{stroke-dashoffset:100}}
-.mi,.why{width:20px;height:24px;display:grid;place-items:center}
+.mi,.why{width:calc(20 * var(--u));height:calc(24 * var(--u));display:grid;place-items:center}
 .mi{color:rgba(255,255,255,.85)}
 .mi.ask{color:var(--ask)}
 .why{color:rgba(255,255,255,.7)}
-.kc{line-height:18px}
-.kc>span{display:flex;gap:4px}
+.kc{line-height:calc(18 * var(--u))}
+.kc>span{display:flex;gap:calc(4 * var(--u))}
 /* flex:none — the keys do not shrink while the part is folded: otherwise scrollWidth in layout() is less than the real width and the hint gets clipped */
-.key{flex:none;display:grid;place-items:center;min-width:18px;height:18px;padding:0 5px;border-radius:5px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.32);font-family:"Bebas Neue",sans-serif;font-size:13px;letter-spacing:.05em;line-height:18px;color:rgba(255,255,255,.88)}
-.key:not(.w){padding-top:2px} /* Bebas Neue capitals sit above the middle of the line */
-.key.w{padding:0 4px}
+.key{flex:none;display:grid;place-items:center;min-width:calc(18 * var(--u));height:calc(18 * var(--u));padding-left:calc(5 * var(--u));padding-right:calc(5 * var(--u));border-radius:calc(5 * var(--u));box-shadow:inset 0 0 0 1px rgba(255,255,255,.32);font-family:"Bebas Neue",sans-serif;font-size:calc(13 * var(--u));letter-spacing:.05em;line-height:calc(18 * var(--u));color:rgba(255,255,255,.88)}
+.key:not(.w){padding-top:calc(2 * var(--u))} /* Bebas Neue capitals sit above the middle of the line */
+.key.w{padding-left:calc(4 * var(--u));padding-right:calc(4 * var(--u))}
+.key.w svg{width:calc(10 * var(--u));height:calc(10 * var(--u))}
 
-.tray{position:absolute;left:50%;bottom:var(--anchor,84px);transform:translateX(-50%);z-index:7;border-radius:20px;background:rgba(18,18,20,.92);color:#fff;--warn:#F5B82E;--ask:#5C8DFF;--ok:#33C27A;box-shadow:0 16px 40px -12px rgba(0,0,0,.5),inset 0 0 0 .5px rgba(255,255,255,.14);backdrop-filter:blur(24px) saturate(1.6);-webkit-backdrop-filter:blur(24px) saturate(1.6);overflow:hidden;transition:width .55s var(--e-spring),height .5s var(--e-spring),border-radius .45s var(--e-out)}
+.tray{z-index:7;border-radius:20px;background:rgba(18,18,20,.92);color:#fff;--warn:#F5B82E;--ask:#5C8DFF;--ok:#33C27A;box-shadow:0 16px 40px -12px rgba(0,0,0,.5),inset 0 0 0 .5px rgba(255,255,255,.14);backdrop-filter:blur(24px) saturate(1.6);-webkit-backdrop-filter:blur(24px) saturate(1.6);overflow:hidden;transition:width .55s var(--e-spring),height .5s var(--e-spring),border-radius .45s var(--e-out)}
 .tray[hidden]{display:none}
 .tray .in{position:absolute;left:50%;bottom:0;transform:translateX(-50%);opacity:0;transition:opacity .15s}
 .tray.open .in{opacity:1;transition:opacity .3s .16s}
@@ -54,3 +66,15 @@
 .tray .ab{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px 0 10px;border-radius:999px;background:#fff;color:#111;font-size:13px;font-weight:600;white-space:nowrap}
 .tray .ab.soft{background:rgba(255,255,255,.12);color:#fff}
 .tray .ab svg,.tray .xb svg{display:block}
+
+/* Places. The Drop and the tray card share one anchor: the end that faces the screen edge (the bottom at the bottom,
+   the top at the top, the side at the sides) is pinned there and they grow toward the center. The Drop is moved
+   smoothly when its place changes. */
+.pv,.tray{position:absolute;left:var(--ax,50%);top:calc(var(--ay,50%) + var(--h) / 2);transform:translate(-50%,-100%)}
+.pv{transition:left .3s var(--e-out),top .3s var(--e-out),transform .3s var(--e-out)}
+[data-place=top] :is(.pv,.tray){top:calc(var(--ay,50%) - var(--h) / 2);transform:translate(-50%,0)}
+[data-place=left] :is(.pv,.tray){left:calc(var(--ax,50%) - var(--h) / 2);top:var(--ay,50%);transform:translate(0,-50%)}
+[data-place=right] :is(.pv,.tray){left:calc(var(--ax,50%) + var(--h) / 2);top:var(--ay,50%);transform:translate(-100%,-50%)}
+[data-place=top] .tray .in{top:0;bottom:auto}
+[data-place=left] .tray .in{left:0;top:50%;bottom:auto;transform:translateY(-50%)}
+[data-place=right] .tray .in{left:auto;right:0;top:50%;bottom:auto;transform:translateY(-50%)}

@@ -2,8 +2,9 @@
    Differences from the original: the "empty" state (quietly fold into a cross), a close button on errors on hover,
    an error without "retry" (Claude key), the error label from api.errLabel(), all button and label texts from api.text
    (the language is chosen outside this file). Parts only the design's own demo pages used are removed.
-   No recording timer: while recording the Drop shows only the mark, 28 px instead of 24 (--mk in drop.css), and stays a circle.
-   Also: buttons and icons open to their own 28/20 px, not to the 16 px icon width (this.nat);
+   No recording timer: while recording the Drop shows only the mark and stays a circle of the same size.
+   Sizes come from drop.css (--h, the Drop's height in every state); nothing here assumes a size.
+   Also: the mark, buttons and icons open to their own size, not to the 16 px icon width (this.nat);
    with prefers-reduced-motion the mark's spring has almost no inertia (k=20, d=.05) and the tray card folds at once.
    The idle key hint is two thin keys, "Ctrl" and the Windows logo ("fn" on mac), with the screen-reader name in aria-label. */
 (function(){
@@ -31,7 +32,7 @@ const RM='(prefers-reduced-motion: reduce)';
 const reduced=()=>!!(window.matchMedia&&window.matchMedia(RM).matches);
 /* parts whose width depends on text: their width is still taken from scrollWidth on every layout */
 const TXT=new Set(['chip','lab','act','kc']);
-/* While a text part is folded, its scrollWidth misses the right padding of its inner block (.chip>span 7, .act>span 12):
+/* While a text part is folded, its scrollWidth misses the right padding of its inner block (.chip>span, .act>span):
    the text overflows that block's zero-width content box. Add it back so the open chip and button are not clipped.
    The other text parts have no such padding (0). */
 const padEnd=(k,e)=>TXT.has(k)&&e.firstElementChild?(parseFloat(getComputedStyle(e.firstElementChild).paddingRight)||0):0;
@@ -50,9 +51,9 @@ class Drop{
   P('undo',`<button class="ib solid" title="${T.restore}" aria-label="${T.restore}">${RING}${IC.undo}</button>`);
   P('retry',`<button class="ib solid" title="${T.retry}" aria-label="${T.retry}">${IC.retry}</button>`);
   P('kc','<span class="kc"></span>');P('ok',`<button class="ib solid" title="${T.done}" aria-label="${T.done}">${IC.ok}</button>`);
-  /* Natural width of fixed-size parts (buttons 28, icons 20, mark 24), once, while nothing is visible:
-     a folded part's scrollWidth sees only the 16 px icon, and the button would open as an oval.
-     The mark's width depends on the state; layout() takes it from --mk instead. */
+  /* Natural width of fixed-size parts (the mark, buttons, icons: fractions of --h in drop.css), once, while nothing
+     is visible: a folded part's scrollWidth sees only the icon inside, and the button would open as an oval.
+     The mark has one size in every state, so it is measured here like the rest. */
   this.nat={};
   for(const [k,e] of Object.entries(this.parts)){if(TXT.has(k)){this.nat[k]=0;continue}e.style.maxWidth='none';this.nat[k]=e.getBoundingClientRect().width;e.style.maxWidth=''}
   const spring=()=>{const r=reduced();this.morph.k=r?20:.17;this.morph.d=r?.05:.7};
@@ -88,10 +89,7 @@ class Drop{
   const V=ic?{idle:{mk:h,kc:h},start:{mk:1},listen:{bx:h,mk:1,mi:md,ok:h},think:{mk:1},done:{mk:1},empty:{mk:1},cancel:{mk:1,lab:h,undo:1},error:{bx:h,mk:1,why,lab:h,retry:rt}}
            :{idle:{mk:h,kc:h},start:{mk:1},listen:{bx:h,mk:1,chip:md,ok:h},think:{mk:1},done:{mk:1},empty:{mk:1},cancel:{mk:1,lab:1,act:1},error:{bx:h,mk:1,lab:1,act:rt}};
   const vis=V[s]||{};
-  /* The mark opens to its size in this state alone (--mk: 24, 28 while recording), never to its measured width:
-     custom properties are not animated, so --mk is already the target, while the svg is still animating toward it. */
-  const mk=parseFloat(getComputedStyle(this.p).getPropertyValue('--mk'))||this.nat.mk||0;
-  const open=(k,e)=>k==='mk'?mk:Math.max(e.scrollWidth+padEnd(k,e),this.nat[k]||0);
+  const open=(k,e)=>Math.max(e.scrollWidth+padEnd(k,e),this.nat[k]||0);
   for(const [k,e] of Object.entries(p)){const on=!!vis[k];e.classList.toggle('on',on);e.style.maxWidth=on?(open(k,e)+2)+'px':'0px'}
  }
  away(b){this.p.classList.toggle('away',b)}
@@ -100,7 +98,8 @@ class Drop{
 }
 
 /* The tray card: grows out of the Drop and folds back into it, starting from and ending in the Drop's own shape
-   (radius h/2: the 44 px recording circle too, not only the 40 px Drop). */
+   (radius h/2, whatever that shape is: the circle, a wider capsule, the upright idle strip at a side place).
+   Where it is pinned and which way it grows comes from drop.css ([data-place]). */
 class Tray{
  constructor(stage,drop,o={}){
   this.drop=drop;this.w=o.width||300;this.isOpen=false;

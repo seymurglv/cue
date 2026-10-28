@@ -3,9 +3,9 @@
 CUE is a voice-dictation app for Windows 11. Press `Ctrl + Win`, speak, and the cleaned-up text appears at the caret
 in whatever app you are typing in. Speech is transcribed in real time by Soniox, then lightly edited by Claude Haiku 5.5
 (filler words, self-corrections, punctuation, lists, numbers) while keeping your own words, tone and mix of languages.
-It runs quietly in the background: a small indicator at the bottom of the screen (the Drop) shows what CUE is doing,
-and a tray icon next to the clock holds a short menu. This first version is built for personal use with your own
-Soniox and Anthropic API keys.
+It runs quietly in the background: a small indicator at the bottom of the screen (the Drop; drag it to the top or to
+either side if you prefer) shows what CUE is doing, and a tray icon next to the clock holds a short menu. This first
+version is built for personal use with your own Soniox and Anthropic API keys.
 
 ## Features
 
@@ -26,6 +26,11 @@ Soniox and Anthropic API keys.
   stays in the clipboard and a card offers to copy it.
 - **Recording limit:** at 8:00 a card says one minute is left, at 9:00 recording ends on its own and the text is pasted
   as usual. The Drop shows no timer while recording, only the voice bars.
+- **The Drop stays where you put it.** Hover over the thin strip to open it, then drag it: when you let go it snaps
+  to the nearest of four places: the bottom (the default) or the top edge, centered, or the left or the right edge,
+  halfway up. The place is remembered (`drop.position` in `settings.json`). A plain click without moving does what it
+  always did, and dragging never takes the focus from the app you are typing in. The Drop can be dragged only while
+  idle, and it always stays on top of ordinary windows.
 - **Tray icon menu:** Pause for an hour, Start at sign-in, Open log, Quit.
 - **Interface language:** English, or Russian when the Windows display language is Russian; `ui.language` in
   `settings.json` can fix it to either.
@@ -61,7 +66,8 @@ cargo run -p cue-cli -- keys check    # a free test request per key
 
 ## Build and run
 
-Development build, with live reload of the Drop UI:
+Development build, with live reload of the Drop UI (`npm run dev` alone serves `ui/preview.html` too: every state
+of the Drop at each of the four places, side by side):
 
 ```powershell
 cd app
@@ -125,6 +131,10 @@ session and does not overwrite it. The defaults:
 - `ui.language`: the language of the tray menu and the Drop. `"auto"` (the default) follows the Windows display
   language, `"en"` and `"ru"` fix it (case and surrounding spaces do not matter), any other value means `"auto"`. The
   value is kept in the file only when it is `"en"` or `"ru"`. Example: `"ui": { "language": "ru" }`.
+- `drop.position`: where the Drop sits: `"bottom"` (the default; centered, 12 px above the taskbar), `"top"`
+  (centered, 12 px below the top of the screen), `"left"` or `"right"` (halfway up, 12 px from the edge). Dragging the
+  Drop sets it. Case and surrounding spaces do not matter; any other value means `"bottom"`. The value is kept in the
+  file only when it is not `"bottom"`. Example: `"drop": { "position": "right" }`.
 - `dictionary.terms`: names and terms you often say, written as they should appear. Example:
   `"dictionary": { "terms": ["Soniox", "Claude Haiku", "GitHub"] }`. When the transcript clearly means one of them but
   spells it differently, splits it or mixes alphabets (`Со niox`, `гитхаб`, `git hub`), the cleanup writes it as
@@ -233,7 +243,8 @@ docs/ARCHITECTURE.md      how CUE works inside
 ```
 
 `app/crates/platform-win/examples` and `app/crates/engines/examples` hold small probes for checking the keyboard
-hook, microphone, focus, paste, sleep events, Soniox and refine on a real machine
+hook, microphone, focus, paste, sleep events, the Drop's z-order (`zorder_probe`, run while CUE is running), Soniox
+and refine on a real machine
 (`cargo run -p <crate> --example <name>`).
 
 ## License
