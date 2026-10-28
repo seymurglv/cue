@@ -165,11 +165,11 @@ pub fn decide(raw: &str, parsed: Parsed, terms: &[String], s: &RefineSettings) -
 }
 
 /// The translation if it passes [`translation_ok`]; markup and list punctuation are stripped first, as in [`decide`].
-pub fn decide_translation(raw: &str, parsed: Parsed, to: &str) -> (String, RefineOutcome) {
+pub fn decide_translation(raw: &str, parsed: Parsed, terms: &[String], to: &str) -> (String, RefineOutcome) {
     match parsed {
         Parsed::Text(t) => {
             let t = tidy_list_items(&strip_markup(raw, &t));
-            if translation_ok(raw, &t, to) {
+            if translation_ok(raw, &t, terms, to) {
                 (t.trim().to_string(), RefineOutcome::Refined)
             } else {
                 (raw.to_string(), RefineOutcome::RawFallback)
@@ -284,7 +284,7 @@ async fn refine_at(
     };
     let decided = match job {
         Job::Clean => decide(raw, parsed, terms, s),
-        Job::Translate(to) => decide_translation(raw, parsed, to),
+        Job::Translate(to) => decide_translation(raw, parsed, terms, to),
     };
     match decided {
         (text, RefineOutcome::Refined) => RefineResult { text, outcome: RefineOutcome::Refined, usage: m.usage },
@@ -524,9 +524,9 @@ mod tests {
     #[test]
     fn decide_translation_checks_the_script_not_the_words() {
         let raw = "ну привет";
-        assert_eq!(decide_translation(raw, Parsed::Text("**Hello.**".into()), "en"), ("Hello.".into(), RefineOutcome::Refined));
-        assert_eq!(decide_translation(raw, Parsed::Text("Ну привет.".into()), "en"), (raw.into(), RefineOutcome::RawFallback));
-        assert_eq!(decide_translation(raw, Parsed::Truncated, "en"), (raw.into(), RefineOutcome::RawFallback));
+        assert_eq!(decide_translation(raw, Parsed::Text("**Hello.**".into()), &[], "en"), ("Hello.".into(), RefineOutcome::Refined));
+        assert_eq!(decide_translation(raw, Parsed::Text("Ну привет.".into()), &[], "en"), (raw.into(), RefineOutcome::RawFallback));
+        assert_eq!(decide_translation(raw, Parsed::Truncated, &[], "en"), (raw.into(), RefineOutcome::RawFallback));
     }
 
     // ---- The whole refine against a fake Messages API. ----
@@ -703,6 +703,18 @@ mod tests {
         let (r, lines, _api) = translate_with(Some(KEY), |_, _, _| reply(200, &message("Ну привет.", "end_turn"))).await;
         assert_eq!((r.text.as_str(), r.outcome, r.usage), (SPEECH, RefineOutcome::RawFallback, USAGE));
         assert_one_warning(&lines, "translation failed the check");
+    }
+
+    #[tokio::test]
+    async fn translate_checks_the_answer_against_the_dictionary_too() {
+        let api = fake_api(|_, _, _| reply(200, &message("Разверни это в Kubernetes.", "end_turn"))).await;
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("{}/v1/messages", api.base);
+        let (s, raw, job) = (RefineSettings::default(), "deploy this to cuber netis", Job::Translate("ru"));
+        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", raw, &ctx(), &["Kubernetes".to_owned()], &s, job).await;
+        assert_eq!((r.text.as_str(), r.outcome), ("Разверни это в Kubernetes.", RefineOutcome::Refined));
+        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", raw, &ctx(), &[], &s, job).await;
+        assert_eq!((r.text.as_str(), r.outcome), (raw, RefineOutcome::RawFallback), "without the dictionary the name outweighs the rest");
     }
 
     #[tokio::test]

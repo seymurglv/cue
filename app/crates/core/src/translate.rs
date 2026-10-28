@@ -1,5 +1,6 @@
 //! Translation (spec 2 §5): the languages Soniox recognizes, the language of the speech, which way to translate, and the
 //! check of the model's translation. Pure logic.
+use std::collections::HashSet;
 
 /// Every language Soniox recognizes (soniox.com/docs/stt/concepts/supported-languages, checked 28.10.2026):
 /// ISO 639-1 code and English name. The name goes into the translation instruction for the model.
@@ -207,7 +208,8 @@ fn script_of_language(code: &str) -> Option<Script> {
     })
 }
 
-/// How many Latin letters one letter of the script is worth in length: Han and Hangul pack a word into fewer characters.
+/// How many Latin letters one letter of the script is worth: Han and Hangul pack a word into fewer characters. Both the
+/// length check and the script share weigh letters by it.
 fn density(s: Option<Script>) -> f32 {
     match s {
         Some(Script::Han) => 3.0,
@@ -216,8 +218,8 @@ fn density(s: Option<Script>) -> f32 {
     }
 }
 
-/// The share of the result's letters in the target script, from which the result counts as written in it: names,
-/// product names and code stay as said.
+/// The share of the result's new letters ([`written_in`]: words neither said nor in the dictionary, weighted by
+/// [`density`]) in the target script, from which the result counts as written in it.
 const MIN_TARGET_SCRIPT: f32 = 0.6;
 /// Length bounds of the translation against the speech, in weighted letters ([`density`]); checked from
 /// `MIN_LETTERS_FOR_RATIO` letters of speech: a short phrase legitimately changes length more.
@@ -226,9 +228,10 @@ const MAX_RATIO: f32 = 2.8;
 const MIN_LETTERS_FOR_RATIO: usize = 20;
 
 /// The translation can be pasted (spec 2 §5): not empty; its length is within bounds of what was said; when the speech
-/// and the target language use different scripts, the result is written in the target one. The word overlap check of
-/// dictation does not apply: a translation shares no words with the speech.
-pub fn translation_ok(raw: &str, out: &str, to: &str) -> bool {
+/// and the target language use different scripts, the result is written in the target one ([`written_in`]). The word
+/// overlap check of dictation does not apply: a translation shares no words with the speech. `terms` is the user's
+/// dictionary (`dictionary.terms`).
+pub fn translation_ok(raw: &str, out: &str, terms: &[String], to: &str) -> bool {
     let out = out.trim();
     if out.is_empty() {
         return false;
@@ -247,12 +250,50 @@ pub fn translation_ok(raw: &str, out: &str, to: &str) -> bool {
         }
     }
     match to_script {
-        Some(t) if src_script != Some(t) => {
-            let in_target = dst.iter().filter(|c| script_of(**c) == Some(t)).count();
-            in_target as f32 / dst.len() as f32 >= MIN_TARGET_SCRIPT
-        }
+        Some(t) if src_script != Some(t) => written_in(t, raw, out, terms),
         _ => true,
     }
+}
+
+/// The result is written in the `target` script. Names, product names and code stay as written (the instruction asks
+/// for it), so a result word found among the words of the speech or of the dictionary (any case) is left out; of the
+/// rest, at least [`MIN_TARGET_SCRIPT`] of the weighted letters are in the target script, and at least one word is.
+/// An echo of the speech leaves no word at all and fails.
+fn written_in(target: Script, raw: &str, out: &str, terms: &[String]) -> bool {
+    let said: HashSet<String> = std::iter::once(raw)
+        .chain(crate::refine::usable_terms(terms))
+        .flat_map(script_words)
+        .map(|(_, w)| w.to_lowercase())
+        .collect();
+    let new: Vec<(Option<Script>, String)> =
+        script_words(out).into_iter().filter(|(_, w)| !said.contains(&w.to_lowercase())).collect();
+    if !new.iter().any(|(s, _)| *s == Some(target)) {
+        return false;
+    }
+    let weight = |(s, w): &(Option<Script>, String)| w.chars().count() as f32 * density(*s);
+    let all: f32 = new.iter().map(weight).sum();
+    let in_target: f32 = new.iter().filter(|(s, _)| *s == Some(target)).map(weight).sum();
+    in_target / all >= MIN_TARGET_SCRIPT
+}
+
+/// Words for the script check: maximal runs of letters of one script, so "检查CUE的GitHub" is four words and a name
+/// glued to text in another script is still a word of its own.
+fn script_words(text: &str) -> Vec<(Option<Script>, String)> {
+    let mut words: Vec<(Option<Script>, String)> = Vec::new();
+    let mut in_word = false;
+    for c in text.chars() {
+        if !c.is_alphabetic() {
+            in_word = false;
+            continue;
+        }
+        let s = script_of(c);
+        match words.last_mut() {
+            Some((ws, w)) if in_word && *ws == s => w.push(c),
+            _ => words.push((s, c.to_string())),
+        }
+        in_word = true;
+    }
+    words
 }
 
 /// The script most letters are written in; `None` when no letter belongs to a known script.
@@ -366,30 +407,60 @@ mod tests {
 
     #[test]
     fn translation_in_the_target_script_passes() {
-        assert!(translation_ok("напомни мне завтра позвонить Ане в десять", "Remind me to call Anya at ten tomorrow.", "en"));
-        assert!(translation_ok("remind me to call Anya tomorrow at ten", "Напомни мне завтра в десять позвонить Ане.", "ru"));
-        assert!(translation_ok("открой Soniox и проверь ключ", "Open Soniox and check the key.", "en"));
+        assert!(translation_ok("напомни мне завтра позвонить Ане в десять", "Remind me to call Anya at ten tomorrow.", &[], "en"));
+        assert!(translation_ok("remind me to call Anya tomorrow at ten", "Напомни мне завтра в десять позвонить Ане.", &[], "ru"));
+        assert!(translation_ok("открой Soniox и проверь ключ", "Open Soniox and check the key.", &[], "en"));
     }
 
     #[test]
     fn untranslated_text_fails_for_a_pair_with_another_script() {
-        assert!(!translation_ok("напомни мне завтра позвонить Ане", "Напомни мне завтра позвонить Ане.", "en"));
-        assert!(!translation_ok("call Anya tomorrow at ten please", "Call Anya tomorrow at ten, please.", "ru"));
+        assert!(!translation_ok("напомни мне завтра позвонить Ане", "Напомни мне завтра позвонить Ане.", &[], "en"));
+        assert!(!translation_ok("call Anya tomorrow at ten please", "Call Anya tomorrow at ten, please.", &[], "ru"));
+    }
+
+    /// Names, product names and code stay as said (the instruction asks for it): they do not count against the script.
+    #[test]
+    fn names_kept_from_the_speech_do_not_count_against_the_script() {
+        assert!(translation_ok("open Slack", "Открой Slack.", &[], "ru"));
+        assert!(translation_ok("run cargo test", "Запусти cargo test", &[], "ru"));
+        assert!(translation_ok("check the GitHub pull request for CUE", "检查CUE的GitHub拉取请求", &[], "zh"));
+    }
+
+    #[test]
+    fn a_copied_name_does_not_pass_an_untranslated_result() {
+        assert!(!translation_ok("открой Slack", "Открой Slack.", &[], "en"));
+        assert!(translation_ok("открой Slack", "Open Slack.", &[], "en"));
+    }
+
+    /// The speech may spell a listed term otherwise; the model writes it as listed.
+    #[test]
+    fn a_dictionary_term_kept_as_written_passes() {
+        let raw = "deploy this to cuber netis";
+        let out = "Разверни это в Kubernetes.";
+        assert!(translation_ok(raw, out, &["Kubernetes".to_owned()], "ru"));
+        assert!(!translation_ok(raw, out, &[], "ru"), "without the dictionary the name is 10 of 22 letters");
+    }
+
+    /// A Han letter stands for about three Latin ones: by plain count a name the speech spelled in Cyrillic would be
+    /// 6 of 14 letters, too many.
+    #[test]
+    fn the_script_share_is_weighted_by_density() {
+        assert!(translation_ok("проверь пул реквест на гитхабе", "检查GitHub上的拉取请求", &[], "zh"));
     }
 
     #[test]
     fn an_answer_instead_of_a_translation_fails_on_length() {
         let raw = "какая сегодня погода в Москве";
         let answer = "I can't check the weather, but you can open a weather site or app and search for Moscow to see the current forecast and temperature for today.";
-        assert!(!translation_ok(raw, answer, "en"));
+        assert!(!translation_ok(raw, answer, &[], "en"));
     }
 
     #[test]
     fn same_script_pairs_check_only_length() {
-        assert!(translation_ok("call me when you are home", "Ruf mich an, wenn du zu Hause bist.", "de"));
-        assert!(translation_ok("短い", "Short.", "en"), "short speech: no length check");
-        assert!(translation_ok("我明天早上十点给你打电话然后我们讨论这个计划的细节", "I'll call you tomorrow at ten in the morning and we'll go over the details of this plan.", "en"));
-        assert!(!translation_ok("hello", "   ", "ru"));
+        assert!(translation_ok("call me when you are home", "Ruf mich an, wenn du zu Hause bist.", &[], "de"));
+        assert!(translation_ok("短い", "Short.", &[], "en"), "short speech: no length check");
+        assert!(translation_ok("我明天早上十点给你打电话然后我们讨论这个计划的细节", "I'll call you tomorrow at ten in the morning and we'll go over the details of this plan.", &[], "en"));
+        assert!(!translation_ok("hello", "   ", &[], "ru"));
     }
 
     #[test]
