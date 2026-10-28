@@ -14,6 +14,7 @@
 use std::future::Future;
 use std::time::Duration;
 
+use cue_core::translate::LanguageTally;
 use futures_util::{FutureExt, Sink, SinkExt, Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -69,6 +70,9 @@ pub fn start_message(cfg: &SonioxConfig) -> Value {
         "num_channels": 1,
         "language_hints": cfg.language_hints,
         "enable_endpoint_detection": false,
+        // Language identification is bundled into the hourly price (soniox.com/pricing, FAQ), and the mode may change
+        // after the stream starts, so it is always on.
+        "enable_language_identification": true,
     });
     let mut ctx = serde_json::Map::new();
     if let Some(app) = &cfg.app {
@@ -99,13 +103,16 @@ pub struct RtToken {
     pub text: String,
     #[serde(default)]
     pub is_final: bool,
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
-/// Builds the text from final tokens; `fin_seen` — the end marker after finalize has arrived;
-/// `finished` — the server has ended the stream (all audio processed).
+/// Builds the text from final tokens and tallies their languages; `fin_seen` — the end marker after finalize has
+/// arrived; `finished` — the server has ended the stream (all audio processed).
 #[derive(Debug, Default)]
 pub struct Transcript {
     finals: String,
+    languages: LanguageTally,
     pub fin_seen: bool,
     pub finished: bool,
 }
@@ -125,6 +132,9 @@ impl Transcript {
                 self.fin_seen = true;
             } else {
                 self.finals.push_str(&t.text);
+                if let Some(l) = &t.language {
+                    self.languages.add(l, &t.text);
+                }
             }
         }
         self.finished |= r.finished;
@@ -133,6 +143,11 @@ impl Transcript {
 
     pub fn text(&self) -> String {
         self.finals.trim().to_string()
+    }
+
+    /// The language of most of the final text; `None` if no final token named a known language.
+    pub fn language(&self) -> Option<String> {
+        self.languages.dominant().map(str::to_owned)
     }
 }
 
@@ -376,7 +391,7 @@ where
                     tr.apply(&parse(&t)?)?;
                     if done(&tr, up.finishing)? {
                         close_in_background(tx, true);
-                        return Ok(SttOutput { text: tr.text(), audio_ms: up.audio_ms() });
+                        return Ok(SttOutput { text: tr.text(), audio_ms: up.audio_ms(), language: tr.language() });
                     }
                 }
                 Some(Ok(Message::Close(frame))) => return Err(closed_by_server(frame)),
@@ -415,6 +430,7 @@ mod tests {
         assert_eq!(v["num_channels"], 1);
         assert_eq!(v["language_hints"], json!(["ru", "en"]));
         assert_eq!(v["enable_endpoint_detection"], false);
+        assert_eq!(v["enable_language_identification"], true);
         assert_eq!(v["context"]["general"], json!([{"key": "app", "value": "Telegram Desktop"}]));
         assert!(v["context"].get("terms").is_none(), "an empty vocabulary is not sent");
         assert!(v.get("api_key").is_none(), "the key goes only in the header");
@@ -444,6 +460,20 @@ mod tests {
         t.apply(&r2).unwrap();
         assert_eq!(t.text(), "Привет как дела");
         assert!(t.fin_seen);
+    }
+
+    #[test]
+    fn transcript_reports_the_language_of_most_letters() {
+        let mut tr = Transcript::default();
+        let r: RtResponse = serde_json::from_str(
+            r#"{"tokens":[{"text":"Скажи","is_final":true,"language":"ru"},{"text":" Soniox","is_final":true,"language":"en"},
+                {"text":" что","is_final":true,"language":"ru"},{"text":" everything","is_final":false,"language":"en"},
+                {"text":"<fin>","is_final":true}]}"#,
+        ).unwrap();
+        tr.apply(&r).unwrap();
+        // Final letters: ru 8, en 6. Counting the non-final token would make it en.
+        assert_eq!(tr.language().as_deref(), Some("ru"));
+        assert!(Transcript::default().language().is_none());
     }
 
     #[test]
@@ -669,7 +699,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    const FIN: &str = r#"{"tokens":[{"text":"Привет","is_final":true},{"text":" мир","is_final":true},{"text":"<fin>","is_final":true}]}"#;
+    const FIN: &str = r#"{"tokens":[{"text":"Привет","is_final":true,"language":"ru"},{"text":" мир","is_final":true,"language":"ru"},{"text":"<fin>","is_final":true}]}"#;
 
     #[tokio::test(start_paused = true)]
     async fn session_buffers_while_connecting_then_finishes_on_fin() {
@@ -691,7 +721,7 @@ mod tests {
         assert_eq!(r.srv.next_sent().await, Message::text(""), "end of audio is an empty text frame");
         assert!(matches!(r.srv.next_sent().await, Message::Close(_)), "then the close");
         let out = r.result().await.unwrap();
-        assert_eq!(out, SttOutput { text: "Привет мир".into(), audio_ms: 120 });
+        assert_eq!(out, SttOutput { text: "Привет мир".into(), audio_ms: 120, language: Some("ru".into()) });
     }
 
     #[tokio::test(start_paused = true)]

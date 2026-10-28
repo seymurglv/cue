@@ -1,8 +1,9 @@
 //! Interface language, decided once at startup: `ui.language` from settings.json when it is `en` or `ru`, otherwise
 //! the Windows UI language (Russian when its primary language is Russian, English otherwise). The tray menu and the
-//! Drop window both use this one value, so they always match.
+//! Drop window both use this one value, so they always match. The same Windows language, as a locale name, is the
+//! default home language of translation.
 use cue_core::settings::UiLanguage;
-use windows::Win32::Globalization::GetUserDefaultUILanguage;
+use windows::Win32::Globalization::{GetUserDefaultUILanguage, LCIDToLocaleName};
 
 /// `LANG_RUSSIAN` from winnt.h.
 const LANG_RUSSIAN: u16 = 0x19;
@@ -50,6 +51,18 @@ impl Lang {
     pub fn init_script(self) -> String {
         format!("window.{WINDOW_GLOBAL} = {:?};", self.code())
     }
+}
+
+/// The Windows display language as a locale name ("ru-RU"), for the home language of translation (spec 2 §9).
+/// `None` if Windows does not give it.
+pub fn windows_language_code() -> Option<String> {
+    // SAFETY: no arguments; reads the user's language setting.
+    let langid = unsafe { GetUserDefaultUILanguage() };
+    let mut buf = [0u16; 85]; // LOCALE_NAME_MAX_LENGTH
+    // SAFETY: the buffer is writable and its length is passed; the LCID is SORT_DEFAULT with the LANGID.
+    let n = unsafe { LCIDToLocaleName(u32::from(langid), Some(&mut buf), 0) };
+    // `n` counts the terminating null; 0 is a failure.
+    (n > 1).then(|| String::from_utf16_lossy(&buf[..n as usize - 1]))
 }
 
 #[cfg(test)]
@@ -101,6 +114,14 @@ mod tests {
         assert_eq!(pick(r#"{"ui":{"language":"auto"}}"#, Lang::Ru), Lang::Ru);
         assert_eq!(pick(r#"{"ui":{"language":"de"}}"#, Lang::Ru), Lang::Ru);
         assert_eq!(pick(r#"{}"#, Lang::En), Lang::En);
+    }
+
+    /// Reads this machine's setting: any Windows has a display language, and its locale name comes back without the
+    /// terminating null.
+    #[test]
+    fn windows_gives_its_language_as_a_locale_name() {
+        let code = windows_language_code().expect("Windows has a display language");
+        assert!(!code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "{code:?}");
     }
 
     #[test]

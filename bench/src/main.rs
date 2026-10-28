@@ -813,7 +813,7 @@ mod tests {
     }
 
     fn heard(text: &str) -> SttOutput {
-        SttOutput { text: text.into(), audio_ms: 1_000 }
+        SttOutput { text: text.into(), audio_ms: 1_000, language: None }
     }
 
     /// A guard inside a future: records the time since `t0` when it is dropped.
@@ -973,7 +973,7 @@ mod tests {
 
     #[test]
     fn stt_run_keeps_text_or_error() {
-        let ok = stt_run(STREAM, (Ok(SttOutput { text: "привет".into(), audio_ms: 1_000 }), 320), 0.5);
+        let ok = stt_run(STREAM, (Ok(SttOutput { text: "привет".into(), audio_ms: 1_000, language: None }), 320), 0.5);
         assert_eq!(ok, SttRun { engine: STREAM.into(), text: "привет".into(), latency_ms: 320, cost_usd: 0.5, error: None });
         let failed = stt_run(BATCH, (Err(EngineError::Timeout), 5_000), 0.25);
         assert_eq!(failed, SttRun { engine: BATCH.into(), text: String::new(), latency_ms: 5_000, cost_usd: 0.25, error: Some("timeout".into()) });

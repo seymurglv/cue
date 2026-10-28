@@ -1,5 +1,6 @@
 //! settings.json: engine and models, refine thresholds, the hint counter, bench, interface language, where the Drop
-//! sits, the user's dictionary, prices for usage accounting.
+//! sits, the user's dictionary, the translation pair, prices for usage accounting.
+use crate::translate;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -153,6 +154,54 @@ fn strings_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<
         .collect())
 }
 
+/// Translation (spec 2 §9). Every field is optional: missing, unknown or misspelled codes read as the default, and the
+/// defaults are never written. `home` defaults to the Windows display language at run time (`translate::resolve_home`).
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TranslateSettings {
+    /// The language of the pair the speech goes to; default `en`.
+    #[serde(deserialize_with = "language_or_nothing", skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// The other language of the pair.
+    #[serde(deserialize_with = "language_or_nothing", skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
+    /// The speech language, passed to Soniox as the only hint; `auto` (or nothing) — Soniox detects it.
+    #[serde(deserialize_with = "language_or_nothing", skip_serializing_if = "Option::is_none")]
+    pub speech: Option<String>,
+}
+
+impl TranslateSettings {
+    pub fn target(&self) -> &'static str {
+        self.target.as_deref().and_then(translate::known).unwrap_or("en")
+    }
+
+    pub fn speech(&self) -> Option<&'static str> {
+        self.speech.as_deref().and_then(translate::known)
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// A language code Soniox knows, normalized ("RU" → "ru"); anything else (`"auto"`, an unknown code, a number, `null`)
+/// reads as nothing, so a typo never makes the file unreadable.
+fn language_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_str().and_then(translate::known).map(str::to_owned))
+}
+
+/// A section that is not an object (`"translate": "en"`, a number) reads as the default section instead of making the
+/// whole file unreadable.
+fn section_or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelPrice {
     pub model: String,
@@ -186,6 +235,9 @@ pub struct Settings {
     /// Not written while the list is empty, like `ui`.
     #[serde(skip_serializing_if = "DictionarySettings::is_default")]
     pub dictionary: DictionarySettings,
+    /// Not written while every field is the default, like `ui`.
+    #[serde(deserialize_with = "section_or_default", skip_serializing_if = "TranslateSettings::is_default")]
+    pub translate: TranslateSettings,
     /// Default prices are not written to the file, so a price fix in the code also reaches existing installs.
     /// If the user changed even one price, the whole block is written.
     #[serde(skip_serializing_if = "Pricing::is_default")]
@@ -246,6 +298,7 @@ impl Default for Settings {
             ui: UiSettings::default(),
             drop: DropSettings::default(),
             dictionary: DictionarySettings::default(),
+            translate: TranslateSettings::default(),
             pricing: Pricing::default(),
         }
     }
@@ -738,6 +791,47 @@ mod tests {
             assert_eq!(written(&p)["drop"], serde_json::json!({ "position": position.code() }));
             assert_eq!(load(&p).unwrap(), s);
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn translate_defaults_and_reading() {
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.translate.target(), "en");
+        assert_eq!(s.translate.speech(), None);
+        let s: Settings = serde_json::from_str(r#"{"translate":{"target":" DE ","home":"ru-RU","speech":"auto"}}"#).unwrap();
+        assert_eq!(s.translate.target(), "de");
+        assert_eq!(s.translate.home.as_deref(), Some("ru"));
+        assert_eq!(s.translate.speech(), None);
+    }
+
+    #[test]
+    fn bad_translate_values_read_as_defaults() {
+        for json in [r#"{"translate":"en"}"#, r#"{"translate":5}"#, r#"{"translate":{"target":"klingon","speech":7}}"#] {
+            let s: Settings = serde_json::from_str(json).unwrap_or_else(|e| panic!("{json}: {e}"));
+            assert_eq!(s.translate.target(), "en", "{json}");
+            assert_eq!(s.translate.speech(), None, "{json}");
+        }
+    }
+
+    #[test]
+    fn default_translate_is_not_written() {
+        let text = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(!text.contains("translate"), "{text}");
+    }
+
+    /// Only the fields that were set are written, and they read back the same.
+    #[test]
+    fn chosen_translate_fields_are_written_and_survive_roundtrip() {
+        let dir = tmp("translate");
+        let p = dir.join("settings.json");
+        let mut s = Settings::default();
+        s.translate.target = Some("de".into());
+        s.translate.speech = Some("ru".into());
+        save(&s, &p).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        assert_eq!(json["translate"], serde_json::json!({ "target": "de", "speech": "ru" }));
+        assert_eq!(load(&p).unwrap(), s);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

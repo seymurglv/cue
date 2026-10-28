@@ -26,6 +26,8 @@ pub enum AudioMsg {
 pub struct SttOutput {
     pub text: String,
     pub audio_ms: u64,
+    /// The language of most of the speech (Soniox language identification), a Soniox code.
+    pub language: Option<String>,
 }
 
 pub fn pcm_bytes(pcm: &[i16]) -> Vec<u8> {
@@ -209,7 +211,9 @@ mod tests {
         while let Some(msg) = rx.recv().await {
             match msg {
                 AudioMsg::Pcm(pcm) => samples += pcm.len() as u64,
-                AudioMsg::Finish => return Ok(SttOutput { text: "готово".into(), audio_ms: samples / SAMPLES_PER_MS }),
+                AudioMsg::Finish => {
+                    return Ok(SttOutput { text: "готово".into(), audio_ms: samples / SAMPLES_PER_MS, language: None });
+                }
                 AudioMsg::Abort => break,
             }
         }
@@ -222,7 +226,7 @@ mod tests {
         s.push(vec![0; CHUNK_SAMPLES]);
         s.push(vec![0; 320]);
         let out = s.finish(Duration::from_secs(5)).await;
-        assert_eq!(out, Ok(SttOutput { text: "готово".into(), audio_ms: 120 }));
+        assert_eq!(out, Ok(SttOutput { text: "готово".into(), audio_ms: 120, language: None }));
     }
 
     #[tokio::test(start_paused = true)]

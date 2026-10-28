@@ -3,14 +3,17 @@
 //!
 //! The REST API was checked against the documentation on 27.10.2026
 //! (<https://soniox.com/docs/stt/api-reference>, <https://soniox.com/docs/stt/async/async-transcription>):
-//! `POST /files` (multipart, field `file`) → `POST /transcriptions` with `model`, `file_id`, `language_hints`
+//! `POST /files` (multipart, field `file`) → `POST /transcriptions` with `model`, `file_id`, `language_hints`,
+//! `enable_language_identification` (always on, as in the stream)
 //! → poll `GET /transcriptions/{id}` until `completed` or `error` (the reason is in `error_message`)
-//! → `GET /transcriptions/{id}/transcript` (field `text`) → `DELETE` the transcription and the file.
+//! → `GET /transcriptions/{id}/transcript` (field `text`; `tokens`, each with its `language`)
+//! → `DELETE` the transcription and the file.
 //! Soniox does not allow deleting a transcription that is still in progress (409); requests have a per-minute limit (429).
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use cue_core::translate::LanguageTally;
 use futures_util::future::join_all;
 use reqwest::header::{HeaderValue, AUTHORIZATION, RETRY_AFTER};
 use reqwest::{Method, StatusCode};
@@ -148,7 +151,7 @@ pub struct TranscriptionStatus {
 }
 
 pub fn create_body(model: &str, file_id: &str, hints: &[String]) -> Value {
-    json!({ "model": model, "file_id": file_id, "language_hints": hints })
+    json!({ "model": model, "file_id": file_id, "language_hints": hints, "enable_language_identification": true })
 }
 
 /// `Ok(true)` — done, `Ok(false)` — still queued or in progress.
@@ -380,11 +383,11 @@ async fn transcribe_at(
         .await
         .unwrap_or(Err(EngineError::Timeout));
     left.clean().await;
-    res.map(|text| SttOutput { text, audio_ms }).map_err(|e| e.redact(key))
+    res.map(|(text, language)| SttOutput { text, audio_ms, language }).map_err(|e| e.redact(key))
 }
 
-/// Upload, transcription, polling, text. Whatever is created in Soniox is recorded in `created` right away —
-/// the cleanup finds it both after a failure and after the deadline.
+/// Upload, transcription, polling, text and its language. Whatever is created in Soniox is recorded in `created`
+/// right away — the cleanup finds it both after a failure and after the deadline.
 async fn recognize(
     rest: &Rest,
     t: &BatchTiming,
@@ -392,7 +395,7 @@ async fn recognize(
     hints: &[String],
     wav: Vec<u8>,
     created: &mut Created,
-) -> Result<String, EngineError> {
+) -> Result<(String, Option<String>), EngineError> {
     let part = reqwest::multipart::Part::bytes(wav)
         .file_name("audio.wav")
         .mime_str("audio/wav")
@@ -414,16 +417,26 @@ async fn recognize(
         tokio::time::sleep(t.poll).await;
     }
     let transcript: Value = rest.get_patiently(&format!("{path}/transcript"), t).await?;
-    transcript_text(&transcript)
+    transcript_output(&transcript)
 }
 
-/// The transcript text. Per the documentation `text` is always present: if it is missing or not a string, the API has changed.
-/// An empty string is a normal result (silence). The response body never gets into the error.
-fn transcript_text(v: &Value) -> Result<String, EngineError> {
-    v.get("text")
+/// The transcript text and the language of most of it. Per the documentation `text` is always present: if it is
+/// missing or not a string, the API has changed. An empty string is a normal result (silence). The language comes from
+/// the `tokens` (each may carry `text` and `language`); without them it is `None`, not an error. The response body
+/// never gets into the error.
+fn transcript_output(v: &Value) -> Result<(String, Option<String>), EngineError> {
+    let text = v
+        .get("text")
         .and_then(Value::as_str)
         .map(|s| s.trim().to_owned())
-        .ok_or_else(|| EngineError::Protocol("the Soniox response has no transcript text".into()))
+        .ok_or_else(|| EngineError::Protocol("the Soniox response has no transcript text".into()))?;
+    let mut languages = LanguageTally::default();
+    for token in v.get("tokens").and_then(Value::as_array).into_iter().flatten() {
+        if let (Some(piece), Some(language)) = (token["text"].as_str(), token["language"].as_str()) {
+            languages.add(language, piece);
+        }
+    }
+    Ok((text, languages.dominant().map(str::to_owned)))
 }
 
 /// Outcome of one attempt to delete a record.
@@ -497,7 +510,15 @@ mod tests {
     #[test]
     fn async_create_body() {
         let v = create_body("stt-async-v5", "f-1", &["ru".into(), "en".into()]);
-        assert_eq!(v, json!({"model": "stt-async-v5", "file_id": "f-1", "language_hints": ["ru", "en"]}));
+        assert_eq!(
+            v,
+            json!({
+                "model": "stt-async-v5",
+                "file_id": "f-1",
+                "language_hints": ["ru", "en"],
+                "enable_language_identification": true,
+            })
+        );
     }
 
     #[test]
@@ -517,11 +538,23 @@ mod tests {
 
     #[test]
     fn transcript_text_is_required() {
-        assert_eq!(transcript_text(&json!({"id": "t", "text": " привет "})), Ok("привет".into()));
-        assert_eq!(transcript_text(&json!({"text": ""})), Ok(String::new()), "silence is a result too");
+        let text = |v: &Value| transcript_output(v).map(|(text, _)| text);
+        assert_eq!(text(&json!({"id": "t", "text": " привет "})), Ok("привет".into()));
+        assert_eq!(text(&json!({"text": ""})), Ok(String::new()), "silence is a result too");
         for v in [json!({"id": "t", "tokens": []}), json!({"text": 5}), json!({"text": null})] {
-            assert!(matches!(transcript_text(&v), Err(EngineError::Protocol(_))), "{v}");
+            assert!(matches!(transcript_output(&v), Err(EngineError::Protocol(_))), "{v}");
         }
+    }
+
+    #[test]
+    fn transcript_language_comes_from_the_tokens() {
+        let v = json!({"id": "t-1", "text": "привет", "tokens": [{"text": "привет", "language": "ru"}]});
+        assert_eq!(transcript_output(&v), Ok(("привет".into(), Some("ru".into()))));
+        assert_eq!(transcript_output(&json!({"id": "t-1", "text": "привет"})), Ok(("привет".into(), None)));
+        // Tokens without a language or text, and a `tokens` that is not a list, give no language and no error.
+        let v = json!({"text": "ok", "tokens": [{"text": "ok"}, {"language": "en"}, 5]});
+        assert_eq!(transcript_output(&v), Ok(("ok".into(), None)));
+        assert_eq!(transcript_output(&json!({"text": "ok", "tokens": "en"})), Ok(("ok".into(), None)));
     }
 
     #[test]
@@ -614,7 +647,7 @@ mod tests {
             ("POST", "/transcriptions") => reply(201, &status("queued")),
             ("GET", "/transcriptions/t-1") => reply(200, &status(if nth == 0 { "queued" } else { "completed" })),
             ("GET", "/transcriptions/t-1/transcript") => {
-                reply(200, r#"{"id":"t-1","text":" привет ","tokens":[{"text":" привет ","start_ms":0,"end_ms":900}]}"#)
+                reply(200, r#"{"id":"t-1","text":" привет ","tokens":[{"text":" привет ","start_ms":0,"end_ms":900,"language":"ru"}]}"#)
             }
             ("DELETE", "/transcriptions/t-1" | "/files/f-1") => reply(204, ""),
             _ => reply(404, r#"{"error_type":"not_found","message":"unknown path"}"#),
@@ -696,7 +729,7 @@ mod tests {
     async fn batch_success_returns_trimmed_text_and_cleans_up() {
         let api = fake_api(happy).await;
         let out = batch(&api, FAST, WAV_LEN).await.unwrap();
-        assert_eq!(out, SttOutput { text: "привет".into(), audio_ms: 1_500 });
+        assert_eq!(out, SttOutput { text: "привет".into(), audio_ms: 1_500, language: Some("ru".into()) });
         let calls = api.calls();
         assert_eq!(
             calls[..5],

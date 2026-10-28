@@ -32,7 +32,8 @@ use cue_core::audio::{Silence, SilenceDetector};
 use cue_core::flow::{DictationId, Effect, Flow, InsertOutcome, Input, Outcome, SttError, TimerKind};
 use cue_core::refine::{RefineContext, join_for_insert};
 use cue_core::settings::{self, DropPosition, Settings};
-use cue_core::ui::{TrayKind, UiAction, UiPhase, UiState};
+use cue_core::translate;
+use cue_core::ui::{Mode, TrayKind, UiAction, UiPhase, UiState};
 use cue_core::usage::{self, SttPath};
 use cue_engines::EngineError;
 use cue_engines::claude::{self, RefineResult};
@@ -48,6 +49,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
 use crate::ipc::Ui;
+use crate::lang;
 use crate::paths::Paths;
 use crate::trayicon::TrayLook;
 use attempt::{Attempt, UsageLog, log_finished, needs_row};
@@ -118,6 +120,10 @@ pub struct Runtime {
     /// The settings were read without error. Otherwise we run with defaults and do not overwrite the file for the
     /// whole session: the user's corrupt or unreadable settings.json must not be replaced with defaults.
     can_save_settings: bool,
+    /// The other language of the translation pair (`translate::resolve_home`), decided once at startup like the
+    /// interface language. `None`: no language other than the target was found, and target speech is only cleaned up.
+    #[expect(dead_code, reason = "the translation instruction of the refine request reads it; not wired yet")]
+    translate_home: Option<&'static str>,
     paths: Paths,
     /// One client for the whole app (refine, batch transcription, warm-up): a shared connection pool.
     http: reqwest::Client,
@@ -169,6 +175,15 @@ impl Runtime {
                 None
             }
         };
+        let target = settings.translate.target();
+        let translate_home = translate::resolve_home(
+            settings.translate.home.as_deref(),
+            lang::windows_language_code().as_deref(),
+            &settings.stt.language_hints,
+            target,
+        );
+        // Language codes only, no user text.
+        tracing::info!(target, home = translate_home.unwrap_or("none"), "translation pair");
         Self {
             flow: Flow::new(settings.hold_hints_left, has_last),
             t0: Instant::now(),
@@ -176,6 +191,7 @@ impl Runtime {
             ui,
             settings,
             can_save_settings,
+            translate_home,
             paths,
             http: reqwest::Client::new(),
             focus: Arc::new(FocusWorker::spawn()),
@@ -344,7 +360,12 @@ impl Runtime {
             self.attempt.stt_done(path, now);
         }
         let input = match result {
-            Ok(out) => Input::SttFinal { id, text: out.text },
+            Ok(out) => {
+                if self.attempt.id == id {
+                    self.attempt.speech_language = out.language;
+                }
+                Input::SttFinal { id, text: out.text }
+            }
             Err(e) => {
                 tracing::warn!(stt_path = path.as_str(), "transcription failed: {e}");
                 let error = if e.is_key_problem() { SttError::KeyProblem } else { SttError::Network };
@@ -477,10 +498,10 @@ impl Runtime {
             old.session.abort();
         }
         let Ok(key) = soniox_key() else { return };
-        let s = &self.settings.stt;
         let cfg = SonioxConfig {
-            model: s.soniox_model.clone(),
-            language_hints: s.language_hints.clone(),
+            model: self.settings.stt.soniox_model.clone(),
+            // The starting mode: it may still change while the chord is held, which language identification covers.
+            language_hints: soniox_hints(self.flow.mode(), &self.settings),
             // "Unknown" is not an app name: no context.
             app: known_app(&self.attempt.app).map(str::to_owned),
             terms: vec![],
@@ -566,7 +587,8 @@ impl Runtime {
             http: self.http.clone(),
             soniox_key,
             model: self.settings.stt.soniox_async_model.clone(),
-            hints: self.settings.stt.language_hints.clone(),
+            // The mode at the second press or the retry: the one the dictation ends with.
+            hints: soniox_hints(self.flow.mode(), &self.settings),
         }
     }
 
@@ -827,6 +849,15 @@ impl Runtime {
     }
 }
 
+/// Soniox language hints: a fixed speech language for translation goes to Soniox as the only hint (spec 2 §5);
+/// otherwise the hints from the settings. Language identification stays on either way (`soniox::start_message`).
+fn soniox_hints(mode: Mode, s: &Settings) -> Vec<String> {
+    match (mode, s.translate.speech()) {
+        (Mode::Translate, Some(code)) => vec![code.to_owned()],
+        _ => s.stt.language_hints.clone(),
+    }
+}
+
 /// JSON of a bench recording. If the app is unknown, `"app": null`, not the "unknown" placeholder.
 fn bench_json(app: &str) -> String {
     serde_json::json!({ "app": known_app(app) }).to_string()
@@ -862,7 +893,16 @@ fn soniox_key() -> Result<String, EngineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cue_core::ui::Mode;
+
+    #[test]
+    fn a_fixed_speech_language_is_the_only_hint_in_translation() {
+        let mut s = Settings::default();
+        assert_eq!(soniox_hints(Mode::Translate, &s), ["ru", "en"], "auto: the hints from the settings");
+        s.translate.speech = Some("de".into());
+        assert_eq!(soniox_hints(Mode::Translate, &s), ["de"]);
+        assert_eq!(soniox_hints(Mode::Dictate, &s), ["ru", "en"], "a dictation keeps the hints from the settings");
+        assert_eq!(soniox_hints(Mode::Ask, &s), ["ru", "en"]);
+    }
 
     #[test]
     fn hotkeys_map_to_flow_inputs() {

@@ -26,6 +26,9 @@ pub struct Attempt {
     pub app: String,
     samples: u64,
     pub stt_path: SttPath,
+    /// The language of most of the speech from the transcription (a Soniox code): which way a translation goes.
+    /// A retry clears it: the new transcription gives its own.
+    pub speech_language: Option<String>,
     refine: claude::Usage,
     pub refine_outcome: Option<RefineOutcome>,
     /// The second press (`FinishStt`) or "retry" (`TranscribeSaved`): transcription is timed from here. Core ms.
@@ -57,6 +60,7 @@ impl Attempt {
             app: String::new(),
             samples: 0,
             stt_path: SttPath::Stream,
+            speech_language: None,
             refine: claude::Usage::default(),
             refine_outcome: None,
             finish_at: None,
@@ -305,12 +309,14 @@ mod tests {
         let mut a = Attempt::new(DictationId(1));
         a.finish_stt(1_000);
         a.stt_done(SttPath::Stream, 1_200);
+        a.speech_language = Some("ru".into());
         a.refine_started(1_200);
         a.refine_done(usage(80, 8), RefineOutcome::RawKeyProblem, 1_300);
         a.retry(5_000);
         let r = a.record(Outcome::Failed, "t".into(), &s);
         assert_eq!((r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens), (0, 0, 0, 0));
         assert_eq!(a.refine_outcome, None);
+        assert_eq!(a.speech_language, None, "the new transcription gives its own speech language");
         assert_eq!(r.stt_path, SttPath::Batch);
     }
 
