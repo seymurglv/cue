@@ -132,7 +132,8 @@ recording in progress.
 - **Sanity check** on what would be pasted: lengths are compared in characters without numbers (digits and number
   words), and only for transcripts of at least four words with two or more that are not numbers; the ratio must stay
   within `min_ratio`…`max_ratio` (0.35–1.25). At least `min_overlap` (70 %) of the result's non-number words must
-  appear in the transcript. An empty result always fails. A failed check pastes the raw transcript.
+  appear in the transcript; words of `dictionary.terms` count as appearing, so a name fixed in a short phrase
+  ("открой гитхаб" → "Открой GitHub.") is not taken for an invention. An empty result always fails. A failed check pastes the raw transcript.
 - A key, balance or limit problem at Anthropic pastes the raw transcript and then shows "Claude key problem" without
   Retry.
 

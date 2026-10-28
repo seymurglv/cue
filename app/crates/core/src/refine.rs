@@ -219,7 +219,11 @@ fn len_without_numbers(text: &str) -> usize {
 /// The result differs suspiciously from what was said: paste the raw text instead.
 /// Lengths are in characters, not bytes (Cyrillic takes 2 bytes per letter in UTF-8), and without numbers: digits are
 /// legitimately shorter than words.
-pub fn sanity_ok(raw: &str, refined: &str, s: &RefineSettings) -> bool {
+///
+/// Words of the user's dictionary (`terms`, see [`usable_terms`]) count as said: the model is told to write a listed
+/// name in place of its misspelling ("сониокс" → "Soniox"), and in a short phrase one such fix alone falls below
+/// `min_overlap` (one new word in a result of up to three words, a two-word name in one of up to six).
+pub fn sanity_ok(raw: &str, refined: &str, terms: &[String], s: &RefineSettings) -> bool {
     let raw = raw.trim();
     let refined = refined.trim();
     // An empty answer or empty speech: there is nothing to trust.
@@ -242,7 +246,8 @@ pub fn sanity_ok(raw: &str, refined: &str, s: &RefineSettings) -> bool {
         // ("двадцать пять" → "25"), not a question ("какой сегодня день" → "26.10.2026").
         return content < 2;
     }
-    let known: std::collections::HashSet<&str> = raw_words.iter().map(String::as_str).collect();
+    let term_words: Vec<String> = usable_terms(terms).into_iter().flat_map(words).collect();
+    let known: std::collections::HashSet<&str> = raw_words.iter().chain(&term_words).map(String::as_str).collect();
     let hits = new_words.iter().filter(|w| known.contains(w.as_str())).count();
     hits as f32 / new_words.len() as f32 >= s.min_overlap
 }
@@ -563,19 +568,19 @@ mod tests {
 
     #[test]
     fn sanity_accepts_normal_cleanup() {
-        assert!(sanity_ok("ну э привет как дела", "Привет, как дела?", &s()));
-        assert!(sanity_ok("в среду нет в четверг созвонимся с командой", "В четверг созвонимся с командой.", &s()));
-        assert!(sanity_ok("двадцать пять рублей", "25 рублей", &s()));
+        assert!(sanity_ok("ну э привет как дела", "Привет, как дела?", &[], &s()));
+        assert!(sanity_ok("в среду нет в четверг созвонимся с командой", "В четверг созвонимся с командой.", &[], &s()));
+        assert!(sanity_ok("двадцать пять рублей", "25 рублей", &[], &s()));
     }
 
     #[test]
     fn sanity_rejects_answers_and_losses() {
         let raw = "напиши письмо ане про встречу в четверг";
         let answer = "Конечно! Вот письмо: Дорогая Аня, напоминаю о нашей встрече в четверг. Пожалуйста, подтвердите участие и время. С уважением.";
-        assert!(!sanity_ok(raw, answer, &s()), "the model answered instead of cleaning up");
+        assert!(!sanity_ok(raw, answer, &[], &s()), "the model answered instead of cleaning up");
         let long = "сегодня мы обсудили релиз проверили логи и решили выкатить исправление после обеда а завтра посмотрим метрики";
-        assert!(!sanity_ok(long, "Релиз.", &s()), "almost all of the speech was lost");
-        assert!(!sanity_ok(long, "", &s()), "an empty answer to long speech");
+        assert!(!sanity_ok(long, "Релиз.", &[], &s()), "almost all of the speech was lost");
+        assert!(!sanity_ok(long, "", &[], &s()), "an empty answer to long speech");
     }
 
     #[test]
@@ -594,16 +599,16 @@ mod tests {
     #[test]
     fn sanity_rejects_empty_or_blank_refined_even_for_short_speech() {
         // An empty answer always means the raw text: there is nothing to "trust" in emptiness, even if the speech was only "ну э".
-        assert!(!sanity_ok("ну э", "", &s()));
-        assert!(!sanity_ok("привет", "  \n\t ", &s()));
-        assert!(!sanity_ok("сегодня мы обсудили релиз и логи", "   ", &s()));
+        assert!(!sanity_ok("ну э", "", &[], &s()));
+        assert!(!sanity_ok("привет", "  \n\t ", &[], &s()));
+        assert!(!sanity_ok("сегодня мы обсудили релиз и логи", "   ", &[], &s()));
     }
 
     #[test]
     fn sanity_on_empty_raw_does_not_panic_and_rejects() {
-        assert!(!sanity_ok("", "", &s()));
-        assert!(!sanity_ok("", "Привет.", &s()));
-        assert!(!sanity_ok("  \n ", "25", &s()));
+        assert!(!sanity_ok("", "", &[], &s()));
+        assert!(!sanity_ok("", "Привет.", &[], &s()));
+        assert!(!sanity_ok("  \n ", "25", &[], &s()));
     }
 
     #[test]
@@ -613,17 +618,17 @@ mod tests {
         let raw = "ну вот типа как бы вот ну deploy to prod";
         assert_eq!(raw.chars().count(), 40);
         assert_eq!(raw.len(), 59);
-        assert!(sanity_ok(raw, "Deploy to prod.", &s()));
+        assert!(sanity_ok(raw, "Deploy to prod.", &[], &s()));
         // Mixed languages; terms are not translated.
-        assert!(sanity_ok("ну давай э задеплоим фикс в prod сегодня", "Давай задеплоим фикс в prod сегодня.", &s()));
+        assert!(sanity_ok("ну давай э задеплоим фикс в prod сегодня", "Давай задеплоим фикс в prod сегодня.", &[], &s()));
     }
 
     #[test]
     fn sanity_treats_yo_and_ye_as_the_same_letter() {
         // The recognizer writes "все", the model "всё": it is the same word, not an invention.
-        assert!(sanity_ok("ну все готово", "Всё готово.", &s()));
-        assert!(sanity_ok("ну всё готово", "Все готово.", &s()));
-        assert!(sanity_ok("э ЕЩЕ раз проверим", "Ещё раз проверим.", &s()));
+        assert!(sanity_ok("ну все готово", "Всё готово.", &[], &s()));
+        assert!(sanity_ok("ну всё готово", "Все готово.", &[], &s()));
+        assert!(sanity_ok("э ЕЩЕ раз проверим", "Ещё раз проверим.", &[], &s()));
     }
 
     #[test]
@@ -713,8 +718,8 @@ mod tests {
     fn sanity_accepts_number_dictations_written_with_digits() {
         assert_eq!(NUMBER_DICTATIONS.len(), 31);
         for (raw, refined) in NUMBER_DICTATIONS {
-            assert!(sanity_ok(raw, refined, &s()), "false rejection: {raw} → {refined}");
-            assert!(sanity_ok(&soniox_like(raw), refined, &s()), "false rejection (Soniox): {raw} → {refined}");
+            assert!(sanity_ok(raw, refined, &[], &s()), "false rejection: {raw} → {refined}");
+            assert!(sanity_ok(&soniox_like(raw), refined, &[], &s()), "false rejection (Soniox): {raw} → {refined}");
         }
     }
 
@@ -730,8 +735,8 @@ mod tests {
             ("тридцать первого декабря в двадцать три пятьдесят девять", "31 декабря в 23:59."),
         ];
         for (raw, refined) in ok {
-            assert!(sanity_ok(raw, refined, &s()), "false rejection: {raw} → {refined}");
-            assert!(sanity_ok(&soniox_like(raw), refined, &s()), "false rejection (Soniox): {raw} → {refined}");
+            assert!(sanity_ok(raw, refined, &[], &s()), "false rejection: {raw} → {refined}");
+            assert!(sanity_ok(&soniox_like(raw), refined, &[], &s()), "false rejection (Soniox): {raw} → {refined}");
         }
     }
 
@@ -762,8 +767,8 @@ mod tests {
             ("какой курс доллара", "92,5 ₽"),
         ];
         for (raw, refined) in bad {
-            assert!(!sanity_ok(raw, refined, &s()), "bad answer let through: {raw} → {refined}");
-            assert!(!sanity_ok(&soniox_like(raw), refined, &s()), "bad answer let through (Soniox): {raw} → {refined}");
+            assert!(!sanity_ok(raw, refined, &[], &s()), "bad answer let through: {raw} → {refined}");
+            assert!(!sanity_ok(&soniox_like(raw), refined, &[], &s()), "bad answer let through (Soniox): {raw} → {refined}");
         }
     }
 
@@ -905,13 +910,13 @@ mod tests {
             ("ставка двадцать один процент годовых", "Ставка 21 % годовых."),
         ];
         for (raw, refined) in ok {
-            assert!(sanity_ok(raw, refined, &s()), "false rejection: {raw} → {refined}");
-            assert!(sanity_ok(&soniox_like(raw), refined, &s()), "false rejection (Soniox): {raw} → {refined}");
+            assert!(sanity_ok(raw, refined, &[], &s()), "false rejection: {raw} → {refined}");
+            assert!(sanity_ok(&soniox_like(raw), refined, &[], &s()), "false rejection (Soniox): {raw} → {refined}");
         }
         // An answer made only of digits and signs is still rejected.
         for (raw, refined) in [("сколько будет двадцать пять умножить на четыре", "25 × 4 = 100."), ("какой курс доллара", "92,5 ₽")] {
-            assert!(!sanity_ok(raw, refined, &s()), "bad answer let through: {raw} → {refined}");
-            assert!(!sanity_ok(&soniox_like(raw), refined, &s()), "bad answer let through (Soniox): {raw} → {refined}");
+            assert!(!sanity_ok(raw, refined, &[], &s()), "bad answer let through: {raw} → {refined}");
+            assert!(!sanity_ok(&soniox_like(raw), refined, &[], &s()), "bad answer let through (Soniox): {raw} → {refined}");
         }
     }
 
@@ -1204,6 +1209,30 @@ mod tests {
         // One paragraph: source line breaks are joined with a space, no double or trailing spaces.
         assert!(!TERMS_INTRO.contains('\n') && !TERMS_INTRO.contains("  ") && !TERMS_INTRO.ends_with(' '));
         assert!(!SYSTEM_PROMPT.contains("Names and terms"), "the dictionary block is separate from the cached prompt");
+    }
+
+    /// A dictionary fix replaces a word the transcript spelled another way. In a short phrase that alone used to fall
+    /// below `min_overlap` (1 of 2 or 2 of 3 words known, a two-word name 2 of 4), and the raw text was pasted.
+    #[test]
+    fn sanity_counts_dictionary_words_as_said() {
+        let dictionary = terms(&["Soniox", "GitHub", "Claude Haiku"]);
+        for (raw, refined) in [
+            ("открой гитхаб", "Открой GitHub."),
+            ("сониокс опять упал", "Soniox опять упал."),
+            ("клод хайку снова тормозит", "Claude Haiku снова тормозит."),
+            ("Со niox тупит опять", "Soniox тупит опять."),
+            ("сониокс", "Soniox"),
+        ] {
+            assert!(!sanity_ok(raw, refined, &[], &s()), "without the dictionary this is rejected: {raw} → {refined}");
+            assert!(sanity_ok(raw, refined, &dictionary, &s()), "false rejection with the dictionary: {raw} → {refined}");
+        }
+        // Only the dictionary's own words count: answers and losses are still caught.
+        let answer = "Конечно! Вот письмо: Дорогая Аня, напоминаю о нашей встрече в четверг в GitHub. С уважением.";
+        assert!(!sanity_ok("напиши письмо ане про встречу в четверг", answer, &dictionary, &s()));
+        let long = "сегодня мы обсудили релиз проверили логи и решили выкатить исправление после обеда а завтра посмотрим метрики";
+        assert!(!sanity_ok(long, "Релиз в Soniox.", &dictionary, &s()));
+        // An unusable entry adds nothing.
+        assert!(!sanity_ok("открой гитхаб", "Открой GitHub.", &terms(&["Git\nHub"]), &s()));
     }
 
     #[test]

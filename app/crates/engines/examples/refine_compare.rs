@@ -302,7 +302,7 @@ async fn router_call(
         Ok(c) => {
             let parsed = openrouter::parse_content(&c.content, c.finish_reason.as_deref(), profile.structured);
             let parsed_kind = parsed_name(&parsed);
-            let (output, outcome) = claude::decide(&p.raw, parsed, s);
+            let (output, outcome) = claude::decide(&p.raw, parsed, terms, s);
             let u = c.usage.unwrap_or_default();
             let (cost_usd, cost_source) = match (c.usage, u.cost) {
                 (_, Some(cost)) => (cost, "openrouter"),

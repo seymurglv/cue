@@ -127,12 +127,13 @@ pub fn classify_http(status: u16, body: &str) -> RefineOutcome {
 
 /// The refined text if it passes the sanity check; otherwise the raw one.
 /// Markdown markup is stripped before the check ([`strip_markup`]), and so are trailing commas and semicolons
-/// of list items ([`tidy_list_items`]): the check judges what will be pasted.
-pub fn decide(raw: &str, parsed: Parsed, s: &RefineSettings) -> (String, RefineOutcome) {
+/// of list items ([`tidy_list_items`]): the check judges what will be pasted. Words of the dictionary `terms` count as
+/// said ([`sanity_ok`]).
+pub fn decide(raw: &str, parsed: Parsed, terms: &[String], s: &RefineSettings) -> (String, RefineOutcome) {
     match parsed {
         Parsed::Text(t) => {
             let t = tidy_list_items(&strip_markup(raw, &t));
-            if sanity_ok(raw, &t, s) {
+            if sanity_ok(raw, &t, terms, s) {
                 (t.trim().to_string(), RefineOutcome::Refined)
             } else {
                 (raw.to_string(), RefineOutcome::RawFallback)
@@ -221,7 +222,7 @@ async fn refine_at(
         Parsed::Truncated => "response truncated at max_tokens",
         Parsed::Malformed => "response does not match the schema",
     };
-    match decide(raw, parsed, s) {
+    match decide(raw, parsed, terms, s) {
         (text, RefineOutcome::Refined) => RefineResult { text, outcome: RefineOutcome::Refined, usage: m.usage },
         (_, outcome) => raw_fallback(raw, outcome, m.usage, why),
     }
@@ -350,11 +351,19 @@ mod tests {
     #[test]
     fn decide_uses_raw_when_insane_or_failed() {
         let s = RefineSettings::default();
-        assert_eq!(decide("ну привет как дела", Parsed::Text("Привет, как дела?".into()), &s), ("Привет, как дела?".into(), RefineOutcome::Refined));
+        assert_eq!(decide("ну привет как дела", Parsed::Text("Привет, как дела?".into()), &[], &s), ("Привет, как дела?".into(), RefineOutcome::Refined));
         let raw = "напиши письмо ане про встречу в четверг";
-        let (t, o) = decide(raw, Parsed::Text("Конечно! Вот письмо для Ани: Дорогая Аня, напоминаю о встрече в четверг. С уважением.".into()), &s);
+        let (t, o) = decide(raw, Parsed::Text("Конечно! Вот письмо для Ани: Дорогая Аня, напоминаю о встрече в четверг. С уважением.".into()), &[], &s);
         assert_eq!((t.as_str(), o), (raw, RefineOutcome::RawFallback));
-        assert_eq!(decide(raw, Parsed::Refusal, &s).1, RefineOutcome::RawFallback);
+        assert_eq!(decide(raw, Parsed::Refusal, &[], &s).1, RefineOutcome::RawFallback);
+    }
+
+    #[test]
+    fn decide_keeps_a_dictionary_fix_in_a_short_phrase() {
+        let s = RefineSettings::default();
+        let fixed = || Parsed::Text("Открой GitHub.".into());
+        assert_eq!(decide("открой гитхаб", fixed(), &["GitHub".to_owned()], &s), ("Открой GitHub.".into(), RefineOutcome::Refined));
+        assert_eq!(decide("открой гитхаб", fixed(), &[], &s).1, RefineOutcome::RawFallback, "without the dictionary: 1 of 2 words said");
     }
 
     #[test]
@@ -364,15 +373,15 @@ mod tests {
         let raw = "ну итоги встречи релиз в четверг и бюджет согласован";
         let answer = "# Итоги встречи\n**Релиз** в четверг, бюджет согласован.";
         assert_eq!(
-            decide(raw, Parsed::Text(answer.into()), &s),
+            decide(raw, Parsed::Text(answer.into()), &[], &s),
             ("Итоги встречи\nРелиз в четверг, бюджет согласован.".into(), RefineOutcome::Refined)
         );
         // The check judges what will be pasted: with the asterisks the response is over 25 % longer than what was said.
         let raw = "ну купить молоко хлеб сыр масло";
         let answer = "Купить:\n* **молоко**\n* **хлеб**\n* **сыр**\n* **масло**";
-        assert!(!sanity_ok(raw, answer, &s), "with the markup the check fails");
+        assert!(!sanity_ok(raw, answer, &[], &s), "with the markup the check fails");
         assert_eq!(
-            decide(raw, Parsed::Text(answer.into()), &s),
+            decide(raw, Parsed::Text(answer.into()), &[], &s),
             ("Купить:\n- молоко\n- хлеб\n- сыр\n- масло".into(), RefineOutcome::Refined)
         );
     }
@@ -384,13 +393,13 @@ mod tests {
         let raw = "взять с собой зонт куртку и термос";
         let answer = "Взять с собой:\n- зонт;\n- куртку;\n- термос.";
         assert_eq!(
-            decide(raw, Parsed::Text(answer.into()), &s),
+            decide(raw, Parsed::Text(answer.into()), &[], &s),
             ("Взять с собой:\n- зонт\n- куртку\n- термос.".into(), RefineOutcome::Refined)
         );
         // Together with markup stripping: `* ` → `- `, then the trailing commas.
         let answer = "Взять с собой:\n* **зонт**,\n* **куртку**,\n* **термос**";
         assert_eq!(
-            decide(raw, Parsed::Text(answer.into()), &s),
+            decide(raw, Parsed::Text(answer.into()), &[], &s),
             ("Взять с собой:\n- зонт\n- куртку\n- термос".into(), RefineOutcome::Refined)
         );
     }
@@ -484,6 +493,18 @@ mod tests {
         let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", RAW, &ctx(), &terms, &RefineSettings::default()).await;
         assert_eq!(r.outcome, RefineOutcome::Refined);
         assert_eq!(api.body(0), serde_json::to_vec(&request_body("claude-haiku-5-5", RAW, &ctx(), &terms)).unwrap());
+    }
+
+    #[tokio::test]
+    async fn refine_checks_the_answer_against_the_dictionary_too() {
+        let api = fake_api(|_, _, _| reply(200, &message("Открой GitHub.", "end_turn"))).await;
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("{}/v1/messages", api.base);
+        let s = RefineSettings::default();
+        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", "открой гитхаб", &ctx(), &["GitHub".to_owned()], &s).await;
+        assert_eq!((r.text.as_str(), r.outcome), ("Открой GitHub.", RefineOutcome::Refined));
+        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", "открой гитхаб", &ctx(), &[], &s).await;
+        assert_eq!((r.text.as_str(), r.outcome), ("открой гитхаб", RefineOutcome::RawFallback));
     }
 
     #[tokio::test]
