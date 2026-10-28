@@ -883,7 +883,6 @@ dependencies = [
  "cpal",
  "cue-core",
  "futures-util",
- "hound",
  "keyring",
  "reqwest",
  "serde",

@@ -28,7 +28,6 @@ tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "native-tls", "http2"] }
 keyring = "4.2"
 rpassword = "7"
-base64 = "0.22"
 hound = "3.5"
 cpal = "0.18"
 tracing = "0.1"

@@ -10,7 +10,8 @@ export default defineConfig({
   build: {
     outDir: '../dist',
     emptyOutDir: true,
-    rolldownOptions: { input: { drop: here('./ui/drop.html'), preview: here('./ui/preview.html') } },
+    // Only the Drop page ships; the dev server still serves ui/preview.html for side-by-side checks.
+    rolldownOptions: { input: { drop: here('./ui/drop.html') } },
   },
   test: { environment: 'jsdom', include: ['test/**/*.test.ts'], setupFiles: ['test/setup.ts'] },
 });

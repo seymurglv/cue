@@ -17,7 +17,6 @@ keyring.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-hound.workspace = true
 anyhow.workspace = true
 cpal.workspace = true
 # Virtual time in session tests (`start_paused`): deadlines are checked exactly, independent of machine load.
