@@ -19,7 +19,8 @@ async fn main() -> anyhow::Result<()> {
     let ctx = RefineContext::new(app.as_str(), None, s.context_chars);
     let http = reqwest::Client::new();
     let t0 = std::time::Instant::now();
-    let r = cue_engines::claude::refine(&http, Some(&key), "claude-haiku-5-5", &raw, &ctx, &s).await;
+    // Without a dictionary: `refine_compare --terms` checks one.
+    let r = cue_engines::claude::refine(&http, Some(&key), "claude-haiku-5-5", &raw, &ctx, &[], &s).await;
     println!("{app} — {:?} in {} ms: {}", r.outcome, t0.elapsed().as_millis(), r.text);
     let u = r.usage;
     println!(

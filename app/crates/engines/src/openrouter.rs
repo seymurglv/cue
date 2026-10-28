@@ -7,7 +7,7 @@
 //! (a moderation refusal quotes the input there).
 use std::time::{Duration, Instant};
 
-use cue_core::refine::{max_tokens, user_message, RefineContext, SYSTEM_PROMPT};
+use cue_core::refine::{max_tokens, terms_prompt, user_message, RefineContext, SYSTEM_PROMPT};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -179,14 +179,19 @@ impl Routing {
     }
 }
 
-/// Refine request body: the app's prompt, the [`max_tokens`] budget (with headroom if reasoning is mandatory),
-/// streaming, reasoning per [`Profile::reasoning`], the `{"text": …}` schema (the same as for Claude), routing per [`Routing`].
-pub fn request_body(model: &str, p: &Profile, routing: Routing, raw: &str, ctx: &RefineContext) -> Value {
+/// Refine request body: the app's prompt (with the dictionary `terms`, as for Claude), the [`max_tokens`] budget (with
+/// headroom if reasoning is mandatory), streaming, reasoning per [`Profile::reasoning`], the `{"text": …}` schema (the same
+/// as for Claude), routing per [`Routing`]. Without a cache mark the dictionary block follows the prompt in the same text.
+pub fn request_body(model: &str, p: &Profile, routing: Routing, raw: &str, ctx: &RefineContext, terms: &[String]) -> Value {
     let budget = max_tokens(raw) + if p.reasoning.mandatory() { REASONING_HEADROOM } else { 0 };
-    let system = if p.cache_mark {
-        json!([{ "type": "text", "text": SYSTEM_PROMPT, "cache_control": { "type": "ephemeral" } }])
-    } else {
-        json!(SYSTEM_PROMPT)
+    let system = match (terms_prompt(terms), p.cache_mark) {
+        (None, true) => json!([{ "type": "text", "text": SYSTEM_PROMPT, "cache_control": { "type": "ephemeral" } }]),
+        (None, false) => json!(SYSTEM_PROMPT),
+        (Some(block), true) => json!([
+            { "type": "text", "text": SYSTEM_PROMPT },
+            { "type": "text", "text": block, "cache_control": { "type": "ephemeral" } }
+        ]),
+        (Some(block), false) => json!(format!("{SYSTEM_PROMPT}\n\n{block}")),
     };
     let mut provider = json!({ "sort": "latency" });
     if routing.deny_data_collection {
@@ -855,7 +860,7 @@ mod tests {
     #[test]
     fn body_uses_app_prompt_budget_stream_and_routing() {
         let raw = "ну привет как дела";
-        let v = request_body("openai/gpt-6-luna", &profile(true, Reasoning::EffortNone, false), Routing::STRICT, raw, &ctx());
+        let v = request_body("openai/gpt-6-luna", &profile(true, Reasoning::EffortNone, false), Routing::STRICT, raw, &ctx(), &[]);
         assert_eq!(v["model"], "openai/gpt-6-luna");
         assert_eq!(v["messages"][0], json!({ "role": "system", "content": SYSTEM_PROMPT }));
         assert_eq!(v["messages"][1], json!({ "role": "user", "content": user_message(&ctx(), raw) }));
@@ -867,7 +872,7 @@ mod tests {
         assert_eq!(rf["type"], "json_schema");
         assert_eq!(rf["json_schema"]["strict"], true);
         assert_eq!(rf["json_schema"]["name"], "refined_text");
-        let claude = crate::claude::request_body("claude-haiku-5-5", raw, &ctx());
+        let claude = crate::claude::request_body("claude-haiku-5-5", raw, &ctx(), &[]);
         assert_eq!(rf["json_schema"]["schema"], claude["output_config"]["format"]["schema"], "the same schema as for Claude");
         // Usage always comes (`usage: {include: true}` is deprecated); sampling is left alone, as for Claude.
         for absent in ["usage", "temperature", "top_p", "top_k", "stream_options"] {
@@ -891,7 +896,7 @@ mod tests {
     fn body_plain_text_mandatory_reasoning_cache_mark_and_allow() {
         let raw = "ну привет как дела";
         let allow = Routing { deny_data_collection: false, require_parameters: true };
-        let v = request_body("x/y", &profile(false, Reasoning::Lowest(Some("low".into())), true), allow, raw, &ctx());
+        let v = request_body("x/y", &profile(false, Reasoning::Lowest(Some("low".into())), true), allow, raw, &ctx(), &[]);
         assert!(v.get("response_format").is_none(), "no schema means plain text");
         assert_eq!(v["max_tokens"], max_tokens(raw) + REASONING_HEADROOM, "headroom for mandatory reasoning");
         assert_eq!(REASONING_HEADROOM, 2_048);
@@ -902,10 +907,24 @@ mod tests {
             json!([{ "type": "text", "text": SYSTEM_PROMPT, "cache_control": { "type": "ephemeral" } }])
         );
         let loose = Routing { deny_data_collection: false, require_parameters: false };
-        let v = request_body("x/y", &profile(false, Reasoning::Absent, false), loose, raw, &ctx());
+        let v = request_body("x/y", &profile(false, Reasoning::Absent, false), loose, raw, &ctx(), &[]);
         assert_eq!(v["provider"], json!({ "sort": "latency" }));
         assert!(v.get("reasoning").is_none());
         assert_eq!(v["max_tokens"], max_tokens(raw));
+    }
+
+    #[test]
+    fn body_carries_the_dictionary_like_the_claude_request() {
+        let (raw, terms) = ("ну привет", vec!["Soniox".to_owned()]);
+        let block = terms_prompt(&terms).unwrap();
+        let marked = request_body("x/y", &profile(true, Reasoning::Absent, true), Routing::STRICT, raw, &ctx(), &terms);
+        let claude = crate::claude::request_body("claude-haiku-5-5", raw, &ctx(), &terms);
+        assert_eq!(marked["messages"][0]["content"], claude["system"], "the same blocks and cache mark as for Claude");
+        let plain = request_body("x/y", &profile(true, Reasoning::Absent, false), Routing::STRICT, raw, &ctx(), &terms);
+        assert_eq!(plain["messages"][0]["content"], json!(format!("{SYSTEM_PROMPT}\n\n{block}")));
+        // No usable term: the prompt alone, as before.
+        let none = request_body("x/y", &profile(true, Reasoning::Absent, false), Routing::STRICT, raw, &ctx(), &[" ".to_owned()]);
+        assert_eq!(none["messages"][0]["content"], json!(SYSTEM_PROMPT));
     }
 
     #[test]
@@ -930,7 +949,7 @@ mod tests {
     const LONG: Duration = Duration::from_secs(10);
 
     async fn call(api: &crate::testing::FakeApi, timeout: Duration) -> Result<Completion, Failure> {
-        let body = request_body("openai/gpt-6-luna", &profile(true, Reasoning::EffortNone, false), Routing::STRICT, "ну привет как дела", &ctx());
+        let body = request_body("openai/gpt-6-luna", &profile(true, Reasoning::EffortNone, false), Routing::STRICT, "ну привет как дела", &ctx(), &[]);
         complete_at(&format!("{}/api/v1/chat/completions", api.base), &http(), KEY, &body, timeout).await
     }
 
@@ -951,7 +970,7 @@ mod tests {
         assert_eq!(req.header("x-title"), ["CUE"]);
         assert_eq!(req.header("content-type"), ["application/json"]);
         let sent: Value = serde_json::from_slice(&req.body).unwrap();
-        let body = request_body("openai/gpt-6-luna", &profile(true, Reasoning::EffortNone, false), Routing::STRICT, "ну привет как дела", &ctx());
+        let body = request_body("openai/gpt-6-luna", &profile(true, Reasoning::EffortNone, false), Routing::STRICT, "ну привет как дела", &ctx(), &[]);
         assert_eq!(sent, body);
     }
 
@@ -964,7 +983,7 @@ mod tests {
         .await;
         let url = format!("{}/api/v1/chat/completions", api.base);
         let p = profile(true, Reasoning::EffortNone, false);
-        let body = |r: Routing| request_body("openai/gpt-6-luna", &p, r, "ну привет", &ctx());
+        let body = |r: Routing| request_body("openai/gpt-6-luna", &p, r, "ну привет", &ctx(), &[]);
         let routed = complete_routed_at(&url, &http(), KEY, first, LONG, body).await;
         (routed, api)
     }
@@ -1003,7 +1022,7 @@ mod tests {
         let api = fake_api(|_, _, _| reply(401, r#"{"error":{"code":401,"message":"bad key"}}"#)).await;
         let url = format!("{}/api/v1/chat/completions", api.base);
         let p = profile(true, Reasoning::EffortNone, false);
-        let r = complete_routed_at(&url, &http(), KEY, Routing::STRICT, LONG, |rt| request_body("m", &p, rt, "да", &ctx())).await;
+        let r = complete_routed_at(&url, &http(), KEY, Routing::STRICT, LONG, |rt| request_body("m", &p, rt, "да", &ctx(), &[])).await;
         assert!(r.result.unwrap_err().error.is_key_problem());
         assert_eq!((r.routing, r.refusals.len(), api.calls().len()), (Routing::STRICT, 0, 1));
     }
@@ -1016,7 +1035,7 @@ mod tests {
         let pieces = vec![stream("\n").into_bytes()];
         let api = fake_api(move |_, _, _| Reply::Stream(200, pieces.clone(), Duration::from_millis(50))).await;
         let (http, url) = (http(), format!("{}/api/v1/chat/completions", api.base));
-        let body = request_body("openai/gpt-6-luna", &profile(true, Reasoning::EffortNone, false), Routing::STRICT, "ну привет", &ctx());
+        let body = request_body("openai/gpt-6-luna", &profile(true, Reasoning::EffortNone, false), Routing::STRICT, "ну привет", &ctx(), &[]);
         for _ in 0..3 {
             let t0 = Instant::now();
             complete_at(&url, &http, KEY, &body, LONG).await.unwrap();

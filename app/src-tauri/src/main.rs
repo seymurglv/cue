@@ -85,6 +85,9 @@ fn setup(
     // the Drop window and the tray menu both get it.
     let lang = lang::Lang::resolve(settings.ui.language, lang::Lang::detect);
     tracing::info!(lang = lang.code(), setting = ?settings.ui.language, "interface language");
+    // Counts only: the terms themselves stay out of the log.
+    let terms = cue_core::refine::usable_terms(&settings.dictionary.terms).len();
+    tracing::info!(terms, skipped = settings.dictionary.terms.len() - terms, "dictionary");
     let ui = ipc::Ui::new(app.handle().clone());
     let win = drop_window::create(app.handle(), lang)?;
     drop_window::spawn_hit_test(win.clone(), app.state::<drop_window::HitState>().inner().clone());

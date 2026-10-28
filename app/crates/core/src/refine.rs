@@ -44,6 +44,44 @@ The text before the cursor is context only: never repeat or change it.
 Return only the cleaned text, in the language it was spoken in \
 (English speech stays English, even though most examples here are Russian), in the `text` field.";
 
+/// The start of the dictionary block ([`terms_prompt`]); the terms follow, one per line. Conservative: a term
+/// replaces only what clearly means it, and nothing else changes because of the list.
+const TERMS_INTRO: &str = "\
+Names and terms the user often says. When the speech clearly refers to one of them, even if the transcript spells it \
+differently, splits it into parts or mixes alphabets, write it exactly as listed. \
+Don't add a term the user didn't say, and don't change other words because of this list.";
+
+/// A longer entry is more likely a pasted sentence than a name: it is skipped, not cut.
+pub const MAX_TERM_CHARS: usize = 60;
+/// Entries past this many are skipped.
+pub const MAX_TERMS: usize = 200;
+
+/// The dictionary entries (`dictionary.terms`) that go into the request, in the user's order: trimmed (a line break at
+/// an edge goes with the spaces); empty ones, ones with a line break or another control character inside, ones longer
+/// than [`MAX_TERM_CHARS`] characters and exact repeats are skipped; at most [`MAX_TERMS`]. Repeats are compared
+/// case-sensitively: "GitHub" and "Github" are both kept.
+pub fn usable_terms(terms: &[String]) -> Vec<&str> {
+    let mut usable: Vec<&str> = Vec::new();
+    for term in terms.iter().map(|t| t.trim()) {
+        if usable.len() == MAX_TERMS {
+            break;
+        }
+        // U+2028 and U+2029 are line breaks too, though not control characters.
+        let one_line = !term.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'));
+        if !term.is_empty() && one_line && term.chars().count() <= MAX_TERM_CHARS && !usable.contains(&term) {
+            usable.push(term);
+        }
+    }
+    usable
+}
+
+/// The dictionary block: a second system block after the unchanged `SYSTEM_PROMPT`. `None` when no usable term is
+/// left: the request is then exactly the one without a dictionary.
+pub fn terms_prompt(terms: &[String]) -> Option<String> {
+    let usable = usable_terms(terms);
+    (!usable.is_empty()).then(|| format!("{TERMS_INTRO}\n\n{}", usable.join("\n")))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RefineContext {
     pub app: String,
@@ -1112,5 +1150,65 @@ mod tests {
             let once = tidy_list_items(text);
             assert_eq!(tidy_list_items(&once), once, "from {text:?}");
         }
+    }
+
+    // The user's dictionary.
+
+    fn terms(list: &[&str]) -> Vec<String> {
+        list.iter().map(|t| t.to_string()).collect()
+    }
+
+    #[test]
+    fn usable_terms_are_trimmed_one_line_and_unique() {
+        let list = terms(&[
+            " Soniox ", "", "   ", "Claude\nHaiku", "Claude\r\nHaiku", "tab\tinside", "line\u{2028}separator", "\u{7}bell",
+            "GitHub\n", "Soniox", "Github", "Claude Haiku",
+        ]);
+        // A line break at an edge is trimmed like a space; one inside drops the entry. Repeats are case-sensitive.
+        assert_eq!(usable_terms(&list), ["Soniox", "GitHub", "Github", "Claude Haiku"]);
+    }
+
+    #[test]
+    fn usable_terms_skip_entries_longer_than_the_limit_in_characters() {
+        assert_eq!(MAX_TERM_CHARS, 60);
+        // 60 Cyrillic letters are 120 bytes: the limit counts characters.
+        let at_limit = "я".repeat(MAX_TERM_CHARS);
+        let list = vec!["a".repeat(MAX_TERM_CHARS + 1), at_limit.clone(), format!("  {at_limit}  ")];
+        assert_eq!(usable_terms(&list), [at_limit.as_str()]);
+    }
+
+    #[test]
+    fn usable_terms_keep_the_first_200() {
+        assert_eq!(MAX_TERMS, 200);
+        // Skipped entries do not count toward the limit.
+        let mut list = terms(&["", "dup", "dup", "a\nb"]);
+        list.extend((0..250).map(|i| format!("term{i}")));
+        let usable = usable_terms(&list);
+        assert_eq!(usable.len(), MAX_TERMS);
+        assert_eq!(usable[..2], ["dup", "term0"]);
+        assert_eq!(usable.last(), Some(&"term198"));
+    }
+
+    #[test]
+    fn terms_prompt_lists_terms_one_per_line_after_the_rules() {
+        let block = terms_prompt(&terms(&["Soniox", " Claude Haiku ", "Soniox", "", "GitHub"])).unwrap();
+        assert_eq!(block, format!("{TERMS_INTRO}\n\nSoniox\nClaude Haiku\nGitHub"));
+        for phrase in [
+            "Names and terms the user often says.",
+            "When the speech clearly refers to one of them, even if the transcript spells it differently, \
+             splits it into parts or mixes alphabets, write it exactly as listed.",
+            "Don't add a term the user didn't say, and don't change other words because of this list.",
+        ] {
+            assert!(TERMS_INTRO.contains(phrase), "missing from the dictionary block: {phrase}");
+        }
+        // One paragraph: source line breaks are joined with a space, no double or trailing spaces.
+        assert!(!TERMS_INTRO.contains('\n') && !TERMS_INTRO.contains("  ") && !TERMS_INTRO.ends_with(' '));
+        assert!(!SYSTEM_PROMPT.contains("Names and terms"), "the dictionary block is separate from the cached prompt");
+    }
+
+    #[test]
+    fn no_usable_terms_means_no_block() {
+        assert_eq!(terms_prompt(&[]), None);
+        assert_eq!(terms_prompt(&terms(&["", "  ", "a\nb", &"x".repeat(MAX_TERM_CHARS + 1)])), None);
     }
 }

@@ -1,7 +1,8 @@
 //! Comparing refine models through OpenRouter: speed, price and outcome on a set of synthetic dictations.
 //!
 //! Run:
-//! cargo run -p cue-engines --example refine_compare -- phrases.json out.json [--models a,b,…] [--runs 3] [--max-usd 1.00] [--dry-run]
+//! cargo run -p cue-engines --example refine_compare -- phrases.json out.json [--models a,b,…] [--runs 3] [--max-usd 1.00]
+//!   [--terms a,b,…] [--dry-run]
 //!
 //! - `phrases.json` is an array of `{id, app, raw, before_cursor?}`; `out.json` gets all calls and the summary.
 //! - Models are OpenRouter ids (`openai/gpt-6-luna`) and `claude-haiku-5-5` — the app's current path (Anthropic direct,
@@ -10,6 +11,8 @@
 //!   (cold), reported separately in the summary; medians and p90 are over warm calls.
 //! - The prompt, the context and the response check are the same as in the app: `cue_core::refine`, then `strip_markup`,
 //!   `tidy_list_items` and `sanity_ok` (all via `claude::decide`) with default settings.
+//! - `--terms` is a dictionary, comma-separated, sent to every model the way the app sends `dictionary.terms`;
+//!   without it, none (as with an empty dictionary).
 //! - Stops as soon as more than `--max-usd` has been spent. `--dry-run` only checks the keys, the phrases and the model list,
 //!   without paid requests.
 //!
@@ -50,7 +53,7 @@ const DEFAULT_MODELS: [&str; 10] = [
 /// Request timeout through OpenRouter — well above the app's timeout (3 s), so the whole latency tail is visible.
 const ROUTER_TIMEOUT: Duration = Duration::from_secs(30);
 
-const USAGE: &str = "refine_compare <phrases.json> <out.json> [--models a,b,…] [--runs N] [--max-usd X] [--dry-run]";
+const USAGE: &str = "refine_compare <phrases.json> <out.json> [--models a,b,…] [--runs N] [--max-usd X] [--terms a,b,…] [--dry-run]";
 
 #[derive(Debug, PartialEq)]
 struct Args {
@@ -59,12 +62,14 @@ struct Args {
     models: Vec<String>,
     runs: usize,
     max_usd: f64,
+    /// The dictionary, as `dictionary.terms` in settings.json.
+    terms: Vec<String>,
     dry_run: bool,
 }
 
 fn parse_args(args: &[String]) -> anyhow::Result<Args> {
     let mut positional = Vec::new();
-    let (mut models, mut runs, mut max_usd, mut dry_run) = (None, 3, 1.0, false);
+    let (mut models, mut runs, mut max_usd, mut terms, mut dry_run) = (None, 3, 1.0, Vec::new(), false);
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let mut value = || it.next().with_context(|| format!("{arg} needs a value\n{USAGE}"));
@@ -82,6 +87,12 @@ fn parse_args(args: &[String]) -> anyhow::Result<Args> {
             "--max-usd" => {
                 max_usd = value()?.parse().ok().filter(|x: &f64| x.is_finite() && *x > 0.0).context("--max-usd: a number greater than 0")?
             }
+            "--terms" => {
+                terms = value()?.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
+                if terms.is_empty() {
+                    bail!("--terms: empty list");
+                }
+            }
             "--dry-run" => dry_run = true,
             flag if flag.starts_with("--") => bail!("unknown flag {flag}\n{USAGE}"),
             _ => positional.push(PathBuf::from(arg)),
@@ -92,7 +103,7 @@ fn parse_args(args: &[String]) -> anyhow::Result<Args> {
     if models.is_empty() {
         bail!("--models: empty list");
     }
-    Ok(Args { phrases, out, models, runs, max_usd, dry_run })
+    Ok(Args { phrases, out, models, runs, max_usd, terms, dry_run })
 }
 
 #[derive(Debug, Deserialize)]
@@ -227,9 +238,9 @@ fn ms(d: Duration) -> u64 {
 }
 
 /// The app's direct path — `claude::refine` as is (its timeout is `timeout_ms`, 3 s); total time only.
-async fn direct_call(http: &reqwest::Client, key: &str, p: &Phrase, ctx: &RefineContext, s: &RefineSettings) -> Call {
+async fn direct_call(http: &reqwest::Client, key: &str, p: &Phrase, ctx: &RefineContext, terms: &[String], s: &RefineSettings) -> Call {
     let t0 = Instant::now();
-    let r = claude::refine(http, Some(key), DIRECT, &p.raw, ctx, s).await;
+    let r = claude::refine(http, Some(key), DIRECT, &p.raw, ctx, terms, s).await;
     let total_ms = ms(t0.elapsed());
     let u = r.usage;
     let cost = cue_core::usage::refine_cost(
@@ -271,9 +282,10 @@ async fn router_call(
     routing: &mut Routing,
     p: &Phrase,
     ctx: &RefineContext,
+    terms: &[String],
     s: &RefineSettings,
 ) -> Call {
-    let body = |r: Routing| openrouter::request_body(id, profile, r, &p.raw, ctx);
+    let body = |r: Routing| openrouter::request_body(id, profile, r, &p.raw, ctx, terms);
     let routed = openrouter::complete_routed(http, key, *routing, ROUTER_TIMEOUT, body).await;
     let (result, used, elapsed) = (routed.result, routed.routing, ms(routed.elapsed));
     if result.is_ok() {
@@ -461,6 +473,7 @@ impl Report<'_> {
             "phrases_file": self.args.phrases.display().to_string(),
             "runs": self.args.runs,
             "max_usd": self.args.max_usd,
+            "terms": self.args.terms,
             "router_timeout_ms": ms(ROUTER_TIMEOUT),
             "planned_calls": self.planned,
             "done_calls": self.calls.len(),
@@ -581,6 +594,9 @@ async fn main() -> anyhow::Result<()> {
         args.runs,
         args.max_usd
     );
+    if !args.terms.is_empty() {
+        println!("dictionary: {} entries", args.terms.len());
+    }
     for l in &lanes {
         match &l.engine {
             Engine::Direct => println!("  {:<30} Anthropic direct (claude::refine)", l.id),
@@ -609,10 +625,10 @@ async fn main() -> anyhow::Result<()> {
                 let cold = lane.calls == 0;
                 lane.calls += 1;
                 let mut call = match &lane.engine {
-                    Engine::Direct => direct_call(&http, direct_key.as_deref().unwrap_or_default(), p, &ctx, &s).await,
+                    Engine::Direct => direct_call(&http, direct_key.as_deref().unwrap_or_default(), p, &ctx, &args.terms, &s).await,
                     Engine::Router { info, profile } => {
                         let key = router_key.as_deref().unwrap_or_default();
-                        router_call(&http, key, &lane.id, info, profile, &mut lane.routing, p, &ctx, &s).await
+                        router_call(&http, key, &lane.id, info, profile, &mut lane.routing, p, &ctx, &args.terms, &s).await
                     }
                 };
                 call.seq = calls.len() + 1;
@@ -653,6 +669,7 @@ mod tests {
         assert_eq!((a.phrases, a.out), (PathBuf::from("p.json"), PathBuf::from("o.json")));
         assert_eq!(a.models, DEFAULT_MODELS.map(str::to_owned).to_vec());
         assert_eq!((a.runs, a.max_usd, a.dry_run), (3, 1.0, false));
+        assert!(a.terms.is_empty(), "no dictionary by default");
         assert_eq!(DEFAULT_MODELS.len(), 10);
     }
 
@@ -661,6 +678,8 @@ mod tests {
         let a = args(&["--runs", "5", "p.json", "--models", " openai/gpt-6-luna, claude-haiku-5-5,openai/gpt-6-luna,", "o.json", "--max-usd", "0.25", "--dry-run"]).unwrap();
         assert_eq!(a.models, ["openai/gpt-6-luna", "claude-haiku-5-5"], "spaces and repeats are removed");
         assert_eq!((a.runs, a.max_usd, a.dry_run), (5, 0.25, true));
+        let a = args(&["p.json", "o.json", "--terms", " Soniox, Claude Haiku,,GitHub "]).unwrap();
+        assert_eq!(a.terms, ["Soniox", "Claude Haiku", "GitHub"], "spaces around entries and empty entries are removed");
     }
 
     #[test]
@@ -673,6 +692,8 @@ mod tests {
             &["p.json", "o.json", "--max-usd", "-1"],
             &["p.json", "o.json", "--max-usd", "NaN"],
             &["p.json", "o.json", "--models", " , "],
+            &["p.json", "o.json", "--terms"],
+            &["p.json", "o.json", "--terms", " , "],
             &["p.json", "o.json", "--fast"],
         ] {
             assert!(args(bad).is_err(), "{bad:?}");

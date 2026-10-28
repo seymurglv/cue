@@ -9,8 +9,8 @@
 //! - Transcription: `soniox` is the stream at speech pace (latency from the end of audio to the final result, like "finalize" in the app),
 //!   `soniox-async` is a batch call on the same file (latency is the whole call); both run at once. At the end of audio, like the app
 //!   on the second press, the connection to Anthropic is warmed up (HEAD without a key).
-//! - Refine runs on the stream text (if the stream failed, on the batch text), each model in turn: the same request, sanity
-//!   check and timeout as in the app (`claude::refine`). Models come from settings.json.
+//! - Refine runs on the stream text (if the stream failed, on the batch text), each model in turn: the same request (with
+//!   `dictionary.terms`), sanity check and timeout as in the app (`claude::refine`). Models come from settings.json.
 //! - Before the first measurement there is a warm-up: one request per model; it is not in the report, but it is in the spend.
 //! - Spending limit `--max-usd` (default $1): once reached, no new paid calls start; what was collected is saved.
 //! - Ctrl+C means "finish what was sent and stop": the current recording's stream is interrupted, its batch call
@@ -290,10 +290,11 @@ fn refine_input(stream: &SttRun, batch: &SttRun) -> Option<String> {
     (!source.text.trim().is_empty()).then(|| source.text.clone())
 }
 
-/// One refine request — the same as in the app (`claude::refine`: request, check, timeout). Latency is the whole call.
+/// One refine request — the same as in the app (`claude::refine`: request with the dictionary from settings, check,
+/// timeout). Latency is the whole call.
 async fn refine_once(http: &reqwest::Client, key: &str, model: &str, raw: &str, ctx: &RefineContext, s: &Settings) -> RefineRun {
     let t0 = Instant::now();
-    let r = claude::refine(http, Some(key), model, raw, ctx, &s.refine).await;
+    let r = claude::refine(http, Some(key), model, raw, ctx, &s.dictionary.terms, &s.refine).await;
     let latency_ms = ms(t0.elapsed());
     let u = r.usage;
     RefineRun {

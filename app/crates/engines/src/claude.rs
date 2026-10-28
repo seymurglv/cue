@@ -1,6 +1,6 @@
 //! Refine through Claude. Never "fails": on any problem it returns the raw text and the reason.
 use cue_core::flow::RefineOutcome;
-use cue_core::refine::{max_tokens, sanity_ok, strip_markup, tidy_list_items, timeout_ms, user_message, RefineContext, SYSTEM_PROMPT};
+use cue_core::refine::{max_tokens, sanity_ok, strip_markup, terms_prompt, tidy_list_items, timeout_ms, user_message, RefineContext, SYSTEM_PROMPT};
 use cue_core::settings::RefineSettings;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -25,13 +25,24 @@ fn thinking_for(model: &str) -> Option<Value> {
 
 /// Messages API request body: the system prompt with a cache mark, a response strictly in the `{"text": …}` schema,
 /// low effort, thinking per model ([`thinking_for`]).
-pub fn request_body(model: &str, raw: &str, ctx: &RefineContext) -> Value {
+///
+/// The user's dictionary `terms` go in a second system block after the unchanged prompt ([`terms_prompt`]), and the
+/// cache mark moves to that last block: the cached prefix covers both. With no usable term the body is the same, byte
+/// for byte, as without a dictionary.
+pub fn request_body(model: &str, raw: &str, ctx: &RefineContext, terms: &[String]) -> Value {
     let thinking = thinking_for(model);
     let budget = max_tokens(raw) + if thinking.is_none() { THINKING_HEADROOM } else { 0 };
+    let system = match terms_prompt(terms) {
+        None => json!([{ "type": "text", "text": SYSTEM_PROMPT, "cache_control": { "type": "ephemeral" } }]),
+        Some(block) => json!([
+            { "type": "text", "text": SYSTEM_PROMPT },
+            { "type": "text", "text": block, "cache_control": { "type": "ephemeral" } }
+        ]),
+    };
     let mut v = json!({
         "model": model,
         "max_tokens": budget,
-        "system": [{ "type": "text", "text": SYSTEM_PROMPT, "cache_control": { "type": "ephemeral" } }],
+        "system": system,
         "messages": [{ "role": "user", "content": user_message(ctx, raw) }],
         "output_config": {
             "effort": "low",
@@ -140,15 +151,17 @@ pub struct RefineResult {
 
 /// One refine request. With no key, on a network failure, timeout, refusal or unusable response — the raw text.
 /// A failure writes one log line — the reason and the outcome: no raw text, no refined text, no response body.
+/// `terms` is the user's dictionary (`dictionary.terms`), see [`request_body`].
 pub async fn refine(
     http: &reqwest::Client,
     key: Option<&str>,
     model: &str,
     raw: &str,
     ctx: &RefineContext,
+    terms: &[String],
     s: &RefineSettings,
 ) -> RefineResult {
-    refine_at(API_URL, http, key, model, raw, ctx, s).await
+    refine_at(API_URL, http, key, model, raw, ctx, terms, s).await
 }
 
 /// Timeout headroom for a model whose thinking cannot be turned off (Opus 5.5): thinking runs before the response,
@@ -161,6 +174,7 @@ fn request_timeout_ms(model: &str, raw: &str) -> u64 {
 }
 
 /// [`refine`] against the URL `url`; tests substitute their own service.
+#[allow(clippy::too_many_arguments)]
 async fn refine_at(
     url: &str,
     http: &reqwest::Client,
@@ -168,6 +182,7 @@ async fn refine_at(
     model: &str,
     raw: &str,
     ctx: &RefineContext,
+    terms: &[String],
     s: &RefineSettings,
 ) -> RefineResult {
     let Some(key) = key else {
@@ -179,7 +194,7 @@ async fn refine_at(
         .header("anthropic-version", API_VERSION)
         .header("content-type", "application/json")
         .timeout(std::time::Duration::from_millis(request_timeout_ms(model, raw)))
-        .json(&request_body(model, raw, ctx))
+        .json(&request_body(model, raw, ctx, terms))
         .send()
         .await;
     let resp = match send {
@@ -229,7 +244,7 @@ mod tests {
 
     #[test]
     fn body_for_haiku() {
-        let v = request_body("claude-haiku-5-5", "ну привет", &ctx());
+        let v = request_body("claude-haiku-5-5", "ну привет", &ctx(), &[]);
         assert_eq!(v["model"], "claude-haiku-5-5");
         assert_eq!(v["max_tokens"], 521);
         assert_eq!(v["thinking"], json!({"type": "disabled"}));
@@ -242,18 +257,64 @@ mod tests {
         assert!(v.get("temperature").is_none() && v.get("top_p").is_none() && v.get("top_k").is_none());
     }
 
+    /// The body as sent before the dictionary existed, byte for byte.
+    fn golden_body() -> String {
+        format!(
+            concat!(
+                r#"{{"max_tokens":521,"messages":[{{"content":"<app>Telegram Desktop</app>\n<transcript>ну привет</transcript>","role":"user"}}],"#,
+                r#""model":"claude-haiku-5-5","output_config":{{"effort":"low","format":{{"schema":{{"additionalProperties":false,"#,
+                r#""properties":{{"text":{{"type":"string"}}}},"required":["text"],"type":"object"}},"type":"json_schema"}}}},"#,
+                r#""system":[{{"cache_control":{{"type":"ephemeral"}},"text":{prompt},"type":"text"}}],"thinking":{{"type":"disabled"}}}}"#
+            ),
+            prompt = serde_json::to_string(SYSTEM_PROMPT).unwrap()
+        )
+    }
+
+    /// With no usable term the body is the one sent before the dictionary existed, byte for byte: the cached prefix
+    /// stays the same, so an update brings no cache write.
+    #[test]
+    fn body_without_terms_is_unchanged() {
+        let unusable = ["".to_owned(), "  ".to_owned(), "Claude\nHaiku".to_owned(), "x".repeat(61)];
+        for terms in [&[][..], &unusable[..]] {
+            let body = serde_json::to_string(&request_body("claude-haiku-5-5", "ну привет", &ctx(), terms)).unwrap();
+            assert_eq!(body, golden_body(), "{terms:?}");
+        }
+    }
+
+    #[test]
+    fn terms_go_in_a_second_system_block_with_the_cache_mark() {
+        let terms = vec!["Soniox".to_owned(), " GitHub ".to_owned()];
+        let with = request_body("claude-haiku-5-5", "ну привет", &ctx(), &terms);
+        // The prompt block comes first, unchanged; the mark is on the last block, so the cached prefix covers both.
+        let block = "Names and terms the user often says. When the speech clearly refers to one of them, even if the transcript \
+                     spells it differently, splits it into parts or mixes alphabets, write it exactly as listed. Don't add a term \
+                     the user didn't say, and don't change other words because of this list.\n\nSoniox\nGitHub";
+        let expected = json!([
+            { "type": "text", "text": SYSTEM_PROMPT },
+            { "type": "text", "text": block, "cache_control": { "type": "ephemeral" } }
+        ]);
+        assert_eq!(with["system"], expected);
+        // Nothing else in the body changes.
+        let mut rest = with.clone();
+        rest["system"] = request_body("claude-haiku-5-5", "ну привет", &ctx(), &[])["system"].clone();
+        assert_eq!(serde_json::to_string(&rest).unwrap(), golden_body());
+        for model in ["claude-sonnet-5-5", "claude-opus-5-5"] {
+            assert_eq!(request_body(model, "x", &ctx(), &terms)["system"], expected, "{model}");
+        }
+    }
+
     #[test]
     fn thinking_per_model() {
-        assert_eq!(request_body("claude-sonnet-5-5", "x", &ctx())["thinking"], json!({"type": "between_tools"}));
-        assert!(request_body("claude-opus-5-5", "x", &ctx()).get("thinking").is_none());
+        assert_eq!(request_body("claude-sonnet-5-5", "x", &ctx(), &[])["thinking"], json!({"type": "between_tools"}));
+        assert!(request_body("claude-opus-5-5", "x", &ctx(), &[]).get("thinking").is_none());
     }
 
     #[test]
     fn opus_gets_thinking_headroom() {
         let raw = "ну привет";
-        assert_eq!(request_body("claude-haiku-5-5", raw, &ctx())["max_tokens"], max_tokens(raw));
-        assert_eq!(request_body("claude-sonnet-5-5", raw, &ctx())["max_tokens"], max_tokens(raw));
-        assert_eq!(request_body("claude-opus-5-5", raw, &ctx())["max_tokens"], max_tokens(raw) + THINKING_HEADROOM);
+        assert_eq!(request_body("claude-haiku-5-5", raw, &ctx(), &[])["max_tokens"], max_tokens(raw));
+        assert_eq!(request_body("claude-sonnet-5-5", raw, &ctx(), &[])["max_tokens"], max_tokens(raw));
+        assert_eq!(request_body("claude-opus-5-5", raw, &ctx(), &[])["max_tokens"], max_tokens(raw) + THINKING_HEADROOM);
         assert_eq!(THINKING_HEADROOM, 2_048);
     }
 
@@ -368,7 +429,7 @@ mod tests {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let (logs, _guard) = capture_logs();
         let url = format!("{}/v1/messages", api.base);
-        let r = refine_at(&url, &http, key, "claude-haiku-5-5", RAW, &ctx(), &RefineSettings::default()).await;
+        let r = refine_at(&url, &http, key, "claude-haiku-5-5", RAW, &ctx(), &[], &RefineSettings::default()).await;
         let lines = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::claude")).cloned().collect();
         (r, lines, api)
     }
@@ -407,10 +468,22 @@ mod tests {
         assert_eq!(req.header("anthropic-version"), ["2026-10-21"]);
         assert_eq!(req.header("content-type"), ["application/json"], "exactly one content-type");
         let body: Value = serde_json::from_slice(&req.body).unwrap();
-        assert_eq!(body, request_body("claude-haiku-5-5", RAW, &ctx()));
+        assert_eq!(body, request_body("claude-haiku-5-5", RAW, &ctx(), &[]));
+        assert_eq!(req.body, serde_json::to_vec(&body).unwrap(), "the body goes out exactly as `request_body` serializes");
         for banned in ["temperature", "top_p", "top_k"] {
             assert!(body.get(banned).is_none(), "{banned} is not sent");
         }
+    }
+
+    #[tokio::test]
+    async fn refine_sends_the_dictionary() {
+        let api = fake_api(|_, _, _| reply(200, &message("Привет, как дела?", "end_turn"))).await;
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("{}/v1/messages", api.base);
+        let terms = vec!["Soniox".to_owned()];
+        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", RAW, &ctx(), &terms, &RefineSettings::default()).await;
+        assert_eq!(r.outcome, RefineOutcome::Refined);
+        assert_eq!(api.body(0), serde_json::to_vec(&request_body("claude-haiku-5-5", RAW, &ctx(), &terms)).unwrap());
     }
 
     #[tokio::test]

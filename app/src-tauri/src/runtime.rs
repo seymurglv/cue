@@ -611,10 +611,11 @@ impl Runtime {
             self.attempt.refine_started(now);
         }
         let (http, s, tx) = (self.http.clone(), self.settings.refine.clone(), self.tx.clone());
+        let terms = self.settings.dictionary.terms.clone();
         let old = self.refine_task.start(id, |task| {
             tokio::spawn(async move {
                 let fallback_raw = raw.clone();
-                let body = claude::refine(&http, key.as_deref(), &s.model, &raw, &ctx, &s);
+                let body = claude::refine(&http, key.as_deref(), &s.model, &raw, &ctx, &terms, &s);
                 let result = guarded("refine", body, move || refine_panicked(fallback_raw)).await;
                 let _ = tx.send(CoreEvent::RefineDone { id, task, result });
             })

@@ -125,6 +125,14 @@ session and does not overwrite it. The defaults:
 - `ui.language`: the language of the tray menu and the Drop. `"auto"` (the default) follows the Windows display
   language, `"en"` and `"ru"` fix it (case and surrounding spaces do not matter), any other value means `"auto"`. The
   value is kept in the file only when it is `"en"` or `"ru"`. Example: `"ui": { "language": "ru" }`.
+- `dictionary.terms`: names and terms you often say, written as they should appear. Example:
+  `"dictionary": { "terms": ["Soniox", "Claude Haiku", "GitHub"] }`. When the transcript clearly means one of them but
+  spells it differently, splits it or mixes alphabets (`Со niox`, `гитхаб`, `git hub`), the cleanup writes it as
+  listed. The list affects only the Claude cleanup, where it rides along with the cached system prompt and costs
+  almost nothing. It is not sent to Soniox as recognition context: Soniox bills context tokens on every dictation,
+  which would roughly double the cost of recognition. Entries are trimmed; empty ones, ones with a line break, ones
+  longer than 60 characters and exact repeats (case-sensitive) are skipped, and only the first 200 are used. A value
+  that is not a list reads as an empty list. The block is kept in the file only when the list is not empty.
 - `pricing` (not written unless you change it): `soniox_rt_per_hour`, `soniox_async_per_hour`, and a `claude` list
   of `{model, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok}` in USD. Defaults:
   Soniox $0.12 / hour (stream) and $0.10 / hour (batch); Haiku 5.5 $0.10 / $0.50, Sonnet 5.5 $2 / $10,
@@ -175,9 +183,10 @@ it. It does not tune the thresholds.
    ```
 
    Each recording is transcribed twice in parallel: Soniox stream at real-time pace and Soniox batch. The transcript
-   is then cleaned by `refine.model` and every model in the `pricing.claude` list, with the same request, sanity check
-   and timeout as the app. `--max-usd` (default $1) stops new paid calls once reached. The first `Ctrl+C` finishes the
-   work already sent and stops; a second one exits at once. Results are saved after every recording.
+   is then cleaned by `refine.model` and every model in the `pricing.claude` list, with the same request (including
+   `dictionary.terms`), sanity check and timeout as the app. `--max-usd` (default $1) stops new paid calls once
+   reached. The first `Ctrl+C` finishes the work already sent and stops; a second one exits at once. Results are saved
+   after every recording.
 3. Open `report.html` from the run folder. It shows blind A/B pairs for transcription and for refine, then the scores,
    latency and cost per dictation. **Save choices** downloads your answers as `choices.json`.
 
@@ -188,9 +197,10 @@ it. It does not tune the thresholds.
 - **Soniox** receives the audio of each dictation while you record, plus the name of the app you are dictating into
   as context. On fallback or Retry, the saved WAV is uploaded to the batch API; CUE deletes the uploaded file and its
   transcription right after use and retries the deletion in the background for about 15 minutes if it fails.
-- **Anthropic** receives the transcript, the app name, and up to `refine.context_chars` (500) characters of text
-  before the caret. Nothing is read from password fields, and the window title is never sent. While you record, CUE
-  also sends an empty `HEAD` request without a key to open the connection early, so cleanup starts faster.
+- **Anthropic** receives the transcript, the app name, up to `refine.context_chars` (500) characters of text
+  before the caret, and your `dictionary.terms`. Nothing is read from password fields, and the window title is never
+  sent. While you record, CUE also sends an empty `HEAD` request without a key to open the connection early, so
+  cleanup starts faster.
 - The microphone is open only while CUE is recording.
 - **Stays on this computer:** the last dictation's audio and text, recordings saved for the bench, settings, logs and
   usage rows. Logs and `usage.csv` never contain dictation text; a crash records only the thread and code location,

@@ -1,5 +1,5 @@
-//! settings.json: engine and models, refine thresholds, the hint counter, bench, interface language,
-//! prices for usage accounting.
+//! settings.json: engine and models, refine thresholds, the hint counter, bench, interface language, the user's
+//! dictionary, prices for usage accounting.
 use serde::{Deserialize, Deserializer, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -72,6 +72,31 @@ pub struct UiSettings {
     pub language: UiLanguage,
 }
 
+/// Names and terms the user often says (product names, people, jargon), written as they should appear. Only the
+/// refine request gets them, as a cached block after the system prompt (`refine::terms_prompt`, which also drops
+/// unusable entries); Soniox does not: it bills context tokens on every dictation.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DictionarySettings {
+    #[serde(deserialize_with = "strings_or_nothing")]
+    pub terms: Vec<String>,
+}
+
+/// A list of strings, kept as written (trimming and the other rules apply on use). Anything other than a list
+/// (a string, a number, `null`) reads as an empty list and items that are not strings are skipped, so a typo in this
+/// field never makes the whole file unreadable.
+fn strings_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let serde_json::Value::Array(items) = value else { return Ok(Vec::new()) };
+    Ok(items
+        .into_iter()
+        .filter_map(|item| match item {
+            serde_json::Value::String(s) => Some(s),
+            _ => None,
+        })
+        .collect())
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelPrice {
     pub model: String,
@@ -99,6 +124,9 @@ pub struct Settings {
     /// Not written while it is the default (`auto`), like `pricing`: files of users who never set it stay as they were.
     #[serde(skip_serializing_if = "UiSettings::is_default")]
     pub ui: UiSettings,
+    /// Not written while the list is empty, like `ui`.
+    #[serde(skip_serializing_if = "DictionarySettings::is_default")]
+    pub dictionary: DictionarySettings,
     /// Default prices are not written to the file, so a price fix in the code also reaches existing installs.
     /// If the user changed even one price, the whole block is written.
     #[serde(skip_serializing_if = "Pricing::is_default")]
@@ -157,12 +185,19 @@ impl Default for Settings {
             hold_hints_left: 2,
             bench: BenchSettings::default(),
             ui: UiSettings::default(),
+            dictionary: DictionarySettings::default(),
             pricing: Pricing::default(),
         }
     }
 }
 
 impl UiSettings {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl DictionarySettings {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -246,6 +281,7 @@ mod tests {
         assert_eq!(s.hold_hints_left, 2);
         assert!(!s.bench.save_recordings);
         assert_eq!(s.ui.language, UiLanguage::Auto);
+        assert!(s.dictionary.terms.is_empty());
         assert_eq!(s.pricing.soniox_rt_per_hour, 0.12);
         let haiku = s.pricing.claude_price("claude-haiku-5-5").unwrap();
         assert_eq!((haiku.input_per_mtok, haiku.output_per_mtok), (0.10, 0.50));
@@ -513,6 +549,57 @@ mod tests {
             assert_eq!(json["ui"], serde_json::json!({ "language": code }));
             assert_eq!(load(&p).unwrap(), s);
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dictionary_terms_are_read_as_written() {
+        let s: Settings = serde_json::from_str(r#"{"dictionary":{"terms":["Soniox"," GitHub ","Soniox",""],"future":1}}"#).unwrap();
+        // Trimming, repeats and empty entries are handled on use (`refine::terms_prompt`), not on load.
+        assert_eq!(s.dictionary.terms, ["Soniox", " GitHub ", "Soniox", ""]);
+        assert_eq!(s.stt, SttSettings::default());
+    }
+
+    #[test]
+    fn file_without_dictionary_has_no_terms() {
+        for text in [r#"{"hold_hints_left":1}"#, r#"{"dictionary":{}}"#, r#"{"dictionary":{"terms":[]}}"#] {
+            let s: Settings = serde_json::from_str(text).unwrap();
+            assert!(s.dictionary.terms.is_empty(), "{text}");
+        }
+    }
+
+    /// A typo in the list never makes the whole file unreadable: anything but a list reads as an empty list,
+    /// items that are not strings are skipped, the rest of the file still loads.
+    #[test]
+    fn invalid_terms_read_as_empty_or_are_skipped() {
+        for value in [r#""Soniox""#, "5", "null", "true", "{}"] {
+            let text = format!(r#"{{"dictionary":{{"terms":{value}}},"hold_hints_left":0}}"#);
+            let s: Settings = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{value}: {e}"));
+            assert!(s.dictionary.terms.is_empty(), "{value}");
+            assert_eq!(s.hold_hints_left, 0, "{value}");
+        }
+        let s: Settings = serde_json::from_str(r#"{"dictionary":{"terms":["Soniox",5,null,["x"],{"a":1},true,"CUE"]}}"#).unwrap();
+        assert_eq!(s.dictionary.terms, ["Soniox", "CUE"]);
+    }
+
+    /// Like `ui`: an empty list (also an explicit one) is not written back; a list with terms is, and survives a roundtrip.
+    #[test]
+    fn empty_dictionary_is_not_written_and_terms_are() {
+        let dir = tmp("dictionary");
+        let p = dir.join("settings.json");
+        let written = |p: &Path| serde_json::from_slice::<serde_json::Value>(&std::fs::read(p).unwrap()).unwrap();
+        save(&Settings::default(), &p).unwrap();
+        assert!(written(&p).get("dictionary").is_none(), "an empty dictionary ended up in the file");
+
+        std::fs::write(&p, r#"{"dictionary":{"terms":[]},"hold_hints_left":2}"#).unwrap();
+        save(&load(&p).unwrap(), &p).unwrap();
+        assert!(written(&p).get("dictionary").is_none(), "an explicit empty list was written back");
+
+        let mut s = Settings::default();
+        s.dictionary.terms = vec!["Soniox".into(), " Claude Haiku".into()];
+        save(&s, &p).unwrap();
+        assert_eq!(written(&p)["dictionary"], serde_json::json!({ "terms": ["Soniox", " Claude Haiku"] }));
+        assert_eq!(load(&p).unwrap(), s);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

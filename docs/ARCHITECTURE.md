@@ -10,8 +10,8 @@ a real clock.
 - **`cue-core`** (`app/crates/core`): no Windows APIs, no network, no clock (time is passed in).
   - `flow`: the dictation state machine `Flow`. `handle(input, now_ms)` returns a list of `Effect`s.
   - `ui`: `UiState`, `UiPhase`, `ErrorCause`, `TrayKind`, `UiAction`, shared with TypeScript as JSON.
-  - `refine`: the system prompt, the user message, timeout and token budget, the sanity check, Markdown stripping,
-    list tidying, and the join space before a paste.
+  - `refine`: the system prompt, the dictionary block, the user message, timeout and token budget, the sanity check,
+    Markdown stripping, list tidying, and the join space before a paste.
   - `audio`: resampling to 16 kHz mono, voice level, the "microphone is silent" detector.
   - `settings`, `usage` (CSV rows, costs, monthly summary), `paths`.
 - **`cue-engines`** (`app/crates/engines`): `stt` (session facade, ~100 ms chunks, batch fallback), `soniox`
@@ -116,9 +116,16 @@ recording in progress.
   Password fields are never read; the app name comes from the executable's file description, never the window title.
 - The request: the system prompt as a cached block, a user message with `<app>`, `<before_cursor>` and `<transcript>`
   tags (closing tags inside the data are defused), effort `low`, thinking disabled where the model allows it, and a
-  JSON schema that forces `{"text": …}`. Timeout: 3 s plus 1 s per 100 words. When the app is unknown (neither
-  the query at the start of recording nor the one after the second press named it), the request carries
-  `<app>unknown app</app>`; Soniox gets no app context in that case.
+  JSON schema that forces `{"text": …}`. Timeout: 3 s plus 1 s per 100 words.
+- The user's dictionary (`dictionary.terms`) goes in a second system block after the unchanged prompt: a short rule
+  (write a listed name exactly as listed when the speech clearly means it, even if the transcript spells it
+  differently, splits it or mixes alphabets; add none the user did not say and change no other word because of the
+  list) and the terms, one per line. The cache mark sits on the last system block, so the cached prefix covers the
+  prompt and the list together; editing the list costs one cache write. Entries are trimmed, and empty, multi-line,
+  overlong (over 60 characters) and repeated ones are dropped, at most 200 kept. With no usable term the request is
+  byte for byte the one without a dictionary. Soniox never gets the terms: it bills context tokens on every dictation.
+- When the app is unknown (neither the query at the start of recording nor the one after the second press named it),
+  the request carries `<app>unknown app</app>`; Soniox gets no app context in that case.
 - The answer is used only when it is a complete `{"text": …}` object: a refusal, `max_tokens`, a timeout, a network
   error or a bad response all mean the raw transcript is pasted with the normal "Done". Explicit Markdown the speaker
   did not dictate is stripped, and stray commas and semicolons at the end of list items are removed.
@@ -206,7 +213,9 @@ UTF-8 BOM is accepted, and any engine name reads as `soniox`. If the file cannot
 never writes it during that session. Writes (the hold-hint counter) are atomic: a temp file in the same folder, then a
 rename. Default prices are not written to the file, so price fixes in code reach existing installs; once any price is
 edited, the whole block is written. `ui.language` (`auto`, `en`, `ru`, in any case and with spaces trimmed; any other
-value reads as `auto`) is likewise written only when it is not `auto`. Model names are settings, so a new model
+value reads as `auto`) is likewise written only when it is not `auto`, and `dictionary` only when its list is not
+empty. `dictionary.terms` is kept as written; a value that is not a list reads as an empty list and items that are
+not strings are skipped, so a typo there never makes the file unreadable. Model names are settings, so a new model
 version needs no code change.
 
 ## Usage accounting
@@ -226,8 +235,9 @@ covers recordings of 20 s or less.
 
 - Logs go to `%LOCALAPPDATA%\CUE\logs\cue.log.YYYY-MM-DD` through a non-blocking writer at `info` level; old files are
   pruned at startup and daily (7 days, 10 MB).
-- Logged: events, per-stage timings (`stt_ms`, `refine_ms`, `insert_ms`, `latency_ms`), outcomes and error kinds.
-  Never logged: dictation text, text before the caret, audio, API keys, response bodies.
+- Logged: events, per-stage timings (`stt_ms`, `refine_ms`, `insert_ms`, `latency_ms`), outcomes and error kinds;
+  at startup, how many dictionary terms are used and skipped. Never logged: dictation text, text before the caret,
+  dictionary terms, audio, API keys, response bodies.
 - WebSocket handshake tracing is switched off by a fixed filter, since it would include the `Authorization` header.
 - The panic hook is installed first and records only the thread and code location, never the message, which could
   contain dictated text. Debug output of focus results and microphone frames shows only lengths.
@@ -239,9 +249,9 @@ covers recordings of 20 s or less.
 `cue-bench run` reads recordings saved by the app (`%LOCALAPPDATA%\CUE\bench\recordings`, a WAV plus a JSON with the
 app name), and for each one runs the Soniox stream at real-time pace and the batch model at the same time, then
 refines the stream text (or the batch text if the stream failed) with `refine.model` and every model in the price
-list. It uses the app's own code paths, so the request, sanity check and timeouts match. One warm-up call per model
-is excluded from the report but counted in spend. A `--max-usd` budget stops new paid calls; `Ctrl+C` finishes the
-work already sent, and before exiting the bench waits for Soniox cleanup. `results.json` and `report.html` are
-rewritten after each recording in `%LOCALAPPDATA%\CUE\bench\runs\<timestamp>`. The report is a single HTML page with
-blind A/B pairs for transcription and for refine, scores, latency and cost per dictation, and saves the answers as
-`choices.json`.
+list. It uses the app's own code paths and `dictionary.terms`, so the request, sanity check and timeouts match. One
+warm-up call per model is excluded from the report but counted in spend. A `--max-usd` budget stops new paid calls;
+`Ctrl+C` finishes the work already sent, and before exiting the bench waits for Soniox cleanup. `results.json` and
+`report.html` are rewritten after each recording in `%LOCALAPPDATA%\CUE\bench\runs\<timestamp>`. The report is a
+single HTML page with blind A/B pairs for transcription and for refine, scores, latency and cost per dictation, and
+saves the answers as `choices.json`.
