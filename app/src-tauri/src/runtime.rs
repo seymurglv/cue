@@ -100,6 +100,7 @@ pub fn input_of(ev: HotkeyEvent) -> Input {
     match ev {
         HotkeyEvent::ChordDown(mode) => Input::ChordDown(mode),
         HotkeyEvent::ModeChange(mode) => Input::ModeChange(mode),
+        HotkeyEvent::ModeToggle => Input::ModeToggle,
         HotkeyEvent::ChordUp => Input::ChordUp,
         HotkeyEvent::ChordAborted => Input::ChordAborted,
         HotkeyEvent::Esc => Input::Esc,
@@ -237,9 +238,11 @@ impl Runtime {
         }
     }
 
-    /// The keyboard hook reads these flags itself: whether to swallow Esc and whether CUE is paused.
+    /// The keyboard hook reads these flags itself: whether to swallow Esc, whether Shift toggles the mode and whether
+    /// CUE is paused.
     fn sync_hook_flags(&self) {
         hook::ESC_ACTIVE.store(self.flow.esc_active(), Ordering::Relaxed);
+        hook::RECORDING.store(self.flow.recording_now(), Ordering::Relaxed);
         hook::PAUSED.store(self.flow.ui_state().paused, Ordering::Relaxed);
     }
 
@@ -256,7 +259,11 @@ impl Runtime {
     fn feed(&mut self, input: Input) {
         let now = self.now();
         let mut later = Vec::new();
-        for e in self.flow.handle(input, now) {
+        let fx = self.flow.handle(input, now);
+        // The hook sees the new phase before the effects run: opening the microphone and the field query take a while,
+        // and a Shift pressed right after a tap must already toggle the recording's mode.
+        self.sync_hook_flags();
+        for e in fx {
             if matches!(e, Effect::StartStt { .. }) {
                 later.push(e);
             } else {
@@ -270,11 +277,11 @@ impl Runtime {
 
     fn on_event(&mut self, ev: CoreEvent) {
         match ev {
-            CoreEvent::Input(i @ Input::ModeChange(_)) => {
+            CoreEvent::Input(i @ (Input::ModeChange(_) | Input::ModeToggle)) => {
                 self.feed(i);
                 // Only the flow decides the mode, and only while recording: the attempt follows, so one that ends
                 // before refine (Esc, a failed transcription) writes the mode it was recording in.
-                if matches!(self.flow.ui_state().phase, UiPhase::Start | UiPhase::Listen) {
+                if self.flow.recording_now() {
                     self.attempt.follow_mode(self.flow.current_id(), self.flow.mode());
                 }
             }
@@ -527,7 +534,7 @@ impl Runtime {
         let Ok(key) = soniox_key() else { return };
         let cfg = SonioxConfig {
             model: self.settings.stt.soniox_model.clone(),
-            // The starting mode: it may still change while the chord is held, which language identification covers.
+            // The starting mode: Shift may still toggle it while recording, which language identification covers.
             language_hints: soniox_hints(self.flow.mode(), &self.settings),
             // "Unknown" is not an app name: no context.
             app: known_app(&self.attempt.app).map(str::to_owned),
@@ -1028,7 +1035,8 @@ mod tests {
     #[test]
     fn hotkeys_map_to_flow_inputs() {
         assert_eq!(input_of(HotkeyEvent::ChordDown(Mode::Translate)), Input::ChordDown(Mode::Translate));
-        assert_eq!(input_of(HotkeyEvent::ModeChange(Mode::Translate)), Input::ModeChange(Mode::Translate));
+        assert_eq!(input_of(HotkeyEvent::ModeChange(Mode::Ask)), Input::ModeChange(Mode::Ask));
+        assert_eq!(input_of(HotkeyEvent::ModeToggle), Input::ModeToggle);
         assert_eq!(input_of(HotkeyEvent::ChordUp), Input::ChordUp);
         assert_eq!(input_of(HotkeyEvent::ChordAborted), Input::ChordAborted);
         assert_eq!(input_of(HotkeyEvent::Esc), Input::Esc);

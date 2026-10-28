@@ -63,8 +63,10 @@ pub enum Outcome {
 pub enum Input {
     /// The chord formed; the mode is what the held Shift / Alt picked.
     ChordDown(Mode),
-    /// Shift or Alt was pressed while the chord is held: the mode the keys pick now.
+    /// Alt was pressed while the chord is held: the mode it picks ("Ask"; switched off in this version).
     ModeChange(Mode),
+    /// A fresh Shift press, with the chord held or after a tap: dictation and translation swap while recording.
+    ModeToggle,
     ChordUp,
     ChordAborted,
     Esc,
@@ -138,8 +140,9 @@ pub struct Flow {
     /// The error on screen is a failed translation: "retry" refines the saved text instead of transcribing the audio.
     retry_text: bool,
     paused: bool,
-    /// The mode of the dictation `id`: what the chord picked, changed only while the starting chord is held, and back
-    /// to `Dictate` on every way into idle (`set_idle`): the idle Drop shows no mode.
+    /// The mode of the dictation `id`: what the chord picked, changed only while starting or recording (Shift toggles,
+    /// Alt asks while the starting chord is held), and back to `Dictate` on every way into idle (`set_idle`): the idle
+    /// Drop shows no mode.
     mode: Mode,
     hold_hints_left: u8,
     has_last: bool,
@@ -202,6 +205,7 @@ impl Flow {
         match input {
             Input::ChordDown(mode) => self.on_chord_down(mode, now, &mut fx),
             Input::ModeChange(mode) => self.on_mode_change(mode, &mut fx),
+            Input::ModeToggle => self.on_mode_toggle(&mut fx),
             Input::ChordUp => {
                 // A ChordUp without a pair (chord pressed during a pause, after a cancel, after the key check)
                 // only clears the hold.
@@ -306,7 +310,8 @@ impl Flow {
         fx
     }
 
-    fn recording_now(&self) -> bool {
+    /// Starting or recording: the microphone is open, and Shift toggles the mode (the keyboard hook asks this too).
+    pub fn recording_now(&self) -> bool {
         matches!(self.phase, Phase::Starting | Phase::Recording)
     }
 
@@ -363,12 +368,25 @@ impl Flow {
         self.push_ui(fx);
     }
 
-    /// Shift or Alt pressed while the starting chord is still held (hold mode included): the dictation switches mode.
-    /// After the release the mode is fixed until the end of the recording (spec 2 §4); the finishing press has already
-    /// moved the flow to "thinking", so it cannot change it either.
+    /// Alt pressed while the starting chord is still held (hold mode included): the dictation switches to the mode Alt
+    /// picks. After the release Alt no longer counts; the finishing press has already moved the flow to "thinking".
     fn on_mode_change(&mut self, mode: Mode, fx: &mut Vec<Effect>) {
         if self.chord_held && self.recording_now() && self.mode != mode {
             self.mode = mode;
+            self.push_ui(fx);
+        }
+    }
+
+    /// A fresh Shift press while starting or recording, with the chord still held or after a tap: dictation and
+    /// translation swap ("Ask" becomes a translation), and the Drop changes its icon at once. The user often taps the
+    /// chord and decides on the translation only while speaking, and a second Shift takes a slip back. The finishing
+    /// press has already moved the flow to "thinking", so a later Shift changes nothing.
+    fn on_mode_toggle(&mut self, fx: &mut Vec<Effect>) {
+        if self.recording_now() {
+            self.mode = match self.mode {
+                Mode::Translate => Mode::Dictate,
+                Mode::Dictate | Mode::Ask => Mode::Translate,
+            };
             self.push_ui(fx);
         }
     }
@@ -1477,38 +1495,95 @@ mod tests {
         assert!(has(&fx, &E::Refine { id, raw: "привет".into(), mode: Mode::Translate }), "the finishing press does not change the mode");
     }
 
-    #[test]
-    fn mode_changes_while_the_starting_chord_is_held() {
-        let mut f = Flow::new(2, false);
-        f.handle(I::ChordDown(Mode::Dictate), 0);
-        let fx = f.handle(I::ModeChange(Mode::Translate), 200);
-        assert_eq!(last_ui(&fx).map(|s| s.mode), Some(Mode::Translate), "the Drop switches its icon at once");
-        assert_eq!(f.mode(), Mode::Translate);
-        assert!(f.handle(I::ModeChange(Mode::Translate), 250).is_empty(), "the same mode again changes nothing");
+    /// Toggles the mode and returns the mode the Drop was told about.
+    fn toggle(f: &mut Flow, t: Ms) -> Option<Mode> {
+        last_ui(&f.handle(I::ModeToggle, t)).map(|s| s.mode)
     }
 
     #[test]
-    fn mode_is_fixed_after_release() {
+    fn shift_toggles_the_mode_after_a_tap() {
         let mut f = Flow::new(2, false);
         let id = recording(&mut f, 0);
-        assert!(f.handle(I::ModeChange(Mode::Translate), 1_000).is_empty(), "the chord was released: the mode is fixed");
+        assert_eq!(toggle(&mut f, 1_000), Some(Mode::Translate), "the Drop switches its icon at once");
+        assert_eq!(f.mode(), Mode::Translate);
+        assert_eq!(toggle(&mut f, 2_000), Some(Mode::Dictate), "a second Shift goes back to dictation");
+        assert_eq!(toggle(&mut f, 3_000), Some(Mode::Translate));
         f.handle(I::ChordDown(Mode::Dictate), 5_000);
-        assert!(f.handle(I::ModeChange(Mode::Translate), 5_050).is_empty(), "the finishing press does not change it either");
+        assert!(f.handle(I::ModeToggle, 5_050).is_empty(), "the finishing press has moved the flow to thinking");
+        f.handle(I::ChordUp, 5_100);
         let fx = f.handle(I::SttFinal { id, text: "текст".into() }, 5_300);
-        assert!(has(&fx, &E::Refine { id, raw: "текст".into(), mode: Mode::Dictate }));
+        assert!(has(&fx, &E::Refine { id, raw: "текст".into(), mode: Mode::Translate }));
     }
 
     #[test]
-    fn hold_counts_the_mode_at_release() {
+    fn shift_toggles_during_start_up() {
+        let mut f = Flow::new(2, false);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
+        f.handle(I::ChordUp, 100);
+        assert_eq!(toggle(&mut f, 200), Some(Mode::Translate), "still starting: the toggle counts");
+        let fx = f.handle(I::Timer(TimerKind::StartingDone), STARTING_MS);
+        assert_eq!(last_ui(&fx).map(|s| (s.phase, s.mode)), Some((UiPhase::Listen, Mode::Translate)));
+    }
+
+    #[test]
+    fn shift_toggles_while_the_chord_is_held_and_hold_refines_in_the_mode_at_release() {
         let mut f = Flow::new(2, false);
         f.handle(I::ChordDown(Mode::Dictate), 0);
         let id = f.current_id();
         f.handle(I::Timer(TimerKind::StartingDone), STARTING_MS);
         f.handle(I::Timer(TimerKind::HoldCheck), HOLD_MS);
-        f.handle(I::ModeChange(Mode::Translate), 2_000);
+        assert_eq!(toggle(&mut f, 1_000), Some(Mode::Translate));
+        assert_eq!(toggle(&mut f, 2_000), Some(Mode::Dictate), "Shift released and pressed again");
         f.handle(I::ChordUp, 3_000);
         let fx = f.handle(I::SttFinal { id, text: "текст".into() }, 3_200);
-        assert!(has(&fx, &E::Refine { id, raw: "текст".into(), mode: Mode::Translate }));
+        assert!(has(&fx, &E::Refine { id, raw: "текст".into(), mode: Mode::Dictate }));
+    }
+
+    #[test]
+    fn translate_chord_toggles_back_to_dictation() {
+        let mut f = Flow::new(2, false);
+        let id = recording_in(&mut f, 0, Mode::Translate);
+        assert_eq!(toggle(&mut f, 1_000), Some(Mode::Dictate));
+        f.handle(I::ChordDown(Mode::Translate), 5_000);
+        let fx = f.handle(I::SttFinal { id, text: "текст".into() }, 5_300);
+        assert!(has(&fx, &E::Refine { id, raw: "текст".into(), mode: Mode::Dictate }), "the finishing chord's mode does not count");
+    }
+
+    #[test]
+    fn shift_outside_a_recording_changes_nothing() {
+        let mut f = Flow::new(2, false);
+        assert!(f.handle(I::ModeToggle, 0).is_empty(), "idle");
+        let id = thinking_with_raw(&mut f, 1_000, "текст");
+        assert!(f.handle(I::ModeToggle, 6_400).is_empty(), "thinking");
+        f.handle(I::Refined { id, text: "Текст.".into(), outcome: RefineOutcome::Refined }, 6_500);
+        assert!(f.handle(I::ModeToggle, 6_550).is_empty(), "pasting");
+        f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 6_600);
+        assert_eq!(f.ui_state().phase, UiPhase::Done);
+        assert!(f.handle(I::ModeToggle, 6_700).is_empty(), "done");
+        recording(&mut f, 10_000);
+        f.handle(I::Esc, 11_000);
+        assert!(f.handle(I::ModeToggle, 11_100).is_empty(), "cancelled");
+        let id = recording(&mut f, 20_000);
+        f.handle(I::ChordDown(Mode::Dictate), 25_000);
+        f.handle(I::SttFailed { id, error: SttError::Network }, 25_200);
+        assert!(f.handle(I::ModeToggle, 25_300).is_empty(), "error");
+        f.handle(I::Ui(UiAction::Dismiss), 25_400);
+        f.handle(I::TogglePause, 26_000);
+        assert!(f.handle(I::ModeToggle, 26_100).is_empty(), "paused");
+        assert_eq!(f.mode(), Mode::Dictate);
+    }
+
+    #[test]
+    fn ask_needs_the_starting_chord_held() {
+        let mut f = Flow::new(2, false);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
+        let fx = f.handle(I::ModeChange(Mode::Ask), 200);
+        assert_eq!(last_ui(&fx).map(|s| s.mode), Some(Mode::Ask), "Alt inside the held chord");
+        assert!(f.handle(I::ModeChange(Mode::Ask), 250).is_empty(), "the same mode again changes nothing");
+        assert_eq!(toggle(&mut f, 300), Some(Mode::Translate), "Shift turns \"Ask\" into a translation");
+        f.handle(I::ChordUp, 400);
+        assert!(f.handle(I::ModeChange(Mode::Ask), 1_000).is_empty(), "the chord was released: Alt changes nothing");
+        assert_eq!(f.mode(), Mode::Translate);
     }
 
     #[test]
@@ -1642,7 +1717,8 @@ mod tests {
     /// every transcription, refine and paste is closed by a result or an abort; a dictation has one `Finished`
     /// (plus one per "retry"), and it arrives before the next dictation starts; a timer is armed again
     /// only after it fired or was cancelled; Esc is swallowed only when there is something to cancel or close; the mode
-    /// changes only while recording, refine runs in the dictation's mode, and the idle Drop shows no mode.
+    /// changes only while recording (every Shift toggle then switches it and shows it on the Drop), at a new dictation
+    /// or on the way into idle; refine runs in the dictation's mode, and the idle Drop shows no mode.
     /// Timers mostly arrive as the state machine armed them (as the runtime does), sometimes at random.
     #[test]
     fn random_inputs_never_panic_and_keep_invariants() {
@@ -1676,6 +1752,7 @@ mod tests {
         let mut seen_finished = 0u64;
         let mut seen_translate_errors = 0u64;
         let mut mode_changes = 0u64;
+        let mut toggles = 0u64;
         for round in 0..300u64 {
             let mut f = Flow::new((round % 3) as u8, round % 2 == 0);
             let mut now: Ms = 0;
@@ -1711,7 +1788,8 @@ mod tests {
                             [next(3) as usize],
                     },
                     15 => I::Inserted { id, outcome: if next(2) == 0 { InsertOutcome::Pasted } else { InsertOutcome::NoField } },
-                    16 => I::ModeChange(if next(2) == 0 { Mode::Translate } else { Mode::Dictate }),
+                    16 if next(3) == 0 => I::ModeChange([Mode::Ask, Mode::Translate, Mode::Dictate][next(3) as usize]),
+                    16 => I::ModeToggle,
                     _ => {
                         let on: Vec<usize> = (0..timers.len()).filter(|&i| armed[i]).collect();
                         let k = if !on.is_empty() && next(5) != 0 {
@@ -1732,9 +1810,24 @@ mod tests {
                 }
                 let (phase_before, mode_before) = (f.ui_state().phase, f.mode());
                 let fx = f.handle(input.clone(), now);
-                if matches!(input, I::ModeChange(_)) && f.mode() != mode_before {
-                    assert!(matches!(phase_before, UiPhase::Start | UiPhase::Listen), "mode changed outside recording");
-                    mode_changes += 1;
+                let recording_before = matches!(phase_before, UiPhase::Start | UiPhase::Listen);
+                if f.mode() != mode_before {
+                    let by_keys = matches!(input, I::ModeChange(_) | I::ModeToggle) && recording_before;
+                    let new_dictation = fx.iter().any(|e| matches!(e, E::OpenMic { .. }));
+                    let into_idle = f.ui_state().phase == UiPhase::Idle;
+                    assert!(by_keys || new_dictation || into_idle, "mode changed outside recording ({input:?})");
+                    if by_keys {
+                        assert_eq!(last_ui(&fx).map(|s| s.mode), Some(f.mode()), "the Drop shows the new mode");
+                        mode_changes += 1;
+                    }
+                }
+                if input == I::ModeToggle {
+                    if recording_before {
+                        assert_ne!(f.mode(), mode_before, "a Shift toggle while recording always switches the mode");
+                        toggles += 1;
+                    } else {
+                        assert!(fx.is_empty(), "a Shift toggle outside recording does nothing ({phase_before:?})");
+                    }
                 }
                 for e in fx {
                     match e {
@@ -1812,9 +1905,9 @@ mod tests {
             }
         }
         assert!(
-            steps == 120_000 && seen_finished > 1_000 && seen_translate_errors > 10 && mode_changes > 100,
+            steps == 120_000 && seen_finished > 1_000 && seen_translate_errors > 10 && mode_changes > 100 && toggles > 100,
             "sequences reach outcomes: {seen_finished}, failed translations: {seen_translate_errors}, \
-             mode changes: {mode_changes}"
+             mode changes: {mode_changes}, Shift toggles while recording: {toggles}"
         );
     }
 }

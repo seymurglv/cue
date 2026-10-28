@@ -16,11 +16,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
 };
 
-use crate::chord::{Chord, Decision, HotkeyEvent, VK_ESCAPE, VK_LCONTROL, VK_LWIN, VK_RCONTROL, VK_RWIN, VK_V};
+use crate::chord::{
+    Chord, Decision, HotkeyEvent, VK_ESCAPE, VK_LCONTROL, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RSHIFT, VK_RWIN, VK_V,
+};
 use crate::input::{key_held, send_mask_key, MODIFIERS};
 
 /// Swallow Esc — while CUE is recording, thinking or showing an error. Set by the core.
 pub static ESC_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// CUE is starting or recording: a fresh Shift press toggles the mode even after the chord was released. Set by the
+/// core. Not `ESC_ACTIVE`: that one also covers thinking and errors, when the user may already be typing again, and
+/// every capital letter would then wake the core for nothing.
+pub static RECORDING: AtomicBool = AtomicBool::new(false);
 /// Ctrl + Win + Alt is the "Ask" chord. Off until "Ask" exists (spec 2, queue 2b): Alt keeps making a system shortcut.
 pub static ASK_ENABLED: AtomicBool = AtomicBool::new(false);
 /// "Pause for an hour": the hook swallows nothing, does not mask the Start menu and sends no events
@@ -178,6 +184,11 @@ impl Debounce {
         let now = MODIFIERS.map(&held);
         let prev = std::mem::replace(&mut self.prev, now);
         let seen = |vk| match MODIFIERS.iter().position(|&m| m == vk) {
+            // Shift is never dropped here. A Shift pressed inside the held chord is new to the previous tick as well, so
+            // a tick that comes before Windows updates its state would drop it, and its auto-repeat would toggle the mode
+            // back. The timer only has to end a stuck chord; a Shift whose release was lost is dropped by the resync
+            // before the next press, the only place that reads it.
+            _ if vk == VK_LSHIFT || vk == VK_RSHIFT => true,
             Some(i) => now[i] || prev[i],
             None => held(vk),
         };
@@ -261,6 +272,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 let mut s = s.try_borrow_mut().ok()?;
                 let (chord, tx) = s.as_mut()?;
                 chord.set_ask(ASK_ENABLED.load(Ordering::Relaxed));
+                chord.set_recording(RECORDING.load(Ordering::Relaxed));
                 let esc_active = ESC_ACTIVE.load(Ordering::Relaxed);
                 let (out, chord_down) = feed(chord, &ev, how, esc_active, PAUSED.load(Ordering::Relaxed), key_held);
                 for event in out.events.into_iter().flatten() {
@@ -428,7 +440,6 @@ mod tests {
     use HotkeyEvent::*;
 
     const VK_A: u16 = 0x41;
-    const VK_LSHIFT: u16 = 0xA0;
     const SC_LCONTROL: u32 = 0x1D;
 
     fn key(vk: u16, down: bool) -> KeyEvent {
@@ -522,7 +533,7 @@ mod tests {
 
     #[test]
     fn injected_events_bypass_chord() {
-        for vk in [VK_LCONTROL, VK_LWIN, VK_V, VK_ESCAPE, VK_MASK] {
+        for vk in [VK_LCONTROL, VK_LWIN, VK_LSHIFT, VK_V, VK_ESCAPE, VK_MASK] {
             for down in [true, false] {
                 let ev = KeyEvent { vk, scan: 0, down, injected: true };
                 assert_eq!(route(&ev), None, "{vk:#04x} down={down}");
@@ -586,16 +597,41 @@ mod tests {
     }
 
     #[test]
-    fn shift_press_inside_held_chord_switches_mode() {
-        // The resync before Shift leaves the held pair alone: Shift switches the chord to translation.
+    fn shift_presses_inside_held_chord_toggle_the_mode() {
+        // The resync before Shift leaves the held pair alone: every fresh Shift press toggles, its auto-repeat does not.
         let mut c = Chord::default();
         hook(&mut c, key(VK_LCONTROL, true), held_set(&[]));
         hook(&mut c, key(VK_LWIN, true), held_set(&[VK_LCONTROL]));
-        let held = [VK_LCONTROL, VK_LWIN];
-        let translate = Some(events(None, Some(ModeChange(Mode::Translate))));
-        assert_eq!(hook(&mut c, key(VK_LSHIFT, true), held_set(&held)), translate);
-        assert_eq!(hook(&mut c, key(VK_LSHIFT, true), held_set(&[VK_LCONTROL, VK_LWIN, VK_LSHIFT])), Some(PASS));
+        let pair = [VK_LCONTROL, VK_LWIN];
+        let with_shift = [VK_LCONTROL, VK_LWIN, VK_LSHIFT];
+        let toggle = Some(events(None, Some(ModeToggle)));
+        assert_eq!(hook(&mut c, key(VK_LSHIFT, true), held_set(&pair)), toggle);
+        assert_eq!(hook(&mut c, key(VK_LSHIFT, true), held_set(&with_shift)), Some(PASS));
+        assert_eq!(hook(&mut c, key(VK_LSHIFT, false), held_set(&with_shift)), Some(PASS));
+        assert_eq!(hook(&mut c, key(VK_LSHIFT, true), held_set(&pair)), toggle);
         assert!(c.active(), "ChordUp only when the pair breaks up");
+    }
+
+    #[test]
+    fn shift_after_a_tap_toggles_while_recording() {
+        let mut c = Chord::default();
+        hook(&mut c, key(VK_LCONTROL, true), held_set(&[]));
+        hook(&mut c, key(VK_LWIN, true), held_set(&[VK_LCONTROL]));
+        hook(&mut c, key(VK_LWIN, false), held_set(&[VK_LCONTROL, VK_LWIN]));
+        hook(&mut c, key(VK_LCONTROL, false), held_set(&[VK_LCONTROL]));
+        let toggle = Some(events(None, Some(ModeToggle)));
+        // The tap is over and the core records: the hook procedure passes the flag to `Chord` before every event.
+        c.set_recording(true);
+        assert_eq!(hook(&mut c, key(VK_LSHIFT, true), held_set(&[])), toggle);
+        assert_eq!(hook(&mut c, key(VK_LSHIFT, true), held_set(&[VK_LSHIFT])), Some(PASS), "auto-repeat");
+        // The Shift release was lost (UAC prompt): the resync before the next press drops the stale Shift.
+        assert_eq!(hook(&mut c, key(VK_LSHIFT, true), held_set(&[])), toggle);
+        assert_eq!(hook(&mut c, key(VK_LSHIFT, false), held_set(&[VK_LSHIFT])), Some(PASS));
+        c.set_recording(false);
+        assert_eq!(hook(&mut c, key(VK_LSHIFT, true), held_set(&[])), Some(PASS), "not recording");
+        c.set_recording(true);
+        let paused = hook_with(&mut c, key(VK_RSHIFT, true), false, true, held_set(&[VK_LSHIFT]));
+        assert_eq!(paused, Some(PASS), "nothing while paused");
     }
 
     #[test]
@@ -812,6 +848,21 @@ mod tests {
         assert!(g.chord.active());
         assert_eq!(g.tick(held_set(&[VK_LCONTROL, VK_LWIN])), None);
         assert!(g.chord.active());
+    }
+
+    #[test]
+    fn timer_does_not_turn_shift_auto_repeat_into_a_toggle() {
+        let mut g = Glue::new();
+        let pair = [VK_LCONTROL, VK_LWIN];
+        g.key(key(VK_LCONTROL, true), held_set(&[]));
+        g.key(key(VK_LWIN, true), held_set(&[VK_LCONTROL]));
+        assert_eq!(g.tick(held_set(&pair)), None);
+        assert_eq!(g.key(key(VK_LSHIFT, true), held_set(&pair)).events, [None, Some(ModeToggle)]);
+        // The tick came before Windows updated the Shift state, and the previous tick did not see Shift either.
+        assert_eq!(g.tick(held_set(&pair)), None);
+        assert_eq!(g.tick(held_set(&[VK_LCONTROL, VK_LWIN, VK_LSHIFT])), None);
+        let repeat = g.key(key(VK_LSHIFT, true), held_set(&[VK_LCONTROL, VK_LWIN, VK_LSHIFT]));
+        assert_eq!(repeat.events, [None, None], "the held Shift's auto-repeat does not toggle back");
     }
 
     #[test]

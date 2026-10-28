@@ -11,8 +11,10 @@ fn main() {
         }
     };
     cue_platform_win::hook::ESC_ACTIVE.store(true, Ordering::Relaxed);
+    // As if a recording were always on: every fresh Shift press prints `ModeToggle`.
+    cue_platform_win::hook::RECORDING.store(true, Ordering::Relaxed);
     println!("Hook installed.");
-    println!("Press Ctrl+Win, Ctrl+Win+V, Ctrl+Win+D, Ctrl+Win+arrows, Esc. To exit, close the terminal window.");
+    println!("Press Ctrl+Win, Ctrl+Win+V, Ctrl+Win+D, Ctrl+Win+arrows, Shift, Esc. To exit, close the terminal window.");
     for ev in rx {
         println!("{ev:?}");
     }
