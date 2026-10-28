@@ -473,17 +473,23 @@ impl Keeper {
     /// An ordinary window above the Drop that overlaps it means the Drop lost its place on top: it is put back, without
     /// activation, and the next check tells whether that helped (`ZGuard`). Window titles are never logged.
     fn guard_z_order(&mut self, rect: PxRect) {
-        match self.guard.check(dropwin::covering_windows(rect, &dropwin::windows_above(self.hwnd))) {
+        let now = Instant::now();
+        match self.guard.check(dropwin::covering_windows(rect, &dropwin::windows_above(self.hwnd)), now) {
             GuardStep::Idle => {}
             GuardStep::Raise => {
                 tracing::debug!("Drop below an ordinary window: raising it");
                 if let Err(e) = dropwin::raise_topmost(self.hwnd) {
-                    tracing::warn!("Drop not raised: {e}");
+                    // The request itself failed: the Drop was not raised, which says nothing about the windows over it.
+                    if self.guard.raise_failed(now) {
+                        tracing::warn!("Drop below an ordinary window, and the request to put it on top failed: {e}");
+                    } else {
+                        tracing::debug!("Drop: the request to put it on top failed again: {e}");
+                    }
                 }
             }
             GuardStep::Fixed => tracing::warn!("Drop was below an ordinary window: on top again"),
             GuardStep::NotFixed => {
-                tracing::warn!("Drop is below a window it cannot be raised above: not raised again until that changes");
+                tracing::warn!("Drop is still below an ordinary window after being raised: trying again every 30 s");
             }
             GuardStep::Uncovered => tracing::info!("Drop no longer covered"),
         }
