@@ -226,6 +226,8 @@ pub struct Pricing {
     pub soniox_rt_per_hour: f64,
     pub soniox_async_per_hour: f64,
     pub claude: Vec<ModelPrice>,
+    /// One server-side web search of "Ask" (spec 2 §10).
+    pub web_search_usd: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -293,6 +295,7 @@ impl Default for Pricing {
                 price("claude-sonnet-5-5", 2.0, 10.0, 0.10),
                 price("claude-opus-5-5", 4.0, 20.0, 0.20),
             ],
+            web_search_usd: 0.01,
         }
     }
 }
@@ -419,6 +422,7 @@ mod tests {
         // Cache reads for Sonnet 5.5 and Opus 5.5 cost 0.05 × the input price (Anthropic pricing page, 2026-10-26).
         assert_eq!(s.pricing.claude_price("claude-sonnet-5-5").unwrap().cache_read_per_mtok, 0.10);
         assert_eq!(s.pricing.claude_price("claude-opus-5-5").unwrap().cache_read_per_mtok, 0.20);
+        assert_eq!(s.pricing.web_search_usd, 0.01);
     }
 
     #[test]

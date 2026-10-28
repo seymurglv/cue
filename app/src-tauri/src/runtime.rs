@@ -17,6 +17,7 @@
 //!   An attempt without a stream (no Soniox key, the stream did not connect) is billed at the stream price: an
 //!   overestimate in a rare failure, accepted;
 //! - the last-dictation files (`last\`) change only on success (`files`); the last text is also kept in memory;
+//! - a refine cache warm-up (`warm_cache`) is paid for and gets a usage.csv row of its own (`warmup`);
 //! - the log gets events, per-stage latencies and error codes; no text, no audio, no keys.
 mod attempt;
 mod files;
@@ -35,7 +36,7 @@ use cue_core::refine::{RefineContext, join_for_insert};
 use cue_core::settings::{self, DropPosition, Settings};
 use cue_core::translate;
 use cue_core::ui::{Mode, TrayKind, UiAction, UiPhase, UiState};
-use cue_core::usage::{self, SttPath};
+use cue_core::usage::{self, SttPath, UsageRecord};
 use cue_engines::EngineError;
 use cue_engines::claude::{self, Job, RefineResult};
 use cue_engines::keys::{self, KeyName};
@@ -53,10 +54,10 @@ use crate::ipc::Ui;
 use crate::lang;
 use crate::paths::Paths;
 use crate::trayicon::TrayLook;
-use attempt::{Attempt, UsageLog, log_finished, needs_row};
+use attempt::{Attempt, UsageLog, log_finished, needs_row, warmup_record};
 use files::LastFiles;
 use insert::{InsertJob, first_known_app, insert_app, is_terminal, known_app, one_line, trim_edges};
-use state::{InsertWatch, LevelGate, MicGate, TaskSlot, Timers, WarmUp};
+use state::{CacheWarm, InsertWatch, LevelGate, MicGate, TaskSlot, Timers, WarmUp};
 use tasks::{guarded, refine_panicked, stt_panicked};
 
 /// Timeout for each UI Automation query.
@@ -87,6 +88,8 @@ pub enum CoreEvent {
     InsertDone { id: DictationId, outcome: InsertOutcome, at: Instant },
     InsertTimeout { id: DictationId, generation: u64 },
     TimerFired { kind: TimerKind, generation: u64 },
+    /// The refine cache warm-up got an answer: its tokens go to usage.csv.
+    Warmed { usage: claude::Usage },
     /// Wake from sleep or unlock: the pooled connections are most likely dead.
     Wake,
     /// The Drop was dragged to a new place: saved in settings.json.
@@ -154,7 +157,9 @@ pub struct Runtime {
     /// The last tray card sent to the window: its button acts on it.
     tray: Option<TrayKind>,
     level: LevelGate,
+    /// The connection warm-up; the refine prompt cache has its own (`cache_warm`).
     warm: WarmUp,
+    cache_warm: CacheWarm,
     attempt: Attempt,
     usage: UsageLog,
 }
@@ -213,6 +218,7 @@ impl Runtime {
             tray: None,
             level: LevelGate::default(),
             warm: WarmUp::default(),
+            cache_warm: CacheWarm::default(),
             attempt: Attempt::new(DictationId::default()),
             usage: UsageLog::default(),
         }
@@ -313,7 +319,11 @@ impl Runtime {
                     self.feed(Input::Timer(kind));
                 }
             }
-            CoreEvent::Wake => self.warm.reset(),
+            CoreEvent::Warmed { usage } => self.on_warmed(usage),
+            CoreEvent::Wake => {
+                self.warm.reset();
+                self.cache_warm.reset();
+            }
             CoreEvent::DropMoved(place) => {
                 self.settings.drop.position = place;
                 self.save_settings();
@@ -500,7 +510,9 @@ impl Runtime {
         let info = self.focus.query(0, FOCUS_TIMEOUT);
         self.note_app(&info.app);
         self.attempt.app = info.app;
+        self.attempt.mode = self.flow.mode();
         self.warm_up();
+        self.warm_cache();
         if let Some(old) = self.stream.take() {
             old.session.abort();
         }
@@ -612,6 +624,33 @@ impl Runtime {
         });
     }
 
+    /// Warms the refine prompt cache when a dictation starts and the cache may have expired (spec 2 §6.3): the first refine
+    /// after a pause reads the prompt from the cache. Dictation and translation share the prefix; "Ask" has its own (queue 2b).
+    fn warm_cache(&mut self) {
+        let model = self.settings.refine.model.clone();
+        if self.flow.mode() == Mode::Ask || !claude::can_warm(&model) || !self.cache_warm.due(self.now()) {
+            return;
+        }
+        let Ok(Some(key)) = keys::lookup(KeyName::Anthropic) else { return };
+        let (http, tx, terms) = (self.http.clone(), self.tx.clone(), self.settings.dictionary.terms.clone());
+        tokio::spawn(async move {
+            if let Some(usage) = claude::warm(&http, &key, &model, &terms).await {
+                let _ = tx.send(CoreEvent::Warmed { usage });
+            }
+        });
+    }
+
+    /// The warm-up's tokens are paid for: a usage.csv row of its own. The log gets the token counts only.
+    fn on_warmed(&mut self, usage: claude::Usage) {
+        tracing::info!(
+            cache_write = usage.cache_creation_input_tokens,
+            cache_read = usage.cache_read_input_tokens,
+            "refine cache warmed"
+        );
+        let rec = warmup_record(usage, utc_now(), &self.settings);
+        self.append_usage(rec);
+    }
+
     /// The focused field (with the text before the caret), right after the second press, in parallel with
     /// transcription: by the time the text arrives the refine context is ready.
     fn prefetch_focus(&mut self, id: DictationId) {
@@ -643,9 +682,12 @@ impl Runtime {
             tracing::warn!("Anthropic key: {e}");
             None
         });
+        let now = self.now();
+        self.cache_warm.touched(now);
         if self.attempt.id == id {
-            let now = self.now();
             self.attempt.refine_started(now);
+            // The mode is final by the time refine starts.
+            self.attempt.mode = mode;
         }
         // Which way to translate (spec 2 §5): the speech language fixed in the settings, else the one Soniox heard most.
         let job = match mode {
@@ -825,7 +867,7 @@ impl Runtime {
         if !needs_row(outcome, self.attempt.audio_ms()) {
             return;
         }
-        let ts = usage::utc_timestamp(SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()));
+        let ts = utc_now();
         self.write_usage(outcome, &ts);
         // Only if this dictation's audio really became `last\audio.wav`; otherwise the previous one is there.
         if committed && self.settings.bench.save_recordings {
@@ -852,11 +894,16 @@ impl Runtime {
     }
 
     fn write_usage(&mut self, outcome: Outcome, ts: &str) {
+        let rec = self.attempt.record(outcome, ts.to_owned(), &self.settings);
+        self.append_usage(rec);
+    }
+
+    /// One usage.csv row, after the rows that could not be written before it.
+    fn append_usage(&mut self, rec: UsageRecord) {
         let (path, settings) = (&self.paths.usage, &self.settings);
         if self.usage.warn_no_price(&settings.pricing, &settings.refine.model) {
             tracing::warn!("usage: no price for model {} in the settings, refine counted as 0", settings.refine.model);
         }
-        let rec = self.attempt.record(outcome, ts.to_owned(), settings);
         if let Err(e) = self.usage.write(rec, |r| usage::append(path, r, &settings.pricing)) {
             tracing::warn!(
                 pending = self.usage.pending(),
@@ -887,6 +934,11 @@ fn soniox_hints(mode: Mode, s: &Settings) -> Vec<String> {
         (Mode::Translate, Some(code)) => vec![code.to_owned()],
         _ => s.stt.language_hints.clone(),
     }
+}
+
+/// The usage.csv time: UTC, like the providers' invoices.
+fn utc_now() -> String {
+    usage::utc_timestamp(SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()))
 }
 
 /// JSON of a bench recording. If the app is unknown, `"app": null`, not the "unknown" placeholder.

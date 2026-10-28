@@ -1,5 +1,5 @@
 //! Small executor rules with no OS and no network: timer generations, whose microphone frames to accept,
-//! the insert watchdog, when to send the voice level, when to warm up the connection.
+//! the insert watchdog, when to send the voice level, when to warm up the connection and the refine cache.
 use std::collections::HashMap;
 
 use cue_core::flow::{DictationId, TimerKind};
@@ -149,6 +149,38 @@ impl WarmUp {
     }
 
     /// After sleep or unlock the pooled connections are most likely dead: the next warm-up happens without waiting.
+    pub fn reset(&mut self) {
+        self.last = None;
+    }
+}
+
+/// The refine prompt cache lives 5 minutes from the start of the last request that used it (spec 2 §6.3).
+pub const CACHE_TTL_MS: u64 = 5 * 60_000;
+/// A warm-up goes out once the cache may expire before refine starts: the recording itself takes time, a minute of margin.
+pub const CACHE_WARM_AFTER_MS: u64 = CACHE_TTL_MS - 60_000;
+
+/// When to warm the refine cache: on a new dictation, if no refine or warm-up started in the last `CACHE_WARM_AFTER_MS`.
+#[derive(Debug, Default)]
+pub struct CacheWarm {
+    last: Option<u64>,
+}
+
+impl CacheWarm {
+    /// A request that reads the cache starts now.
+    pub fn touched(&mut self, now: u64) {
+        self.last = Some(now);
+    }
+
+    /// Whether to warm now; a `true` counts as a touch.
+    pub fn due(&mut self, now: u64) -> bool {
+        if self.last.is_some_and(|t| now.saturating_sub(t) < CACHE_WARM_AFTER_MS) {
+            return false;
+        }
+        self.last = Some(now);
+        true
+    }
+
+    /// After sleep the clock may have skipped: warm on the next dictation.
     pub fn reset(&mut self) {
         self.last = None;
     }
@@ -306,6 +338,23 @@ mod tests {
         w.reset();
         assert!(w.due(22_000));
         assert!(!w.due(22_001));
+    }
+
+    #[test]
+    fn cache_warm_up_after_a_pause_only() {
+        const MIN: u64 = 60_000;
+        let mut c = CacheWarm::default();
+        assert!(c.due(0), "the first dictation of the session");
+        assert!(!c.due(3 * MIN), "the warm-up 3 minutes ago still holds");
+        let mut c = CacheWarm::default();
+        assert!(c.due(0));
+        c.touched(3 * MIN);
+        assert!(!c.due(6 * MIN), "a refine 3 minutes ago kept the cache");
+        assert!(c.due(8 * MIN), "5 minutes since the refine: the cache may expire while the user speaks");
+        assert!(!c.due(8 * MIN + 1), "a warm-up counts as a touch");
+        c.reset();
+        assert!(c.due(8 * MIN + 2), "after sleep the clock may have skipped");
+        assert_eq!(CACHE_WARM_AFTER_MS, 4 * MIN);
     }
 
     #[test]

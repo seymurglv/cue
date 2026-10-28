@@ -43,16 +43,18 @@ fn check_line(name: KeyName, probed: &Result<Option<Result<(), EngineError>>, En
 
 /// The `cue-cli usage` summary for a month. "—" where there is nothing to divide by.
 ///
-/// "Per dictation" is the month's whole cost (failed attempts included) divided by the dictations that produced text:
-/// what a user really costs. "Per hour of audio" is for comparing with providers' prices.
+/// "Per dictation" is the month's whole cost (failed attempts and cache warm-ups included) divided by the dictations
+/// that produced text: what a user really costs. "Per hour of audio" is for comparing with providers' prices.
+/// Web search is named only when there was some: until "Ask" it is always 0.
 fn usage_report(month: &str, s: &Summary) -> String {
     let ms = |v: u64| if v == 0 { "—".to_owned() } else { format!("{v} ms") };
-    let total = s.stt_usd + s.refine_usd;
+    let total = s.stt_usd + s.refine_usd + s.search_usd;
+    let search = if s.search_usd > 0.0 { format!(", web search ${:.4}", s.search_usd) } else { String::new() };
     let per_dictation = if s.dictations == 0 { "—".to_owned() } else { format!("${:.5}", total / s.dictations as f64) };
     let per_hour = if s.audio_minutes > 0.0 { format!("${:.4}", total * 60.0 / s.audio_minutes) } else { "—".to_owned() };
-    format!(
+    let mut report = format!(
         "Month {month} (UTC): dictations {}, audio {:.1} min\n\
-         Transcription ${:.4}, refine ${:.4}, total ${total:.4}\n\
+         Transcription ${:.4}, refine ${:.4}{search}, total ${total:.4}\n\
          Per dictation {per_dictation}, per hour of audio {per_hour}\n\
          Average latency to paste: {}, for audio up to {} s: {}\n",
         s.dictations,
@@ -62,7 +64,14 @@ fn usage_report(month: &str, s: &Summary) -> String {
         ms(s.avg_latency_ms),
         cue_core::usage::SHORT_AUDIO_MS / 1_000,
         ms(s.avg_latency_short_ms)
-    )
+    );
+    if !s.modes.is_empty() {
+        report.push_str("By mode:\n");
+        for m in &s.modes {
+            report.push_str(&format!("  {:<9} {:>5} rows   ${:.4}\n", m.mode, m.rows, m.usd));
+        }
+    }
+    report
 }
 
 /// "YYYY-MM" with a month of 01–12.
@@ -157,6 +166,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cue_core::usage::ModeTotal;
 
     #[test]
     fn show_line_present_key_is_masked() {
@@ -240,6 +250,10 @@ mod tests {
         );
     }
 
+    fn mode(mode: &str, rows: u64, usd: f64) -> ModeTotal {
+        ModeTotal { mode: mode.into(), rows, usd }
+    }
+
     #[test]
     fn usage_report_with_data() {
         let s = Summary {
@@ -247,8 +261,10 @@ mod tests {
             audio_minutes: 1.5,
             stt_usd: 0.0123,
             refine_usd: 0.0456,
+            search_usd: 0.0,
             avg_latency_ms: 1_200,
             avg_latency_short_ms: 1_100,
+            modes: vec![mode("dictate", 120, 0.0412), mode("translate", 14, 0.0051), mode("warmup", 9, 0.0013)],
         };
         // Per dictation: 0.0579 / 3; per hour of audio: 0.0579 / (1.5 / 60).
         assert_eq!(
@@ -256,8 +272,21 @@ mod tests {
             "Month 2026-10 (UTC): dictations 3, audio 1.5 min\n\
              Transcription $0.0123, refine $0.0456, total $0.0579\n\
              Per dictation $0.01930, per hour of audio $2.3160\n\
-             Average latency to paste: 1200 ms, for audio up to 20 s: 1100 ms\n"
+             Average latency to paste: 1200 ms, for audio up to 20 s: 1100 ms\n\
+             By mode:\n  \
+               dictate     120 rows   $0.0412\n  \
+               translate    14 rows   $0.0051\n  \
+               warmup        9 rows   $0.0013\n"
         );
+    }
+
+    /// Web searches of "Ask" are part of the total; the line names them only when there were any.
+    #[test]
+    fn usage_report_counts_web_search_in_the_total() {
+        let s = Summary { dictations: 2, stt_usd: 0.01, refine_usd: 0.02, search_usd: 0.03, ..Summary::default() };
+        let report = usage_report("2026-11", &s);
+        assert!(report.contains("Transcription $0.0100, refine $0.0200, web search $0.0300, total $0.0600\n"), "{report}");
+        assert!(report.contains("Per dictation $0.03000,"), "{report}");
     }
 
     #[test]

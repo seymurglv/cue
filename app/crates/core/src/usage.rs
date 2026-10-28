@@ -7,16 +7,22 @@
 //! - "dictations" are the rows whose outcome delivered text: `inserted` and `no_field`;
 //! - the average "second press → paste" latency counts only `inserted` rows
 //!   (cancelled, empty and failed rows have 0 there and would understate the latency target figure);
-//!   separately, over pastes with audio up to `SHORT_AUDIO_MS` (the target figure itself).
+//!   separately, over pastes with audio up to `SHORT_AUDIO_MS` (the target figure itself);
+//! - rows and dollars per mode, in the order the modes first appear.
+//!
+//! The last three columns, `mode`, `web_searches` and `search_usd`, came with the modes (spec 2 §10). Old rows
+//! without these columns read as dictation; the header of an existing file is not rewritten. A refine cache warm-up
+//! is a row of its own (`warmup`, outcome `discarded`, no audio): it costs money but is not a dictation.
 //!
 //! `ts` is UTC, and the summary month is a UTC month too: that way it matches the providers' invoices.
 //!
-//! Every column is a number, a time, an outcome, an engine, a transcription path or a model. String fields are
+//! Every column is a number, a time, an outcome, an engine, a transcription path, a model or a mode. String fields are
 //! still escaped by CSV rules (the user may type a model name in by hand), and control characters in them
 //! are replaced with a space: one record is always one line of the file. The summary skips corrupt and
 //! partially written lines.
 use crate::flow::Outcome;
 use crate::settings::{Pricing, SttEngineKind};
+use crate::ui::Mode;
 use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -44,6 +50,37 @@ impl SttPath {
     }
 }
 
+/// What the row paid for: a dictation in one of the modes, or a refine cache warm-up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UsageMode {
+    Dictate,
+    Translate,
+    Ask,
+    Warmup,
+}
+
+impl UsageMode {
+    /// Value of the `mode` column.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UsageMode::Dictate => DICTATE,
+            UsageMode::Translate => "translate",
+            UsageMode::Ask => "ask",
+            UsageMode::Warmup => "warmup",
+        }
+    }
+}
+
+impl From<Mode> for UsageMode {
+    fn from(m: Mode) -> Self {
+        match m {
+            Mode::Dictate => UsageMode::Dictate,
+            Mode::Translate => UsageMode::Translate,
+            Mode::Ask => UsageMode::Ask,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct UsageRecord {
     pub ts: String,
@@ -57,6 +94,8 @@ pub struct UsageRecord {
     pub output_tokens: u64,
     pub latency_ms: u64,
     pub outcome: Outcome,
+    pub mode: UsageMode,
+    pub web_searches: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -65,18 +104,32 @@ pub struct Summary {
     pub audio_minutes: f64,
     pub stt_usd: f64,
     pub refine_usd: f64,
+    pub search_usd: f64,
     /// "Second press → paste", `inserted` rows only. 0 means there were no pastes.
     pub avg_latency_ms: u64,
     /// The same for audio no longer than `SHORT_AUDIO_MS`: the latency target figure (~30 words in ≤ 1.5 s).
     pub avg_latency_short_ms: u64,
+    /// Rows and dollars per value of the `mode` column, in the order of first appearance.
+    pub modes: Vec<ModeTotal>,
 }
 
-pub const HEADER: &str = "ts,audio_ms,stt_engine,stt_path,stt_usd,refine_model,input_tokens,cache_read_tokens,cache_write_tokens,output_tokens,refine_usd,latency_ms,outcome";
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ModeTotal {
+    pub mode: String,
+    pub rows: u64,
+    /// Transcription, refine and search together.
+    pub usd: f64,
+}
+
+pub const HEADER: &str = "ts,audio_ms,stt_engine,stt_path,stt_usd,refine_model,input_tokens,cache_read_tokens,cache_write_tokens,output_tokens,refine_usd,latency_ms,outcome,mode,web_searches,search_usd";
 
 /// The bound of a "short" dictation for the latency target: ~30 words fit into 20 s of audio.
 pub const SHORT_AUDIO_MS: u64 = 20_000;
 
-const COLUMNS: usize = 13;
+const COLUMNS: usize = 16;
+/// A row written before the modes: no `mode`, `web_searches`, `search_usd`.
+const COLUMNS_V1: usize = 13;
+const DICTATE: &str = "dictate";
 const INSERTED: &str = "inserted";
 const NO_FIELD: &str = "no_field";
 
@@ -154,7 +207,7 @@ fn csv_field(s: &str) -> Cow<'_, str> {
 /// One record, without a trailing newline.
 pub fn line(r: &UsageRecord, p: &Pricing) -> String {
     format!(
-        "{},{},{},{},{:.6},{},{},{},{},{},{:.6},{},{}",
+        "{},{},{},{},{:.6},{},{},{},{},{},{:.6},{},{},{},{},{:.6}",
         csv_field(&r.ts),
         r.audio_ms,
         engine_name(r.stt_engine),
@@ -167,7 +220,10 @@ pub fn line(r: &UsageRecord, p: &Pricing) -> String {
         r.output_tokens,
         refine_cost(p, &r.refine_model, r.input_tokens, r.cache_read_tokens, r.cache_write_tokens, r.output_tokens),
         r.latency_ms,
-        outcome_name(r.outcome)
+        outcome_name(r.outcome),
+        r.mode.as_str(),
+        r.web_searches,
+        f64::from(r.web_searches) * p.web_search_usd
     )
 }
 
@@ -203,24 +259,30 @@ struct Row {
     audio_ms: u64,
     stt_usd: f64,
     refine_usd: f64,
+    search_usd: f64,
     latency_ms: u64,
     outcome: String,
+    mode: String,
 }
 
 impl Row {
     fn parse(line: &str) -> Option<Row> {
         let mut c = split_record(line)?;
-        if c.len() != COLUMNS {
-            return None;
-        }
         let usd = |s: &str| s.parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0);
+        let (mode, search_usd) = match c.len() {
+            COLUMNS_V1 => (DICTATE.to_owned(), 0.0),
+            COLUMNS => (std::mem::take(&mut c[13]), usd(&c[15])?),
+            _ => return None,
+        };
         Some(Row {
             audio_ms: c[1].parse().ok()?,
             stt_usd: usd(&c[4])?,
             refine_usd: usd(&c[10])?,
+            search_usd,
             latency_ms: c[11].parse().ok()?,
             outcome: std::mem::take(&mut c[12]),
             ts: std::mem::take(&mut c[0]),
+            mode,
         })
     }
 }
@@ -236,6 +298,15 @@ pub fn summarize(csv: &str, month: &str) -> Summary {
         s.audio_minutes += row.audio_ms as f64 / 60_000.0;
         s.stt_usd += row.stt_usd;
         s.refine_usd += row.refine_usd;
+        s.search_usd += row.search_usd;
+        let usd = row.stt_usd + row.refine_usd + row.search_usd;
+        match s.modes.iter_mut().find(|m| m.mode == row.mode) {
+            Some(m) => {
+                m.rows += 1;
+                m.usd += usd;
+            }
+            None => s.modes.push(ModeTotal { mode: row.mode, rows: 1, usd }),
+        }
         match row.outcome.as_str() {
             INSERTED => {
                 s.dictations += 1;
@@ -329,6 +400,8 @@ mod tests {
             output_tokens: 200,
             latency_ms: 900,
             outcome: Outcome::Inserted,
+            mode: UsageMode::Dictate,
+            web_searches: 0,
         }
     }
 
@@ -356,7 +429,110 @@ mod tests {
         let l = line(&rec(), &Pricing::default());
         assert_eq!(l.split(',').count(), HEADER.split(',').count());
         assert!(l.starts_with("2026-10-27T09:00:00Z,30000,soniox,stream,0.001000,claude-haiku-5-5,1000,2000,0,200,"));
-        assert!(l.ends_with(",900,inserted"));
+        assert!(l.ends_with(",900,inserted,dictate,0,0.000000"), "{l}");
+    }
+
+    // ---- Modes (spec 2 §10) ----
+
+    /// The header before the modes: files written by earlier versions start with it.
+    const HEADER_V1: &str = "ts,audio_ms,stt_engine,stt_path,stt_usd,refine_model,input_tokens,cache_read_tokens,cache_write_tokens,output_tokens,refine_usd,latency_ms,outcome";
+
+    fn rec_with(ts: &str, outcome: Outcome) -> UsageRecord {
+        UsageRecord {
+            ts: ts.into(),
+            audio_ms: 1_000,
+            stt_engine: SttEngineKind::Soniox,
+            stt_path: SttPath::Stream,
+            refine_model: "claude-haiku-5-5".into(),
+            input_tokens: 10,
+            cache_read_tokens: 900,
+            cache_write_tokens: 0,
+            output_tokens: 5,
+            latency_ms: 900,
+            outcome,
+            mode: UsageMode::Dictate,
+            web_searches: 0,
+        }
+    }
+
+    #[test]
+    fn modes_have_stable_names() {
+        assert_eq!(UsageMode::Dictate.as_str(), "dictate");
+        assert_eq!(UsageMode::Translate.as_str(), "translate");
+        assert_eq!(UsageMode::Ask.as_str(), "ask");
+        assert_eq!(UsageMode::Warmup.as_str(), "warmup");
+        assert_eq!(UsageMode::from(Mode::Dictate), UsageMode::Dictate);
+        assert_eq!(UsageMode::from(Mode::Translate), UsageMode::Translate);
+        assert_eq!(UsageMode::from(Mode::Ask), UsageMode::Ask);
+        assert_eq!(HEADER.split(',').count(), COLUMNS);
+        assert!(HEADER.starts_with(HEADER_V1), "the new columns go at the end");
+    }
+
+    #[test]
+    fn new_rows_carry_mode_and_searches() {
+        let p = Pricing::default();
+        let mut r = rec_with("2026-11-01T10:00:00Z", Outcome::Inserted);
+        r.mode = UsageMode::Translate;
+        r.web_searches = 2;
+        let l = line(&r, &p);
+        assert!(l.ends_with(",inserted,translate,2,0.020000"), "{l}");
+        let s = summarize(&format!("{HEADER}\n{l}\n"), "2026-11");
+        assert!((s.search_usd - 0.02).abs() < 1e-9, "{}", s.search_usd);
+        let row_usd = s.stt_usd + s.refine_usd + s.search_usd;
+        assert_eq!(s.modes.len(), 1);
+        assert_eq!((s.modes[0].mode.as_str(), s.modes[0].rows), ("translate", 1));
+        assert!((s.modes[0].usd - row_usd).abs() < 1e-9, "the mode's dollars include the search: {}", s.modes[0].usd);
+    }
+
+    #[test]
+    fn old_rows_read_as_dictation() {
+        let csv = format!("{HEADER_V1}\n2026-11-01T10:00:00Z,1000,soniox,stream,0.000033,claude-haiku-5-5,10,0,0,5,0.000004,900,inserted\n");
+        let s = summarize(&csv, "2026-11");
+        assert_eq!(s.dictations, 1);
+        assert_eq!(s.modes.iter().map(|m| (m.mode.as_str(), m.rows)).collect::<Vec<_>>(), vec![("dictate", 1)]);
+        assert_eq!(s.search_usd, 0.0);
+    }
+
+    #[test]
+    fn warmup_rows_cost_money_but_are_not_dictations() {
+        let p = Pricing::default();
+        let mut r = rec_with("2026-11-01T10:00:00Z", Outcome::Discarded);
+        (r.audio_ms, r.latency_ms, r.cache_read_tokens, r.cache_write_tokens, r.mode) = (0, 0, 0, 900, UsageMode::Warmup);
+        let csv = format!("{HEADER}\n{}\n", line(&r, &p));
+        let s = summarize(&csv, "2026-11");
+        assert_eq!(s.dictations, 0);
+        assert!(s.refine_usd > 0.0);
+        assert_eq!(s.modes.iter().map(|m| (m.mode.as_str(), m.rows)).collect::<Vec<_>>(), vec![("warmup", 1)]);
+    }
+
+    /// A file started before the modes keeps its old header: old and new rows are summed together, modes in the order
+    /// they first appear.
+    #[test]
+    fn old_and_new_rows_in_one_file_are_summed_by_mode() {
+        let p = Pricing::default();
+        let old = "2026-11-01T10:00:00Z,1000,soniox,stream,0.000033,claude-haiku-5-5,10,0,0,5,0.000004,900,inserted";
+        let mut warm = rec_with("2026-11-02T10:00:00Z", Outcome::Discarded);
+        warm.mode = UsageMode::Warmup;
+        let mut tr = rec_with("2026-11-02T10:01:00Z", Outcome::Inserted);
+        tr.mode = UsageMode::Translate;
+        let dict = rec_with("2026-11-02T10:02:00Z", Outcome::NoField);
+        let csv = [HEADER_V1.to_owned(), old.to_owned(), line(&warm, &p), line(&tr, &p), line(&dict, &p)].join("\n");
+        let s = summarize(&csv, "2026-11");
+        assert_eq!(s.dictations, 3);
+        let modes: Vec<_> = s.modes.iter().map(|m| (m.mode.as_str(), m.rows)).collect();
+        assert_eq!(modes, [("dictate", 2), ("warmup", 1), ("translate", 1)]);
+        let by_mode: f64 = s.modes.iter().map(|m| m.usd).sum();
+        assert!((by_mode - (s.stt_usd + s.refine_usd + s.search_usd)).abs() < 1e-9, "modes add up to the total");
+    }
+
+    /// Only the two known widths are rows: 13 columns (before the modes) and 16.
+    #[test]
+    fn rows_of_other_widths_are_skipped() {
+        let old = "2026-11-01T10:00:00Z,1000,soniox,stream,0.000033,claude-haiku-5-5,10,0,0,5,0.000004,900,inserted";
+        for tail in [",dictate", ",dictate,0", ",dictate,0,0.000000,x", ",dictate,0,-1", ",dictate,0,NaN"] {
+            let csv = format!("{HEADER}\n{old}{tail}\n");
+            assert_eq!(summarize(&csv, "2026-11"), Summary::default(), "{tail}");
+        }
     }
 
     #[test]
@@ -415,7 +591,7 @@ mod tests {
     #[test]
     fn outcome_is_written_by_its_stable_name() {
         let l = line(&with(Outcome::NoField, 0), &Pricing::default());
-        assert!(l.ends_with(",0,no_field"), "{l}");
+        assert!(l.ends_with(",0,no_field,dictate,0,0.000000"), "{l}");
         assert_eq!(summarize(&format!("{HEADER}\n{l}\n"), "2026-10").dictations, 1);
     }
 

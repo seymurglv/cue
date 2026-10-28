@@ -84,6 +84,22 @@ pub fn request_body_for(model: &str, raw: &str, ctx: &RefineContext, terms: &[St
     v
 }
 
+/// Whether a cache warm-up is possible for the model: a model whose thinking cannot be turned off (Opus 5.5) would need a
+/// thinking budget in a one-token answer.
+pub fn can_warm(model: &str) -> bool {
+    thinking_for(model).is_some()
+}
+
+/// The cache warm-up (spec 2 §6.3): the dictation request with a one-character transcript and `max_tokens: 1`.
+/// `max_tokens: 0` is refused together with `output_config.format`, and the format has to stay: the warm-up must build
+/// the exact prefix real refine reads.
+pub fn warm_body(model: &str, terms: &[String]) -> Value {
+    let ctx = RefineContext { app: String::new(), before_cursor: None };
+    let mut v = request_body(model, ".", &ctx, terms);
+    v["max_tokens"] = json!(1);
+    v
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
 pub struct Usage {
     #[serde(default)]
@@ -248,11 +264,7 @@ async fn refine_at(
     let Some(key) = key else {
         return raw_fallback(raw, RefineOutcome::RawKeyProblem, Usage::default(), "no Anthropic key");
     };
-    let send = http
-        .post(url)
-        .header("x-api-key", key)
-        .header("anthropic-version", API_VERSION)
-        .header("content-type", "application/json")
+    let send = messages_post(http, url, key)
         .timeout(std::time::Duration::from_millis(request_timeout_ms(model, raw, job)))
         .json(&request_body_for(model, raw, ctx, terms, job))
         .send()
@@ -296,6 +308,49 @@ async fn refine_at(
 fn raw_fallback(raw: &str, outcome: RefineOutcome, usage: Usage, why: &str) -> RefineResult {
     tracing::warn!("refine: {why} → {outcome:?}");
     RefineResult { text: raw.to_string(), outcome, usage }
+}
+
+/// A Messages API POST with the key and the API version.
+fn messages_post(http: &reqwest::Client, url: &str, key: &str) -> reqwest::RequestBuilder {
+    http.post(url)
+        .header("x-api-key", key)
+        .header("anthropic-version", API_VERSION)
+        .header("content-type", "application/json")
+}
+
+/// The warm-up runs while the user speaks; one that has not answered in 5 s is of no use to this dictation.
+const WARM_TIMEOUT_MS: u64 = 5_000;
+
+/// Of a warm-up answer only the tokens matter: they are paid for.
+#[derive(Deserialize)]
+struct WarmResp {
+    usage: Usage,
+}
+
+/// One cache warm-up request ([`warm_body`]): the tokens paid for on HTTP 200. On any problem, one log line with the
+/// reason only (neither the key nor the response body) and `None`: the dictation goes on, its refine writes the cache.
+pub async fn warm(http: &reqwest::Client, key: &str, model: &str, terms: &[String]) -> Option<Usage> {
+    warm_at(API_URL, http, key, model, terms).await
+}
+
+/// [`warm`] against the URL `url`; tests substitute their own service.
+async fn warm_at(url: &str, http: &reqwest::Client, key: &str, model: &str, terms: &[String]) -> Option<Usage> {
+    let send = messages_post(http, url, key)
+        .timeout(std::time::Duration::from_millis(WARM_TIMEOUT_MS))
+        .json(&warm_body(model, terms))
+        .send()
+        .await;
+    let why = match send {
+        Err(e) if e.is_timeout() => "timeout".to_owned(),
+        Err(_) => "network".to_owned(),
+        Ok(r) if r.status().as_u16() != 200 => format!("HTTP {}", r.status().as_u16()),
+        Ok(r) => match r.json::<WarmResp>().await {
+            Ok(w) => return Some(w.usage),
+            Err(_) => "HTTP 200 response not parsed".to_owned(),
+        },
+    };
+    tracing::warn!("cache warm-up: {why}");
+    None
 }
 
 #[cfg(test)]
@@ -722,5 +777,81 @@ mod tests {
         let (r, lines, _api) = translate_with(Some(KEY), |_, _, _| reply(401, r#"{"type":"error"}"#)).await;
         assert_eq!((r.text.as_str(), r.outcome), (SPEECH, RefineOutcome::RawKeyProblem));
         assert_one_warning(&lines, "HTTP 401");
+    }
+
+    // ---- Cache warm-up (spec 2 §6.3) ----
+
+    /// The warm-up writes the prefix real refine reads: the same model, system blocks with the cache mark, thinking and
+    /// answer format; a translation adds its block after that prefix.
+    #[test]
+    fn warm_body_builds_the_dictation_prefix() {
+        let terms = ["Soniox".to_owned()];
+        for t in [&[][..], &terms[..]] {
+            for model in ["claude-haiku-5-5", "claude-sonnet-5-5"] {
+                let warm = warm_body(model, t);
+                let real = request_body(model, "ну привет", &ctx(), t);
+                for field in ["model", "system", "thinking", "output_config"] {
+                    assert_eq!(warm[field], real[field], "{model}: {field}");
+                }
+                assert_eq!(warm["max_tokens"], 1, "{model}");
+                let tr = request_body_for(model, "ну привет", &ctx(), t, Job::Translate("en"));
+                let prefix = warm["system"].as_array().unwrap();
+                assert_eq!(&tr["system"].as_array().unwrap()[..prefix.len()], &prefix[..], "{model}: translation reads it too");
+            }
+        }
+    }
+
+    #[test]
+    fn no_warm_up_for_a_model_whose_thinking_cannot_be_turned_off() {
+        assert!(can_warm("claude-haiku-5-5"));
+        assert!(can_warm("claude-sonnet-5-5"));
+        assert!(!can_warm("claude-opus-5-5"));
+    }
+
+    /// A warm-up against a fake Messages API: the result, the claude log lines and the service itself.
+    async fn warm_with<F>(route: F) -> (Option<Usage>, Vec<String>, FakeApi)
+    where
+        F: Fn(&str, &str, usize) -> Reply + Send + Sync + 'static,
+    {
+        let api = fake_api(route).await;
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let (logs, _guard) = capture_logs();
+        let url = format!("{}/v1/messages", api.base);
+        let u = warm_at(&url, &http, KEY, "claude-haiku-5-5", &[]).await;
+        let lines = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::claude")).cloned().collect();
+        (u, lines, api)
+    }
+
+    #[tokio::test]
+    async fn warm_returns_the_tokens_paid_for() {
+        let body = json!({
+            "content": [{ "type": "text", "text": "{" }],
+            "stop_reason": "max_tokens",
+            "usage": { "input_tokens": 12, "output_tokens": 1, "cache_creation_input_tokens": 900, "cache_read_input_tokens": 0 }
+        })
+        .to_string();
+        let (u, lines, api) = warm_with(move |_, _, _| reply(200, &body)).await;
+        let paid = Usage { input_tokens: 12, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 900 };
+        assert_eq!(u, Some(paid));
+        assert!(lines.is_empty(), "a success leaves the log alone: {lines:?}");
+        let req = &api.seen()[0];
+        assert_eq!(api.calls(), ["POST /v1/messages"]);
+        assert_eq!(req.header("x-api-key"), [KEY]);
+        assert_eq!(req.header("anthropic-version"), ["2026-10-21"]);
+        assert_eq!(req.body, serde_json::to_vec(&warm_body("claude-haiku-5-5", &[])).unwrap());
+    }
+
+    #[tokio::test]
+    async fn warm_failure_is_one_log_line_and_no_tokens() {
+        let refusal = format!(r#"{{"type":"error","error":{{"message":"BODY-MARK {KEY}"}}}}"#);
+        let (u, lines, _api) = warm_with(move |_, _, _| reply(500, &refusal)).await;
+        assert_eq!(u, None);
+        assert_one_warning(&lines, "cache warm-up: HTTP 500");
+        let (u, lines, _api) = warm_with(|_, _, _| Reply::Close).await;
+        assert_eq!(u, None);
+        assert_one_warning(&lines, "cache warm-up: network");
+        let (u, lines, _api) = warm_with(|_, _, _| reply(200, r#"{"content":[]}"#)).await;
+        assert_eq!(u, None);
+        assert_one_warning(&lines, "cache warm-up: HTTP 200 response not parsed");
     }
 }

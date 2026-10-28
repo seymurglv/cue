@@ -12,12 +12,14 @@
 //! was restored after Esc ("restore"), from "restore": time spent in "Cancelled" is not CUE's latency.
 //! An attempt without a stream (no Soniox key, the stream never connected) still bills the audio at the stream price:
 //! an overestimate in a rare failure, accepted.
-//! No text here: only numbers, the path and the outcome.
+//! A refine cache warm-up is not an attempt but has a row of its own (`warmup_record`).
+//! No text here: only numbers, the path, the mode and the outcome.
 use std::collections::VecDeque;
 
 use cue_core::flow::{DictationId, Outcome, RefineOutcome, STARTING_MS};
 use cue_core::settings::{Pricing, Settings};
-use cue_core::usage::{self, SttPath, UsageRecord};
+use cue_core::ui::Mode;
+use cue_core::usage::{self, SttPath, UsageMode, UsageRecord};
 use cue_engines::claude;
 use cue_engines::stt::SAMPLES_PER_MS;
 
@@ -28,6 +30,9 @@ pub struct Attempt {
     pub app: String,
     samples: u64,
     pub stt_path: SttPath,
+    /// The mode the dictation starts in, then the one its refine runs in (the mode may change while the chord is held).
+    /// Retries keep it.
+    pub mode: Mode,
     /// The language of most of the speech from the transcription (a Soniox code): which way a translation goes.
     /// A retry clears it: the new transcription gives its own; a retry of the translation keeps it.
     pub speech_language: Option<String>,
@@ -62,6 +67,7 @@ impl Attempt {
             app: String::new(),
             samples: 0,
             stt_path: SttPath::Stream,
+            mode: Mode::Dictate,
             speech_language: None,
             refine: claude::Usage::default(),
             refine_outcome: None,
@@ -94,19 +100,20 @@ impl Attempt {
         self.latency_from = Some(now);
     }
 
-    /// "Retry": a new attempt on the same audio. The audio and the app stay.
+    /// "Retry": a new attempt on the same audio. The audio, the app and the mode stay.
     pub fn retry(&mut self, now: u64) {
-        *self = Self { app: std::mem::take(&mut self.app), samples: self.samples, ..Self::new(self.id) };
+        *self = Self { app: std::mem::take(&mut self.app), samples: self.samples, mode: self.mode, ..Self::new(self.id) };
         self.stt_path = SttPath::Batch;
         self.finish_at = Some(now);
         self.latency_from = Some(now);
     }
 
     /// "Retry" after a failed translation: a new attempt on the same text. No audio is paid again (the row has 0 ms); the
-    /// app and the speech language stay.
+    /// app, the mode and the speech language stay.
     pub fn retry_text(&mut self, now: u64) {
         *self = Self {
             app: std::mem::take(&mut self.app),
+            mode: self.mode,
             speech_language: self.speech_language.take(),
             ..Self::new(self.id)
         };
@@ -165,7 +172,29 @@ impl Attempt {
             output_tokens: self.refine.output_tokens,
             latency_ms: self.latency_ms,
             outcome,
+            mode: self.mode.into(),
+            web_searches: 0,
         }
+    }
+}
+
+/// The usage.csv row of a refine cache warm-up: the tokens are paid for, but there is no audio, no paste and no
+/// dictation (`discarded`).
+pub fn warmup_record(usage: claude::Usage, ts: String, s: &Settings) -> UsageRecord {
+    UsageRecord {
+        ts,
+        audio_ms: 0,
+        stt_engine: s.stt.engine,
+        stt_path: SttPath::Stream,
+        refine_model: s.refine.model.clone(),
+        input_tokens: usage.input_tokens,
+        cache_read_tokens: usage.cache_read_input_tokens,
+        cache_write_tokens: usage.cache_creation_input_tokens,
+        output_tokens: usage.output_tokens,
+        latency_ms: 0,
+        outcome: Outcome::Discarded,
+        mode: UsageMode::Warmup,
+        web_searches: 0,
     }
 }
 
@@ -358,6 +387,32 @@ mod tests {
         let r = a.record(Outcome::Inserted, "t".into(), &s);
         assert_eq!((r.audio_ms, r.input_tokens, r.output_tokens), (0, 40, 12));
         assert_eq!(r.latency_ms, 650, "from \"retry\" to Ctrl+V");
+    }
+
+    #[test]
+    fn the_row_carries_the_mode_through_retries() {
+        let s = Settings::default();
+        let mut a = Attempt::new(DictationId(6));
+        assert_eq!(a.record(Outcome::Inserted, "t".into(), &s).mode, UsageMode::Dictate, "a new recording");
+        a.mode = Mode::Translate;
+        let r = a.record(Outcome::Failed, "t".into(), &s);
+        assert_eq!((r.mode, r.web_searches), (UsageMode::Translate, 0));
+        a.retry_text(1_000);
+        assert_eq!(a.record(Outcome::Failed, "t".into(), &s).mode, UsageMode::Translate, "a retry of the translation");
+        a.retry(2_000);
+        assert_eq!(a.record(Outcome::Inserted, "t".into(), &s).mode, UsageMode::Translate, "a retry of the transcription");
+        assert_eq!(Attempt::new(DictationId(7)).mode, Mode::Dictate, "the next recording starts over");
+    }
+
+    #[test]
+    fn warm_up_row_has_tokens_and_nothing_else() {
+        let s = Settings::default();
+        let r = warmup_record(usage(12, 1), "2026-11-01T10:00:00Z".into(), &s);
+        assert_eq!(r.ts, "2026-11-01T10:00:00Z");
+        assert_eq!((r.mode, r.outcome, r.web_searches), (UsageMode::Warmup, Outcome::Discarded, 0));
+        assert_eq!((r.audio_ms, r.latency_ms), (0, 0));
+        assert_eq!(r.refine_model, s.refine.model);
+        assert_eq!((r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens), (12, 1, 7, 3));
     }
 
     #[test]
