@@ -14,6 +14,17 @@ pub enum UiPhase {
     Error,
 }
 
+/// What the dictation does with the speech, picked by the chord (spec 2 §4): `Ctrl + Win` dictates, `+ Shift` translates,
+/// `+ Alt` asks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    #[default]
+    Dictate,
+    Translate,
+    Ask,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ErrorCause {
@@ -38,6 +49,7 @@ pub struct UiState {
     pub error: Option<ErrorCause>,
     pub retry: bool,
     pub paused: bool,
+    pub mode: Mode,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -58,10 +70,10 @@ mod tests {
 
     #[test]
     fn json_names_match_typescript() {
-        let s = UiState { phase: UiPhase::Error, error: Some(ErrorCause::SonioxKey), retry: true, paused: false };
+        let s = UiState { phase: UiPhase::Error, error: Some(ErrorCause::SonioxKey), retry: true, paused: false, mode: Mode::Dictate };
         assert_eq!(
             serde_json::to_string(&s).unwrap(),
-            r#"{"phase":"error","error":"sonioxKey","retry":true,"paused":false}"#
+            r#"{"phase":"error","error":"sonioxKey","retry":true,"paused":false,"mode":"dictate"}"#
         );
         assert_eq!(serde_json::to_string(&TrayKind::NoField).unwrap(), r#""noField""#);
         assert_eq!(serde_json::from_str::<UiAction>(r#""trayAction""#).unwrap(), UiAction::TrayAction);
@@ -111,7 +123,10 @@ mod tests {
         for (name, v) in actions {
             assert_eq!(serde_json::from_str::<UiAction>(&format!("\"{name}\"")).unwrap(), v);
         }
-        let s = UiState { phase: UiPhase::Listen, error: None, retry: false, paused: true };
-        assert_eq!(json(s), r#"{"phase":"listen","error":null,"retry":false,"paused":true}"#);
+        for (v, name) in [(Mode::Dictate, "dictate"), (Mode::Translate, "translate"), (Mode::Ask, "ask")] {
+            assert_eq!(json(v), format!("\"{name}\""));
+        }
+        let s = UiState { phase: UiPhase::Listen, error: None, retry: false, paused: true, mode: Mode::Translate };
+        assert_eq!(json(s), r#"{"phase":"listen","error":null,"retry":false,"paused":true,"mode":"translate"}"#);
     }
 }

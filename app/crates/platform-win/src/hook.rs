@@ -21,6 +21,8 @@ use crate::input::{key_held, send_mask_key, MODIFIERS};
 
 /// Swallow Esc — while CUE is recording, thinking or showing an error. Set by the core.
 pub static ESC_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Ctrl + Win + Alt is the "Ask" chord. Off until "Ask" exists (spec 2, queue 2b): Alt keeps making a system shortcut.
+pub static ASK_ENABLED: AtomicBool = AtomicBool::new(false);
 /// "Pause for an hour": the hook swallows nothing, does not mask the Start menu and sends no events
 /// (the Windows Ctrl+Win+V works as usual), but `Chord` still sees every key. Set by the core.
 pub static PAUSED: AtomicBool = AtomicBool::new(false);
@@ -142,7 +144,7 @@ fn feed(
     } else {
         chord.on_key(ev.vk, ev.down, ev.injected, esc_active)
     };
-    let chord_down = d.event == Some(HotkeyEvent::ChordDown);
+    let chord_down = matches!(d.event, Some(HotkeyEvent::ChordDown(_)));
     if paused {
         return (Outcome::default(), chord_down);
     }
@@ -258,6 +260,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 // There is no re-entry here (the mask is sent below), but a panic in the procedure would bring the process down.
                 let mut s = s.try_borrow_mut().ok()?;
                 let (chord, tx) = s.as_mut()?;
+                chord.set_ask(ASK_ENABLED.load(Ordering::Relaxed));
                 let esc_active = ESC_ACTIVE.load(Ordering::Relaxed);
                 let (out, chord_down) = feed(chord, &ev, how, esc_active, PAUSED.load(Ordering::Relaxed), key_held);
                 for event in out.events.into_iter().flatten() {
@@ -418,6 +421,7 @@ pub fn installed() -> bool {
 mod tests {
     use super::*;
     use crate::chord::{VK_MASK, VK_RMENU};
+    use cue_core::ui::Mode;
     use windows::Win32::UI::WindowsAndMessaging::{
         KBDLLHOOKSTRUCT_FLAGS, LLKHF_LOWER_IL_INJECTED, LLKHF_UP, WM_KEYUP, WM_SYSKEYUP,
     };
@@ -582,13 +586,14 @@ mod tests {
     }
 
     #[test]
-    fn shift_press_inside_held_chord_still_aborts() {
-        // The resync before Shift leaves the held pair alone: Shift is a third key, as before.
+    fn shift_press_inside_held_chord_switches_mode() {
+        // The resync before Shift leaves the held pair alone: Shift switches the chord to translation.
         let mut c = Chord::default();
         hook(&mut c, key(VK_LCONTROL, true), held_set(&[]));
         hook(&mut c, key(VK_LWIN, true), held_set(&[VK_LCONTROL]));
         let held = [VK_LCONTROL, VK_LWIN];
-        assert_eq!(hook(&mut c, key(VK_LSHIFT, true), held_set(&held)), Some(events(None, Some(ChordAborted))));
+        let translate = Some(events(None, Some(ModeChange(Mode::Translate))));
+        assert_eq!(hook(&mut c, key(VK_LSHIFT, true), held_set(&held)), translate);
         assert_eq!(hook(&mut c, key(VK_LSHIFT, true), held_set(&[VK_LCONTROL, VK_LWIN, VK_LSHIFT])), Some(PASS));
         assert!(c.active(), "ChordUp only when the pair breaks up");
     }
@@ -597,11 +602,11 @@ mod tests {
     fn resync_event_comes_before_key_event() {
         let mut c = Chord::default();
         assert_eq!(hook(&mut c, key(VK_LCONTROL, true), held_set(&[])), Some(PASS));
-        assert_eq!(hook(&mut c, key(VK_LWIN, true), held_set(&[VK_LCONTROL])), Some(events(None, Some(ChordDown))));
+        assert_eq!(hook(&mut c, key(VK_LWIN, true), held_set(&[VK_LCONTROL])), Some(events(None, Some(ChordDown(Mode::Dictate)))));
         // The Ctrl release went to the secure desktop (UAC prompt), Ctrl is pressed again.
         assert_eq!(
             hook(&mut c, key(VK_LCONTROL, true), held_set(&[VK_LWIN])),
-            Some(events(Some(ChordUp), Some(ChordDown)))
+            Some(events(Some(ChordUp), Some(ChordDown(Mode::Dictate))))
         );
     }
 
@@ -652,7 +657,7 @@ mod tests {
         assert_eq!(paused(&mut c, key(VK_ESCAPE, true), &[VK_LCONTROL]), Some(PASS), "Esc is not swallowed");
         assert_eq!(paused(&mut c, key(VK_ESCAPE, false), &[VK_LCONTROL, VK_ESCAPE]), Some(PASS));
         // The pause is over, Ctrl is still held: Chord saw its press during the pause.
-        assert_eq!(hook(&mut c, key(VK_LWIN, true), held_set(&[VK_LCONTROL])), Some(events(None, Some(ChordDown))));
+        assert_eq!(hook(&mut c, key(VK_LWIN, true), held_set(&[VK_LCONTROL])), Some(events(None, Some(ChordDown(Mode::Dictate)))));
     }
 
     #[test]
@@ -797,11 +802,11 @@ mod tests {
     fn chord_restarted_in_one_event_rearms_debounce() {
         let mut g = Glue::new();
         g.key(key(VK_LCONTROL, true), held_set(&[]));
-        assert_eq!(g.key(key(VK_LWIN, true), held_set(&[VK_LCONTROL])).events, [None, Some(ChordDown)]);
+        assert_eq!(g.key(key(VK_LWIN, true), held_set(&[VK_LCONTROL])).events, [None, Some(ChordDown(Mode::Dictate))]);
         // The Ctrl release was lost; the tick already saw Ctrl released.
         assert_eq!(g.tick(held_set(&[VK_LWIN])), None);
         // Ctrl is pressed again: the resync ends the old chord, the press forms a new one — same timer.
-        assert_eq!(g.key(key(VK_LCONTROL, true), held_set(&[VK_LWIN])).events, [Some(ChordUp), Some(ChordDown)]);
+        assert_eq!(g.key(key(VK_LCONTROL, true), held_set(&[VK_LWIN])).events, [Some(ChordUp), Some(ChordDown(Mode::Dictate))]);
         // The tick came before Windows updated the Ctrl state.
         assert_eq!(g.tick(held_set(&[VK_LWIN])), None, "no false ChordUp right after ChordDown");
         assert!(g.chord.active());

@@ -92,7 +92,8 @@ pub enum CoreEvent {
 
 pub fn input_of(ev: HotkeyEvent) -> Input {
     match ev {
-        HotkeyEvent::ChordDown => Input::ChordDown,
+        HotkeyEvent::ChordDown(mode) => Input::ChordDown(mode),
+        HotkeyEvent::ModeChange(mode) => Input::ModeChange(mode),
         HotkeyEvent::ChordUp => Input::ChordUp,
         HotkeyEvent::ChordAborted => Input::ChordAborted,
         HotkeyEvent::Esc => Input::Esc,
@@ -375,7 +376,7 @@ impl Runtime {
             Effect::FinishStt { id } => self.finish_stt(id),
             Effect::AbortStt { id } => self.abort_stt(id),
             Effect::TranscribeSaved { id } => self.transcribe_saved(id),
-            Effect::Refine { id, raw } => self.refine(id, raw),
+            Effect::Refine { id, raw, .. } => self.refine(id, raw),
             Effect::AbortRefine { id } => {
                 if let Some(task) = self.refine_task.take_for(id) {
                     task.abort();
@@ -861,10 +862,12 @@ fn soniox_key() -> Result<String, EngineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cue_core::ui::Mode;
 
     #[test]
     fn hotkeys_map_to_flow_inputs() {
-        assert_eq!(input_of(HotkeyEvent::ChordDown), Input::ChordDown);
+        assert_eq!(input_of(HotkeyEvent::ChordDown(Mode::Translate)), Input::ChordDown(Mode::Translate));
+        assert_eq!(input_of(HotkeyEvent::ModeChange(Mode::Translate)), Input::ModeChange(Mode::Translate));
         assert_eq!(input_of(HotkeyEvent::ChordUp), Input::ChordUp);
         assert_eq!(input_of(HotkeyEvent::ChordAborted), Input::ChordAborted);
         assert_eq!(input_of(HotkeyEvent::Esc), Input::Esc);

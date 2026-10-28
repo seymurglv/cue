@@ -3,7 +3,9 @@ import { DICTS, TRAYS, type Dict, type ErrorCause, type Lang, type TrayKind } fr
 import { trayHtml } from './trays';
 
 export type Phase = 'idle' | 'start' | 'listen' | 'think' | 'done' | 'empty' | 'cancel' | 'error';
-export interface UiState { phase: Phase; error: ErrorCause | null; retry: boolean; paused: boolean }
+/** What the dictation does with the speech; the core picks it from the chord (Shift — translate, Alt — ask). */
+export type Mode = 'dictate' | 'translate' | 'ask';
+export interface UiState { phase: Phase; error: ErrorCause | null; retry: boolean; paused: boolean; mode: Mode }
 export type UiAction = 'cancel' | 'finish' | 'undo' | 'retry' | 'dismiss' | 'trayAction' | 'trayClose';
 export interface Rect { x: number; y: number; w: number; h: number }
 /** Where the Drop sits on the screen; the layout follows it (drop.css, [data-place]). */
@@ -37,7 +39,7 @@ const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
 export const DRAG_THRESHOLD = 4;
 
 export class DropController {
-  private state: UiState = { phase: 'idle', error: null, retry: false, paused: false };
+  private state: UiState = { phase: 'idle', error: null, retry: false, paused: false, mode: 'dictate' };
   private voice: any;
   private drop: any;
   private trayBox: any;
@@ -70,7 +72,7 @@ export class DropController {
     // Without a level from the core Voice would draw made-up syllables; the bars show only what the core sent.
     this.voice.ext = 0;
     const api = {
-      mode: () => 'dictate',
+      mode: () => this.state.mode ?? 'dictate',
       err: () => (this.state.error === 'net' ? 'net' : 'key'),
       errLabel: () => this.t.error[this.state.error ?? 'net'],
       text: this.t.drop,
@@ -116,12 +118,14 @@ export class DropController {
 
   apply(s: UiState) {
     const prev = this.state.phase;
+    const prevMode = this.state.mode ?? 'dictate';
     this.state = s;
     // Dragging is for the idle Drop only: a dictation or a pause ends it, and the core snaps the Drop to a place.
     if (s.phase !== 'idle' || s.paused) this.endDrag(true);
     // A new recording does not drift to the last level of the previous one, and the level does not linger after recording.
     if (s.phase !== prev && (s.phase === 'listen' || prev === 'listen')) this.resetVoice();
-    if (s.phase !== prev || s.phase === 'error') this.drop.enter(s.phase);
+    // A new mode during start-up or recording re-enters the phase: drop.js picks the mark's shape and icon by mode there.
+    if (s.phase !== prev || s.phase === 'error' || (s.mode ?? 'dictate') !== prevMode) this.drop.enter(s.phase);
     else this.drop.layout();
     this.syncIdle();
     this.wake();

@@ -1,5 +1,5 @@
 //! The dictation flow: one state machine. Pure logic with no OS, network or clock.
-use crate::ui::{ErrorCause, TrayKind, UiAction, UiPhase, UiState};
+use crate::ui::{ErrorCause, Mode, TrayKind, UiAction, UiPhase, UiState};
 
 pub type Ms = u64;
 
@@ -61,7 +61,10 @@ pub enum Outcome {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Input {
-    ChordDown,
+    /// The chord formed; the mode is what the held Shift / Alt picked.
+    ChordDown(Mode),
+    /// Shift or Alt was pressed while the chord is held: the mode the keys pick now.
+    ModeChange(Mode),
     ChordUp,
     ChordAborted,
     Esc,
@@ -86,7 +89,7 @@ pub enum Effect {
     FinishStt { id: DictationId },
     AbortStt { id: DictationId },
     TranscribeSaved { id: DictationId },
-    Refine { id: DictationId, raw: String },
+    Refine { id: DictationId, raw: String, mode: Mode },
     AbortRefine { id: DictationId },
     Insert { id: DictationId, text: String },
     PasteLast,
@@ -131,6 +134,8 @@ pub struct Flow {
     /// Refine for `id` was requested, but there is no result yet.
     refine_pending: bool,
     paused: bool,
+    /// The mode of the dictation `id`: what the chord picked, changed only while the starting chord is held.
+    mode: Mode,
     hold_hints_left: u8,
     has_last: bool,
 }
@@ -149,6 +154,7 @@ impl Flow {
             stt_pending: false,
             refine_pending: false,
             paused: false,
+            mode: Mode::Dictate,
             hold_hints_left,
             has_last,
         }
@@ -156,6 +162,10 @@ impl Flow {
 
     pub fn current_id(&self) -> DictationId {
         self.id
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.mode
     }
 
     /// Swallow Esc: while CUE is starting, recording, thinking (including pasting, when the Drop shows
@@ -178,13 +188,14 @@ impl Flow {
             Phase::Cancelled => (UiPhase::Cancel, None, false),
             Phase::Error { cause, retry } => (UiPhase::Error, Some(cause), retry),
         };
-        UiState { phase, error, retry, paused: self.paused }
+        UiState { phase, error, retry, paused: self.paused, mode: self.mode }
     }
 
     pub fn handle(&mut self, input: Input, now: Ms) -> Vec<Effect> {
         let mut fx = Vec::new();
         match input {
-            Input::ChordDown => self.on_chord_down(now, &mut fx),
+            Input::ChordDown(mode) => self.on_chord_down(mode, now, &mut fx),
+            Input::ModeChange(mode) => self.on_mode_change(mode, &mut fx),
             Input::ChordUp => {
                 // A ChordUp without a pair (chord pressed during a pause, after a cancel, after the key check)
                 // only clears the hold.
@@ -288,7 +299,7 @@ impl Flow {
         id == self.id && self.stt_pending
     }
 
-    fn on_chord_down(&mut self, now: Ms, fx: &mut Vec<Effect>) {
+    fn on_chord_down(&mut self, mode: Mode, now: Ms, fx: &mut Vec<Effect>) {
         if self.paused {
             return;
         }
@@ -305,14 +316,15 @@ impl Flow {
             Phase::Thinking | Phase::Inserting => fx.push(Effect::Shake),
             Phase::Cancelled => {
                 self.close_cancelled(fx);
-                self.start(fx);
+                self.start(mode, fx);
             }
-            Phase::Idle | Phase::Done | Phase::Empty | Phase::Error { .. } => self.start(fx),
+            Phase::Idle | Phase::Done | Phase::Empty | Phase::Error { .. } => self.start(mode, fx),
         }
     }
 
-    fn start(&mut self, fx: &mut Vec<Effect>) {
+    fn start(&mut self, mode: Mode, fx: &mut Vec<Effect>) {
         self.id = DictationId(self.id.0.wrapping_add(1));
+        self.mode = mode;
         self.phase = Phase::Starting;
         self.chord_held = true;
         self.hold_mode = false;
@@ -332,6 +344,16 @@ impl Flow {
         fx.push(Effect::SetTimer { kind: TimerKind::WarnLastMinute, after: WARN_MS });
         fx.push(Effect::SetTimer { kind: TimerKind::AutoFinish, after: AUTO_FINISH_MS });
         self.push_ui(fx);
+    }
+
+    /// Shift or Alt pressed while the starting chord is still held (hold mode included): the dictation switches mode.
+    /// After the release the mode is fixed until the end of the recording (spec 2 §4); the finishing press has already
+    /// moved the flow to "thinking", so it cannot change it either.
+    fn on_mode_change(&mut self, mode: Mode, fx: &mut Vec<Effect>) {
+        if self.chord_held && self.recording_now() && self.mode != mode {
+            self.mode = mode;
+            self.push_ui(fx);
+        }
     }
 
     /// The start-up or recording is thrown away: the audio is not kept, transcription is aborted, no "restore".
@@ -383,7 +405,7 @@ impl Flow {
             return false;
         }
         if !self.refine_pending {
-            fx.push(Effect::Refine { id: self.id, raw: raw.to_owned() });
+            fx.push(Effect::Refine { id: self.id, raw: raw.to_owned(), mode: self.mode });
             self.refine_pending = true;
         }
         true
@@ -558,6 +580,8 @@ impl Flow {
 
     fn enter_idle(&mut self, fx: &mut Vec<Effect>) {
         self.phase = Phase::Idle;
+        // The idle Drop shows no mode; "restore" and "retry" do not live in idle, so nothing still needs it.
+        self.mode = Mode::Dictate;
         self.push_ui(fx);
     }
 
@@ -604,7 +628,12 @@ mod tests {
 
     /// Pressed and released, start-up done: recording in "press and release" mode.
     fn recording(f: &mut Flow, t: Ms) -> DictationId {
-        f.handle(I::ChordDown, t);
+        recording_in(f, t, Mode::Dictate)
+    }
+
+    /// As `recording`, with the chord that picked `mode`.
+    fn recording_in(f: &mut Flow, t: Ms, mode: Mode) -> DictationId {
+        f.handle(I::ChordDown(mode), t);
         f.handle(I::ChordUp, t + 100);
         f.handle(I::Timer(TimerKind::StartingDone), t + STARTING_MS);
         f.handle(I::Timer(TimerKind::HoldCheck), t + HOLD_MS);
@@ -614,7 +643,7 @@ mod tests {
     /// The recording was finished by a second press, and the transcribed text has arrived.
     fn thinking_with_raw(f: &mut Flow, t: Ms, raw: &str) -> DictationId {
         let id = recording(f, t);
-        f.handle(I::ChordDown, t + 5_000);
+        f.handle(I::ChordDown(Mode::Dictate), t + 5_000);
         f.handle(I::ChordUp, t + 5_100);
         f.handle(I::SttFinal { id, text: raw.into() }, t + 5_300);
         id
@@ -623,7 +652,7 @@ mod tests {
     #[test]
     fn tap_starts_and_second_press_finishes() {
         let mut f = Flow::new(2, false);
-        let fx = f.handle(I::ChordDown, 0);
+        let fx = f.handle(I::ChordDown(Mode::Dictate), 0);
         let id = f.current_id();
         assert_eq!(id, DictationId(1));
         assert!(has(&fx, &E::OpenMic { id }));
@@ -636,7 +665,7 @@ mod tests {
         let fx = f.handle(I::Timer(TimerKind::StartingDone), 380);
         assert_eq!(phase(&fx), Some(UiPhase::Listen));
         assert!(f.handle(I::Timer(TimerKind::HoldCheck), 600).is_empty());
-        let fx = f.handle(I::ChordDown, 5_000);
+        let fx = f.handle(I::ChordDown(Mode::Dictate), 5_000);
         assert!(has(&fx, &E::StopMic { id, keep: true }));
         assert!(has(&fx, &E::FinishStt { id }));
         assert_eq!(phase(&fx), Some(UiPhase::Think));
@@ -646,9 +675,9 @@ mod tests {
     fn happy_path_inserts_then_hides() {
         let mut f = Flow::new(2, false);
         let id = recording(&mut f, 0);
-        f.handle(I::ChordDown, 5_000);
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
         let fx = f.handle(I::SttFinal { id, text: "ну привет".into() }, 5_200);
-        assert!(has(&fx, &E::Refine { id, raw: "ну привет".into() }));
+        assert!(has(&fx, &E::Refine { id, raw: "ну привет".into(), mode: Mode::Dictate }));
         let fx = f.handle(I::Refined { id, text: "Привет.".into(), outcome: RefineOutcome::Refined }, 5_900);
         assert!(has(&fx, &E::Insert { id, text: "Привет.".into() }));
         let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 6_000);
@@ -664,7 +693,7 @@ mod tests {
         let mut f = Flow::new(2, false);
         for round in 0..3u64 {
             let t = round * 100_000;
-            f.handle(I::ChordDown, t);
+            f.handle(I::ChordDown(Mode::Dictate), t);
             let id = f.current_id();
             f.handle(I::Timer(TimerKind::StartingDone), t + 380);
             f.handle(I::Timer(TimerKind::HoldCheck), t + 600);
@@ -682,15 +711,15 @@ mod tests {
     #[test]
     fn second_press_within_debounce_is_ignored() {
         let mut f = Flow::new(2, false);
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         f.handle(I::ChordUp, 50);
-        assert!(f.handle(I::ChordDown, 200).is_empty());
+        assert!(f.handle(I::ChordDown(Mode::Dictate), 200).is_empty());
     }
 
     #[test]
     fn system_shortcut_in_first_380ms_discards_silently() {
         let mut f = Flow::new(2, false);
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         let id = f.current_id();
         let fx = f.handle(I::ChordAborted, 120);
         assert!(has(&fx, &E::StopMic { id, keep: false }));
@@ -711,7 +740,7 @@ mod tests {
     #[test]
     fn system_shortcut_while_chord_held_discards_after_start() {
         let mut f = Flow::new(2, false);
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         let id = f.current_id();
         f.handle(I::Timer(TimerKind::StartingDone), STARTING_MS);
         f.handle(I::Timer(TimerKind::HoldCheck), HOLD_MS);
@@ -728,7 +757,7 @@ mod tests {
     #[test]
     fn system_shortcut_before_hold_check_leaves_nothing_running() {
         let mut f = Flow::new(2, false);
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         let id = f.current_id();
         f.handle(I::Timer(TimerKind::StartingDone), STARTING_MS);
         let fx = f.handle(I::ChordAborted, 450);
@@ -742,7 +771,7 @@ mod tests {
     #[test]
     fn late_third_key_in_held_dictation_keeps_recording() {
         let mut f = Flow::new(2, false);
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         let id = f.current_id();
         f.handle(I::Timer(TimerKind::StartingDone), STARTING_MS);
         f.handle(I::Timer(TimerKind::HoldCheck), HOLD_MS);
@@ -765,7 +794,7 @@ mod tests {
         assert!(f.handle(I::SttFinal { id, text: "сказанное".into() }, 3_300).is_empty(), "nothing is pasted while cancelled");
         let fx = f.handle(I::Ui(UiAction::Undo), 4_000);
         assert!(has(&fx, &E::CancelTimer(TimerKind::UndoExpire)));
-        assert!(has(&fx, &E::Refine { id, raw: "сказанное".into() }));
+        assert!(has(&fx, &E::Refine { id, raw: "сказанное".into(), mode: Mode::Dictate }));
         assert_eq!(phase(&fx), Some(UiPhase::Think));
     }
 
@@ -777,7 +806,7 @@ mod tests {
         let fx = f.handle(I::Ui(UiAction::Undo), 3_200);
         assert!(!fx.iter().any(|e| matches!(e, E::Refine { .. })));
         let fx = f.handle(I::SttFinal { id, text: "позже".into() }, 3_600);
-        assert!(has(&fx, &E::Refine { id, raw: "позже".into() }));
+        assert!(has(&fx, &E::Refine { id, raw: "позже".into(), mode: Mode::Dictate }));
     }
 
     #[test]
@@ -799,21 +828,21 @@ mod tests {
         assert_eq!(phase(&fx), Some(UiPhase::Cancel));
         assert!(f.handle(I::Refined { id, text: "Поздно.".into(), outcome: RefineOutcome::Refined }, 5_500).is_empty());
         let fx = f.handle(I::Ui(UiAction::Undo), 6_000);
-        assert!(has(&fx, &E::Refine { id, raw: "черновик".into() }));
+        assert!(has(&fx, &E::Refine { id, raw: "черновик".into(), mode: Mode::Dictate }));
     }
 
     #[test]
     fn press_while_thinking_shakes() {
         let mut f = Flow::new(2, false);
         thinking_with_raw(&mut f, 0, "x");
-        assert_eq!(f.handle(I::ChordDown, 5_600), vec![E::Shake]);
+        assert_eq!(f.handle(I::ChordDown(Mode::Dictate), 5_600), vec![E::Shake]);
     }
 
     #[test]
     fn stt_failure_shows_error_and_retry_uses_saved_audio() {
         let mut f = Flow::new(2, false);
         let id = recording(&mut f, 0);
-        f.handle(I::ChordDown, 5_000);
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
         let fx = f.handle(I::SttFailed { id, error: SttError::Network }, 6_000);
         let ui = last_ui(&fx).unwrap();
         assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::Net), true));
@@ -842,15 +871,15 @@ mod tests {
     fn error_closes_by_dismiss_or_new_dictation() {
         let mut f = Flow::new(2, false);
         let id = recording(&mut f, 0);
-        f.handle(I::ChordDown, 5_000);
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
         f.handle(I::SttFailed { id, error: SttError::Network }, 6_000);
         assert_eq!(phase(&f.handle(I::Ui(UiAction::Dismiss), 7_000)), Some(UiPhase::Idle));
-        f.handle(I::ChordDown, 10_000);
+        f.handle(I::ChordDown(Mode::Dictate), 10_000);
         let id2 = f.current_id();
         f.handle(I::Timer(TimerKind::StartingDone), 10_380);
-        f.handle(I::ChordDown, 15_000);
+        f.handle(I::ChordDown(Mode::Dictate), 15_000);
         f.handle(I::SttFailed { id: id2, error: SttError::Network }, 16_000);
-        let fx = f.handle(I::ChordDown, 20_000);
+        let fx = f.handle(I::ChordDown(Mode::Dictate), 20_000);
         assert!(has(&fx, &E::OpenMic { id: DictationId(id2.0 + 1) }));
     }
 
@@ -858,7 +887,7 @@ mod tests {
     fn empty_transcript_collapses_quietly() {
         let mut f = Flow::new(2, false);
         let id = recording(&mut f, 0);
-        f.handle(I::ChordDown, 5_000);
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
         let fx = f.handle(I::SttFinal { id, text: "  ".into() }, 5_200);
         assert!(!fx.iter().any(|e| matches!(e, E::Refine { .. })));
         assert_eq!(phase(&fx), Some(UiPhase::Empty));
@@ -908,7 +937,7 @@ mod tests {
         recording(&mut f, 1_000);
         assert!(f.handle(I::PasteLast, 3_000).is_empty(), "does nothing during recording");
         let mut f = Flow::new(2, true);
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         let id = f.current_id();
         let fx = f.handle(I::PasteLast, 50);
         assert!(has(&fx, &E::Finished { id, outcome: Outcome::Discarded }), "Ctrl+Win+V does not start a dictation");
@@ -921,11 +950,11 @@ mod tests {
         let fx = f.handle(I::TogglePause, 0);
         assert!(has(&fx, &E::SetTimer { kind: TimerKind::PauseEnd, after: PAUSE_MS }));
         assert!(last_ui(&fx).unwrap().paused);
-        assert!(f.handle(I::ChordDown, 1_000).is_empty());
+        assert!(f.handle(I::ChordDown(Mode::Dictate), 1_000).is_empty());
         assert!(f.handle(I::PasteLast, 2_000).is_empty());
         let fx = f.handle(I::Timer(TimerKind::PauseEnd), PAUSE_MS);
         assert!(!last_ui(&fx).unwrap().paused);
-        assert!(!f.handle(I::ChordDown, PAUSE_MS + 1_000).is_empty());
+        assert!(!f.handle(I::ChordDown(Mode::Dictate), PAUSE_MS + 1_000).is_empty());
     }
 
     #[test]
@@ -933,7 +962,7 @@ mod tests {
         let mut f = Flow::new(2, false);
         let id = recording(&mut f, 0);
         f.handle(I::Esc, 3_000);
-        let fx = f.handle(I::ChordDown, 4_000);
+        let fx = f.handle(I::ChordDown(Mode::Dictate), 4_000);
         assert!(has(&fx, &E::Finished { id, outcome: Outcome::Cancelled }));
         assert!(has(&fx, &E::OpenMic { id: DictationId(id.0 + 1) }));
     }
@@ -943,7 +972,7 @@ mod tests {
         let mut f = Flow::new(2, false);
         let old = thinking_with_raw(&mut f, 0, "a");
         f.handle(I::Esc, 5_400);
-        f.handle(I::ChordDown, 6_000);
+        f.handle(I::ChordDown(Mode::Dictate), 6_000);
         assert!(f.handle(I::SttFinal { id: old, text: "старое".into() }, 6_100).is_empty());
         assert!(f.handle(I::Inserted { id: old, outcome: InsertOutcome::Pasted }, 6_200).is_empty());
     }
@@ -962,7 +991,7 @@ mod tests {
         assert!(!fx.iter().any(|e| matches!(e, E::Tray(Some(_)) | E::Finished { .. })));
         assert_eq!(phase(&fx), Some(UiPhase::Think));
         let fx = f.handle(I::SttFinal { id, text: "успел сказать".into() }, 3_300);
-        assert!(has(&fx, &E::Refine { id, raw: "успел сказать".into() }));
+        assert!(has(&fx, &E::Refine { id, raw: "успел сказать".into(), mode: Mode::Dictate }));
         f.handle(I::Refined { id, text: "Успел сказать.".into(), outcome: RefineOutcome::Refined }, 3_800);
         let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 3_900);
         assert!(has(&fx, &E::Finished { id, outcome: Outcome::Inserted }));
@@ -985,7 +1014,7 @@ mod tests {
     #[test]
     fn mic_failed_while_starting_discards_even_if_heard() {
         let mut f = Flow::new(2, false);
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         let id = f.current_id();
         let fx = f.handle(I::MicFailed { heard: true }, 100);
         assert!(has(&fx, &E::StopMic { id, keep: false }));
@@ -1011,7 +1040,7 @@ mod tests {
     fn pause_during_recording_discards_dictation() {
         let mut f = Flow::new(2, false);
         // Hold mode: the chord is still held down.
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         let id = f.current_id();
         f.handle(I::Timer(TimerKind::StartingDone), 380);
         f.handle(I::Timer(TimerKind::HoldCheck), 600);
@@ -1028,19 +1057,19 @@ mod tests {
         f.handle(I::TogglePause, 3_000);
         assert!(f.handle(I::ChordUp, 3_100).is_empty());
         // The next dictation starts in "press and release" mode.
-        f.handle(I::ChordDown, 4_000);
+        f.handle(I::ChordDown(Mode::Dictate), 4_000);
         let id2 = f.current_id();
         f.handle(I::ChordUp, 4_100);
         f.handle(I::Timer(TimerKind::StartingDone), 4_380);
         f.handle(I::Timer(TimerKind::HoldCheck), 4_600);
         assert!(f.handle(I::ChordUp, 5_000).is_empty());
-        assert!(has(&f.handle(I::ChordDown, 6_000), &E::FinishStt { id: id2 }));
+        assert!(has(&f.handle(I::ChordDown(Mode::Dictate), 6_000), &E::FinishStt { id: id2 }));
     }
 
     #[test]
     fn pause_while_starting_discards() {
         let mut f = Flow::new(2, false);
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         let id = f.current_id();
         let fx = f.handle(I::TogglePause, 100);
         assert!(has(&fx, &E::StopMic { id, keep: false }));
@@ -1059,7 +1088,7 @@ mod tests {
             E::StopMic { .. } | E::AbortStt { .. } | E::AbortRefine { .. } | E::Finished { .. }
         )));
         assert_eq!(last_ui(&fx).map(|s| (s.phase, s.paused)), Some((UiPhase::Think, true)));
-        assert!(f.handle(I::ChordDown, 5_800).is_empty(), "no shake during a pause either");
+        assert!(f.handle(I::ChordDown(Mode::Dictate), 5_800).is_empty(), "no shake during a pause either");
         let fx = f.handle(I::Refined { id, text: "Текст.".into(), outcome: RefineOutcome::Refined }, 5_900);
         assert!(has(&fx, &E::Insert { id, text: "Текст.".into() }));
     }
@@ -1072,13 +1101,13 @@ mod tests {
         let id = recording(&mut f, 1_000);
         assert!(f.handle(I::ChordUp, 3_000).is_empty(), "does not end a \"press and release\" recording");
         assert_eq!(f.ui_state().phase, UiPhase::Listen);
-        assert!(has(&f.handle(I::ChordDown, 4_000), &E::FinishStt { id }));
+        assert!(has(&f.handle(I::ChordDown(Mode::Dictate), 4_000), &E::FinishStt { id }));
     }
 
     #[test]
     fn events_after_aborted_chord_are_safe() {
         let mut f = Flow::new(2, true);
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         f.handle(I::ChordAborted, 100);
         assert!(f.handle(I::ChordUp, 200).is_empty(), "ChordUp after an abort");
         assert_eq!(f.handle(I::PasteLast, 250), vec![E::PasteLast], "V in an aborted chord pastes the last result");
@@ -1097,7 +1126,7 @@ mod tests {
         assert!(has(&fx, &E::Finished { id, outcome: Outcome::Discarded }));
         assert!(!fx.iter().any(|e| matches!(e, E::SetTimer { kind: TimerKind::UndoExpire, .. } | E::Tray(Some(_)))));
         assert_eq!(phase(&fx), Some(UiPhase::Idle));
-        f.handle(I::ChordDown, 3_000);
+        f.handle(I::ChordDown(Mode::Dictate), 3_000);
         let id2 = f.current_id();
         let fx = f.handle(I::SessionLocked, 3_100);
         assert!(has(&fx, &E::Finished { id: id2, outcome: Outcome::Discarded }), "during start-up too");
@@ -1127,7 +1156,7 @@ mod tests {
         assert_eq!(SYSTEM_CHORD_MS, 1_500);
         assert_eq!((WARN_MS, AUTO_FINISH_MS, PAUSE_MS), (480_000, 540_000, 3_600_000));
         let mut f = Flow::new(2, false);
-        let fx = f.handle(I::ChordDown, 0);
+        let fx = f.handle(I::ChordDown(Mode::Dictate), 0);
         for (kind, after) in [
             (TimerKind::StartingDone, STARTING_MS),
             (TimerKind::HoldCheck, HOLD_MS),
@@ -1142,36 +1171,36 @@ mod tests {
     fn hold_threshold_and_debounce_boundaries() {
         // Released after 599 ms: "press and release".
         let mut f = Flow::new(2, false);
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         f.handle(I::Timer(TimerKind::StartingDone), 380);
         assert!(f.handle(I::ChordUp, 599).is_empty());
         assert!(f.handle(I::Timer(TimerKind::HoldCheck), 600).is_empty());
         assert_eq!(f.ui_state().phase, UiPhase::Listen);
         // Held for 600 ms: "hold".
         let mut f = Flow::new(2, false);
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         let id = f.current_id();
         f.handle(I::Timer(TimerKind::StartingDone), 380);
         f.handle(I::Timer(TimerKind::HoldCheck), 600);
         assert!(has(&f.handle(I::ChordUp, 600), &E::FinishStt { id }));
         // Debounce: a press after 299 ms does not count, after 300 ms it does.
         let mut f = Flow::new(2, false);
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         f.handle(I::ChordAborted, 50);
         f.handle(I::ChordUp, 60);
-        assert!(f.handle(I::ChordDown, 299).is_empty());
-        assert!(has(&f.handle(I::ChordDown, 300), &E::OpenMic { id: DictationId(2) }));
+        assert!(f.handle(I::ChordDown(Mode::Dictate), 299).is_empty());
+        assert!(has(&f.handle(I::ChordDown(Mode::Dictate), 300), &E::OpenMic { id: DictationId(2) }));
     }
 
     #[test]
     fn release_during_start_is_tap_mode_even_if_timers_reorder() {
         let mut f = Flow::new(2, false);
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         let id = f.current_id();
         f.handle(I::Timer(TimerKind::HoldCheck), 360);
         assert!(f.handle(I::ChordUp, 370).is_empty());
         f.handle(I::Timer(TimerKind::StartingDone), 380);
-        assert!(has(&f.handle(I::ChordDown, 5_000), &E::FinishStt { id }));
+        assert!(has(&f.handle(I::ChordDown(Mode::Dictate), 5_000), &E::FinishStt { id }));
         f.handle(I::SttFinal { id, text: "т".into() }, 5_100);
         f.handle(I::Refined { id, text: "Т.".into(), outcome: RefineOutcome::Refined }, 5_200);
         let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 5_300);
@@ -1182,10 +1211,10 @@ mod tests {
     #[test]
     fn second_press_during_start_finishes() {
         let mut f = Flow::new(2, false);
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         let id = f.current_id();
         f.handle(I::ChordUp, 100);
-        let fx = f.handle(I::ChordDown, 350);
+        let fx = f.handle(I::ChordDown(Mode::Dictate), 350);
         assert!(has(&fx, &E::StopMic { id, keep: true }));
         assert!(has(&fx, &E::FinishStt { id }));
         assert!(has(&fx, &E::CancelTimer(TimerKind::StartingDone)));
@@ -1199,7 +1228,7 @@ mod tests {
     fn hold_is_decided_by_time_not_timer_order() {
         // HoldCheck on time, StartingDone late: held for 650 ms, so release ends the recording.
         let mut f = Flow::new(2, false);
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         let id = f.current_id();
         f.handle(I::Timer(TimerKind::HoldCheck), 600);
         let fx = f.handle(I::ChordUp, 650);
@@ -1210,7 +1239,7 @@ mod tests {
         assert_eq!(f.ui_state().phase, UiPhase::Think);
         // HoldCheck late: held for 700 ms, still "hold", and the hint is shown.
         let mut f = Flow::new(2, false);
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         let id = f.current_id();
         f.handle(I::Timer(TimerKind::StartingDone), 380);
         assert!(has(&f.handle(I::ChordUp, 700), &E::FinishStt { id }));
@@ -1244,8 +1273,8 @@ mod tests {
     #[test]
     fn ui_state_reports_phase_and_pause() {
         let mut f = Flow::new(2, false);
-        assert_eq!(f.ui_state(), UiState { phase: UiPhase::Idle, error: None, retry: false, paused: false });
-        f.handle(I::ChordDown, 1_000);
+        assert_eq!(f.ui_state(), UiState { phase: UiPhase::Idle, error: None, retry: false, paused: false, mode: Mode::Dictate });
+        f.handle(I::ChordDown(Mode::Dictate), 1_000);
         assert_eq!(f.ui_state().phase, UiPhase::Start);
         f.handle(I::Timer(TimerKind::StartingDone), 1_380);
         assert_eq!(f.ui_state().phase, UiPhase::Listen);
@@ -1287,7 +1316,7 @@ mod tests {
         assert!(f.handle(I::Ui(UiAction::Cancel), 5_455).is_empty());
         assert_eq!(f.ui_state().phase, UiPhase::Think);
         assert!(f.handle(I::PasteLast, 5_460).is_empty());
-        assert_eq!(f.handle(I::ChordDown, 5_470), vec![E::Shake]);
+        assert_eq!(f.handle(I::ChordDown(Mode::Dictate), 5_470), vec![E::Shake]);
         f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 5_500);
         assert!(!f.esc_active());
         assert!(f.handle(I::Esc, 5_600).is_empty());
@@ -1296,7 +1325,7 @@ mod tests {
     #[test]
     fn paste_last_without_result_still_cancels_start() {
         let mut f = Flow::new(2, false);
-        f.handle(I::ChordDown, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
         let id = f.current_id();
         let fx = f.handle(I::PasteLast, 50);
         assert!(has(&fx, &E::Finished { id, outcome: Outcome::Discarded }), "Ctrl+Win+V is not dictation, even with nothing to paste");
@@ -1318,7 +1347,7 @@ mod tests {
         let mut f = Flow::new(2, false);
         let id = recording(&mut f, 0);
         assert!(f.handle(I::SttFailed { id, error: SttError::KeyProblem }, 2_000).is_empty(), "recording goes on");
-        let fx = f.handle(I::ChordDown, 5_000);
+        let fx = f.handle(I::ChordDown(Mode::Dictate), 5_000);
         assert!(has(&fx, &E::StopMic { id, keep: true }), "the recording is kept for \"retry\"");
         assert!(!has(&fx, &E::FinishStt { id }), "transcription has already ended");
         assert!(has(&fx, &E::Finished { id, outcome: Outcome::Failed }));
@@ -1332,8 +1361,8 @@ mod tests {
         let mut f = Flow::new(2, false);
         let id = recording(&mut f, 0);
         assert!(f.handle(I::SttFinal { id, text: "рано".into() }, 2_000).is_empty());
-        let fx = f.handle(I::ChordDown, 5_000);
-        assert!(has(&fx, &E::Refine { id, raw: "рано".into() }));
+        let fx = f.handle(I::ChordDown(Mode::Dictate), 5_000);
+        assert!(has(&fx, &E::Refine { id, raw: "рано".into(), mode: Mode::Dictate }));
         assert!(!has(&fx, &E::FinishStt { id }));
         assert_eq!(phase(&fx), Some(UiPhase::Think));
     }
@@ -1362,7 +1391,7 @@ mod tests {
         let mut f = Flow::new(2, false);
         let id = recording(&mut f, 0);
         f.handle(I::Esc, 3_000);
-        let fx = f.handle(I::ChordDown, 4_000);
+        let fx = f.handle(I::ChordDown(Mode::Dictate), 4_000);
         let abort = fx.iter().position(|e| *e == E::AbortStt { id });
         let open = fx.iter().position(|e| matches!(e, E::OpenMic { .. }));
         assert!(abort.is_some() && abort < open);
@@ -1386,7 +1415,7 @@ mod tests {
         for kind in [StartingDone, HoldCheck, DoneHide, EmptyHide, UndoExpire, PauseEnd] {
             assert!(f.handle(I::Timer(kind), 2_000).is_empty(), "{kind:?} during recording");
         }
-        f.handle(I::ChordDown, 5_000);
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
         for kind in all {
             assert!(f.handle(I::Timer(kind), 5_100).is_empty(), "{kind:?} in \"thinking\"");
         }
@@ -1395,9 +1424,70 @@ mod tests {
         let id = thinking_with_raw(&mut f, 0, "текст");
         f.handle(I::Refined { id, text: "Текст.".into(), outcome: RefineOutcome::Refined }, 5_400);
         f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 5_500);
-        f.handle(I::ChordDown, 6_000);
+        f.handle(I::ChordDown(Mode::Dictate), 6_000);
         assert!(f.handle(I::Timer(DoneHide), 7_000).is_empty());
         assert_eq!(f.ui_state().phase, UiPhase::Start);
+    }
+
+    // ---- Modes: Shift translates, Alt asks (spec 2 §4) ----
+
+    #[test]
+    fn translate_chord_carries_its_mode_to_refine() {
+        let mut f = Flow::new(2, false);
+        let fx = f.handle(I::ChordDown(Mode::Translate), 0);
+        assert_eq!(last_ui(&fx).map(|s| s.mode), Some(Mode::Translate));
+        let id = f.current_id();
+        f.handle(I::ChordUp, 100);
+        f.handle(I::Timer(TimerKind::StartingDone), STARTING_MS);
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
+        let fx = f.handle(I::SttFinal { id, text: "привет".into() }, 5_200);
+        assert!(has(&fx, &E::Refine { id, raw: "привет".into(), mode: Mode::Translate }), "the finishing press does not change the mode");
+    }
+
+    #[test]
+    fn mode_changes_while_the_starting_chord_is_held() {
+        let mut f = Flow::new(2, false);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
+        let fx = f.handle(I::ModeChange(Mode::Translate), 200);
+        assert_eq!(last_ui(&fx).map(|s| s.mode), Some(Mode::Translate), "the Drop switches its icon at once");
+        assert_eq!(f.mode(), Mode::Translate);
+        assert!(f.handle(I::ModeChange(Mode::Translate), 250).is_empty(), "the same mode again changes nothing");
+    }
+
+    #[test]
+    fn mode_is_fixed_after_release() {
+        let mut f = Flow::new(2, false);
+        let id = recording(&mut f, 0);
+        assert!(f.handle(I::ModeChange(Mode::Translate), 1_000).is_empty(), "the chord was released: the mode is fixed");
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
+        assert!(f.handle(I::ModeChange(Mode::Translate), 5_050).is_empty(), "the finishing press does not change it either");
+        let fx = f.handle(I::SttFinal { id, text: "текст".into() }, 5_300);
+        assert!(has(&fx, &E::Refine { id, raw: "текст".into(), mode: Mode::Dictate }));
+    }
+
+    #[test]
+    fn hold_counts_the_mode_at_release() {
+        let mut f = Flow::new(2, false);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
+        let id = f.current_id();
+        f.handle(I::Timer(TimerKind::StartingDone), STARTING_MS);
+        f.handle(I::Timer(TimerKind::HoldCheck), HOLD_MS);
+        f.handle(I::ModeChange(Mode::Translate), 2_000);
+        f.handle(I::ChordUp, 3_000);
+        let fx = f.handle(I::SttFinal { id, text: "текст".into() }, 3_200);
+        assert!(has(&fx, &E::Refine { id, raw: "текст".into(), mode: Mode::Translate }));
+    }
+
+    #[test]
+    fn idle_drop_shows_no_mode() {
+        let mut f = Flow::new(2, false);
+        let id = recording_in(&mut f, 0, Mode::Translate);
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
+        f.handle(I::SttFinal { id, text: "текст".into() }, 5_200);
+        f.handle(I::Refined { id, text: "Text.".into(), outcome: RefineOutcome::Refined }, 5_900);
+        f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 6_000);
+        let fx = f.handle(I::Timer(TimerKind::DoneHide), 7_500);
+        assert_eq!(last_ui(&fx).map(|s| s.mode), Some(Mode::Dictate));
     }
 
     /// Random input sequences: no panic; the microphone is open exactly while recording;
@@ -1451,7 +1541,7 @@ mod tests {
                 let id = DictationId(f.current_id().0.saturating_sub(next(2)));
                 let text = if next(4) == 0 { " ".to_string() } else { "текст".to_string() };
                 let input = match next(20) {
-                    0 | 1 => I::ChordDown,
+                    0 | 1 => I::ChordDown(Mode::Dictate),
                     2 | 3 => I::ChordUp,
                     4 => I::ChordAborted,
                     5 => I::Esc,

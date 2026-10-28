@@ -169,6 +169,7 @@ pub fn light_taskbar() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cue_core::ui::Mode;
 
     fn px(img: &[u8], size: u32, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * size + x) * 4) as usize;
@@ -297,7 +298,7 @@ mod tests {
 
     #[test]
     fn look_follows_core_state() {
-        let ui = |phase, paused| UiState { phase, error: None, retry: false, paused };
+        let ui = |phase, paused| UiState { phase, error: None, retry: false, paused, mode: Mode::Dictate };
         assert_eq!(TrayLook::of(&ui(UiPhase::Start, false)), TrayLook::Recording);
         assert_eq!(TrayLook::of(&ui(UiPhase::Listen, false)), TrayLook::Recording);
         for phase in [UiPhase::Idle, UiPhase::Think, UiPhase::Done, UiPhase::Empty, UiPhase::Cancel, UiPhase::Error] {

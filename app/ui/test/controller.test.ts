@@ -5,7 +5,7 @@ import { DRAG_THRESHOLD, DropController, PLACES, pickPlace, type UiState, type U
 import { trayHtml } from '../src/trays';
 import { DICTS, KEY_NAME, TRAYS, en, pickLang, ru, type TrayKind } from '../src/strings';
 
-const base: UiState = { phase: 'idle', error: null, retry: false, paused: false };
+const base: UiState = { phase: 'idle', error: null, retry: false, paused: false, mode: 'dictate' };
 let sent: UiAction[];
 let rectsSent: Rect[][];
 let wakes: number;
@@ -243,6 +243,38 @@ describe('Which Drop parts are visible in each state', () => {
     ctl.apply({ ...base, phase: 'error', error: 'net', retry: true });
     expect(shown()).toEqual(['mk', 'retry', 'why']);
     expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('No connection');
+  });
+});
+
+describe('Modes', () => {
+  it('shows the translate icon while recording a translation', () => {
+    ctl.apply({ ...base, phase: 'listen', mode: 'translate' });
+    expect(shown()).toContain('mi');
+    // Compared as parsed markup: the DOM writes the icon's self-closing <path/> back out as <path></path>.
+    const icon = document.createElement('span');
+    icon.innerHTML = CUE().IC.tr;
+    expect(document.querySelector('.drop .mi')!.innerHTML).toBe(icon.innerHTML);
+  });
+
+  it('switches the icon when the mode changes during the recording', () => {
+    ctl.apply({ ...base, phase: 'listen' });
+    expect(shown()).not.toContain('mi');
+    ctl.apply({ ...base, phase: 'listen', mode: 'translate' });
+    expect(shown()).toContain('mi');
+  });
+
+  it('a mode picked during start-up reshapes the mark at once', () => {
+    const mark = () => (ctl as any).drop.morph.state;
+    ctl.apply({ ...base, phase: 'start' });
+    expect(mark()).toBe('start');
+    ctl.apply({ ...base, phase: 'start', mode: 'translate' });
+    expect(mark()).toBe('translate');
+  });
+
+  it('a state without a mode is a dictation', () => {
+    const { mode: _, ...old } = base;
+    ctl.apply({ ...(old as UiState), phase: 'listen' });
+    expect(shown()).not.toContain('mi');
   });
 });
 

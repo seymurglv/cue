@@ -1,4 +1,5 @@
 //! CUE chords from keyboard events. Windows key codes (VK), but no Windows API calls.
+use cue_core::ui::Mode;
 
 pub const VK_CONTROL: u16 = 0x11;
 pub const VK_LCONTROL: u16 = 0xA2;
@@ -26,8 +27,10 @@ const SIDED: [u16; 8] = [VK_LCONTROL, VK_RCONTROL, VK_LWIN, VK_RWIN, VK_LSHIFT, 
 /// Event for the core.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HotkeyEvent {
-    /// Exactly the Ctrl + Win pair is held (no Shift or Alt).
-    ChordDown,
+    /// The chord formed: Ctrl + Win and at most one of Shift / Alt, which picks the mode.
+    ChordDown(Mode),
+    /// Shift or Alt pressed while the chord is held picks another mode (spec 2 §4).
+    ModeChange(Mode),
     /// The pair broke up after `ChordDown`; also comes after `ChordAborted`.
     ChordUp,
     /// A third key was pressed inside the chord: this is a system shortcut, not a dictation.
@@ -59,10 +62,17 @@ pub struct Chord {
     alt: u8,
     /// Between `ChordDown` and `ChordUp`.
     active: bool,
-    /// The chord is cancelled (`ChordAborted` sent, or the pair was formed together with Shift/Alt).
+    /// The chord is cancelled (`ChordAborted` sent, or the pair was formed as a system shortcut: Shift and Alt
+    /// together, or Alt while "Ask" is off).
     aborted: bool,
+    /// Ctrl + Win + Alt is a chord: "Ask" is on.
+    ask: bool,
+    /// The held chord's mode.
+    mode: Mode,
     /// This Win press had a `ChordDown`: the last Win release is masked.
     win_needs_mask: bool,
+    /// Alt took part in an "Ask" chord: its last release is masked.
+    alt_needs_mask: bool,
     /// Swallowed keys: their auto-repeat and release are swallowed too.
     swallowed: [bool; 256],
     /// Swallowed keys that `resync` considered released: only a release is expected from them;
@@ -79,7 +89,10 @@ impl Default for Chord {
             alt: 0,
             active: false,
             aborted: false,
+            ask: false,
+            mode: Mode::Dictate,
             win_needs_mask: false,
+            alt_needs_mask: false,
             swallowed: [false; 256],
             release_only: [false; 256],
         }
@@ -87,11 +100,16 @@ impl Default for Chord {
 }
 
 impl Chord {
+    /// Whether Ctrl + Win + Alt is a CUE chord ("Ask", spec 2 §4). Off: Alt makes it a system shortcut, as before "Ask" existed.
+    pub fn set_ask(&mut self, on: bool) {
+        self.ask = on;
+    }
+
     /// Checks the remembered Ctrl, Win, Shift and Alt against the physical keys: `held(vk)` — is the key held now.
     /// Drops keys whose release never reached the hook (secure desktop after
     /// Ctrl+Alt+Del, UAC prompt, lock screen, elevated window); adds no new presses.
     /// If the Ctrl + Win pair is gone after `ChordDown`, returns `ChordUp` (once).
-    /// If no Win is held, the Start menu mask is no longer needed.
+    /// If no Win is held, the Start menu mask is no longer needed; if no Alt is held, the app menu mask neither.
     /// A swallowed V or Esc that `held` reports as released is switched to "expect only a release":
     /// `GetAsyncKeyState` does not see the swallowed press (it never reached the system), so the key may
     /// still be held. `on_key` will swallow its release; if a new press comes first, the
@@ -118,6 +136,9 @@ impl Chord {
         }
         if self.win == 0 {
             self.win_needs_mask = false;
+        }
+        if self.alt == 0 {
+            self.alt_needs_mask = false;
         }
         if self.active && !self.paired() {
             self.active = false;
@@ -146,6 +167,17 @@ impl Chord {
         self.ctrl != 0 && self.win != 0
     }
 
+    /// The mode the held Shift and Alt pick, or `None` for a system shortcut: both together (the Office key), or Alt while
+    /// "Ask" is off.
+    fn mode_now(&self) -> Option<Mode> {
+        match (self.shift != 0, self.alt != 0) {
+            (false, false) => Some(Mode::Dictate),
+            (true, false) => Some(Mode::Translate),
+            (false, true) if self.ask => Some(Mode::Ask),
+            _ => None,
+        }
+    }
+
     /// Whether the chord is held: between `ChordDown` and `ChordUp`.
     pub fn active(&self) -> bool {
         self.active
@@ -159,9 +191,11 @@ impl Chord {
     ///
     /// A swallowed key (V, Esc) stays swallowed — auto-repeat and release — until it is released,
     /// regardless of `esc_active` and of whether the chord is still held.
-    /// The chord is exactly Ctrl + Win: if Shift or Alt is held when the pair forms, this is a system shortcut
-    /// (Office key, Ctrl+Shift+Win+B) — no events, no swallowed V, no mask: Windows sees everything as is.
-    /// The mask stays if this Win press already had a `ChordDown` (including one cancelled by a third key).
+    /// The chord is Ctrl + Win and at most one of Shift / Alt (spec 2 §4): Shift translates, Alt asks (only while "Ask"
+    /// is on). If Shift and Alt together (the Office key), or Alt while "Ask" is off, are held when the pair forms, this
+    /// is a system shortcut — no events, no swallowed V, no mask: Windows sees everything as is. Inside a held chord a
+    /// Shift or Alt press switches the mode; Shift and Alt together cancel the chord and drop the masks. Any other third
+    /// key (Alt while "Ask" is off included) cancels the chord, and the mask stays: this Win press had a `ChordDown`.
     pub fn on_key(&mut self, vk: u16, down: bool, injected: bool, esc_active: bool) -> Decision {
         let mut d = Decision::default();
         if injected {
@@ -188,12 +222,16 @@ impl Chord {
             VK_LCONTROL | VK_RCONTROL | VK_CONTROL | VK_LWIN | VK_RWIN => {
                 let paired = self.paired();
                 if paired && !was_paired {
-                    // Exactly Ctrl + Win: with Shift or Alt the chord is cancelled at once and transparent (no mask).
-                    self.active = self.shift == 0 && self.alt == 0;
+                    // Exactly one of Shift / Alt picks the mode; both, or Alt while "Ask" is off, is a system shortcut: the
+                    // chord is cancelled at once and transparent (no mask).
+                    let mode = self.mode_now();
+                    self.active = mode.is_some();
                     self.aborted = !self.active;
-                    if self.active {
+                    if let Some(mode) = mode {
+                        self.mode = mode;
                         self.win_needs_mask = true;
-                        d.event = Some(HotkeyEvent::ChordDown);
+                        self.alt_needs_mask = mode == Mode::Ask;
+                        d.event = Some(HotkeyEvent::ChordDown(mode));
                     }
                 } else if !paired && self.active {
                     self.active = false;
@@ -202,6 +240,33 @@ impl Chord {
                 let is_win = vk == VK_LWIN || vk == VK_RWIN;
                 if !down && is_win && self.win == 0 && self.win_needs_mask {
                     self.win_needs_mask = false;
+                    d.inject_mask_first = true;
+                }
+            }
+            VK_LSHIFT | VK_RSHIFT | VK_SHIFT | VK_LMENU | VK_RMENU | VK_MENU => {
+                if down && self.active && !self.aborted {
+                    match self.mode_now() {
+                        // A press switches the mode; a release never does: the order of releases must not change the result.
+                        Some(mode) if mode != self.mode && mode != Mode::Dictate => {
+                            self.mode = mode;
+                            self.alt_needs_mask |= mode == Mode::Ask;
+                            d.event = Some(HotkeyEvent::ModeChange(mode));
+                        }
+                        Some(_) => {}
+                        None => {
+                            self.aborted = true;
+                            if self.shift != 0 && self.alt != 0 {
+                                // The Office key: Windows must see it as is, the Start menu and Office included.
+                                self.win_needs_mask = false;
+                                self.alt_needs_mask = false;
+                            }
+                            d.event = Some(HotkeyEvent::ChordAborted);
+                        }
+                    }
+                }
+                let is_alt = matches!(vk, VK_LMENU | VK_RMENU | VK_MENU);
+                if !down && is_alt && self.alt == 0 && self.alt_needs_mask {
+                    self.alt_needs_mask = false;
                     d.inject_mask_first = true;
                 }
             }
@@ -231,6 +296,7 @@ mod tests {
     use super::*;
     use HotkeyEvent::*;
 
+    const DOWN: HotkeyEvent = HotkeyEvent::ChordDown(Mode::Dictate);
     const VK_D: u16 = 0x44;
     const VK_B: u16 = 0x42;
     const VK_L: u16 = 0x4C;
@@ -244,7 +310,7 @@ mod tests {
         let mut c = Chord::default();
         assert_eq!(press(&mut c, VK_LCONTROL).event, None);
         let d = press(&mut c, VK_LWIN);
-        assert_eq!(d.event, Some(ChordDown));
+        assert_eq!(d.event, Some(DOWN));
         assert!(!d.swallow, "Ctrl and Win are not swallowed");
         assert_eq!(press(&mut c, VK_LWIN).event, None, "auto-repeat does not repeat the event");
     }
@@ -253,7 +319,7 @@ mod tests {
     fn win_then_ctrl_and_right_keys() {
         let mut c = Chord::default();
         press(&mut c, VK_RWIN);
-        assert_eq!(press(&mut c, VK_RCONTROL).event, Some(ChordDown));
+        assert_eq!(press(&mut c, VK_RCONTROL).event, Some(DOWN));
     }
 
     #[test]
@@ -411,7 +477,7 @@ mod tests {
         press(&mut c, VK_RMENU);
         assert_eq!(c.resync(|_| false), None);
         press(&mut c, VK_LCONTROL);
-        assert_eq!(press(&mut c, VK_LWIN).event, Some(ChordDown));
+        assert_eq!(press(&mut c, VK_LWIN).event, Some(DOWN));
     }
 
     #[test]
@@ -419,6 +485,7 @@ mod tests {
         let mut c = Chord::default();
         press(&mut c, VK_LCONTROL);
         press(&mut c, VK_LSHIFT);
+        press(&mut c, VK_LMENU);
         press(&mut c, VK_LWIN);
         assert_eq!(c.resync(|_| false), None, "there was no ChordDown — no ChordUp needed");
         press(&mut c, VK_LWIN);
@@ -439,11 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_or_alt_inside_chord_aborts() {
-        let mut c = Chord::default();
-        press(&mut c, VK_LCONTROL);
-        press(&mut c, VK_LWIN);
-        assert_eq!(press(&mut c, VK_RSHIFT).event, Some(ChordAborted));
+    fn alt_inside_chord_aborts_while_ask_is_off() {
         let mut c = Chord::default();
         press(&mut c, VK_LWIN);
         press(&mut c, VK_LCONTROL);
@@ -451,16 +514,15 @@ mod tests {
     }
 
     #[test]
-    fn shift_held_lets_system_chord_pass() {
-        // Ctrl+Shift+Win+B — restarts the graphics driver.
+    fn ctrl_shift_win_b_starts_translate_then_aborts() {
+        // Ctrl+Shift+Win+B restarts the graphics driver: the recording starts, the third key drops it (flow: SYSTEM_CHORD_MS).
         let mut c = Chord::default();
-        for vk in [VK_LCONTROL, VK_LSHIFT, VK_LWIN, VK_B] {
-            assert_eq!(press(&mut c, vk), Decision::default(), "press {vk:#04x}");
-        }
-        for vk in [VK_B, VK_LSHIFT, VK_LCONTROL] {
-            assert_eq!(release(&mut c, vk), Decision::default(), "release {vk:#04x}");
-        }
-        assert_eq!(release(&mut c, VK_LWIN), Decision::default(), "no ChordUp, no mask — Windows sees everything as is");
+        press(&mut c, VK_LCONTROL);
+        press(&mut c, VK_LSHIFT);
+        assert_eq!(press(&mut c, VK_LWIN).event, Some(ChordDown(Mode::Translate)));
+        let d = press(&mut c, VK_B);
+        assert_eq!(d.event, Some(ChordAborted));
+        assert!(!d.swallow, "Windows still gets B");
     }
 
     #[test]
@@ -488,20 +550,20 @@ mod tests {
         release(&mut c, VK_D);
         assert_eq!(release(&mut c, VK_RMENU), Decision::default(), "the pair existed before Alt went away — it does not start");
         assert_eq!(release(&mut c, VK_RWIN), Decision::default(), "CUE did not step in — no mask");
-        assert_eq!(press(&mut c, VK_RWIN).event, Some(ChordDown), "without Alt — a normal chord again");
+        assert_eq!(press(&mut c, VK_RWIN).event, Some(DOWN), "without Alt — a normal chord again");
     }
 
     #[test]
-    fn shift_after_fired_chord_keeps_mask() {
+    fn shift_after_fired_chord_starts_translate() {
         let mut c = Chord::default();
         press(&mut c, VK_LCONTROL);
-        assert_eq!(press(&mut c, VK_LWIN).event, Some(ChordDown));
+        assert_eq!(press(&mut c, VK_LWIN).event, Some(DOWN));
         assert_eq!(release(&mut c, VK_LCONTROL).event, Some(ChordUp));
         press(&mut c, VK_LSHIFT);
-        assert_eq!(press(&mut c, VK_LCONTROL), Decision::default(), "with Shift the chord does not start");
-        release(&mut c, VK_LCONTROL);
+        assert_eq!(press(&mut c, VK_LCONTROL).event, Some(ChordDown(Mode::Translate)));
+        assert_eq!(release(&mut c, VK_LCONTROL).event, Some(ChordUp));
         release(&mut c, VK_LSHIFT);
-        assert_eq!(release(&mut c, VK_LWIN), MASK_ONLY, "this Win press already had a ChordDown — the mask is needed");
+        assert_eq!(release(&mut c, VK_LWIN), MASK_ONLY, "this Win press had a ChordDown — the mask is needed");
     }
 
     #[test]
@@ -533,7 +595,7 @@ mod tests {
         assert_eq!(press(&mut c, VK_V).event, Some(PasteLast));
         assert_eq!(release(&mut c, VK_LWIN).event, Some(ChordUp));
         assert_eq!(c.resync(|vk| vk == VK_LCONTROL), None, "before a new Win press");
-        assert_eq!(press(&mut c, VK_LWIN).event, Some(ChordDown));
+        assert_eq!(press(&mut c, VK_LWIN).event, Some(DOWN));
         assert_eq!(release(&mut c, VK_V), SWALLOWED, "the release of a held V does not reach the app");
         release(&mut c, VK_LWIN);
         release(&mut c, VK_LCONTROL);
@@ -565,7 +627,7 @@ mod tests {
         let mut c = Chord::default();
         press(&mut c, VK_LCONTROL);
         press(&mut c, VK_RCONTROL);
-        assert_eq!(press(&mut c, VK_LWIN).event, Some(ChordDown));
+        assert_eq!(press(&mut c, VK_LWIN).event, Some(DOWN));
         assert_eq!(press(&mut c, VK_RWIN).event, None);
         assert_eq!(release(&mut c, VK_LCONTROL), Decision::default(), "the right Ctrl is still held");
         assert_eq!(release(&mut c, VK_LWIN), Decision::default(), "the right Win is still held — no ChordUp, no mask");
@@ -585,5 +647,99 @@ mod tests {
         c.on_key(VK_ESCAPE, false, false, true);
         let d = press(&mut c, VK_ESCAPE);
         assert_eq!(d, Decision { swallow: false, event: Some(ChordAborted), inject_mask_first: false }, "otherwise Esc is a third key");
+    }
+
+    // ---- Modes: Shift translates, Alt asks (spec 2 §4) ----
+
+    fn ask_chord() -> Chord {
+        let mut c = Chord::default();
+        c.set_ask(true);
+        c
+    }
+
+    #[test]
+    fn shift_held_when_the_pair_forms_translates() {
+        let mut c = Chord::default();
+        press(&mut c, VK_LCONTROL);
+        press(&mut c, VK_LSHIFT);
+        assert_eq!(press(&mut c, VK_LWIN).event, Some(ChordDown(Mode::Translate)));
+    }
+
+    #[test]
+    fn shift_inside_the_chord_switches_to_translate_once() {
+        let mut c = Chord::default();
+        press(&mut c, VK_LCONTROL);
+        press(&mut c, VK_LWIN);
+        let d = press(&mut c, VK_RSHIFT);
+        assert_eq!(d, Decision { swallow: false, event: Some(ModeChange(Mode::Translate)), inject_mask_first: false }, "Shift is not swallowed");
+        assert_eq!(press(&mut c, VK_RSHIFT).event, None, "auto-repeat does not repeat the change");
+        assert_eq!(release(&mut c, VK_RSHIFT), Decision::default(), "releasing Shift keeps the mode");
+        let d = release(&mut c, VK_LWIN);
+        assert_eq!(d.event, Some(ChordUp));
+        assert!(d.inject_mask_first);
+    }
+
+    #[test]
+    fn paste_last_works_in_translate_mode() {
+        let mut c = Chord::default();
+        for vk in [VK_LCONTROL, VK_LSHIFT, VK_LWIN] {
+            press(&mut c, vk);
+        }
+        assert_eq!(press(&mut c, VK_V).event, Some(PasteLast));
+    }
+
+    #[test]
+    fn alt_held_when_the_pair_forms_asks_only_when_enabled() {
+        let mut c = ask_chord();
+        press(&mut c, VK_LMENU);
+        press(&mut c, VK_LCONTROL);
+        assert_eq!(press(&mut c, VK_LWIN).event, Some(ChordDown(Mode::Ask)));
+    }
+
+    #[test]
+    fn alt_release_after_ask_is_masked() {
+        let mut c = ask_chord();
+        press(&mut c, VK_LCONTROL);
+        press(&mut c, VK_LWIN);
+        assert_eq!(press(&mut c, VK_LMENU).event, Some(ModeChange(Mode::Ask)));
+        let d = release(&mut c, VK_LMENU);
+        assert_eq!(d, MASK_ONLY, "the app's menu must not open on the Alt release");
+        assert_eq!(release(&mut c, VK_LWIN).event, Some(ChordUp));
+    }
+
+    #[test]
+    fn translate_can_switch_to_ask_while_held() {
+        let mut c = ask_chord();
+        press(&mut c, VK_LCONTROL);
+        press(&mut c, VK_LSHIFT);
+        press(&mut c, VK_LWIN);
+        release(&mut c, VK_LSHIFT);
+        assert_eq!(press(&mut c, VK_RMENU).event, Some(ModeChange(Mode::Ask)));
+    }
+
+    #[test]
+    fn shift_and_alt_together_are_the_office_key_and_drop_the_mask() {
+        let mut c = ask_chord();
+        press(&mut c, VK_LCONTROL);
+        press(&mut c, VK_LWIN);
+        press(&mut c, VK_LSHIFT);
+        assert_eq!(press(&mut c, VK_LMENU).event, Some(ChordAborted));
+        assert_eq!(release(&mut c, VK_LMENU), Decision::default(), "no Alt mask");
+        release(&mut c, VK_LSHIFT);
+        let d = release(&mut c, VK_LWIN);
+        assert_eq!(d.event, Some(ChordUp));
+        assert!(!d.inject_mask_first, "Windows sees the Office key as is");
+    }
+
+    #[test]
+    fn resync_drops_the_alt_mask_when_alt_is_gone() {
+        let mut c = ask_chord();
+        press(&mut c, VK_LCONTROL);
+        press(&mut c, VK_LWIN);
+        press(&mut c, VK_LMENU);
+        // All releases were lost (lock screen).
+        assert_eq!(c.resync(|_| false), Some(ChordUp));
+        press(&mut c, VK_LMENU);
+        assert_eq!(release(&mut c, VK_LMENU), Decision::default());
     }
 }
