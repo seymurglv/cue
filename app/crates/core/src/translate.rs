@@ -122,6 +122,151 @@ pub fn resolve_home(setting: Option<&str>, windows: Option<&str>, hints: &[Strin
         .or_else(|| hints.iter().filter_map(|h| known(h)).find(|c| *c != target))
 }
 
+/// The instruction for one translated dictation: a system block after the cached prompt (spec 2 §5), so the cache is
+/// shared with plain dictation. It overrides the prompt's "never translate" and "the language it was spoken in".
+pub fn instruction(to: &str) -> String {
+    let lang = name(to);
+    format!(
+        "Translation is on for this dictation. Clean up the transcript by the rules above, then write the whole result in {lang}: \
+         translate every part that is not in {lang} yet. This replaces the rules to keep the spoken language and never translate. \
+         Keep the meaning, the tone and the formatting rules above (plain text, the list rules, one line in terminals). \
+         Names and terms from the user's list, product names and code stay as written. Return only the {lang} text in the `text` field."
+    )
+}
+
+/// Translation takes a second longer than a cleanup (spec 2 §5: 4 s against 3 s).
+pub fn timeout_ms(raw: &str) -> u64 {
+    crate::refine::timeout_ms(raw) + 1_000
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Script {
+    Latin,
+    Cyrillic,
+    Greek,
+    Arabic,
+    Hebrew,
+    Devanagari,
+    Bengali,
+    Gurmukhi,
+    Gujarati,
+    Tamil,
+    Telugu,
+    Kannada,
+    Malayalam,
+    Thai,
+    Han,
+    Hangul,
+}
+
+fn script_of(c: char) -> Option<Script> {
+    use Script::*;
+    Some(match c as u32 {
+        0x41..=0x5A | 0x61..=0x7A | 0xC0..=0x24F | 0x1E00..=0x1EFF => Latin,
+        0x370..=0x3FF | 0x1F00..=0x1FFF => Greek,
+        0x400..=0x52F => Cyrillic,
+        0x590..=0x5FF => Hebrew,
+        0x600..=0x6FF | 0x750..=0x77F | 0x8A0..=0x8FF | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF => Arabic,
+        0x900..=0x97F => Devanagari,
+        0x980..=0x9FF => Bengali,
+        0xA00..=0xA7F => Gurmukhi,
+        0xA80..=0xAFF => Gujarati,
+        0xB80..=0xBFF => Tamil,
+        0xC00..=0xC7F => Telugu,
+        0xC80..=0xCFF => Kannada,
+        0xD00..=0xD7F => Malayalam,
+        0xE00..=0xE7F => Thai,
+        0x1100..=0x11FF | 0x3130..=0x318F | 0xAC00..=0xD7AF => Hangul,
+        // Kana goes with Han: Japanese writes both, and only Japanese and Chinese use them.
+        0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF => Han,
+        _ => return None,
+    })
+}
+
+/// The script a language is written in; `None` for Serbian (both Cyrillic and Latin are usual).
+fn script_of_language(code: &str) -> Option<Script> {
+    use Script::*;
+    Some(match code {
+        "be" | "bg" | "kk" | "mk" | "ru" | "uk" => Cyrillic,
+        "sr" => return None,
+        "el" => Greek,
+        "ar" | "fa" | "ur" => Arabic,
+        "he" => Hebrew,
+        "hi" | "mr" => Devanagari,
+        "bn" => Bengali,
+        "pa" => Gurmukhi,
+        "gu" => Gujarati,
+        "ta" => Tamil,
+        "te" => Telugu,
+        "kn" => Kannada,
+        "ml" => Malayalam,
+        "th" => Thai,
+        "zh" | "ja" => Han,
+        "ko" => Hangul,
+        _ => Latin,
+    })
+}
+
+/// How many Latin letters one letter of the script is worth in length: Han and Hangul pack a word into fewer characters.
+fn density(s: Option<Script>) -> f32 {
+    match s {
+        Some(Script::Han) => 3.0,
+        Some(Script::Hangul) => 2.0,
+        _ => 1.0,
+    }
+}
+
+/// The share of the result's letters in the target script, from which the result counts as written in it: names,
+/// product names and code stay as said.
+const MIN_TARGET_SCRIPT: f32 = 0.6;
+/// Length bounds of the translation against the speech, in weighted letters ([`density`]); checked from
+/// `MIN_LETTERS_FOR_RATIO` letters of speech: a short phrase legitimately changes length more.
+const MIN_RATIO: f32 = 0.35;
+const MAX_RATIO: f32 = 2.8;
+const MIN_LETTERS_FOR_RATIO: usize = 20;
+
+/// The translation can be pasted (spec 2 §5): not empty; its length is within bounds of what was said; when the speech
+/// and the target language use different scripts, the result is written in the target one. The word overlap check of
+/// dictation does not apply: a translation shares no words with the speech.
+pub fn translation_ok(raw: &str, out: &str, to: &str) -> bool {
+    let out = out.trim();
+    if out.is_empty() {
+        return false;
+    }
+    let letters = |t: &str| t.chars().filter(|c| c.is_alphabetic()).collect::<Vec<_>>();
+    let (src, dst) = (letters(raw), letters(out));
+    if dst.is_empty() {
+        return false;
+    }
+    let src_script = dominant_script(&src);
+    let to_script = script_of_language(to);
+    if src.len() >= MIN_LETTERS_FOR_RATIO {
+        let ratio = dst.len() as f32 * density(to_script) / (src.len() as f32 * density(src_script));
+        if !(MIN_RATIO..=MAX_RATIO).contains(&ratio) {
+            return false;
+        }
+    }
+    match to_script {
+        Some(t) if src_script != Some(t) => {
+            let in_target = dst.iter().filter(|c| script_of(**c) == Some(t)).count();
+            in_target as f32 / dst.len() as f32 >= MIN_TARGET_SCRIPT
+        }
+        _ => true,
+    }
+}
+
+/// The script most letters are written in; `None` when no letter belongs to a known script.
+fn dominant_script(letters: &[char]) -> Option<Script> {
+    let mut counts: Vec<(Script, usize)> = Vec::new();
+    for s in letters.iter().filter_map(|c| script_of(*c)) {
+        match counts.iter_mut().find(|(x, _)| *x == s) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((s, 1)),
+        }
+    }
+    counts.into_iter().max_by_key(|(_, n)| *n).map(|(s, _)| s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +362,47 @@ mod tests {
         assert_eq!(resolve_home(None, Some("en-US"), &hints, "en"), Some("ru"), "Windows in the target language: the first other hint");
         assert_eq!(resolve_home(Some("en"), None, &[], "en"), None);
         assert_eq!(resolve_home(Some("klingon"), Some("fr-FR"), &hints, "en"), Some("fr"));
+    }
+
+    #[test]
+    fn translation_in_the_target_script_passes() {
+        assert!(translation_ok("напомни мне завтра позвонить Ане в десять", "Remind me to call Anya at ten tomorrow.", "en"));
+        assert!(translation_ok("remind me to call Anya tomorrow at ten", "Напомни мне завтра в десять позвонить Ане.", "ru"));
+        assert!(translation_ok("открой Soniox и проверь ключ", "Open Soniox and check the key.", "en"));
+    }
+
+    #[test]
+    fn untranslated_text_fails_for_a_pair_with_another_script() {
+        assert!(!translation_ok("напомни мне завтра позвонить Ане", "Напомни мне завтра позвонить Ане.", "en"));
+        assert!(!translation_ok("call Anya tomorrow at ten please", "Call Anya tomorrow at ten, please.", "ru"));
+    }
+
+    #[test]
+    fn an_answer_instead_of_a_translation_fails_on_length() {
+        let raw = "какая сегодня погода в Москве";
+        let answer = "I can't check the weather, but you can open a weather site or app and search for Moscow to see the current forecast and temperature for today.";
+        assert!(!translation_ok(raw, answer, "en"));
+    }
+
+    #[test]
+    fn same_script_pairs_check_only_length() {
+        assert!(translation_ok("call me when you are home", "Ruf mich an, wenn du zu Hause bist.", "de"));
+        assert!(translation_ok("短い", "Short.", "en"), "short speech: no length check");
+        assert!(translation_ok("我明天早上十点给你打电话然后我们讨论这个计划的细节", "I'll call you tomorrow at ten in the morning and we'll go over the details of this plan.", "en"));
+        assert!(!translation_ok("hello", "   ", "ru"));
+    }
+
+    #[test]
+    fn the_instruction_names_the_language() {
+        let text = instruction("en");
+        assert!(text.contains("English") && text.contains("text"), "{text}");
+        assert!(!text.contains("{lang}"), "{text}");
+        assert!(instruction("ru").contains("Russian"));
+    }
+
+    #[test]
+    fn translation_gets_a_second_more_than_a_cleanup() {
+        assert_eq!(timeout_ms("a b"), 4_000);
+        assert_eq!(timeout_ms("a b"), crate::refine::timeout_ms("a b") + 1_000);
     }
 }

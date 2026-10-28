@@ -2,6 +2,7 @@
 use cue_core::flow::RefineOutcome;
 use cue_core::refine::{max_tokens, sanity_ok, strip_markup, terms_prompt, tidy_list_items, timeout_ms, user_message, RefineContext, SYSTEM_PROMPT};
 use cue_core::settings::RefineSettings;
+use cue_core::translate::{self, translation_ok};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -23,6 +24,15 @@ fn thinking_for(model: &str) -> Option<Value> {
     }
 }
 
+/// What the refine request does with the transcript.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Job {
+    /// Clean up in the spoken language (dictation).
+    Clean,
+    /// Clean up and write in this language (a Soniox code, see `cue_core::translate`).
+    Translate(&'static str),
+}
+
 /// Messages API request body: the system prompt with a cache mark, a response strictly in the `{"text": …}` schema,
 /// low effort, thinking per model ([`thinking_for`]).
 ///
@@ -30,6 +40,13 @@ fn thinking_for(model: &str) -> Option<Value> {
 /// cache mark moves to that last block: the cached prefix covers both. With no usable term the body is the same, byte
 /// for byte, as without a dictionary.
 pub fn request_body(model: &str, raw: &str, ctx: &RefineContext, terms: &[String]) -> Value {
+    request_body_for(model, raw, ctx, terms, Job::Clean)
+}
+
+/// [`request_body`] for a job. A translation adds one system block after the cache mark: the cached prefix is the one
+/// plain dictation uses, so translating never writes a second cache. The answer may be longer in tokens than the speech
+/// (another alphabet), so the budget doubles.
+pub fn request_body_for(model: &str, raw: &str, ctx: &RefineContext, terms: &[String], job: Job) -> Value {
     let thinking = thinking_for(model);
     let budget = max_tokens(raw) + if thinking.is_none() { THINKING_HEADROOM } else { 0 };
     let system = match terms_prompt(terms) {
@@ -59,6 +76,10 @@ pub fn request_body(model: &str, raw: &str, ctx: &RefineContext, terms: &[String
     });
     if let Some(t) = thinking {
         v["thinking"] = t;
+    }
+    if let Job::Translate(to) = job {
+        v["system"].as_array_mut().expect("system is an array").push(json!({ "type": "text", "text": translate::instruction(to) }));
+        v["max_tokens"] = json!(v["max_tokens"].as_u64().unwrap_or(0).saturating_mul(2).min(16_000));
     }
     v
 }
@@ -143,6 +164,21 @@ pub fn decide(raw: &str, parsed: Parsed, terms: &[String], s: &RefineSettings) -
     }
 }
 
+/// The translation if it passes [`translation_ok`]; markup and list punctuation are stripped first, as in [`decide`].
+pub fn decide_translation(raw: &str, parsed: Parsed, to: &str) -> (String, RefineOutcome) {
+    match parsed {
+        Parsed::Text(t) => {
+            let t = tidy_list_items(&strip_markup(raw, &t));
+            if translation_ok(raw, &t, to) {
+                (t.trim().to_string(), RefineOutcome::Refined)
+            } else {
+                (raw.to_string(), RefineOutcome::RawFallback)
+            }
+        }
+        _ => (raw.to_string(), RefineOutcome::RawFallback),
+    }
+}
+
 /// Refine result: what to paste, why exactly this, and how many tokens were spent (for usage accounting).
 pub struct RefineResult {
     pub text: String,
@@ -162,19 +198,41 @@ pub async fn refine(
     terms: &[String],
     s: &RefineSettings,
 ) -> RefineResult {
-    refine_at(API_URL, http, key, model, raw, ctx, terms, s).await
+    refine_at(API_URL, http, key, model, raw, ctx, terms, s, Job::Clean).await
+}
+
+/// One translation request (spec 2 §5): the refine request with the translation block. Never "fails": on any problem
+/// the raw text comes back with `RawFallback` / `RawKeyProblem`, and the flow shows "Couldn't translate" instead of
+/// pasting it.
+#[allow(clippy::too_many_arguments)]
+pub async fn translate(
+    http: &reqwest::Client,
+    key: Option<&str>,
+    model: &str,
+    raw: &str,
+    ctx: &RefineContext,
+    terms: &[String],
+    s: &RefineSettings,
+    to: &'static str,
+) -> RefineResult {
+    refine_at(API_URL, http, key, model, raw, ctx, terms, s, Job::Translate(to)).await
 }
 
 /// Timeout headroom for a model whose thinking cannot be turned off (Opus 5.5): thinking runs before the response,
 /// and the usual timeout for a short text (3 s) is not enough for it.
 const THINKING_TIME_HEADROOM_MS: u64 = 5_000;
 
-/// Request timeout: [`timeout_ms`] by text length, plus headroom for a model whose thinking cannot be turned off.
-fn request_timeout_ms(model: &str, raw: &str) -> u64 {
-    timeout_ms(raw) + if thinking_for(model).is_none() { THINKING_TIME_HEADROOM_MS } else { 0 }
+/// Request timeout: [`timeout_ms`] by text length ([`translate::timeout_ms`] for a translation), plus headroom for a
+/// model whose thinking cannot be turned off.
+fn request_timeout_ms(model: &str, raw: &str, job: Job) -> u64 {
+    let base = match job {
+        Job::Clean => timeout_ms(raw),
+        Job::Translate(_) => translate::timeout_ms(raw),
+    };
+    base + if thinking_for(model).is_none() { THINKING_TIME_HEADROOM_MS } else { 0 }
 }
 
-/// [`refine`] against the URL `url`; tests substitute their own service.
+/// [`refine`] or [`translate`] against the URL `url`; tests substitute their own service.
 #[allow(clippy::too_many_arguments)]
 async fn refine_at(
     url: &str,
@@ -185,6 +243,7 @@ async fn refine_at(
     ctx: &RefineContext,
     terms: &[String],
     s: &RefineSettings,
+    job: Job,
 ) -> RefineResult {
     let Some(key) = key else {
         return raw_fallback(raw, RefineOutcome::RawKeyProblem, Usage::default(), "no Anthropic key");
@@ -194,8 +253,8 @@ async fn refine_at(
         .header("x-api-key", key)
         .header("anthropic-version", API_VERSION)
         .header("content-type", "application/json")
-        .timeout(std::time::Duration::from_millis(request_timeout_ms(model, raw)))
-        .json(&request_body(model, raw, ctx, terms))
+        .timeout(std::time::Duration::from_millis(request_timeout_ms(model, raw, job)))
+        .json(&request_body_for(model, raw, ctx, terms, job))
         .send()
         .await;
     let resp = match send {
@@ -216,13 +275,18 @@ async fn refine_at(
     };
     let parsed = parse_response(&m);
     // The reason, in case the response is rejected.
-    let why = match &parsed {
-        Parsed::Text(_) => "response failed the sanity check",
-        Parsed::Refusal => "model refused",
-        Parsed::Truncated => "response truncated at max_tokens",
-        Parsed::Malformed => "response does not match the schema",
+    let why = match (&parsed, job) {
+        (Parsed::Text(_), Job::Clean) => "response failed the sanity check",
+        (Parsed::Text(_), Job::Translate(_)) => "translation failed the check",
+        (Parsed::Refusal, _) => "model refused",
+        (Parsed::Truncated, _) => "response truncated at max_tokens",
+        (Parsed::Malformed, _) => "response does not match the schema",
     };
-    match decide(raw, parsed, terms, s) {
+    let decided = match job {
+        Job::Clean => decide(raw, parsed, terms, s),
+        Job::Translate(to) => decide_translation(raw, parsed, to),
+    };
+    match decided {
         (text, RefineOutcome::Refined) => RefineResult { text, outcome: RefineOutcome::Refined, usage: m.usage },
         (_, outcome) => raw_fallback(raw, outcome, m.usage, why),
     }
@@ -407,10 +471,62 @@ mod tests {
     #[test]
     fn opus_gets_time_headroom() {
         let raw = "ну привет";
-        assert_eq!(request_timeout_ms("claude-haiku-5-5", raw), timeout_ms(raw));
-        assert_eq!(request_timeout_ms("claude-sonnet-5-5", raw), timeout_ms(raw));
-        assert_eq!(request_timeout_ms("claude-opus-5-5", raw), timeout_ms(raw) + THINKING_TIME_HEADROOM_MS);
+        assert_eq!(request_timeout_ms("claude-haiku-5-5", raw, Job::Clean), timeout_ms(raw));
+        assert_eq!(request_timeout_ms("claude-sonnet-5-5", raw, Job::Clean), timeout_ms(raw));
+        assert_eq!(request_timeout_ms("claude-opus-5-5", raw, Job::Clean), timeout_ms(raw) + THINKING_TIME_HEADROOM_MS);
         assert_eq!(THINKING_TIME_HEADROOM_MS, 5_000);
+    }
+
+    // ---- Translation (spec 2 §5) ----
+
+    #[test]
+    fn translation_adds_a_block_after_the_cache_mark() {
+        let plain = request_body("claude-haiku-5-5", "ну привет", &ctx(), &[]);
+        let tr = request_body_for("claude-haiku-5-5", "ну привет", &ctx(), &[], Job::Translate("en"));
+        let system = tr["system"].as_array().unwrap();
+        assert_eq!(system.len(), 2);
+        assert_eq!(system[0], plain["system"][0], "the cached prompt block is the same, mark included");
+        assert!(system[1].get("cache_control").is_none(), "the instruction is not cached");
+        assert!(system[1]["text"].as_str().unwrap().contains("English"));
+        assert_eq!(tr["max_tokens"], plain["max_tokens"].as_u64().unwrap() * 2);
+        assert_eq!(tr["output_config"], plain["output_config"]);
+        assert_eq!(tr["messages"], plain["messages"]);
+    }
+
+    #[test]
+    fn translation_with_terms_keeps_the_mark_on_the_terms_block() {
+        let terms = vec!["Soniox".to_owned()];
+        let tr = request_body_for("claude-haiku-5-5", "x", &ctx(), &terms, Job::Translate("ru"));
+        let system = tr["system"].as_array().unwrap();
+        assert_eq!(system.len(), 3);
+        assert!(system[1].get("cache_control").is_some());
+        assert!(system[2]["text"].as_str().unwrap().contains("Russian"));
+    }
+
+    #[test]
+    fn a_cleanup_job_is_the_plain_body() {
+        let terms = vec!["Soniox".to_owned()];
+        for model in ["claude-haiku-5-5", "claude-opus-5-5"] {
+            assert_eq!(request_body_for(model, "x", &ctx(), &terms, Job::Clean), request_body(model, "x", &ctx(), &terms));
+        }
+    }
+
+    #[test]
+    fn translation_gets_a_second_more() {
+        let raw = "ну привет";
+        assert_eq!(request_timeout_ms("claude-haiku-5-5", raw, Job::Translate("en")), translate::timeout_ms(raw));
+        assert_eq!(
+            request_timeout_ms("claude-opus-5-5", raw, Job::Translate("en")),
+            translate::timeout_ms(raw) + THINKING_TIME_HEADROOM_MS
+        );
+    }
+
+    #[test]
+    fn decide_translation_checks_the_script_not_the_words() {
+        let raw = "ну привет";
+        assert_eq!(decide_translation(raw, Parsed::Text("**Hello.**".into()), "en"), ("Hello.".into(), RefineOutcome::Refined));
+        assert_eq!(decide_translation(raw, Parsed::Text("Ну привет.".into()), "en"), (raw.into(), RefineOutcome::RawFallback));
+        assert_eq!(decide_translation(raw, Parsed::Truncated, "en"), (raw.into(), RefineOutcome::RawFallback));
     }
 
     // ---- The whole refine against a fake Messages API. ----
@@ -434,11 +550,29 @@ mod tests {
     where
         F: Fn(&str, &str, usize) -> Reply + Send + Sync + 'static,
     {
+        run_with(key, RAW, Job::Clean, route).await
+    }
+
+    /// The speech of the translation tests.
+    const SPEECH: &str = "ну привет";
+
+    /// A translation of [`SPEECH`] into English, as [`refine_with`].
+    async fn translate_with<F>(key: Option<&str>, route: F) -> (RefineResult, Vec<String>, FakeApi)
+    where
+        F: Fn(&str, &str, usize) -> Reply + Send + Sync + 'static,
+    {
+        run_with(key, SPEECH, Job::Translate("en"), route).await
+    }
+
+    async fn run_with<F>(key: Option<&str>, raw: &str, job: Job, route: F) -> (RefineResult, Vec<String>, FakeApi)
+    where
+        F: Fn(&str, &str, usize) -> Reply + Send + Sync + 'static,
+    {
         let api = fake_api(route).await;
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let (logs, _guard) = capture_logs();
         let url = format!("{}/v1/messages", api.base);
-        let r = refine_at(&url, &http, key, "claude-haiku-5-5", RAW, &ctx(), &[], &RefineSettings::default()).await;
+        let r = refine_at(&url, &http, key, "claude-haiku-5-5", raw, &ctx(), &[], &RefineSettings::default(), job).await;
         let lines = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::claude")).cloned().collect();
         (r, lines, api)
     }
@@ -490,7 +624,7 @@ mod tests {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let url = format!("{}/v1/messages", api.base);
         let terms = vec!["Soniox".to_owned()];
-        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", RAW, &ctx(), &terms, &RefineSettings::default()).await;
+        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", RAW, &ctx(), &terms, &RefineSettings::default(), Job::Clean).await;
         assert_eq!(r.outcome, RefineOutcome::Refined);
         assert_eq!(api.body(0), serde_json::to_vec(&request_body("claude-haiku-5-5", RAW, &ctx(), &terms)).unwrap());
     }
@@ -501,9 +635,9 @@ mod tests {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let url = format!("{}/v1/messages", api.base);
         let s = RefineSettings::default();
-        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", "открой гитхаб", &ctx(), &["GitHub".to_owned()], &s).await;
+        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", "открой гитхаб", &ctx(), &["GitHub".to_owned()], &s, Job::Clean).await;
         assert_eq!((r.text.as_str(), r.outcome), ("Открой GitHub.", RefineOutcome::Refined));
-        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", "открой гитхаб", &ctx(), &[], &s).await;
+        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", "открой гитхаб", &ctx(), &[], &s, Job::Clean).await;
         assert_eq!((r.text.as_str(), r.outcome), ("открой гитхаб", RefineOutcome::RawFallback));
     }
 
@@ -552,5 +686,29 @@ mod tests {
             assert_eq!(r.usage, USAGE, "{why}: tokens were spent, so they are counted");
             assert_one_warning(&lines, why);
         }
+    }
+
+    #[tokio::test]
+    async fn translate_returns_the_translation() {
+        let (r, lines, api) = translate_with(Some(KEY), |_, _, _| reply(200, &message("Hello.", "end_turn"))).await;
+        assert_eq!((r.text.as_str(), r.outcome, r.usage), ("Hello.", RefineOutcome::Refined, USAGE));
+        assert!(lines.is_empty(), "a success leaves the log alone: {lines:?}");
+        let body: Value = serde_json::from_slice(&api.body(0)).unwrap();
+        assert_eq!(body, request_body_for("claude-haiku-5-5", SPEECH, &ctx(), &[], Job::Translate("en")));
+        assert_eq!(body["system"][1]["text"], translate::instruction("en"), "the translation block is sent");
+    }
+
+    #[tokio::test]
+    async fn untranslated_answer_returns_the_raw_text_with_its_reason() {
+        let (r, lines, _api) = translate_with(Some(KEY), |_, _, _| reply(200, &message("Ну привет.", "end_turn"))).await;
+        assert_eq!((r.text.as_str(), r.outcome, r.usage), (SPEECH, RefineOutcome::RawFallback, USAGE));
+        assert_one_warning(&lines, "translation failed the check");
+    }
+
+    #[tokio::test]
+    async fn translate_key_problem_returns_the_raw_text() {
+        let (r, lines, _api) = translate_with(Some(KEY), |_, _, _| reply(401, r#"{"type":"error"}"#)).await;
+        assert_eq!((r.text.as_str(), r.outcome), (SPEECH, RefineOutcome::RawKeyProblem));
+        assert_one_warning(&lines, "HTTP 401");
     }
 }

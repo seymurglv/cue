@@ -13,8 +13,9 @@
 //!   (`state::InsertWatch`);
 //! - "retry" is a new attempt of the same dictation: `Finished` arrives twice, each attempt gets its own usage.csv
 //!   row with its own outcome; a retry resets the tokens, latencies and transcription path, the audio and the app
-//!   stay (`attempt`). An attempt without a stream (no Soniox key, the stream did not connect) is billed at the stream
-//!   price: an overestimate in a rare failure, accepted;
+//!   stay (`attempt`). After a failed translation "retry" refines the saved text again, and its row has no audio.
+//!   An attempt without a stream (no Soniox key, the stream did not connect) is billed at the stream price: an
+//!   overestimate in a rare failure, accepted;
 //! - the last-dictation files (`last\`) change only on success (`files`); the last text is also kept in memory;
 //! - the log gets events, per-stage latencies and error codes; no text, no audio, no keys.
 mod attempt;
@@ -36,7 +37,7 @@ use cue_core::translate;
 use cue_core::ui::{Mode, TrayKind, UiAction, UiPhase, UiState};
 use cue_core::usage::{self, SttPath};
 use cue_engines::EngineError;
-use cue_engines::claude::{self, RefineResult};
+use cue_engines::claude::{self, Job, RefineResult};
 use cue_engines::keys::{self, KeyName};
 use cue_engines::soniox::SonioxConfig;
 use cue_engines::stt::{self, Engine, Fallback, SttOutput, SttSession};
@@ -122,7 +123,6 @@ pub struct Runtime {
     can_save_settings: bool,
     /// The other language of the translation pair (`translate::resolve_home`), decided once at startup like the
     /// interface language. `None`: no language other than the target was found, and target speech is only cleaned up.
-    #[expect(dead_code, reason = "the translation instruction of the refine request reads it; not wired yet")]
     translate_home: Option<&'static str>,
     paths: Paths,
     /// One client for the whole app (refine, batch transcription, warm-up): a shared connection pool.
@@ -397,7 +397,14 @@ impl Runtime {
             Effect::FinishStt { id } => self.finish_stt(id),
             Effect::AbortStt { id } => self.abort_stt(id),
             Effect::TranscribeSaved { id } => self.transcribe_saved(id),
-            Effect::Refine { id, raw, .. } => self.refine(id, raw),
+            Effect::Refine { id, raw, mode } => self.refine(id, raw, mode),
+            Effect::RefineAgain { id, raw, mode } => {
+                if self.attempt.id == id {
+                    let now = self.now();
+                    self.attempt.retry_text(now);
+                }
+                self.refine(id, raw, mode)
+            }
             Effect::AbortRefine { id } => {
                 if let Some(task) = self.refine_task.take_for(id) {
                     task.abort();
@@ -625,7 +632,7 @@ impl Runtime {
         }
     }
 
-    fn refine(&mut self, id: DictationId, raw: String) {
+    fn refine(&mut self, id: DictationId, raw: String, mode: Mode) {
         let info = self.focus_for_refine(id);
         self.note_app(&info.app);
         // The query was late ("unknown"): use the app at the start of recording.
@@ -640,12 +647,36 @@ impl Runtime {
             let now = self.now();
             self.attempt.refine_started(now);
         }
+        // Which way to translate (spec 2 §5): the speech language fixed in the settings, else the one Soniox heard most.
+        let job = match mode {
+            Mode::Translate => {
+                let speech = self
+                    .settings
+                    .translate
+                    .speech()
+                    .or_else(|| self.attempt.speech_language.as_deref().and_then(translate::known));
+                Job::Translate(translate::output_language(speech, self.settings.translate.target(), self.translate_home))
+            }
+            Mode::Dictate | Mode::Ask => Job::Clean,
+        };
+        if let Job::Translate(to) = job {
+            // The language code only, no text.
+            tracing::info!(to, "translating");
+        }
         let (http, s, tx) = (self.http.clone(), self.settings.refine.clone(), self.tx.clone());
         let terms = self.settings.dictionary.terms.clone();
         let old = self.refine_task.start(id, |task| {
             tokio::spawn(async move {
                 let fallback_raw = raw.clone();
-                let body = claude::refine(&http, key.as_deref(), &s.model, &raw, &ctx, &terms, &s);
+                // One future for both jobs, so `guarded` covers a translation too.
+                let body = async {
+                    match job {
+                        Job::Clean => claude::refine(&http, key.as_deref(), &s.model, &raw, &ctx, &terms, &s).await,
+                        Job::Translate(to) => {
+                            claude::translate(&http, key.as_deref(), &s.model, &raw, &ctx, &terms, &s, to).await
+                        }
+                    }
+                };
                 let result = guarded("refine", body, move || refine_panicked(fallback_raw)).await;
                 let _ = tx.send(CoreEvent::RefineDone { id, task, result });
             })

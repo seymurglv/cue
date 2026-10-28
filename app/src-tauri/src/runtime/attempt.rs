@@ -6,6 +6,8 @@
 //! twice).
 //! A retry resets the attempt's fields (refine tokens, latencies, the path: `Batch`, batch transcription of the saved
 //! audio only) and keeps the audio and the app: it is the same audio from the same app.
+//! "Retry" after a failed translation (`RefineAgain`) is a new attempt on the saved text: its row has no audio (the
+//! first attempt paid for it), and the app and the speech language stay.
 //! The `latency` runs from the second press (`FinishStt`) to Ctrl+V; after "retry", from the retry; if the dictation
 //! was restored after Esc ("restore"), from "restore": time spent in "Cancelled" is not CUE's latency.
 //! An attempt without a stream (no Soniox key, the stream never connected) still bills the audio at the stream price:
@@ -27,7 +29,7 @@ pub struct Attempt {
     samples: u64,
     pub stt_path: SttPath,
     /// The language of most of the speech from the transcription (a Soniox code): which way a translation goes.
-    /// A retry clears it: the new transcription gives its own.
+    /// A retry clears it: the new transcription gives its own; a retry of the translation keeps it.
     pub speech_language: Option<String>,
     refine: claude::Usage,
     pub refine_outcome: Option<RefineOutcome>,
@@ -97,6 +99,17 @@ impl Attempt {
         *self = Self { app: std::mem::take(&mut self.app), samples: self.samples, ..Self::new(self.id) };
         self.stt_path = SttPath::Batch;
         self.finish_at = Some(now);
+        self.latency_from = Some(now);
+    }
+
+    /// "Retry" after a failed translation: a new attempt on the same text. No audio is paid again (the row has 0 ms); the
+    /// app and the speech language stay.
+    pub fn retry_text(&mut self, now: u64) {
+        *self = Self {
+            app: std::mem::take(&mut self.app),
+            speech_language: self.speech_language.take(),
+            ..Self::new(self.id)
+        };
         self.latency_from = Some(now);
     }
 
@@ -318,6 +331,33 @@ mod tests {
         assert_eq!(a.refine_outcome, None);
         assert_eq!(a.speech_language, None, "the new transcription gives its own speech language");
         assert_eq!(r.stt_path, SttPath::Batch);
+    }
+
+    #[test]
+    fn text_retry_pays_no_audio_and_keeps_the_language() {
+        let s = Settings::default();
+        let mut a = Attempt::new(DictationId(7));
+        a.app = "Telegram Desktop".into();
+        a.add_audio(16 * 3_000);
+        a.finish_stt(1_000);
+        a.stt_done(SttPath::Stream, 1_300);
+        a.speech_language = Some("ru".into());
+        a.refine_started(1_300);
+        a.refine_done(usage(90, 30), RefineOutcome::RawFallback, 2_000);
+
+        a.retry_text(5_000);
+        assert_eq!(a.audio_ms(), 0, "the audio was paid for by the first attempt");
+        assert_eq!(a.stages(), Stages::default(), "no transcription and no latencies of the failed attempt");
+        assert_eq!((a.app.as_str(), a.speech_language.as_deref(), a.id), ("Telegram Desktop", Some("ru"), DictationId(7)));
+        assert_eq!(a.refine_outcome, None);
+        a.refine_started(5_000);
+        a.refine_done(usage(40, 12), RefineOutcome::Refined, 5_600);
+        a.insert_started(5_600);
+        a.inserted(5_650);
+        assert_eq!(a.stages().stt, None);
+        let r = a.record(Outcome::Inserted, "t".into(), &s);
+        assert_eq!((r.audio_ms, r.input_tokens, r.output_tokens), (0, 40, 12));
+        assert_eq!(r.latency_ms, 650, "from \"retry\" to Ctrl+V");
     }
 
     #[test]

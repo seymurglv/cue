@@ -31,6 +31,8 @@ pub enum ErrorCause {
     Net,
     SonioxKey,
     ClaudeKey,
+    /// The translation failed (network, timeout, the check): nothing was pasted.
+    Translate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -98,7 +100,12 @@ mod tests {
         for (v, name) in phases {
             assert_eq!(json(v), format!("\"{name}\""));
         }
-        let causes = [(ErrorCause::Net, "net"), (ErrorCause::SonioxKey, "sonioxKey"), (ErrorCause::ClaudeKey, "claudeKey")];
+        let causes = [
+            (ErrorCause::Net, "net"),
+            (ErrorCause::SonioxKey, "sonioxKey"),
+            (ErrorCause::ClaudeKey, "claudeKey"),
+            (ErrorCause::Translate, "translate"),
+        ];
         for (v, name) in causes {
             assert_eq!(json(v), format!("\"{name}\""));
         }

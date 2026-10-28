@@ -74,7 +74,9 @@ describe('Dictionaries and language', () => {
     expect(en.tray.micSilent.title).toBe('Microphone is silent');
     expect(en.tray.holdHint.act).toBe('Got it');
     expect(en.tray.lastMinute.title).toBe('One minute left');
-    expect(en.error).toEqual({ net: 'No connection', sonioxKey: 'Soniox key problem', claudeKey: 'Claude key problem' });
+    expect(en.error).toEqual({
+      net: 'No connection', sonioxKey: 'Soniox key problem', claudeKey: 'Claude key problem', translate: "Couldn't translate",
+    });
     expect(en.close).toBe('Close');
     expect(en.drop).toEqual({
       cancel: 'Cancel · Esc', cancelName: 'Cancel', restore: 'Restore', retry: 'Retry', done: 'Done', cancelled: 'Cancelled', ask: 'Ask',
@@ -223,6 +225,19 @@ describe('Which Drop parts are visible in each state', () => {
     hover(true);
     expect(shown()).toEqual(['bx', 'lab', 'mk', 'retry']);
     expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Soniox key problem');
+  });
+
+  it('a failed translation shows its own label and retry, with the network icon', () => {
+    ctl.apply({ ...base, phase: 'error', error: 'translate', retry: true, mode: 'translate' });
+    expect(shown()).toEqual(['mk', 'retry', 'why']);
+    const icon = document.createElement('span');
+    icon.innerHTML = CUE().IC.net;
+    expect(document.querySelector('.drop .why')!.innerHTML).toBe(icon.innerHTML);
+    hover(true);
+    expect(shown()).toEqual(['bx', 'lab', 'mk', 'retry', 'why']);
+    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe("Couldn't translate");
+    (document.querySelector('.drop .ib.solid[title="Retry"]') as HTMLButtonElement).click();
+    expect(sent).toEqual(['retry']);
   });
 
   it('Claude key error: the mark only; on hover the cross and the cause in words', () => {
@@ -961,6 +976,8 @@ describe('Russian interface', () => {
     expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Отменено');
     ctl.apply({ ...base, phase: 'error', error: 'sonioxKey', retry: true });
     expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Проблема с ключом Soniox');
+    ctl.apply({ ...base, phase: 'error', error: 'translate', retry: true, mode: 'translate' });
+    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Не удалось перевести');
   });
 
   it('no-field card in Russian: the copy label changes by common letters, only the new tail fades in', () => {

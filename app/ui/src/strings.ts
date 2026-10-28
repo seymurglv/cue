@@ -2,7 +2,7 @@
 // and sets it in the Drop window before any script runs (window.__CUE_LANG__); the tray menu uses the same value.
 export type Lang = 'en' | 'ru';
 export type TrayKind = 'noField' | 'micSilent' | 'holdHint' | 'lastMinute';
-export type ErrorCause = 'net' | 'sonioxKey' | 'claudeKey';
+export type ErrorCause = 'net' | 'sonioxKey' | 'claudeKey' | 'translate';
 
 export const KEY_NAME = 'Ctrl + Win';
 
@@ -78,6 +78,7 @@ export const en: Dict = {
     net: 'No connection',
     sonioxKey: 'Soniox key problem',
     claudeKey: 'Claude key problem',
+    translate: "Couldn't translate",
   },
   close: 'Close',
   drop: {
@@ -117,6 +118,7 @@ export const ru: Dict = {
     net: 'Нет сети',
     sonioxKey: 'Проблема с ключом Soniox',
     claudeKey: 'Проблема с ключом Claude',
+    translate: 'Не удалось перевести',
   },
   close: 'Закрыть',
   drop: {

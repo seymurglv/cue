@@ -90,6 +90,8 @@ pub enum Effect {
     AbortStt { id: DictationId },
     TranscribeSaved { id: DictationId },
     Refine { id: DictationId, raw: String, mode: Mode },
+    /// "Retry" after a failed translation: the same text is refined again; a new usage row without audio (spec 2 §5).
+    RefineAgain { id: DictationId, raw: String, mode: Mode },
     AbortRefine { id: DictationId },
     Insert { id: DictationId, text: String },
     PasteLast,
@@ -133,6 +135,8 @@ pub struct Flow {
     stt_pending: bool,
     /// Refine for `id` was requested, but there is no result yet.
     refine_pending: bool,
+    /// The error on screen is a failed translation: "retry" refines the saved text instead of transcribing the audio.
+    retry_text: bool,
     paused: bool,
     /// The mode of the dictation `id`: what the chord picked, changed only while the starting chord is held.
     mode: Mode,
@@ -153,6 +157,7 @@ impl Flow {
             refine_outcome: None,
             stt_pending: false,
             refine_pending: false,
+            retry_text: false,
             paused: false,
             mode: Mode::Dictate,
             hold_hints_left,
@@ -260,6 +265,16 @@ impl Flow {
                 if id == self.id && self.refine_pending && self.phase == Phase::Thinking =>
             {
                 self.refine_pending = false;
+                // A failed translation is never replaced with the untranslated text (spec 2 §5): an error with "retry",
+                // which refines the saved text again.
+                if self.mode == Mode::Translate && (outcome != RefineOutcome::Refined || text.trim().is_empty()) {
+                    let cause = if outcome == RefineOutcome::RawKeyProblem { ErrorCause::ClaudeKey } else { ErrorCause::Translate };
+                    fx.push(Effect::Finished { id, outcome: Outcome::Failed });
+                    self.retry_text = true;
+                    self.phase = Phase::Error { cause, retry: true };
+                    self.push_ui(&mut fx);
+                    return fx;
+                }
                 // An empty result would not pass the sanity check: the raw text is pasted.
                 let (text, outcome) = match self.raw.clone() {
                     Some(raw) if text.trim().is_empty() => {
@@ -333,6 +348,7 @@ impl Flow {
         self.refine_outcome = None;
         self.stt_pending = true;
         self.refine_pending = false;
+        self.retry_text = false;
         for kind in [TimerKind::DoneHide, TimerKind::EmptyHide, TimerKind::UndoExpire] {
             fx.push(Effect::CancelTimer(kind));
         }
@@ -393,6 +409,7 @@ impl Flow {
     fn advance(&mut self, fx: &mut Vec<Effect>) -> bool {
         if let Some(error) = self.stt_error.take() {
             fx.push(Effect::Finished { id: self.id, outcome: Outcome::Failed });
+            self.retry_text = false;
             self.phase = Phase::Error { cause: cause_of(error), retry: true };
             self.push_ui(fx);
             return false;
@@ -449,6 +466,16 @@ impl Flow {
 
     fn on_retry(&mut self, fx: &mut Vec<Effect>) {
         if let Phase::Error { retry: true, .. } = self.phase {
+            if self.retry_text
+                && let Some(raw) = self.raw.clone()
+            {
+                self.retry_text = false;
+                self.phase = Phase::Thinking;
+                self.refine_pending = true;
+                fx.push(Effect::RefineAgain { id: self.id, raw, mode: self.mode });
+                self.push_ui(fx);
+                return;
+            }
             self.raw = None;
             self.stt_error = None;
             self.refine_outcome = None;
@@ -1517,7 +1544,100 @@ mod tests {
         }
     }
 
-    /// Random input sequences: no panic; the microphone is open exactly while recording;
+    // ---- Translation errors (spec 2 §5, §8) ----
+
+    #[test]
+    fn failed_translation_is_an_error_and_pastes_nothing() {
+        let mut f = Flow::new(2, false);
+        let id = recording_in(&mut f, 0, Mode::Translate);
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
+        f.handle(I::SttFinal { id, text: "привет".into() }, 5_200);
+        let fx = f.handle(I::Refined { id, text: "привет".into(), outcome: RefineOutcome::RawFallback }, 6_000);
+        assert!(!fx.iter().any(|e| matches!(e, E::Insert { .. })), "the untranslated text is never pasted");
+        let ui = last_ui(&fx).unwrap();
+        assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::Translate), true));
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::Failed }));
+        let fx = f.handle(I::Ui(UiAction::Retry), 7_000);
+        assert!(has(&fx, &E::RefineAgain { id, raw: "привет".into(), mode: Mode::Translate }), "retry refines the saved text");
+        assert!(!fx.iter().any(|e| matches!(e, E::TranscribeSaved { .. })));
+        assert_eq!(phase(&fx), Some(UiPhase::Think));
+        let fx = f.handle(I::Refined { id, text: "Hi.".into(), outcome: RefineOutcome::Refined }, 8_000);
+        assert!(has(&fx, &E::Insert { id, text: "Hi.".into() }));
+    }
+
+    #[test]
+    fn translation_key_problem_shows_the_key_error_with_retry() {
+        let mut f = Flow::new(2, false);
+        let id = recording_in(&mut f, 0, Mode::Translate);
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
+        f.handle(I::SttFinal { id, text: "привет".into() }, 5_200);
+        let fx = f.handle(I::Refined { id, text: "привет".into(), outcome: RefineOutcome::RawKeyProblem }, 6_000);
+        let ui = last_ui(&fx).unwrap();
+        assert_eq!((ui.error, ui.retry), (Some(ErrorCause::ClaudeKey), true));
+        assert!(!fx.iter().any(|e| matches!(e, E::Insert { .. })));
+    }
+
+    /// An empty "translation" is a failure too, not a reason to paste what was said.
+    #[test]
+    fn empty_translation_is_an_error() {
+        let mut f = Flow::new(2, false);
+        let id = recording_in(&mut f, 0, Mode::Translate);
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
+        f.handle(I::SttFinal { id, text: "привет".into() }, 5_200);
+        let fx = f.handle(I::Refined { id, text: "  ".into(), outcome: RefineOutcome::Refined }, 6_000);
+        assert!(!fx.iter().any(|e| matches!(e, E::Insert { .. })));
+        assert_eq!(last_ui(&fx).unwrap().error, Some(ErrorCause::Translate));
+    }
+
+    #[test]
+    fn dictation_still_pastes_the_raw_text_on_fallback() {
+        let mut f = Flow::new(2, false);
+        let id = thinking_with_raw(&mut f, 0, "привет");
+        let fx = f.handle(I::Refined { id, text: "привет".into(), outcome: RefineOutcome::RawFallback }, 6_000);
+        assert!(has(&fx, &E::Insert { id, text: "привет".into() }));
+    }
+
+    #[test]
+    fn stt_error_retry_still_transcribes_again() {
+        let mut f = Flow::new(2, false);
+        let id = recording_in(&mut f, 0, Mode::Translate);
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
+        f.handle(I::SttFailed { id, error: SttError::Network }, 5_200);
+        let fx = f.handle(I::Ui(UiAction::Retry), 6_000);
+        assert!(has(&fx, &E::TranscribeSaved { id }));
+    }
+
+    /// Esc during the retried translation, then "restore": the saved text is refined again in the same mode.
+    #[test]
+    fn cancelled_retry_restores_into_a_translation() {
+        let mut f = Flow::new(2, false);
+        let id = recording_in(&mut f, 0, Mode::Translate);
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
+        f.handle(I::SttFinal { id, text: "привет".into() }, 5_200);
+        f.handle(I::Refined { id, text: "привет".into(), outcome: RefineOutcome::RawFallback }, 6_000);
+        f.handle(I::Ui(UiAction::Retry), 7_000);
+        assert!(has(&f.handle(I::Esc, 7_100), &E::AbortRefine { id }));
+        let fx = f.handle(I::Ui(UiAction::Undo), 7_500);
+        assert!(has(&fx, &E::Refine { id, raw: "привет".into(), mode: Mode::Translate }));
+    }
+
+    /// A new dictation after a failed translation starts clean: its own transcription error retries the audio.
+    #[test]
+    fn a_new_dictation_forgets_the_text_retry() {
+        let mut f = Flow::new(2, false);
+        let id = recording_in(&mut f, 0, Mode::Translate);
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
+        f.handle(I::SttFinal { id, text: "привет".into() }, 5_200);
+        f.handle(I::Refined { id, text: "привет".into(), outcome: RefineOutcome::RawFallback }, 6_000);
+        let id2 = recording_in(&mut f, 10_000, Mode::Translate);
+        f.handle(I::ChordDown(Mode::Dictate), 15_000);
+        f.handle(I::SttFailed { id: id2, error: SttError::Network }, 15_200);
+        let fx = f.handle(I::Ui(UiAction::Retry), 16_000);
+        assert!(has(&fx, &E::TranscribeSaved { id: id2 }));
+        assert!(!fx.iter().any(|e| matches!(e, E::RefineAgain { .. })));
+    }
+
+    /// Random input sequences, dictations and translations: no panic; the microphone is open exactly while recording;
     /// every transcription, refine and paste is closed by a result or an abort; a dictation has one `Finished`
     /// (plus one per "retry"), and it arrives before the next dictation starts; a timer is armed again
     /// only after it fired or was cancelled; Esc is swallowed only when there is something to cancel or close.
@@ -1552,6 +1672,7 @@ mod tests {
         ];
         let mut steps = 0u64;
         let mut seen_finished = 0u64;
+        let mut seen_translate_errors = 0u64;
         for round in 0..300u64 {
             let mut f = Flow::new((round % 3) as u8, round % 2 == 0);
             let mut now: Ms = 0;
@@ -1568,7 +1689,7 @@ mod tests {
                 let id = DictationId(f.current_id().0.saturating_sub(next(2)));
                 let text = if next(4) == 0 { " ".to_string() } else { "текст".to_string() };
                 let input = match next(20) {
-                    0 | 1 => I::ChordDown(Mode::Dictate),
+                    0 | 1 => I::ChordDown(if next(3) == 0 { Mode::Translate } else { Mode::Dictate }),
                     2 | 3 => I::ChordUp,
                     4 => I::ChordAborted,
                     5 => I::Esc,
@@ -1631,8 +1752,12 @@ mod tests {
                             assert_eq!(stt, Some(id), "AbortStt without a transcription ({input:?})");
                             stt = None;
                         }
-                        E::Refine { id, .. } => {
+                        E::Refine { id, .. } | E::RefineAgain { id, .. } => {
                             assert_eq!(refine, None, "a second refine ({input:?})");
+                            if matches!(e, E::RefineAgain { .. }) {
+                                assert_eq!(id, f.current_id());
+                                *retries.entry(id.0).or_default() += 1;
+                            }
                             refine = Some(id);
                         }
                         E::AbortRefine { id } => {
@@ -1648,6 +1773,7 @@ mod tests {
                             armed[slot(kind)] = true;
                         }
                         E::CancelTimer(kind) => armed[slot(kind)] = false,
+                        E::Ui(UiState { error: Some(ErrorCause::Translate), .. }) => seen_translate_errors += 1,
                         E::Finished { id, .. } => {
                             seen_finished += 1;
                             let n = finished.entry(id.0).or_default();
@@ -1671,6 +1797,9 @@ mod tests {
                 }
             }
         }
-        assert!(steps == 120_000 && seen_finished > 1_000, "sequences reach outcomes: {seen_finished}");
+        assert!(
+            steps == 120_000 && seen_finished > 1_000 && seen_translate_errors > 10,
+            "sequences reach outcomes: {seen_finished}, failed translations: {seen_translate_errors}"
+        );
     }
 }

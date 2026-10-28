@@ -73,7 +73,8 @@ export class DropController {
     this.voice.ext = 0;
     const api = {
       mode: () => this.state.mode ?? 'dictate',
-      err: () => (this.state.error === 'net' ? 'net' : 'key'),
+      // The cause icon: a failed translation shows the network one; the key problems show none.
+      err: () => (this.state.error === 'net' || this.state.error === 'translate' ? 'net' : 'key'),
       errLabel: () => this.t.error[this.state.error ?? 'net'],
       text: this.t.drop,
       retry: () => this.state.retry,
