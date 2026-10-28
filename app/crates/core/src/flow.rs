@@ -138,7 +138,8 @@ pub struct Flow {
     /// The error on screen is a failed translation: "retry" refines the saved text instead of transcribing the audio.
     retry_text: bool,
     paused: bool,
-    /// The mode of the dictation `id`: what the chord picked, changed only while the starting chord is held.
+    /// The mode of the dictation `id`: what the chord picked, changed only while the starting chord is held, and back
+    /// to `Dictate` on every way into idle (`set_idle`): the idle Drop shows no mode.
     mode: Mode,
     hold_hints_left: u8,
     has_last: bool,
@@ -1640,7 +1641,8 @@ mod tests {
     /// Random input sequences, dictations and translations: no panic; the microphone is open exactly while recording;
     /// every transcription, refine and paste is closed by a result or an abort; a dictation has one `Finished`
     /// (plus one per "retry"), and it arrives before the next dictation starts; a timer is armed again
-    /// only after it fired or was cancelled; Esc is swallowed only when there is something to cancel or close.
+    /// only after it fired or was cancelled; Esc is swallowed only when there is something to cancel or close; the mode
+    /// changes only while recording, refine runs in the dictation's mode, and the idle Drop shows no mode.
     /// Timers mostly arrive as the state machine armed them (as the runtime does), sometimes at random.
     #[test]
     fn random_inputs_never_panic_and_keep_invariants() {
@@ -1673,6 +1675,7 @@ mod tests {
         let mut steps = 0u64;
         let mut seen_finished = 0u64;
         let mut seen_translate_errors = 0u64;
+        let mut mode_changes = 0u64;
         for round in 0..300u64 {
             let mut f = Flow::new((round % 3) as u8, round % 2 == 0);
             let mut now: Ms = 0;
@@ -1708,6 +1711,7 @@ mod tests {
                             [next(3) as usize],
                     },
                     15 => I::Inserted { id, outcome: if next(2) == 0 { InsertOutcome::Pasted } else { InsertOutcome::NoField } },
+                    16 => I::ModeChange(if next(2) == 0 { Mode::Translate } else { Mode::Dictate }),
                     _ => {
                         let on: Vec<usize> = (0..timers.len()).filter(|&i| armed[i]).collect();
                         let k = if !on.is_empty() && next(5) != 0 {
@@ -1726,7 +1730,13 @@ mod tests {
                     I::Timer(kind) => armed[slot(*kind)] = false,
                     _ => {}
                 }
-                for e in f.handle(input.clone(), now) {
+                let (phase_before, mode_before) = (f.ui_state().phase, f.mode());
+                let fx = f.handle(input.clone(), now);
+                if matches!(input, I::ModeChange(_)) && f.mode() != mode_before {
+                    assert!(matches!(phase_before, UiPhase::Start | UiPhase::Listen), "mode changed outside recording");
+                    mode_changes += 1;
+                }
+                for e in fx {
                     match e {
                         E::OpenMic { id } => {
                             assert_eq!(mic, None, "microphone opened twice ({input:?})");
@@ -1752,8 +1762,9 @@ mod tests {
                             assert_eq!(stt, Some(id), "AbortStt without a transcription ({input:?})");
                             stt = None;
                         }
-                        E::Refine { id, .. } | E::RefineAgain { id, .. } => {
+                        E::Refine { id, mode, .. } | E::RefineAgain { id, mode, .. } => {
                             assert_eq!(refine, None, "a second refine ({input:?})");
+                            assert_eq!(mode, f.mode(), "refine in another mode than the dictation's ({input:?})");
                             if matches!(e, E::RefineAgain { .. }) {
                                 assert_eq!(id, f.current_id());
                                 *retries.entry(id.0).or_default() += 1;
@@ -1795,11 +1806,15 @@ mod tests {
                 if f.esc_active() {
                     assert!(matches!(ui.phase, UiPhase::Start | UiPhase::Listen | UiPhase::Think | UiPhase::Error));
                 }
+                if ui.phase == UiPhase::Idle {
+                    assert_eq!(ui.mode, Mode::Dictate, "the idle Drop shows a mode ({input:?})");
+                }
             }
         }
         assert!(
-            steps == 120_000 && seen_finished > 1_000 && seen_translate_errors > 10,
-            "sequences reach outcomes: {seen_finished}, failed translations: {seen_translate_errors}"
+            steps == 120_000 && seen_finished > 1_000 && seen_translate_errors > 10 && mode_changes > 100,
+            "sequences reach outcomes: {seen_finished}, failed translations: {seen_translate_errors}, \
+             mode changes: {mode_changes}"
         );
     }
 }

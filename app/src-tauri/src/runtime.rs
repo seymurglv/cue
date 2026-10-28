@@ -188,7 +188,7 @@ impl Runtime {
             target,
         );
         // Language codes only, no user text.
-        tracing::info!(target, home = translate_home.unwrap_or("none"), "translation pair");
+        tracing::info!(to = target, home = translate_home.unwrap_or("none"), "translation pair");
         Self {
             flow: Flow::new(settings.hold_hints_left, has_last),
             t0: Instant::now(),
@@ -270,6 +270,14 @@ impl Runtime {
 
     fn on_event(&mut self, ev: CoreEvent) {
         match ev {
+            CoreEvent::Input(i @ Input::ModeChange(_)) => {
+                self.feed(i);
+                // Only the flow decides the mode, and only while recording: the attempt follows, so one that ends
+                // before refine (Esc, a failed transcription) writes the mode it was recording in.
+                if matches!(self.flow.ui_state().phase, UiPhase::Start | UiPhase::Listen) {
+                    self.attempt.follow_mode(self.flow.current_id(), self.flow.mode());
+                }
+            }
             CoreEvent::Input(i) => self.feed(i),
             CoreEvent::UiAction(UiAction::TrayAction) => self.on_tray_action(),
             CoreEvent::UiAction(UiAction::TrayClose) => self.tray = None,
@@ -689,18 +697,8 @@ impl Runtime {
             // The mode is final by the time refine starts.
             self.attempt.mode = mode;
         }
-        // Which way to translate (spec 2 §5): the speech language fixed in the settings, else the one Soniox heard most.
-        let job = match mode {
-            Mode::Translate => {
-                let speech = self
-                    .settings
-                    .translate
-                    .speech()
-                    .or_else(|| self.attempt.speech_language.as_deref().and_then(translate::known));
-                Job::Translate(translate::output_language(speech, self.settings.translate.target(), self.translate_home))
-            }
-            Mode::Dictate | Mode::Ask => Job::Clean,
-        };
+        let t = &self.settings.translate;
+        let job = job_for(mode, t.speech(), self.attempt.speech_language.as_deref(), t.target(), self.translate_home);
         if let Job::Translate(to) = job {
             // The language code only, no text.
             tracing::info!(to, "translating");
@@ -927,6 +925,25 @@ impl Runtime {
     }
 }
 
+/// What refine does with the dictation. A translation goes the way the speech language says (spec 2 §5,
+/// `translate::output_language`): the language fixed in `translate.speech`, else the one Soniox heard most (`heard`; a
+/// code CUE does not know counts as unknown speech). Dictation and "Ask" are cleaned up.
+fn job_for(
+    mode: Mode,
+    fixed: Option<&'static str>,
+    heard: Option<&str>,
+    target: &'static str,
+    home: Option<&'static str>,
+) -> Job {
+    match mode {
+        Mode::Translate => {
+            let speech = fixed.or_else(|| heard.and_then(translate::known));
+            Job::Translate(translate::output_language(speech, target, home))
+        }
+        Mode::Dictate | Mode::Ask => Job::Clean,
+    }
+}
+
 /// Soniox language hints: a fixed speech language for translation goes to Soniox as the only hint (spec 2 §5);
 /// otherwise the hints from the settings. Language identification stays on either way (`soniox::start_message`).
 fn soniox_hints(mode: Mode, s: &Settings) -> Vec<String> {
@@ -985,6 +1002,27 @@ mod tests {
         assert_eq!(soniox_hints(Mode::Translate, &s), ["de"]);
         assert_eq!(soniox_hints(Mode::Dictate, &s), ["ru", "en"], "a dictation keeps the hints from the settings");
         assert_eq!(soniox_hints(Mode::Ask, &s), ["ru", "en"]);
+    }
+
+    #[test]
+    fn a_translation_goes_the_way_the_speech_language_says() {
+        let tr = |fixed, heard, home| job_for(Mode::Translate, fixed, heard, "en", home);
+        assert_eq!(tr(None, Some("ru"), Some("ru")), Job::Translate("en"));
+        assert_eq!(tr(None, Some("en"), Some("ru")), Job::Translate("ru"), "target speech goes home");
+        assert_eq!(tr(None, Some("en-US"), Some("ru")), Job::Translate("ru"), "Soniox's code goes through `known`");
+        assert_eq!(tr(Some("ru"), Some("en"), Some("ru")), Job::Translate("en"), "the fixed language beats Soniox's");
+        assert_eq!(tr(Some("en"), Some("ru"), Some("ru")), Job::Translate("ru"));
+        assert_eq!(tr(None, Some("xx"), Some("ru")), Job::Translate("en"), "an unknown code is unknown speech");
+        assert_eq!(tr(None, None, Some("ru")), Job::Translate("en"));
+        assert_eq!(tr(None, Some("en"), None), Job::Translate("en"), "no home language: target speech stays");
+    }
+
+    #[test]
+    fn dictation_and_ask_are_cleaned_up() {
+        for mode in [Mode::Dictate, Mode::Ask] {
+            assert_eq!(job_for(mode, Some("ru"), Some("ru"), "en", Some("ru")), Job::Clean, "{mode:?}");
+            assert_eq!(job_for(mode, None, None, "en", None), Job::Clean, "{mode:?}");
+        }
     }
 
     #[test]

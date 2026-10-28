@@ -30,8 +30,8 @@ pub struct Attempt {
     pub app: String,
     samples: u64,
     pub stt_path: SttPath,
-    /// The mode the dictation starts in, then the one its refine runs in (the mode may change while the chord is held).
-    /// Retries keep it.
+    /// The mode the dictation records in (it follows a change while the starting chord is held:
+    /// [`Attempt::follow_mode`]), then the one its refine runs in. Retries keep it.
     pub mode: Mode,
     /// The language of most of the speech from the transcription (a Soniox code): which way a translation goes.
     /// A retry clears it: the new transcription gives its own; a retry of the translation keeps it.
@@ -77,6 +77,14 @@ impl Attempt {
             refine_at: None,
             insert_at: None,
             latency_ms: 0,
+        }
+    }
+
+    /// The dictation `id` switched mode while recording (Shift while the starting chord is held): an attempt that ends
+    /// before its refine writes the mode it was recording in. Another dictation's change is not this attempt's.
+    pub fn follow_mode(&mut self, id: DictationId, mode: Mode) {
+        if id == self.id {
+            self.mode = mode;
         }
     }
 
@@ -402,6 +410,18 @@ mod tests {
         a.retry(2_000);
         assert_eq!(a.record(Outcome::Inserted, "t".into(), &s).mode, UsageMode::Translate, "a retry of the transcription");
         assert_eq!(Attempt::new(DictationId(7)).mode, Mode::Dictate, "the next recording starts over");
+    }
+
+    /// Shift while the starting chord is held: an attempt that ends before refine (Esc, a failed transcription, a
+    /// dropped recording) writes the mode it was recording in.
+    #[test]
+    fn the_row_follows_a_mode_change_while_recording() {
+        let s = Settings::default();
+        let mut a = Attempt::new(DictationId(7));
+        a.follow_mode(DictationId(7), Mode::Translate);
+        assert_eq!(a.record(Outcome::Cancelled, "t".into(), &s).mode, UsageMode::Translate);
+        a.follow_mode(DictationId(6), Mode::Dictate);
+        assert_eq!(a.mode, Mode::Translate, "another dictation's mode is not this attempt's");
     }
 
     #[test]
