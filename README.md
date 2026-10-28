@@ -42,7 +42,7 @@ Not in this version: a settings window, history, a custom vocabulary, an install
   `rustup default stable-x86_64-pc-windows-msvc`.
 - Visual Studio Build Tools with the "Desktop development with C++" workload.
 - Microsoft Edge WebView2 Runtime (included with Windows 11).
-- Node.js 24 with npm.
+- Node.js 24 or newer, with npm (`"node": ">=24"` in `app/package.json`).
 - A Soniox API key and an Anthropic API key.
 
 ## API keys
@@ -145,6 +145,9 @@ Everything else lives in `%LOCALAPPDATA%\CUE`:
 | `bench\recordings\` | Recordings for the bench, only when `bench.save_recordings` is `true`. |
 | `bench\runs\<timestamp>\` | Bench runs: `results.json` and `report.html`. |
 
+WebView2 keeps the Drop window's browser profile (cache and storage) separately, in
+`%LOCALAPPDATA%\app.cue.dictation\EBWebView` (`app.cue.dictation` is the app identifier in `tauri.conf.json`).
+
 ## Costs
 
 ```powershell
@@ -155,6 +158,9 @@ cargo run -p cue-cli -- usage 2026-10
 The summary shows the number of dictations, minutes of audio, transcription and refine cost, the cost per dictation
 and per hour of audio, and the average latency from the second key press to the paste (overall and for recordings of
 20 s or less). Prices come from `settings.json`. A Retry is a second paid attempt and gets its own row.
+
+`usage.csv` is comma-separated. In Excel with a locale whose list separator is not a comma (Russian, for example), do not
+open the file directly; use **Data → From Text/CSV** and choose the comma delimiter.
 
 ## Comparison bench
 
