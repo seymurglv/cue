@@ -179,10 +179,16 @@ fn script_of(c: char) -> Option<Script> {
         0xE00..=0xE7F => Thai,
         0x1100..=0x11FF | 0x3130..=0x318F | 0xAC00..=0xD7AF | 0xFFA0..=0xFFDC => Hangul,
         // Kana goes with Han: Japanese writes both, and only Japanese and Chinese use them. Full- and halfwidth.
-        0x3040..=0x30FF | 0x31F0..=0x31FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0xFF66..=0xFF9F
-        | 0x20000..=0x323AF => Han,
+        _ if is_kana(c) => Han,
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x323AF => Han,
         _ => return None,
     })
+}
+
+/// Hiragana and Katakana, full- and halfwidth: in the script check they are Han ([`script_of`]), in length a syllable
+/// ([`density`]).
+fn is_kana(c: char) -> bool {
+    matches!(u32::from(c), 0x3040..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9F)
 }
 
 /// The script a language is written in; `None` for Serbian (both Cyrillic and Latin are usual).
@@ -209,10 +215,14 @@ fn script_of_language(code: &str) -> Option<Script> {
     })
 }
 
-/// How many Latin letters one letter of the script is worth: Han and Hangul pack a word into fewer characters. Every
-/// letter weighs by its own script, in the length check ([`weighted`]) and in the script share ([`written_in`]).
-fn density(s: Option<Script>) -> f32 {
-    match s {
+/// How many Latin letters one letter is worth: a Han character is a word or most of one, a Hangul block a syllable of
+/// two or three letters, a kana a syllable of one or two ("か" is "ka"). Every letter weighs by its own script, in the
+/// length check ([`weighted`]) and in the script share ([`written_in`]).
+fn density(c: char) -> f32 {
+    if is_kana(c) {
+        return 1.5;
+    }
+    match script_of(c) {
         Some(Script::Han) => 3.0,
         Some(Script::Hangul) => 2.0,
         _ => 1.0,
@@ -221,68 +231,94 @@ fn density(s: Option<Script>) -> f32 {
 
 /// The weight of the letters, each by its own script ([`density`]): Latin code inside Chinese speech weighs as Latin.
 fn weighted(letters: &[char]) -> f32 {
-    letters.iter().map(|c| density(script_of(*c))).sum()
+    letters.iter().copied().map(density).sum()
+}
+
+/// How many letters one digit is worth in the length check, in the speech and in the result alike. A translation often
+/// writes the speech's number words as digits, and Soniox writes some numbers in digits itself: "sixty thousand" (13
+/// letters) becomes "60 000" (5 digits), "three thirty" (11) "15:30" (4), "сто двадцать пять" (15) "125" (3). Two and a
+/// half letters a digit is at the low end of that: a number in digits weighs no more than the words it stands for, so it
+/// never pushes a result over the upper bound, and enough that a sentence with its numbers in digits stays above the
+/// lower one.
+const DIGIT_WEIGHT: f32 = 2.5;
+
+/// The length of a text for the length check: its letters ([`weighted`]) and its digits ([`DIGIT_WEIGHT`]).
+fn size(letters: &[char], text: &str) -> f32 {
+    weighted(letters) + digits(text) as f32 * DIGIT_WEIGHT
+}
+
+/// Digits of any script (0–9, Arabic-Indic, Devanagari, fullwidth…) that are not letters.
+fn digits(text: &str) -> usize {
+    text.chars().filter(|c| c.is_numeric() && !c.is_alphabetic()).count()
 }
 
 /// The share of the counted letters of the result ([`written_in`], weighted by [`density`]) in the target script, from
 /// which the result counts as written in it. A cleanup that respells a few names in the target script stays below it.
 const MIN_TARGET_SCRIPT: f32 = 0.8;
-/// Length bounds of the translation against the speech, in weighted letters ([`weighted`]); checked from
-/// `MIN_LETTERS_FOR_RATIO` letters of speech: a short phrase legitimately changes length more.
+/// Length bounds of the translation against the speech, in weighted letters and digits ([`size`]); checked from
+/// `MIN_LETTERS_FOR_RATIO` letters of speech: a short phrase legitimately changes length more. A result of digits alone
+/// is checked however short the speech: its length is all there is to check.
 const MIN_RATIO: f32 = 0.35;
 const MAX_RATIO: f32 = 2.8;
 const MIN_LETTERS_FOR_RATIO: usize = 20;
 
-/// The translation can be pasted (spec 2 §5: untranslated text is never pasted silently): not empty; its length is
-/// within bounds of what was said; when the speech is in another script than the target language, the result is
-/// written in the target script ([`written_in`]). Latin is the script of names, product names and code in any language,
-/// so the speech's script is its main non-Latin one when it has any ([`speech_script`]). A pair in one script (English
-/// into German) is checked by length only: there the script cannot tell a translation from a cleanup. The word overlap
-/// check of dictation does not apply: a translation shares no words with the speech. `terms` is the user's dictionary
-/// (`dictionary.terms`).
+/// The translation can be pasted (spec 2 §5: untranslated text is never pasted silently): it has letters or digits; its
+/// length is within bounds of what was said; when the speech is in another script than the target language, the result
+/// is written in the target script ([`written_in`]). Latin is the script of names, product names and code in any
+/// language, so the speech's script is its main non-Latin one when it has any ([`speech_script`]). A pair in one script
+/// (English into German) is checked by length only: there the script cannot tell a translation from a cleanup. A result
+/// of digits alone ("сто двадцать пять" → "125") is checked by length only too: no untranslated word can be pasted. The
+/// word overlap check of dictation does not apply: a translation shares no words with the speech. `terms` is the user's
+/// dictionary (`dictionary.terms`).
 pub fn translation_ok(raw: &str, out: &str, terms: &[String], to: &str) -> bool {
-    let out = out.trim();
-    if out.is_empty() {
-        return false;
-    }
     let letters = |t: &str| t.chars().filter(|c| c.is_alphabetic()).collect::<Vec<_>>();
     let (src, dst) = (letters(raw), letters(out));
-    if dst.is_empty() {
+    let digits_only = dst.is_empty();
+    if digits_only && digits(out) == 0 {
         return false;
     }
-    if src.len() >= MIN_LETTERS_FOR_RATIO {
-        let ratio = weighted(&dst) / weighted(&src);
+    if src.len() >= MIN_LETTERS_FOR_RATIO || digits_only {
+        let ratio = size(&dst, out) / size(&src, raw);
         if !(MIN_RATIO..=MAX_RATIO).contains(&ratio) {
             return false;
         }
     }
     match script_of_language(to) {
-        Some(t) if speech_script(&src) != Some(t) => written_in(t, out, terms),
+        Some(t) if !digits_only && speech_script(&src) != Some(t) => written_in(t, raw, out, terms),
         _ => true,
     }
 }
 
 /// The result is written in the `target` script. Only words that can show a translation count: never the words of the
-/// dictionary, in any script (the model writes them as listed), and into a non-Latin target no Latin word (names,
-/// product names and code stay in Latin). Of the counted words at least one is in the target script, and at least
-/// [`MIN_TARGET_SCRIPT`] of their letters, weighted by [`density`], are. An echo of the speech has no word in the target
-/// script and fails; so does a cleanup that respells a few names in Latin.
+/// dictionary, in any script (the model writes them as listed); never a word in the target script that the speech
+/// already has (names, product names and code kept as said: "запусти npm install" → "Run npm install." counts only
+/// "Run"); and into a non-Latin target no Latin word (names, product names and code stay in Latin). Words are compared
+/// by [`script_words`], ignoring case. Of the counted words at least one is in the target script, and at least
+/// [`MIN_TARGET_SCRIPT`] of their letters, weighted by [`density`], are. An echo of the speech, code-heavy speech
+/// included, has no counted word in the target script and fails; so does a cleanup that respells a few names in Latin.
 ///
 /// Known limits: into a non-Latin target Latin text shows nothing either way, so the English original followed by its
 /// translation passes, and so does English with one word in the target script; a phrase of names alone around one word
 /// of the speech ("кубернетес и докер" → "Kubernetes и Docker.") passes into English unless the names are listed; a
 /// translation made only of dictionary terms ("Sberbank" → "Сбербанк" with that term listed) fails.
-fn written_in(target: Script, out: &str, terms: &[String]) -> bool {
+fn written_in(target: Script, raw: &str, out: &str, terms: &[String]) -> bool {
+    let lowercase = |words: Vec<(Option<Script>, String)>| words.into_iter().map(|(_, w)| w.to_lowercase());
     let listed: HashSet<String> =
-        crate::refine::usable_terms(terms).into_iter().flat_map(script_words).map(|(_, w)| w.to_lowercase()).collect();
+        crate::refine::usable_terms(terms).into_iter().flat_map(|t| lowercase(script_words(t))).collect();
+    let spoken: HashSet<String> = lowercase(script_words(raw)).collect();
     let counted: Vec<(Option<Script>, String)> = script_words(out)
         .into_iter()
-        .filter(|(s, w)| (target == Script::Latin || *s != Some(Script::Latin)) && !listed.contains(&w.to_lowercase()))
+        .filter(|(s, w)| {
+            let w = w.to_lowercase();
+            let kept_name = target != Script::Latin && *s == Some(Script::Latin);
+            let kept_from_speech = *s == Some(target) && spoken.contains(&w);
+            !kept_name && !kept_from_speech && !listed.contains(&w)
+        })
         .collect();
     if !counted.iter().any(|(s, _)| *s == Some(target)) {
         return false;
     }
-    let weight = |(s, w): &(Option<Script>, String)| w.chars().count() as f32 * density(*s);
+    let weight = |(_, w): &(Option<Script>, String)| w.chars().map(density).sum::<f32>();
     let all: f32 = counted.iter().map(weight).sum();
     let in_target: f32 = counted.iter().filter(|(s, _)| *s == Some(target)).map(weight).sum();
     in_target / all >= MIN_TARGET_SCRIPT
@@ -309,7 +345,9 @@ fn script_words(text: &str) -> Vec<(Option<Script>, String)> {
 }
 
 /// The script of the speech: its main non-Latin script when it has any, else Latin; `None` when no letter belongs to a
-/// known script. Latin stands for names and code in any language, so "запусти cargo test" is Cyrillic speech.
+/// known script. Latin stands for names and code in any language, so "запусти cargo test" is Cyrillic speech. Known
+/// limit: English speech with one word in the target script ("send it to Сбербанк", into Russian) is then speech in the
+/// target script, and only its length is checked.
 fn speech_script(letters: &[char]) -> Option<Script> {
     let scripts = || letters.iter().filter_map(|c| script_of(*c));
     let mut counts: Vec<(Script, usize)> = Vec::new();
@@ -467,13 +505,21 @@ mod tests {
                 "en",
                 PASS,
             ),
+            // Kana is a syllable, not a word: a Japanese translation is not "three times longer".
+            ("install the new update now", "今すぐ新しいアップデートをインストールしてください", &[], "ja", PASS),
+            // Number words of the speech written as digits keep the length.
+            ("The budget is fifty, sorry, sixty thousand dollars.", "Бюджет — 60 000 долларов.", &[], "ru", PASS),
+            ("the meeting is at three thirty on the twenty second", "Встреча в 15:30 22-го.", &[], "ru", PASS),
+            // A number alone: nothing untranslated can be pasted, and the length is checked however short the speech.
+            ("сто двадцать пять", "125", &[], "en", PASS),
+            ("напомни мне позвонить маме в пять часов вечера", "5", &[], "en", FAIL),
             // One script: the length only.
             ("call me when you are home", "Ruf mich an, wenn du zu Hause bist.", &[], "de", PASS),
             // Cleanups instead of translations, with names respelled in Latin.
             ("открой гитхаб и проверь пул реквест", "Открой GitHub и проверь пул реквест.", &[], "en", FAIL),
             ("открой гитхаб и проверь пул реквест", "Открой GitHub и проверь pull request.", &[], "en", FAIL),
             ("открой гитхаб и проверь пул реквест", "Открой GitHub и проверь pull request.", &["GitHub", "pull request"], "en", FAIL),
-            ("проверь пул реквест в гитхабе и открой клод код", "Проверь pull request в GitHub и открой Claude Code.", &[], "en", FAIL),
+            ("проверь пул реквест в гитхабе и открой фигму", "Проверь pull request в GitHub и открой Figma.", &[], "en", FAIL),
             ("запусти докер компоуз апп", "Запусти Docker Compose апп.", &[], "en", FAIL),
             ("открой сониокс и проверь ключ", "Открой Soniox и проверь ключ.", &[], "en", FAIL),
             ("открой сониокс и проверь ключ", "Открой Soniox и проверь ключ.", &["Soniox"], "en", FAIL),
@@ -486,6 +532,15 @@ mod tests {
             ("напомни мне завтра позвонить Ане", "Напомни мне завтра позвонить Ане.", &[], "en", FAIL),
             ("call Anya tomorrow at ten please", "Call Anya tomorrow at ten, please.", &[], "ru", FAIL),
             ("открой Slack", "Открой Slack.", &[], "en", FAIL),
+            // Echoes of code-heavy speech: the code kept from the speech shows no translation.
+            ("запусти npm install lodash express typescript", "Запусти npm install lodash express typescript.", &[], "en", FAIL),
+            (
+                "сделай git commit amend no edit и git push force with lease",
+                "Сделай git commit amend no edit и git push force with lease.",
+                &[],
+                "en",
+                FAIL,
+            ),
             ("open Slack and check the messages", "打开Slack并检查消息", &[], "ru", FAIL),
             ("hello", "   ", &[], "ru", FAIL),
         ];
@@ -505,6 +560,16 @@ mod tests {
         assert!(translation_ok("pay the bill in sberbank", "Pay the bill in Сбербанк.", &[], "ru"));
         // A phrase of names alone: without the dictionary the respelled names read as English.
         assert!(translation_ok("кубернетес и докер", "Kubernetes и Docker.", &[], "en"));
+        // English speech with a word in the target script reads as a pair in one script: the length only, so the echo
+        // passes.
+        let echo = "Send the invoice to Сбербанк today, please.";
+        assert!(translation_ok("send the invoice to Сбербанк today please", echo, &[], "ru"));
+        // A digit weighs less than most spoken numbers take: a long number alone, in many words and few digits, still
+        // falls under the length bound.
+        assert!(!translation_ok("one thousand nine hundred ninety nine", "1999", &[], "ru"));
+        // The check does not read meaning: a self-correction turned around passes.
+        let inverted = "Send the report to Igor, I mean Oleg, by the end of the day.";
+        assert!(translation_ok("Отправь отчёт Олегу, точнее, Игорю, до конца дня.", inverted, &[], "en"));
     }
 
     /// Japanese writes kana and kanji, Korean Hangul syllables and jamo, full- or halfwidth.
