@@ -62,7 +62,9 @@ export class DropController {
   private dragging = false;
   private captured: number | null = null;
 
-  constructor(private host: HTMLElement, private io: DropIo, lang: Lang = 'en') {
+  /** place: the core's place at startup (any value reads as in place()); set before the Drop is built, so the first
+   *  frame is already laid out for it and nothing slides into place. */
+  constructor(private host: HTMLElement, private io: DropIo, lang: Lang = 'en', place: unknown = 'bottom') {
     this.t = DICTS[lang];
     this.voice = new (CUE().Voice)();
     // Without a level from the core Voice would draw made-up syllables; the bars show only what the core sent.
@@ -80,7 +82,7 @@ export class DropController {
       onPress: () => this.io.send('finish'),
       onAction: () => this.io.send(this.state.phase === 'cancel' ? 'undo' : 'retry'),
     };
-    this.host.dataset.place = 'bottom';
+    this.host.dataset.place = pickPlace(place);
     this.drop = new (CUE().Drop)(host, api);
     this.trayBox = new (CUE().Tray)(host, this.drop, { width: 300 });
     this.dropEl = this.drop.p;

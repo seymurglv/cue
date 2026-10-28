@@ -623,20 +623,29 @@ describe('Dragging the Drop', () => {
   });
 });
 
-describe('Rectangles for click-through at the side places', () => {
-  it.each(['left', 'right', 'top'] as const)('%s: the Drop sends its own rectangle, the tray card its own', (place) => {
-    const stub = (el: Element, x: number, y: number, width: number, height: number) => {
-      (el as any).getBoundingClientRect = () => ({ x, y, width, height, left: x, top: y, right: x + width, bottom: y + height, toJSON() {} });
+describe('The place at startup', () => {
+  it('is set before the Drop is built, so its first layout is already for that place', () => {
+    const Drop = CUE().Drop;
+    const atBuild: (string | undefined)[] = [];
+    CUE().Drop = function (host: HTMLElement, api: unknown) {
+      atBuild.push(host.dataset.place);
+      return new Drop(host, api);
     };
-    ctl.place(place);
-    const d = document.querySelector('.drop')!;
-    stub(d, 302, 182, 7.2, 36); // the upright strip at the left
-    ctl.frame(0);
-    expect(rectsSent.at(-1)).toEqual([{ x: 302, y: 182, w: 8, h: 36 }]);
-    ctl.tray('noField');
-    stub(document.querySelector('.tray')!, 302, 130, 300, 140);
-    ctl.frame(16);
-    expect(rectsSent.at(-1)).toEqual([{ x: 302, y: 130, w: 300, h: 140 }]);
+    try {
+      const cases: [unknown, string][] = [['left', 'left'], ['right', 'right'], ['top', 'top'], ['bottom', 'bottom'], [undefined, 'bottom'], ['middle', 'bottom']];
+      for (const [given, want] of cases) {
+        document.body.innerHTML = '<div id="stage"></div>';
+        new DropController(document.getElementById('stage')!, { send() {}, rects() {} }, 'en', given);
+        expect(atBuild.at(-1), String(given)).toBe(want);
+        expect(document.getElementById('stage')!.dataset.place, String(given)).toBe(want);
+      }
+      // Without a place: bottom, as before.
+      document.body.innerHTML = '<div id="stage"></div>';
+      new DropController(document.getElementById('stage')!, { send() {}, rects() {} });
+      expect(atBuild.at(-1)).toBe('bottom');
+    } finally {
+      CUE().Drop = Drop;
+    }
   });
 });
 

@@ -39,14 +39,13 @@ function wake() {
 // The core sets the language in an initialization script, before this module runs.
 const lang = pickLang((window as any).__CUE_LANG__);
 document.documentElement.lang = lang;
+// The place comes the same way as the language, before the Drop is built; later changes come as cue://place.
 const ctl = new DropController(document.getElementById('stage')!, {
   send: (action: UiAction) => void call('drop_action', { action }),
   rects: (rects) => void call('drop_hit_rects', { rects }),
   wake,
   drag: (phase: DragPhase) => void call('drop_drag', { phase }),
-}, lang);
-// The place comes the same way as the language, before the first frame; later changes come as cue://place.
-ctl.place((window as any).__CUE_PLACE__);
+}, lang, (window as any).__CUE_PLACE__);
 wake();
 
 /** Subscribe to every core event first, then drop_ready: otherwise the first state could arrive before the subscriptions. */
