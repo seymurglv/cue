@@ -489,7 +489,8 @@ impl Keeper {
             }
             GuardStep::Fixed => tracing::warn!("Drop was below an ordinary window: on top again"),
             GuardStep::NotFixed => {
-                tracing::warn!("Drop is still below an ordinary window after being raised: trying again every 30 s");
+                let every = dropwin::GUARD_RETRY.as_secs();
+                tracing::warn!("Drop is still below an ordinary window after being raised: trying again every {every} s");
             }
             GuardStep::Uncovered => tracing::info!("Drop no longer covered"),
         }

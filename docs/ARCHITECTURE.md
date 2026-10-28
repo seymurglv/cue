@@ -224,14 +224,16 @@ another app above the Drop and above other always-on-top windows: the Drop was d
 always on top and whether DWM cloaks it (closed Start and Search panels, windows on other virtual desktops). The
 ordinary, uncloaked windows above the Drop that overlap the Drop window cover it (`covering_windows`). When some do, the
 Drop is put back on top with `SetWindowPos(HWND_TOPMOST, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)`, and the next check
-tells whether that helped (`ZGuard`, a pure state machine): uncovered, it logs that the Drop is on top again; still
-covered by the same windows (a window in a band above every always-on-top window, or one that came back on top within
-the check), it logs that once per occurrence and raises the Drop again only every 30 s, or at once when the set of
-covering windows changes. A raise whose request fails is logged as such and is not taken as "cannot be raised above":
-the next check raises again, and after two failures in a row only every 30 s. So the guard never raises twice a second
-for nothing, and does not keep putting the Drop above other always-on-top apps when that cannot help; always-on-top
-windows above the Drop are never answered at all. Window titles are never logged. `zorder_probe` (an example in `cue-platform-win`) prints what
-the guard sees.
+tells whether that helped (`ZGuard`, a pure state machine). Uncovered, it logs that the Drop is on top again. Still
+covered by the same windows (a window in a band above every always-on-top window), it logs that and raises the Drop
+again only every 30 s, or at once when the set of covering windows changes. The same windows back on top within 30 s of
+a raise that helped (one of them keeps coming back, like a maximized window that is brought forward again) are the same
+occurrence and held off the same way, so such a window costs one raise every 30 s, not one a second. Each kind of
+message is logged once per occurrence. A raise whose request fails is logged as such and is not taken as "cannot be
+raised above": the next check raises again, and after two failures in a row only every 30 s. So the guard never raises
+twice a second for nothing, and does not keep putting the Drop above other always-on-top apps when that cannot help;
+always-on-top windows above the Drop are never answered at all. Window titles are never logged. `zorder_probe` (an
+example in `cue-platform-win`) prints what the guard sees.
 
 ### Events and sizes
 

@@ -168,7 +168,7 @@ pub enum GuardStep {
     Idle,
     /// The Drop is covered: put it back on top. The next check tells whether that helped.
     Raise,
-    /// The Drop was raised and is no longer covered.
+    /// The Drop was raised and is no longer covered. Reported once per occurrence.
     Fixed,
     /// The Drop was raised and the same windows still cover it: most likely it cannot be raised above them (a window
     /// in a band above always-on-top windows), or one of them came back on top within the check. It is raised again
@@ -185,14 +185,21 @@ pub const GUARD_RETRY: Duration = Duration::from_secs(30);
 
 /// The z-order guard over time: raises the Drop when it is covered, checks on the next check that the raise helped,
 /// and when it did not, holds off while the same windows cover the Drop, trying again every `GUARD_RETRY` (at once
-/// when the covering windows change). So it never raises twice a second for nothing, and does not keep putting the
-/// Drop above other always-on-top windows when that cannot help. A raise that failed outright (`raise_failed`) says
-/// nothing about the windows: it is not taken as "cannot be raised above".
+/// when the covering windows change). The same windows back on top within `GUARD_RETRY` of a raise that helped are the
+/// same occurrence going on (one of them keeps coming back on top): held off the same way, not raised again at once.
+/// So it never raises twice a second for nothing, and does not keep putting the Drop above other always-on-top windows
+/// when that cannot help. A raise that failed outright (`raise_failed`) says nothing about the windows: it is not taken
+/// as "cannot be raised above". An occurrence ends when the Drop is seen uncovered after the guard held off, or stays
+/// uncovered for `GUARD_RETRY` after a raise that helped, or other windows cover it.
 #[derive(Debug, Default)]
 pub struct ZGuard {
     state: Cover,
-    /// `NotFixed` was already reported in this occurrence (since the Drop was last uncovered).
+    /// The windows of the last raise that helped (sorted ids), and when the guard saw that it did.
+    fixed: Option<(Vec<usize>, Instant)>,
+    /// `NotFixed` was already reported in this occurrence.
     reported: bool,
+    /// `Fixed` was already reported in this occurrence.
+    fixed_reported: bool,
     /// Raises that failed in a row: after the first the next check tries again, after two the guard holds off.
     failures: u32,
     /// A failed raise was already reported in this occurrence.
@@ -220,15 +227,37 @@ impl ZGuard {
             // The last raise was not reported as failed: it went through.
             self.failures = 0;
         }
+        let fresh = |at: Instant| now.saturating_duration_since(at) < GUARD_RETRY;
         if covering.is_empty() {
-            self.reported = false;
-            self.failures = 0;
-            self.failure_reported = false;
             return match std::mem::take(&mut self.state) {
-                Cover::Clear => GuardStep::Idle,
-                Cover::Raised(_) => GuardStep::Fixed,
-                Cover::Held { .. } | Cover::Unraised { .. } => GuardStep::Uncovered,
+                Cover::Raised(by) => {
+                    // It helped. The same windows back on top soon would be this occurrence going on.
+                    self.fixed = Some((by, now));
+                    if std::mem::replace(&mut self.fixed_reported, true) { GuardStep::Idle } else { GuardStep::Fixed }
+                }
+                Cover::Held { .. } | Cover::Unraised { .. } => {
+                    self.end_occurrence();
+                    GuardStep::Uncovered
+                }
+                Cover::Clear => {
+                    if self.fixed.as_ref().is_some_and(|(_, at)| !fresh(*at)) {
+                        self.end_occurrence();
+                    }
+                    GuardStep::Idle
+                }
             };
+        }
+        if matches!(self.state, Cover::Clear)
+            && let Some((by, at)) = self.fixed.take()
+        {
+            if by == covering && fresh(at) {
+                // One of them keeps coming back on top: hold off, and raise again `GUARD_RETRY` after the raise that
+                // helped.
+                self.state = Cover::Held { by: covering, since: at };
+                return if std::mem::replace(&mut self.reported, true) { GuardStep::Idle } else { GuardStep::NotFixed };
+            }
+            // Other windows, or long after: a new occurrence.
+            self.end_occurrence();
         }
         let raise = match &self.state {
             Cover::Raised(by) if *by == covering => {
@@ -255,8 +284,16 @@ impl ZGuard {
     pub fn raise_failed(&mut self, now: Instant) -> bool {
         let Cover::Raised(by) = &self.state else { return false };
         self.state = Cover::Unraised { by: by.clone(), at: now };
-        self.failures += 1;
+        self.failures = self.failures.saturating_add(1);
         !std::mem::replace(&mut self.failure_reported, true)
+    }
+
+    fn end_occurrence(&mut self) {
+        self.fixed = None;
+        self.reported = false;
+        self.fixed_reported = false;
+        self.failures = 0;
+        self.failure_reported = false;
     }
 }
 
@@ -471,9 +508,44 @@ mod tests {
         assert_eq!(g.check(&[7]), NotFixed);
         assert_eq!(g.hold(&[7], 30), [(62, Raise)]);
         assert_eq!(g.check(&[]), Fixed);
-        // A new occurrence afterwards is reported again.
+        // Uncovered for 30 s: that occurrence is over, and a new one is answered and reported again.
+        assert_eq!(g.hold(&[], 30), []);
         assert_eq!(g.check(&[7]), Raise);
         assert_eq!(g.check(&[7]), NotFixed);
+    }
+
+    /// The case seen live: a maximized ordinary window that comes back above the Drop a check after each raise.
+    #[test]
+    fn a_window_that_keeps_coming_back_on_top_is_held_off_too() {
+        let mut g = Clocked::new();
+        let mut steps = vec![];
+        // Five minutes: each raise helps, and on the check after it the window is back on top.
+        let mut uncovered_next = false;
+        for _ in 0..600 {
+            let covering: &[usize] = if uncovered_next { &[] } else { &[7] };
+            let step = g.check(covering);
+            uncovered_next = step == Raise;
+            if step != Idle {
+                steps.push((g.ticks, step));
+            }
+        }
+        // One raise, "on top again" and "not fixed" once each, then a raise every 30 s from the one that helped.
+        assert_eq!(steps[..3], [(1, Raise), (2, Fixed), (3, NotFixed)]);
+        let raises: Vec<u32> = steps[3..].iter().map(|&(t, s)| if s == Raise { t } else { 0 }).collect();
+        assert_eq!(raises, [62, 123, 184, 245, 306, 367, 428, 489, 550]);
+    }
+
+    #[test]
+    fn other_windows_after_a_fix_are_a_new_occurrence() {
+        let mut g = Clocked::new();
+        assert_eq!(g.check(&[7]), Raise);
+        assert_eq!(g.check(&[]), Fixed);
+        assert_eq!(g.check(&[9]), Raise);
+        assert_eq!(g.check(&[]), Fixed);
+        // The same window back after more than 30 s: answered at once, a new occurrence.
+        assert_eq!(g.hold(&[], 31), []);
+        assert_eq!(g.check(&[9]), Raise);
+        assert_eq!(g.check(&[]), Fixed);
     }
 
     #[test]
