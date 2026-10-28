@@ -3,19 +3,20 @@
 CUE is a voice-dictation app for Windows 11. Press `Ctrl + Win`, speak, and the cleaned-up text appears at the caret
 in whatever app you are typing in. Speech is transcribed in real time by Soniox, then lightly edited by Claude Haiku 5.5
 (filler words, self-corrections, punctuation, lists, numbers) while keeping your own words, tone and mix of languages.
-Add `Shift` (`Ctrl + Win + Shift`) and the text is pasted translated: into English, and English into your home
-language (Russian, say); any pair of the languages Soniox recognizes can be set. It runs quietly in the background:
-a small indicator at the bottom of the screen (the Drop; drag it to the top or to either side if you prefer) shows
-what CUE is doing, and a tray icon next to the clock holds a short menu. This first version is built for personal use
-with your own Soniox and Anthropic API keys.
+Add `Shift` (`Ctrl + Win + Shift`, or press `Shift` while you speak) and the text is pasted translated: into English,
+and English into your home language (Russian, say); any pair of the languages Soniox recognizes can be set. It runs
+quietly in the background: a small indicator at the bottom of the screen (the Drop; drag it to the top or to either
+side if you prefer) shows what CUE is doing, and a tray icon next to the clock holds a short menu. This first version
+is built for personal use with your own Soniox and Anthropic API keys.
 
 ## Features
 
 - **Two chords.** `Ctrl + Win` (left or right keys, any order) starts dictation; `Ctrl + Win + Shift` (any order too)
-  starts a translated one. Tap and release: CUE records until you press the chord again (with or without `Shift`; the
-  mode no longer changes then). Hold for 0.6 s or longer: recording ends when you let go. While the starting chord is
-  still held, adding `Shift` turns the dictation into a translation and the Drop changes its icon at once; once you
-  let go, the mode stays until the recording ends.
+  starts a translated one. Tap and release: CUE records until you press `Ctrl + Win` again. Hold for 0.6 s or
+  longer: recording ends when you let go. While CUE records, every press of `Shift` (left or right; on its own after
+  a tap, or with `Ctrl + Win` still held) switches between dictation and translation, and the Drop changes its icon at
+  once: a second press takes it back. Letting go of `Shift` changes nothing, and outside a recording `Shift` does
+  nothing.
   `Ctrl + Win` with `Shift` and `Alt` together is the Office key, and `Ctrl + Win + Alt` is kept for the "Ask" mode
   of a later version: CUE leaves both to Windows.
 - **Translation** (`Ctrl + Win + Shift`). Speech that is not in your target language (`translate.target`, English

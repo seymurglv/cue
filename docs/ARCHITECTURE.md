@@ -39,8 +39,8 @@ a real clock.
   Network calls and timers are tokio tasks that send their results back as events. A panic while handling one event
   is caught and logged, and the core keeps running.
 - **`cue-keyboard`**: the `WH_KEYBOARD_LL` hook with its own message loop at time-critical priority. The handler only
-  classifies the key and sends a `HotkeyEvent`; `cue-hotkeys` forwards it to the core. The hook reads two atomics the
-  core updates after every event: `ESC_ACTIVE` and `PAUSED`.
+  classifies the key and sends a `HotkeyEvent`; `cue-hotkeys` forwards it to the core. The hook reads three atomics
+  the core updates as soon as the flow has handled an event: `ESC_ACTIVE`, `RECORDING` and `PAUSED`.
 - **`cue-focus`**: UI Automation on its own COM thread. Each query has a deadline; a late answer becomes "unknown",
   and queries whose deadline passed while a hung app blocked the thread are skipped.
 - **`cue-insert`**: owns all clipboard work, one job at a time. Every job ends within about 7 s; the core also keeps a
@@ -71,9 +71,12 @@ that crashes still reports: transcription as a network error (so Retry is offere
 "no field".
 
 **Modes.** `Flow` keeps the mode of the dictation (`Mode`: `Dictate`, `Translate`, `Ask`; "Ask" cannot be picked in
-this version). `ChordDown(mode)` starts a dictation in the mode the chord picked, and `ModeChange(mode)` switches it
-while the starting chord is still held (in hold mode too); after the release, and once the finishing press has moved
-the flow to thinking, the mode is fixed. The mode reaches the Drop in `UiState` and the runtime in `Refine { mode }`
+this version). `ChordDown(mode)` starts a dictation in the mode the chord picked. `ModeToggle` (a fresh Shift press)
+swaps dictation and translation ("Ask" becomes a translation) while starting or recording, whether the chord is still
+held or was tapped: people often tap the chord and decide on a translation only while speaking, and a second Shift
+takes a slip back. `ModeChange(mode)` (Alt, for "Ask") counts only while the starting chord is still held (in hold
+mode too). Once the finishing press has moved the flow to thinking, neither changes the mode, and neither does
+anything outside a recording. The mode reaches the Drop in `UiState` and the runtime in `Refine { mode }`
 and `RefineAgain { mode }`; every path into Idle resets it to `Dictate`. A translation that comes back as anything
 but a refined, non-empty text is never pasted: the attempt ends as `failed`, and the flow shows the `translate` error
 (`claudeKey` for a key, balance or limit problem) with Retry. That Retry emits `RefineAgain` with the saved
@@ -86,10 +89,18 @@ transcript: the text is translated again, the audio is not transcribed again.
   (`hook::ASK_ENABLED`). If Shift and Alt together (Ctrl + Shift + Alt + Win is the Office key), or Alt while "Ask" is
   off, are held when the pair forms, it is a system shortcut: no events, no swallowed `V`, no mask, and Windows sees
   every key as is.
-- While the chord is held, a Shift press (or Alt, once "Ask" is on) switches the mode, and the Drop changes its icon
-  at once. A release never switches it, so the order in which the keys come up does not matter, and nothing goes back
-  to dictation. Shift and Alt together inside a held chord (the Office key pressed late) count as a third key (below)
-  and also drop the Win and Alt masks whatever the order of the presses, so Windows sees the Office key as is.
+- Every fresh Shift press (left or right; not its auto-repeat, not an injected one) toggles the mode while the chord
+  is held, and also after the chord was released while CUE is starting or recording: the core sets `hook::RECORDING`
+  for that (not `ESC_ACTIVE`, which also covers thinking and errors, when every capital letter typed would wake the
+  core for nothing), and refreshes the flags right after the flow decides, before the effects run, so a Shift pressed
+  just after a tap already counts. Inside a held chord the event goes out without the flag (the core may not have
+  heard of the new recording yet), and the flow drops it when nothing records. A press is fresh when its side's bit
+  was not set yet; the resync before every press drops a Shift whose release was lost. A release never toggles, so
+  the order in which the keys come up does not matter. The Drop changes its icon at once. After a tap, a Shift that is
+  part of another shortcut (Alt + Shift, Ctrl + Shift + a key, the Office key) toggles as well. An Alt press inside a held
+  chord, once "Ask" is on, picks "Ask". Shift and Alt together inside a held chord (the Office key pressed late) count
+  as a third key (below) and also drop the Win and Alt masks whatever the order of the presses, so Windows sees the
+  Office key as is.
 - Ctrl, Win, Shift and Alt always pass through to Windows. CUE swallows only `V` while the chord is held (paste last;
   the Windows `Ctrl + Win + V` panel does not open) and `Esc` while CUE is starting, recording, thinking, pasting or
   showing an error. A swallowed key's auto-repeat and release are swallowed too.
@@ -103,7 +114,9 @@ transcript: the text is translated again, the audio is not transcribed again.
   A chord while thinking only makes the Drop shake.
 - Injected key events (including CUE's own) pass untouched. Before each key-down the remembered modifiers are
   checked against `GetAsyncKeyState`, so key-ups lost to the secure desktop or UAC do not leave a stuck chord; a
-  250 ms timer ends a chord whose keys are gone.
+  250 ms timer ends a chord whose keys are gone. The timer never drops Shift: a tick may come before Windows records
+  a fresh Shift press, and the held Shift's auto-repeat would then toggle the mode back; the check before the next
+  key-down drops a Shift whose key-up was lost.
 - The hook is installed again after resume from sleep and after unlock, since Windows may remove it.
 - Pause for an hour sets `PAUSED`: the hook swallows and masks nothing and sends no events.
 
@@ -408,17 +421,17 @@ its own row in `%LOCALAPPDATA%\CUE\usage.csv`:
 output_tokens, refine_usd, latency_ms, outcome, mode, web_searches, search_usd`. `stt_path` is `stream`,
 `stream+batch` or `batch`; outcomes are `inserted`, `no_field`, `cancelled`, `empty`, `failed`, `discarded` (written
 only when audio ran past 380 ms). `mode` is `dictate` or `translate` as the dictation's refine started (for an attempt
-that ends before refine, the mode it was recording in: the attempt follows a `ModeChange` the flow accepts; `ask` is
-reserved), or `warmup`. `web_searches` and `search_usd` (searches × `pricing.web_search_usd`) are for "Ask" and are 0
-for now. The Retry of a failed translation re-translates the saved text: a new row with no audio. A cache warm-up is a
-row of its own: its tokens and cost, no audio, latency 0, outcome `discarded`, mode `warmup`. Rows written before the
-last three columns existed read as dictation, and the header of an existing file is never rewritten (new files get the
-16-column header). Latency runs from the second press to Ctrl+V (from Retry or Restore when used); the target for a
-~30-word phrase is 1.5 s or less. Rows that fail to write, for example while the file is open in Excel, wait in memory
-and go out before the next one. `cue-cli usage` sums a UTC month: dictations are `inserted` plus `no_field` rows,
-average latency counts only `inserted` rows, and a separate average covers recordings of 20 s or less. The cost includes
-failed attempts and warm-ups; web search is shown only when there was some, and the rows and dollars of each `mode`
-value follow, in the order they first appear.
+that ends before refine, the mode it was recording in: the attempt follows a `ModeToggle` or `ModeChange` the flow
+accepts; `ask` is reserved), or `warmup`. `web_searches` and `search_usd` (searches × `pricing.web_search_usd`) are for
+"Ask" and are 0 for now. The Retry of a failed translation re-translates the saved text: a new row with no audio. A
+cache warm-up is a row of its own: its tokens and cost, no audio, latency 0, outcome `discarded`, mode `warmup`. Rows
+written before the last three columns existed read as dictation, and the header of an existing file is never rewritten
+(new files get the 16-column header). Latency runs from the second press to Ctrl+V (from Retry or Restore when used);
+the target for a ~30-word phrase is 1.5 s or less. Rows that fail to write, for example while the file is open in Excel,
+wait in memory and go out before the next one. `cue-cli usage` sums a UTC month: dictations are `inserted` plus
+`no_field` rows, average latency counts only `inserted` rows, and a separate average covers recordings of 20 s or less.
+The cost includes failed attempts and warm-ups; web search is shown only when there was some, and the rows and dollars
+of each `mode` value follow, in the order they first appear.
 
 ## Logging and privacy rules
 
