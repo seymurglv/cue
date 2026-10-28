@@ -1,5 +1,5 @@
-//! settings.json: engine and models, refine thresholds, the hint counter, bench, interface language, the user's
-//! dictionary, prices for usage accounting.
+//! settings.json: engine and models, refine thresholds, the hint counter, bench, interface language, where the Drop
+//! sits, the user's dictionary, prices for usage accounting.
 use serde::{Deserialize, Deserializer, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -72,6 +72,62 @@ pub struct UiSettings {
     pub language: UiLanguage,
 }
 
+/// Where the Drop sits on the work area: centered at the bottom (the default) or the top edge, or vertically centered
+/// at the left or the right edge. The user picks it by dragging the Drop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DropPosition {
+    #[default]
+    Bottom,
+    Top,
+    Left,
+    Right,
+}
+
+impl DropPosition {
+    pub const ALL: [Self; 4] = [Self::Bottom, Self::Top, Self::Left, Self::Right];
+
+    /// The name in settings.json and in the Drop window.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Bottom => "bottom",
+            Self::Top => "top",
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+
+    /// Case and surrounding spaces do not matter; anything else is `None`.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        Self::ALL.into_iter().find(|p| p.code().eq_ignore_ascii_case(text))
+    }
+}
+
+/// Like `UiLanguage`: any value that is not one of the four names (another word, a number, `null`) reads as `Bottom`,
+/// so a typo never makes the whole file unreadable.
+impl<'de> Deserialize<'de> for DropPosition {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(value.as_str().and_then(Self::parse).unwrap_or_default())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Default, Serialize)]
+pub struct DropSettings {
+    pub position: DropPosition,
+}
+
+/// `drop` that is not an object (a string, a number, `null`) reads as the defaults instead of failing the whole file;
+/// inside it, unknown fields are ignored and a bad `position` reads as `bottom`.
+impl<'de> Deserialize<'de> for DropSettings {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let position = value.get("position").and_then(|v| v.as_str()).and_then(DropPosition::parse).unwrap_or_default();
+        Ok(Self { position })
+    }
+}
+
 /// Names and terms the user often says (product names, people, jargon), written as they should appear. Only the
 /// refine request gets them, as a cached block after the system prompt (`refine::terms_prompt`, which also drops
 /// unusable entries); Soniox does not: it bills context tokens on every dictation.
@@ -124,6 +180,9 @@ pub struct Settings {
     /// Not written while it is the default (`auto`), like `pricing`: files of users who never set it stay as they were.
     #[serde(skip_serializing_if = "UiSettings::is_default")]
     pub ui: UiSettings,
+    /// Where the Drop sits. Not written while it is the default (`bottom`), like `ui`.
+    #[serde(skip_serializing_if = "DropSettings::is_default")]
+    pub drop: DropSettings,
     /// Not written while the list is empty, like `ui`.
     #[serde(skip_serializing_if = "DictionarySettings::is_default")]
     pub dictionary: DictionarySettings,
@@ -185,6 +244,7 @@ impl Default for Settings {
             hold_hints_left: 2,
             bench: BenchSettings::default(),
             ui: UiSettings::default(),
+            drop: DropSettings::default(),
             dictionary: DictionarySettings::default(),
             pricing: Pricing::default(),
         }
@@ -192,6 +252,12 @@ impl Default for Settings {
 }
 
 impl UiSettings {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl DropSettings {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -281,6 +347,7 @@ mod tests {
         assert_eq!(s.hold_hints_left, 2);
         assert!(!s.bench.save_recordings);
         assert_eq!(s.ui.language, UiLanguage::Auto);
+        assert_eq!(s.drop.position, DropPosition::Bottom);
         assert!(s.dictionary.terms.is_empty());
         assert_eq!(s.pricing.soniox_rt_per_hour, 0.12);
         let haiku = s.pricing.claude_price("claude-haiku-5-5").unwrap();
@@ -601,5 +668,86 @@ mod tests {
         assert_eq!(written(&p)["dictionary"], serde_json::json!({ "terms": ["Soniox", " Claude Haiku"] }));
         assert_eq!(load(&p).unwrap(), s);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn drop_position_reads_all_four_in_any_case() {
+        for (text, expected) in [
+            ("bottom", DropPosition::Bottom),
+            ("top", DropPosition::Top),
+            ("left", DropPosition::Left),
+            ("right", DropPosition::Right),
+            ("LEFT", DropPosition::Left),
+            (" Right ", DropPosition::Right),
+            ("	Top
+", DropPosition::Top),
+        ] {
+            let json = serde_json::json!({ "drop": { "position": text } }).to_string();
+            let s: Settings = serde_json::from_str(&json).unwrap();
+            assert_eq!(s.drop.position, expected, "{text:?}");
+        }
+    }
+
+    /// A typo in the position or in the whole block reads as the default and the rest of the file still loads.
+    #[test]
+    fn invalid_drop_position_reads_as_bottom_and_keeps_the_rest() {
+        for drop in [
+            r#"{"position":"middle"}"#,
+            r#"{"position":"le ft"}"#,
+            r#"{"position":""}"#,
+            r#"{"position":5}"#,
+            r#"{"position":null}"#,
+            r#"{"position":["left"]}"#,
+            r#"{"future":1}"#,
+            r#"{}"#,
+            r#""left""#,
+            "5",
+            "null",
+            "[]",
+        ] {
+            let text = format!(r#"{{"drop":{drop},"hold_hints_left":0}}"#);
+            let s: Settings = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{drop}: {e}"));
+            assert_eq!(s.drop.position, DropPosition::Bottom, "{drop}");
+            assert_eq!(s.hold_hints_left, 0, "{drop}");
+        }
+    }
+
+    #[test]
+    fn file_without_drop_block_reads_as_bottom() {
+        let s: Settings = serde_json::from_str(r#"{"hold_hints_left":1}"#).unwrap();
+        assert_eq!(s.drop, DropSettings::default());
+        assert_eq!(s.drop.position, DropPosition::Bottom);
+    }
+
+    /// Like `ui`: the default (also an explicit `"bottom"`) is not written; another place is, and survives a roundtrip.
+    #[test]
+    fn drop_position_is_written_only_when_not_bottom() {
+        let dir = tmp("drop-position");
+        let p = dir.join("settings.json");
+        let written = |p: &Path| serde_json::from_slice::<serde_json::Value>(&std::fs::read(p).unwrap()).unwrap();
+        save(&Settings::default(), &p).unwrap();
+        assert!(written(&p).get("drop").is_none(), "the default position ended up in the file");
+
+        std::fs::write(&p, r#"{"drop":{"position":"BOTTOM"},"hold_hints_left":2}"#).unwrap();
+        save(&load(&p).unwrap(), &p).unwrap();
+        assert!(written(&p).get("drop").is_none(), "an explicit bottom was written back");
+
+        for position in [DropPosition::Top, DropPosition::Left, DropPosition::Right] {
+            let mut s = Settings::default();
+            s.drop.position = position;
+            save(&s, &p).unwrap();
+            assert_eq!(written(&p)["drop"], serde_json::json!({ "position": position.code() }));
+            assert_eq!(load(&p).unwrap(), s);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn drop_position_codes_parse_back() {
+        for position in DropPosition::ALL {
+            assert_eq!(DropPosition::parse(position.code()), Some(position));
+            assert_eq!(serde_json::to_string(&position).unwrap(), format!("\"{}\"", position.code()));
+        }
+        assert_eq!(DropPosition::parse("center"), None);
     }
 }
