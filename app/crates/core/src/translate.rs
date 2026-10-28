@@ -218,11 +218,13 @@ fn density(s: Option<Script>) -> f32 {
     }
 }
 
-/// The share of the result's new letters ([`written_in`]: words neither said nor in the dictionary, weighted by
+/// The share of the result's new letters ([`written_in`]: words neither said nor kept from the dictionary, weighted by
 /// [`density`]) in the target script, from which the result counts as written in it.
 const MIN_TARGET_SCRIPT: f32 = 0.6;
 /// Length bounds of the translation against the speech, in weighted letters ([`density`]); checked from
-/// `MIN_LETTERS_FOR_RATIO` letters of speech: a short phrase legitimately changes length more.
+/// `MIN_LETTERS_FOR_RATIO` letters of speech: a short phrase legitimately changes length more and keeps a larger share
+/// of names and code. For a pair with different scripts the lower bound applies to the new target-script letters alone
+/// as well ([`written_in`]).
 const MIN_RATIO: f32 = 0.35;
 const MAX_RATIO: f32 = 2.8;
 const MIN_LETTERS_FOR_RATIO: usize = 20;
@@ -243,37 +245,43 @@ pub fn translation_ok(raw: &str, out: &str, terms: &[String], to: &str) -> bool 
     }
     let src_script = dominant_script(&src);
     let to_script = script_of_language(to);
-    if src.len() >= MIN_LETTERS_FOR_RATIO {
-        let ratio = dst.len() as f32 * density(to_script) / (src.len() as f32 * density(src_script));
+    let long = src.len() >= MIN_LETTERS_FOR_RATIO;
+    let speech = src.len() as f32 * density(src_script);
+    if long {
+        let ratio = dst.len() as f32 * density(to_script) / speech;
         if !(MIN_RATIO..=MAX_RATIO).contains(&ratio) {
             return false;
         }
     }
+    let min_new = if long { MIN_RATIO * speech } else { 0.0 };
     match to_script {
-        Some(t) if src_script != Some(t) => written_in(t, raw, out, terms),
+        Some(t) if src_script != Some(t) => written_in(t, raw, out, terms, min_new),
         _ => true,
     }
 }
 
-/// The result is written in the `target` script. Names, product names and code stay as written (the instruction asks
-/// for it), so a result word found among the words of the speech or of the dictionary (any case) is left out; of the
-/// rest, at least [`MIN_TARGET_SCRIPT`] of the weighted letters are in the target script, and at least one word is.
-/// An echo of the speech leaves no word at all and fails.
-fn written_in(target: Script, raw: &str, out: &str, terms: &[String]) -> bool {
-    let said: HashSet<String> = std::iter::once(raw)
-        .chain(crate::refine::usable_terms(terms))
-        .flat_map(script_words)
-        .map(|(_, w)| w.to_lowercase())
-        .collect();
+/// The result is written in the `target` script (spec 2 §5: untranslated text is never pasted silently). Names, product
+/// names and code stay as written (the instruction asks for it), so a result word found (any case) among the words of
+/// the speech, or among the dictionary's words in another script, is left out; a dictionary term in the target script
+/// is the translation itself and counts. Of the remaining words at least one is in the target script, at least
+/// [`MIN_TARGET_SCRIPT`] of their weighted letters ([`density`]) are, and those target-script letters come to at least
+/// `min_new`: [`MIN_RATIO`] of the weighted speech from `MIN_LETTERS_FOR_RATIO` letters of it, so a cleanup that only
+/// respells a name in the target script fails. An echo of the speech leaves no word and fails.
+///
+/// Known limit: a short phrase (under `MIN_LETTERS_FOR_RATIO` letters) that keeps the speech and adds one target-script
+/// name, and an answer of the original plus its translation, are not caught.
+fn written_in(target: Script, raw: &str, out: &str, terms: &[String], min_new: f32) -> bool {
+    let listed = crate::refine::usable_terms(terms).into_iter().flat_map(script_words).filter(|(s, _)| *s != Some(target));
+    let kept: HashSet<String> = script_words(raw).into_iter().chain(listed).map(|(_, w)| w.to_lowercase()).collect();
     let new: Vec<(Option<Script>, String)> =
-        script_words(out).into_iter().filter(|(_, w)| !said.contains(&w.to_lowercase())).collect();
+        script_words(out).into_iter().filter(|(_, w)| !kept.contains(&w.to_lowercase())).collect();
     if !new.iter().any(|(s, _)| *s == Some(target)) {
         return false;
     }
     let weight = |(s, w): &(Option<Script>, String)| w.chars().count() as f32 * density(*s);
     let all: f32 = new.iter().map(weight).sum();
     let in_target: f32 = new.iter().filter(|(s, _)| *s == Some(target)).map(weight).sum();
-    in_target / all >= MIN_TARGET_SCRIPT
+    in_target >= min_new && in_target / all >= MIN_TARGET_SCRIPT
 }
 
 /// Words for the script check: maximal runs of letters of one script, so "检查CUE的GitHub" is four words and a name
@@ -439,6 +447,28 @@ mod tests {
         let out = "Разверни это в Kubernetes.";
         assert!(translation_ok(raw, out, &["Kubernetes".to_owned()], "ru"));
         assert!(!translation_ok(raw, out, &[], "ru"), "without the dictionary the name is 10 of 22 letters");
+    }
+
+    /// A cleanup instead of a translation: only the name the model respelled is in the target script, far too little of
+    /// what was said, whether or not the name is in the dictionary.
+    #[test]
+    fn a_cleanup_with_a_respelled_name_fails() {
+        assert!(!translation_ok("открой гитхаб и проверь пул реквест", "Открой GitHub и проверь пул реквест.", &[], "en"));
+        let (raw, out) = ("открой сониокс и проверь ключ", "Открой Soniox и проверь ключ.");
+        assert!(!translation_ok(raw, out, &[], "en"));
+        assert!(!translation_ok(raw, out, &["Soniox".to_owned()], "en"), "a term in the target script is no translation of the rest");
+    }
+
+    /// A term in the target script is the translation itself, not a name kept as written.
+    #[test]
+    fn a_translation_into_a_dictionary_term_passes() {
+        assert!(translation_ok("Sberbank", "Сбербанк", &["Сбербанк".to_owned()], "ru"));
+    }
+
+    /// A short phrase keeps a larger share of code and names.
+    #[test]
+    fn a_short_phrase_keeps_its_code() {
+        assert!(translation_ok("запусти cargo test", "Run cargo test", &[], "en"));
     }
 
     /// A Han letter stands for about three Latin ones: by plain count a name the speech spelled in Cyrillic would be
