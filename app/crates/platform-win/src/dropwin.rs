@@ -183,14 +183,20 @@ pub enum GuardStep {
 /// top, so the guard keeps trying, but slowly: never twice a second against a window that stays above it.
 pub const GUARD_RETRY: Duration = Duration::from_secs(30);
 
+/// The same windows on top of the Drop again this soon after a raise that helped came back by themselves (a window that
+/// keeps putting itself forward does so within a check): the same occurrence, held off. Later, the user brought them
+/// forward: a new occurrence, answered at once.
+pub const GUARD_CAME_BACK: Duration = Duration::from_secs(2);
+
 /// The z-order guard over time: raises the Drop when it is covered, checks on the next check that the raise helped,
 /// and when it did not, holds off while the same windows cover the Drop, trying again every `GUARD_RETRY` (at once
-/// when the covering windows change). The same windows back on top within `GUARD_RETRY` of a raise that helped are the
-/// same occurrence going on (one of them keeps coming back on top): held off the same way, not raised again at once.
-/// So it never raises twice a second for nothing, and does not keep putting the Drop above other always-on-top windows
-/// when that cannot help. A raise that failed outright (`raise_failed`) says nothing about the windows: it is not taken
-/// as "cannot be raised above". An occurrence ends when the Drop is seen uncovered after the guard held off, or stays
-/// uncovered for `GUARD_RETRY` after a raise that helped, or other windows cover it.
+/// when the covering windows change). The same windows back on top within `GUARD_CAME_BACK` of a raise that helped are
+/// the same occurrence going on (one of them keeps coming back on top): held off the same way, raised again
+/// `GUARD_RETRY` after the raise that helped. So it never raises twice a second for nothing, and does not keep putting
+/// the Drop above other always-on-top windows when that cannot help. A raise that failed outright (`raise_failed`) says
+/// nothing about the windows: it is not taken as "cannot be raised above". An occurrence ends when the Drop is seen
+/// uncovered after the guard held off, or stays uncovered for `GUARD_CAME_BACK` after a raise that helped, or other
+/// windows cover it.
 #[derive(Debug, Default)]
 pub struct ZGuard {
     state: Cover,
@@ -227,7 +233,7 @@ impl ZGuard {
             // The last raise was not reported as failed: it went through.
             self.failures = 0;
         }
-        let fresh = |at: Instant| now.saturating_duration_since(at) < GUARD_RETRY;
+        let fresh = |at: Instant| now.saturating_duration_since(at) < GUARD_CAME_BACK;
         if covering.is_empty() {
             return match std::mem::take(&mut self.state) {
                 Cover::Raised(by) => {
@@ -542,10 +548,27 @@ mod tests {
         assert_eq!(g.check(&[]), Fixed);
         assert_eq!(g.check(&[9]), Raise);
         assert_eq!(g.check(&[]), Fixed);
-        // The same window back after more than 30 s: answered at once, a new occurrence.
-        assert_eq!(g.hold(&[], 31), []);
+        // The same window back after 10 s (the user brought it forward): answered at once, a new occurrence.
+        assert_eq!(g.hold(&[], 10), []);
         assert_eq!(g.check(&[9]), Raise);
         assert_eq!(g.check(&[]), Fixed);
+    }
+
+    #[test]
+    fn the_same_window_back_within_2_s_came_back_by_itself() {
+        let mut g = Clocked::new();
+        assert_eq!(g.check(&[7]), Raise);
+        assert_eq!(g.check(&[]), Fixed);
+        // 1.5 s later the same window is on top again: held off, raised again 30 s after the raise that helped.
+        assert_eq!(g.hold(&[], 1), []);
+        assert_eq!(g.check(&[7]), NotFixed);
+        assert_eq!(g.hold(&[7], 30), [(62, Raise)]);
+        assert_eq!(g.check(&[]), Uncovered);
+        // 2 s after a raise that helped is already too late to be the same occurrence: answered at once.
+        assert_eq!(g.check(&[7]), Raise);
+        assert_eq!(g.check(&[]), Fixed);
+        assert_eq!(g.hold(&[], 2), []);
+        assert_eq!(g.check(&[7]), Raise);
     }
 
     #[test]
