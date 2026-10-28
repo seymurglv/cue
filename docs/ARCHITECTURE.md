@@ -188,27 +188,35 @@ recording in progress.
   `max_tokens` doubles (another alphabet may take more tokens), up to 16 000. Timeout: 4 s plus 1 s per 100 words,
   a second more than a cleanup.
 - **Check** (`translation_ok`), instead of the sanity check, on the text after Markdown stripping and list tidying.
-  The result is not empty. From 20 letters of speech, its length is 0.35–2.8 times the speech's, counted in letters,
-  each weighted by its script: a Han or kana character counts as 3 Latin letters, a Hangul one as 2. When the speech
-  is in another script than the target language, the result must be written in the target script. Latin is the script
-  of names, product names and code in every language, so the speech's script is its main non-Latin one when it has
-  any. The result is split into words (runs of letters of one script); words of `dictionary.terms` never count, and
-  into a non-Latin target no Latin word counts. Of the counted words at least one is in the target script, and so is at
-  least 80 % of their weighted letters. A pair in one script (English into German) is checked by length only, since
-  there the script cannot tell a translation from a cleanup; Serbian, written in both Cyrillic and Latin, is checked
-  by length only too. The word overlap of the sanity check does not apply: a translation shares no words with the
-  speech.
+  The result has letters or digits. From 20 letters of speech, its length is 0.35–2.8 times the speech's, counted in
+  letters, each weighted by its script (a Han character counts as 3 Latin letters, a Hangul one as 2, a kana as 1.5),
+  and in digits, 2.5 letters each on both sides: a translation often writes the speech's number words as digits
+  ("sixty thousand" as "60 000"). A result of digits alone ("сто двадцать пять" → "125") is checked by length however
+  short the speech, and by nothing else: no untranslated word can be pasted. When the speech is in another script than
+  the target language, the result must be written in the target script. Latin is the script of names, product names
+  and code in every language, so the speech's script is its main non-Latin one when it has any. The result is split
+  into words (runs of letters of one script); words of `dictionary.terms` never count, nor does a word in the target
+  script that the speech already has (names and code kept as said, compared ignoring case), and into a non-Latin
+  target no Latin word counts. Of the counted words at least one is in the target script, and so is at least 80 % of
+  their weighted letters. So an echo of the speech fails, code-heavy speech included ("запусти npm install lodash" →
+  "Запусти npm install lodash."), while "Run npm install lodash." passes on "Run". A pair in one script (English into
+  German) is checked by length only, since there the script cannot tell a translation from a cleanup; Serbian, written
+  in both Cyrillic and Latin, is checked by length only too. The word overlap of the sanity check does not apply: a
+  translation shares no words with the speech.
 - **Known limits of the check.** A translation made only of dictionary terms fails ("Sberbank" → "Сбербанк" with that
   term listed). Into a non-Latin target, Latin text shows nothing either way, so the English original followed by its
   translation passes, and so does English with one word in the target script. A phrase of names around one word of
   speech ("кубернетес и докер" → "Kubernetes и Docker.") passes into English unless the names are listed. In a
-  same-script pair the untranslated speech passes. Number words in the speech count as letters and digits in the
-  result do not, so a short phrase whose numbers turn into digits can fall under the length bound ("The budget is
-  fifty, sorry, sixty thousand dollars." → "Бюджет — 60 000 долларов." fails).
-- **Failure.** No key, a network error, a timeout, a refusal, `max_tokens`, a response off the schema or a failed check
-  pastes nothing: the flow shows "Couldn't translate" ("Claude key problem" for a key, balance or limit problem) with
-  Retry, which translates the saved transcript again. The log gets one line with the reason and the outcome, and
-  the target code when a translation starts; never the text.
+  same-script pair the untranslated speech passes, and English speech with a word in the target script (a Cyrillic
+  name, translated into Russian) counts as such a pair. A digit weighs 2.5 letters, the low end of what a spoken
+  number takes, so a long number alone, said in many words and written in few digits, still falls under the length
+  bound ("one thousand nine hundred ninety nine" → "1999" fails); inside a sentence the other words carry it. The
+  check does not read meaning: a self-correction can come back turned around and pass ("Отправь отчёт Олегу, точнее,
+  Игорю" came back as "…to Igor, I mean Oleg" in every bench run).
+- **Failure.** A network error, a timeout, a refusal, `max_tokens`, a response off the schema or a failed check pastes
+  nothing: the flow shows "Couldn't translate" with Retry, which translates the saved transcript again. No Anthropic
+  key, or a key, balance or limit problem, shows "Claude key problem" with Retry instead. The log gets one line with the
+  reason and the outcome, and the target code when a translation starts; never the text.
 
 ### Cache warm-up
 
@@ -399,18 +407,18 @@ its own row in `%LOCALAPPDATA%\CUE\usage.csv`:
 `ts, audio_ms, stt_engine, stt_path, stt_usd, refine_model, input_tokens, cache_read_tokens, cache_write_tokens,
 output_tokens, refine_usd, latency_ms, outcome, mode, web_searches, search_usd`. `stt_path` is `stream`,
 `stream+batch` or `batch`; outcomes are `inserted`, `no_field`, `cancelled`, `empty`, `failed`, `discarded` (written
-only when audio ran past 380 ms). `mode` is `dictate` or `translate` as the dictation's refine started (the mode it
-started in, for an attempt that ends before refine; `ask` is reserved), or `warmup`. `web_searches` and `search_usd`
-(searches × `pricing.web_search_usd`) are for "Ask" and are 0 for now. The Retry of a failed translation
-re-translates the saved text: a new row with no audio. A cache warm-up is a row of its own: its tokens and cost, no
-audio, latency 0, outcome `discarded`, mode `warmup`. Rows written before the last three columns existed read as
-dictation, and the header of an existing file is never rewritten (new files get the 16-column header). Latency runs
-from the second press to Ctrl+V (from Retry or Restore when used); the target for a ~30-word phrase is 1.5 s or less.
-Rows that fail to write, for example while the file is open in Excel, wait in memory and go out before the next one.
-`cue-cli usage` sums a UTC month: dictations are `inserted` plus `no_field` rows, average latency counts only
-`inserted` rows, and a separate average covers recordings of 20 s or less. The cost includes failed attempts and
-warm-ups; web search is shown only when there was some, and the rows and dollars of each `mode` value follow, in the
-order they first appear.
+only when audio ran past 380 ms). `mode` is `dictate` or `translate` as the dictation's refine started (for an attempt
+that ends before refine, the mode it was recording in: the attempt follows a `ModeChange` the flow accepts; `ask` is
+reserved), or `warmup`. `web_searches` and `search_usd` (searches × `pricing.web_search_usd`) are for "Ask" and are 0
+for now. The Retry of a failed translation re-translates the saved text: a new row with no audio. A cache warm-up is a
+row of its own: its tokens and cost, no audio, latency 0, outcome `discarded`, mode `warmup`. Rows written before the
+last three columns existed read as dictation, and the header of an existing file is never rewritten (new files get the
+16-column header). Latency runs from the second press to Ctrl+V (from Retry or Restore when used); the target for a
+~30-word phrase is 1.5 s or less. Rows that fail to write, for example while the file is open in Excel, wait in memory
+and go out before the next one. `cue-cli usage` sums a UTC month: dictations are `inserted` plus `no_field` rows,
+average latency counts only `inserted` rows, and a separate average covers recordings of 20 s or less. The cost includes
+failed attempts and warm-ups; web search is shown only when there was some, and the rows and dollars of each `mode`
+value follow, in the order they first appear.
 
 ## Logging and privacy rules
 
@@ -442,6 +450,7 @@ saves the answers as `choices.json`.
 (`{id, app, raw, before_cursor?, to?}`) goes through OpenRouter models and the direct Haiku path with the app's prompt,
 context and checks, sequentially, under a `--max-usd` budget. A phrase with `to` is translated, on the direct path
 only (`claude::translate`, the translation check, the 4 s timeout); OpenRouter models skip it, and the skip is listed
-in `out.json`. `out.json` holds every call (the text that would be pasted, the outcome, `to`) and per-model medians,
-p90 and cost; the console gets only ids and numbers. A translation that fails its check counts as `raw_fallback`,
-where the app says "Couldn't translate".
+in `out.json`. `out.json` holds every call (the outcome, `to`, and the text that would be pasted, or the raw transcript
+when the outcome is not `refined`) and per-model medians, p90 and cost; the console gets only ids and numbers. A
+translation that fails its check counts as `raw_fallback`, where the app pastes nothing and says "Couldn't translate";
+on the direct path the model's own answer is not kept.

@@ -226,9 +226,10 @@ struct Call {
     outcome: &'static str,
     /// Longer than the app's timeout (`timeout_ms`: 3 s for phrases under 100 words; a translation gets a second more).
     over_timeout: bool,
-    /// What would be pasted at the caret.
+    /// When `outcome` is `refined`, the text that would be pasted at the caret. Otherwise the raw transcript: a cleanup
+    /// pastes it, a translation pastes nothing (the app shows "Couldn't translate").
     output: String,
-    /// The model's response as is.
+    /// The model's response as is; `None` on the direct path, which returns only the decided text.
     content: Option<String>,
     provider: Option<String>,
     served_model: Option<String>,

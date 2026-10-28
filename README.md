@@ -21,10 +21,11 @@ with your own Soniox and Anthropic API keys.
 - **Translation** (`Ctrl + Win + Shift`). Speech that is not in your target language (`translate.target`, English
   by default) is translated into it; speech in the target language goes to your home language (`translate.home`, by
   default the Windows display language). The speech language is the one most of your words were in, so
-  "Открой Telegram" counts as Russian. The cleanup rules stay as in dictation (self-corrections, lists, numbers, one
-  line in terminals), and names from `dictionary.terms`, product names and code are kept as written. If the
-  translation fails (no network, a timeout, or an answer that does not look like a translation), nothing is pasted:
-  the Drop shows "Couldn't translate", and **Retry** translates the saved text again.
+  "Открой Telegram" counts as Russian. The cleanup of dictation applies too (fillers, lists, numbers, one line in
+  terminals), and names from `dictionary.terms`, product names and code are kept as written; a self-correction,
+  though, can come back turned around (see Known limitations). If the translation fails (no network, a timeout, or an
+  answer that does not look like a translation), nothing is pasted: the Drop shows "Couldn't translate", and **Retry**
+  translates the saved text again.
 - **Text at the caret in any app**, pasted through the clipboard. Your previous clipboard content comes back about
   half a second later, and dictated text is kept out of Windows clipboard history and the cloud clipboard.
 - **Russian, English, and both mixed** in one sentence.
@@ -53,8 +54,8 @@ with your own Soniox and Anthropic API keys.
 - **Comparison bench** (a developer tool): runs your saved recordings through Soniox stream and batch and through
   several Claude models, and builds a blind A/B report.
 
-Not in this version: the "Ask" mode (`Ctrl + Win + Alt`), a settings window, history, a custom vocabulary, an
-installer, macOS.
+Not in this version: the "Ask" mode (`Ctrl + Win + Alt`), a settings window, history, a vocabulary for speech
+recognition itself (`dictionary.terms` guides only the cleanup, see Settings), an installer, macOS.
 
 ## Requirements
 
@@ -267,8 +268,12 @@ it. It does not tune the thresholds.
 - The terminal one-line rule recognizes Windows Terminal, PowerShell, Command Prompt, conhost, mintty and WSL by
   name; the VS Code integrated terminal looks like the editor.
 - A translation is checked by length and by script, not by meaning. Between two languages written in the same script
-  (English and German) only the length is checked, so untranslated text can pass there; other limits are in
-  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+  (English and German) only the length is checked, so untranslated text can pass there. English speech with a word in
+  the target script (a Cyrillic name, translated into Russian) counts as such a pair too and gets the length check
+  only. Other limits are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+- A translation can turn a self-correction around: "Отправь отчёт Олегу, точнее, Игорю" ("to Oleg, I mean Igor")
+  came back as "…to Igor, I mean Oleg" in every bench run. The check cannot see it, so read a translated correction
+  before sending it.
 
 ## Repository layout
 
