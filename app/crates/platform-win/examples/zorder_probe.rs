@@ -9,8 +9,8 @@ use cue_platform_win::dropwin::{self, Above, Seen};
 use cue_platform_win::placement::PxRect;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, GW_HWNDPREV, GWL_EXSTYLE, GetClassNameW, GetWindow, GetWindowLongPtrW, GetWindowThreadProcessId,
-    IsWindowVisible, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    FindWindowExW, GWL_EXSTYLE, GetClassNameW, GetWindowLongPtrW, GetWindowThreadProcessId, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW,
 };
 use windows::core::w;
 
@@ -33,13 +33,13 @@ fn main() {
     };
     println!("Drop window {:?}: {rect:?}", drop.0);
     let above = dropwin::windows_above(drop);
-    for (w, hwnd) in above.iter().zip(handles_above(drop)) {
+    for w in &above {
         let overlap = if w.rect.intersects(&rect) { "overlaps" } else { "" };
         let kind = if w.topmost { "on top" } else { "ordinary" };
         let cloaked = if w.cloaked { "cloaked" } else { "" };
-        println!("  {:<40} pid {:>6}  {kind:<8} {cloaked:<7} {overlap}", class_of(hwnd), pid_of(hwnd));
+        println!("  {:<40} pid {:>6}  {kind:<8} {cloaked:<7} {overlap}", class_of(w.hwnd), pid_of(w.hwnd));
     }
-    let verdict = |r: PxRect, a: &[Above]| if dropwin::covered_by_ordinary_window(r, a) { "covered" } else { "fine" };
+    let verdict = |r: PxRect, a: &[Above]| if dropwin::covering_windows(r, a).is_empty() { "fine" } else { "covered" };
     println!("{} windows above; verdict: {}", above.len(), verdict(rect, &above));
     let Some(n) = secs else { return };
     let start = Instant::now();
@@ -61,29 +61,13 @@ fn find_drop() -> Option<HWND> {
     loop {
         // SAFETY: a search through the top-level windows by title; no window is changed.
         let hwnd = unsafe { FindWindowExW(None, after, None, w!("CUE")) }.ok()?;
+        // SAFETY: only reads the style of the window just found; a window destroyed meanwhile reads as 0.
         let ex = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
         if ex & WS_EX_TOOLWINDOW.0 != 0 && ex & WS_EX_NOACTIVATE.0 != 0 {
             return Some(hwnd);
         }
         after = Some(hwnd);
     }
-}
-
-/// The same walk as `dropwin::windows_above`, for the handles (visible windows only, in the same order).
-fn handles_above(drop: HWND) -> Vec<HWND> {
-    let mut out = Vec::new();
-    let mut cur = drop;
-    // SAFETY: GetWindow and IsWindowVisible only read the window list.
-    while let Ok(h) = unsafe { GetWindow(cur, GW_HWNDPREV) } {
-        if h.0.is_null() {
-            break;
-        }
-        if unsafe { IsWindowVisible(h) }.as_bool() {
-            out.push(h);
-        }
-        cur = h;
-    }
-    out
 }
 
 fn class_of(hwnd: HWND) -> String {

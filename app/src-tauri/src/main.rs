@@ -98,11 +98,12 @@ fn setup(
     tracing::info!(place = place.code(), "Drop place");
     let ui = ipc::Ui::new(app.handle().clone(), place);
     let win = drop_window::create(app.handle(), lang, place)?;
-    drop_window::spawn_hit_test(win.clone(), app.state::<drop_window::HitState>().inner().clone());
+    let hits = app.state::<drop_window::HitState>().inner().clone();
+    drop_window::spawn_hit_test(win.clone(), hits.clone());
     let (drag_tx, drag_rx) = std::sync::mpsc::channel();
     app.manage(drop_window::Placer::new(drag_tx));
     let tx = core_tx.clone();
-    drop_window::spawn_placement(win, ui.clone(), place, drag_rx, move |p| {
+    drop_window::spawn_placement(win, ui.clone(), place, drag_rx, hits, move |p| {
         let _ = tx.send(CoreEvent::DropMoved(p));
     });
     // Without the icon there is no way to quit or pause: if it is not created, CUE does not start (reason in the log).

@@ -6,7 +6,8 @@
 //!
 //! Always on top is set once, but Windows does not keep it in every case: an ordinary window of another app has been
 //! seen above the Drop (and above other always-on-top windows). The z-order guard (`windows_above`,
-//! `covered_by_ordinary_window`, `raise_topmost`) puts the Drop back on top when that happens.
+//! `covering_windows`, `ZGuard`, `raise_topmost`) puts the Drop back on top when that happens, and checks that it
+//! helped.
 use windows::Win32::Foundation::{GetLastError, SetLastError, ERROR_SUCCESS, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -116,14 +117,20 @@ pub fn observe(hwnd: HWND) -> Seen {
         if !IsWindowVisible(hwnd).as_bool() {
             return Seen::Hidden;
         }
-        let mut r = RECT::default();
         let dpi = GetDpiForWindow(hwnd);
-        if GetWindowRect(hwnd, &mut r).is_err() || dpi == 0 {
-            return Seen::Gone;
+        match window_rect(hwnd) {
+            Ok(rect) if dpi != 0 => Seen::Shown { rect, scale: f64::from(dpi) / f64::from(USER_DEFAULT_SCREEN_DPI) },
+            _ => Seen::Gone,
         }
-        let rect = PxRect { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
-        Seen::Shown { rect, scale: f64::from(dpi) / f64::from(USER_DEFAULT_SCREEN_DPI) }
     }
+}
+
+/// The window's rect in physical px, shown or not. From any thread.
+pub fn window_rect(hwnd: HWND) -> windows::core::Result<PxRect> {
+    let mut r = RECT::default();
+    // SAFETY: only reads the window's rect into our variable; a destroyed HWND gives an error.
+    unsafe { GetWindowRect(hwnd, &mut r) }?;
+    Ok(PxRect { left: r.left, top: r.top, right: r.right, bottom: r.bottom })
 }
 
 /// Moves the Drop so its top-left corner is at `(x, y)` (physical px): no resize, no z-order change, no activation.
@@ -136,6 +143,7 @@ pub fn move_to(hwnd: HWND, x: i32, y: i32) -> windows::core::Result<()> {
 /// A visible top-level window above the Drop in z-order, as the z-order guard sees it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Above {
+    pub hwnd: HWND,
     pub rect: PxRect,
     /// Always on top (`WS_EX_TOPMOST`). Such a window is allowed above the Drop: the guard never competes with it.
     pub topmost: bool,
@@ -144,11 +152,74 @@ pub struct Above {
     pub cloaked: bool,
 }
 
-/// The z-order guard's decision. Every ordinary (not always-on-top) window belongs below the Drop, so one that is
-/// above it, drawn, and overlapping the Drop window means the Drop has lost its place on top. Always-on-top windows
-/// above the Drop are left alone, and so are windows that do not overlap it.
-pub fn covered_by_ordinary_window(drop: PxRect, above: &[Above]) -> bool {
-    above.iter().any(|w| !w.topmost && !w.cloaked && w.rect.intersects(&drop))
+/// The windows that cover the Drop, as ids (their handle values). Every ordinary (not always-on-top) window belongs
+/// below the Drop, so one that is above it, drawn, and overlapping the Drop window means the Drop has lost its place on
+/// top. Always-on-top windows above the Drop are left alone, and so are windows that do not overlap it.
+pub fn covering_windows(drop: PxRect, above: &[Above]) -> Vec<usize> {
+    above.iter().filter(|w| !w.topmost && !w.cloaked && w.rect.intersects(&drop)).map(|w| w.hwnd.0 as usize).collect()
+}
+
+/// What the z-order guard does after one check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuardStep {
+    /// Nothing to do.
+    Idle,
+    /// The Drop is covered: put it back on top. The next check tells whether that helped.
+    Raise,
+    /// The Drop was raised and is no longer covered.
+    Fixed,
+    /// The Drop was raised and the same windows still cover it: it cannot be raised above them (a window in a band
+    /// above always-on-top windows). It is not raised again until the covering windows change. Once per occurrence.
+    NotFixed,
+    /// The windows the Drop could not be raised above no longer cover it.
+    Uncovered,
+}
+
+/// The z-order guard over time: raises the Drop when it is covered, checks on the next check that the raise helped,
+/// and stops raising when it did not, until the set of covering windows changes. So it never raises twice a second
+/// for nothing, and never keeps putting itself above other always-on-top windows when that cannot help.
+#[derive(Debug, Default)]
+pub struct ZGuard {
+    state: Cover,
+    /// `NotFixed` was already reported in this occurrence (since the Drop was last uncovered).
+    reported: bool,
+}
+
+#[derive(Debug, Default, PartialEq)]
+enum Cover {
+    #[default]
+    Clear,
+    /// Raised because of these windows (sorted ids).
+    Raised(Vec<usize>),
+    /// Raising did not help against these windows (sorted ids).
+    Held(Vec<usize>),
+}
+
+impl ZGuard {
+    /// One check with the windows that cover the Drop now (`covering_windows`).
+    pub fn check(&mut self, mut covering: Vec<usize>) -> GuardStep {
+        covering.sort_unstable();
+        covering.dedup();
+        if covering.is_empty() {
+            self.reported = false;
+            return match std::mem::take(&mut self.state) {
+                Cover::Clear => GuardStep::Idle,
+                Cover::Raised(_) => GuardStep::Fixed,
+                Cover::Held(_) => GuardStep::Uncovered,
+            };
+        }
+        match &self.state {
+            Cover::Raised(by) if *by == covering => {
+                self.state = Cover::Held(covering);
+                if std::mem::replace(&mut self.reported, true) { GuardStep::Idle } else { GuardStep::NotFixed }
+            }
+            Cover::Held(by) if *by == covering => GuardStep::Idle,
+            _ => {
+                self.state = Cover::Raised(covering);
+                GuardStep::Raise
+            }
+        }
+    }
 }
 
 /// Stops a walk that would never end if the z-order kept changing under it.
@@ -180,6 +251,7 @@ pub fn windows_above(hwnd: HWND) -> Vec<Above> {
         }
         .is_ok_and(|()| cloaked != 0);
         out.push(Above {
+            hwnd: cur,
             rect: PxRect { left: r.left, top: r.top, right: r.right, bottom: r.bottom },
             topmost: ex & WS_EX_TOPMOST.0 != 0,
             cloaked,
@@ -263,12 +335,92 @@ mod tests {
     const MAXIMIZED: PxRect = PxRect { left: -8, top: -8, right: 1928, bottom: 1040 };
 
     fn win(rect: PxRect, topmost: bool, cloaked: bool) -> Above {
-        Above { rect, topmost, cloaked }
+        win_id(1, rect, topmost, cloaked)
+    }
+
+    fn win_id(id: usize, rect: PxRect, topmost: bool, cloaked: bool) -> Above {
+        Above { hwnd: HWND(id as *mut core::ffi::c_void), rect, topmost, cloaked }
+    }
+
+    fn covered_by_ordinary_window(drop: PxRect, above: &[Above]) -> bool {
+        !covering_windows(drop, above).is_empty()
     }
 
     #[test]
     fn nothing_above_is_fine() {
         assert!(!covered_by_ordinary_window(DROP, &[]));
+    }
+
+    #[test]
+    fn covering_windows_are_the_ordinary_drawn_overlapping_ones() {
+        let above = [
+            win_id(10, MAXIMIZED, false, false),
+            win_id(11, MAXIMIZED, true, false),
+            win_id(12, MAXIMIZED, false, true),
+            win_id(13, PxRect { left: 0, top: 0, right: 100, bottom: 100 }, false, false),
+            win_id(14, DROP, false, false),
+        ];
+        assert_eq!(covering_windows(DROP, &above), [10, 14]);
+    }
+
+    use GuardStep::{Fixed, Idle, NotFixed, Raise, Uncovered};
+
+    #[test]
+    fn guard_stays_idle_while_nothing_covers_the_drop() {
+        let mut g = ZGuard::default();
+        for _ in 0..5 {
+            assert_eq!(g.check(vec![]), Idle);
+        }
+    }
+
+    #[test]
+    fn guard_raises_then_checks_that_it_helped() {
+        let mut g = ZGuard::default();
+        assert_eq!(g.check(vec![7]), Raise);
+        assert_eq!(g.check(vec![]), Fixed);
+        assert_eq!(g.check(vec![]), Idle);
+        // A new occurrence is answered the same way.
+        assert_eq!(g.check(vec![9]), Raise);
+        assert_eq!(g.check(vec![]), Fixed);
+    }
+
+    #[test]
+    fn guard_backs_off_when_raising_does_not_help() {
+        let mut g = ZGuard::default();
+        assert_eq!(g.check(vec![7]), Raise);
+        assert_eq!(g.check(vec![7]), NotFixed);
+        // No more raises (and no more reports) while the same windows cover it.
+        for _ in 0..10 {
+            assert_eq!(g.check(vec![7]), Idle);
+        }
+        assert_eq!(g.check(vec![]), Uncovered);
+        assert_eq!(g.check(vec![]), Idle);
+    }
+
+    #[test]
+    fn guard_tries_again_when_the_covering_windows_change() {
+        let mut g = ZGuard::default();
+        assert_eq!(g.check(vec![7]), Raise);
+        assert_eq!(g.check(vec![7]), NotFixed);
+        // Another window joins: one raise for it.
+        assert_eq!(g.check(vec![7, 8]), Raise);
+        // It helped against that one; the first still covers the Drop: one more try, then quiet, and "not fixed" is
+        // not reported twice in one occurrence.
+        assert_eq!(g.check(vec![7]), Raise);
+        assert_eq!(g.check(vec![7]), Idle);
+        assert_eq!(g.check(vec![7]), Idle);
+        assert_eq!(g.check(vec![]), Uncovered);
+        // After the Drop was uncovered, a new occurrence is reported again.
+        assert_eq!(g.check(vec![7]), Raise);
+        assert_eq!(g.check(vec![7]), NotFixed);
+    }
+
+    #[test]
+    fn guard_ignores_the_order_and_repeats_of_the_windows() {
+        let mut g = ZGuard::default();
+        assert_eq!(g.check(vec![8, 7]), Raise);
+        assert_eq!(g.check(vec![7, 8, 8]), NotFixed);
+        assert_eq!(g.check(vec![8, 7]), Idle);
     }
 
     /// The case seen live: a maximized ordinary window above the Drop and above two always-on-top windows.

@@ -679,8 +679,7 @@ mod tests {
             ("right", DropPosition::Right),
             ("LEFT", DropPosition::Left),
             (" Right ", DropPosition::Right),
-            ("	Top
-", DropPosition::Top),
+            ("\tTop\n", DropPosition::Top),
         ] {
             let json = serde_json::json!({ "drop": { "position": text } }).to_string();
             let s: Settings = serde_json::from_str(&json).unwrap();

@@ -183,25 +183,33 @@ the bottom) or below it (at the top). At the sides its outer end is pinned at th
 the idle strip stands upright against the edge, and on hover and in every other state it is the usual capsule or
 circle. Tray cards open beside it, toward the center, centered on it.
 
-`cue-placement` is the only thread that moves the window, always with `SetWindowPos(SWP_NOACTIVATE |
-SWP_ASYNCWINDOWPOS)`. At rest it checks every 0.5 s that the window is centered on its place's anchor on the foreground
-window's monitor (per-monitor DPI; after a scale change Windows resizes the window and the next check re-centers it),
-runs the z-order guard, and hides the idle strip over full-screen apps (`SHQueryUserNotificationState`) and while
-paused.
+After the window is created and placed, `cue-placement` is the only CUE code that moves it, always with
+`SetWindowPos(SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS)`; Windows itself still resizes it, and may move it, when its scale
+changes. At rest the thread checks every 0.5 s that the window is centered on its place's anchor on the foreground
+window's monitor, runs the z-order guard, and hides the idle strip over full-screen apps
+(`SHQueryUserNotificationState`) and while paused. The window is always centered on the anchor at its current size,
+never at the size it would have at the target monitor's scale. The anchor lies a few dozen px inside the target monitor,
+so most of a window centered on it is on that monitor whatever the two scales; Windows takes a window's scale from the
+monitor it shares the most area with, so it gives the window the target's scale and size, and the next check centers it
+again. Placed at the predicted size, most of the window could stay on the old monitor, whose scale it would then keep,
+so it would never arrive. While the window is hidden the thread only waits for the next check.
 
-**Dragging.** Only the idle Drop can be dragged, once hover has opened it. The page watches a press of the primary
-mouse button on it: a move of more than 4 px with the button down starts a drag (`drop_drag` `start`); a press that
-moves less stays an ordinary click. No tray card is open during a drag: none can be open when it starts, and one that
-arrives ends the drag first, as do a dictation, a pause and full screen. While dragging, the page captures the pointer
-and reports the whole window as its hit rectangle, so no click falls through while the window catches up with the
-cursor. `cue-placement` moves the window
-itself every 8 ms so the Drop's center keeps its distance from the cursor (`GetCursorPos`); it ends the drag on
-`drop_drag` `end` or as soon as the primary button is physically up (`GetAsyncKeyState`, which also covers a release
-the page never saw and the secure desktop). On release it picks the place whose center is nearest to the Drop's center
-on the monitor under it, saves it through the core (`settings.json`), sends `cue://place` (also when the place did not
-change: that answers the page and ends its dragging state), and snaps the window to that place on the foreground
-window's monitor: 200 ms eased out, or at once when Windows animation effects are off (`SPI_GETCLIENTAREAANIMATION`,
-the setting WebView2 reports as `prefers-reduced-motion`).
+**Dragging.** Only the idle Drop can be dragged, once hover has opened it. The page watches a press of the primary mouse
+button on it: a move of more than 4 px with the button down starts a drag (`drop_drag` `start`); a press that moves less
+stays an ordinary click. No tray card is open during a drag: none can be open when it starts, and one that arrives ends
+the drag first, as do a dictation, a pause and full screen. While dragging, the page captures the pointer and reports
+the whole window as its hit rectangle, so no click falls through while the window catches up with the cursor.
+`cue-hit-test` accepts such a whole-window rectangle only while `cue-placement` is dragging or snapping the window, so a
+page that misses the end of a drag (busy or hung) cannot leave the whole window catching clicks. `cue-placement` moves
+the window itself every 8 ms so the Drop's center keeps its distance from the cursor (`GetCursorPos`); it ends the drag
+on `drop_drag` `end` or as soon as the primary button is physically up (`GetAsyncKeyState`, which also covers a release
+the page never saw and the secure desktop), and a hidden window ends it too. On release it picks the place whose center
+is nearest to the Drop's center on the monitor under it, saves it through the core (`settings.json`), sends
+`cue://place` (also when the place did not change: that answers the page and ends its dragging state), and snaps the
+window to that place on the foreground window's monitor: a short spring of 250 ms (ease-out-back, past the place by
+3.7 % of the way for a short snap and never by more than 4 px, then exactly on it), or at once when Windows animation
+effects are off (`SPI_GETCLIENTAREAANIMATION`, the setting WebView2 reports as `prefers-reduced-motion`). The drag and
+snap transitions sit behind a small trait for the system calls, so they are tested without a window.
 
 The core drives these moves instead of starting the system move loop (`WM_NCLBUTTONDOWN` with `HTCAPTION`): that loop
 is modal on the window thread, can bring up Snap Assist, resizes on DPI changes on its own terms and leaves no room for
@@ -213,11 +221,15 @@ the snap. A move from another thread never activates the window, the mouse press
 `WS_EX_TOPMOST` is set once, at creation, and Windows has been seen to put an ordinary (not always-on-top) window of
 another app above the Drop and above other always-on-top windows: the Drop was drawn but hidden. Every 0.5 s at rest
 `cue-placement` walks the windows above the Drop (`GW_HWNDPREV`), skipping hidden ones and noting for each whether it is
-always on top and whether DWM cloaks it (closed Start and Search panels, windows on other virtual desktops). If an
-ordinary, uncloaked window above the Drop overlaps the Drop window (`covered_by_ordinary_window`, a pure function), the
-Drop is put back on top with `SetWindowPos(HWND_TOPMOST, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)`. Always-on-top
-windows above the Drop are never answered, so it does not fight other always-on-top apps. The event is logged once per
-occurrence, without window titles. `zorder_probe` (an example in `cue-platform-win`) prints what the guard sees.
+always on top and whether DWM cloaks it (closed Start and Search panels, windows on other virtual desktops). The
+ordinary, uncloaked windows above the Drop that overlap the Drop window cover it (`covering_windows`). When some do, the
+Drop is put back on top with `SetWindowPos(HWND_TOPMOST, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)`, and the next check
+tells whether that helped (`ZGuard`, a pure state machine): uncovered, it logs that the Drop is on top again; still
+covered by the same windows (a window in a band above every always-on-top window), it logs that once and does not raise
+the Drop again until the set of covering windows changes. So the guard never raises twice a second for nothing, and
+never keeps putting the Drop above other always-on-top apps when that cannot help; always-on-top windows above the Drop
+are never answered at all. Window titles are never logged. `zorder_probe` (an example in `cue-platform-win`) prints what
+the guard sees.
 
 ### Events and sizes
 

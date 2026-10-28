@@ -28,6 +28,26 @@ impl PxRect {
     pub fn intersects(&self, other: &PxRect) -> bool {
         self.left < other.right && other.left < self.right && self.top < other.bottom && other.top < self.bottom
     }
+
+    /// The area the two rects share, px² (0 when they do not overlap).
+    pub fn overlap_area(&self, other: &PxRect) -> i64 {
+        let w = (self.right.min(other.right) - self.left.max(other.left)).max(0);
+        let h = (self.bottom.min(other.bottom) - self.top.max(other.top)).max(0);
+        i64::from(w) * i64::from(h)
+    }
+}
+
+/// The index of the monitor (its full bounds) that shares the most area with `rect`: the one Windows takes a window's
+/// scale from. None when `rect` is on none of them; a tie goes to the earlier one.
+pub fn largest_overlap(rect: PxRect, monitors: &[PxRect]) -> Option<usize> {
+    monitors
+        .iter()
+        .map(|m| rect.overlap_area(m))
+        .enumerate()
+        .filter(|&(_, area)| area > 0)
+        // min_by_key keeps the first of equal keys.
+        .min_by_key(|&(_, area)| std::cmp::Reverse(area))
+        .map(|(i, _)| i)
 }
 
 /// A monitor: its work area (without the taskbar) in physical px and its scale (1.25 = 125 %).
@@ -59,16 +79,10 @@ pub fn anchor(work: PxRect, scale: f64, place: DropPosition, m: DropMetrics) -> 
     }
 }
 
-/// Top-left corner of a `w`×`h` window (physical px) whose center is `center`.
+/// Top-left corner of a `w`×`h` window (physical px) whose center is `center`. The Drop window is always placed with its
+/// current size, never with the size it would have at another scale (see `rest_origin` in the app).
 pub fn origin_for_center(center: (i32, i32), w: i32, h: i32) -> (i32, i32) {
     (center.0 - w / 2, center.1 - h / 2)
-}
-
-/// Top-left corner of the Drop window (logical size `w`×`h`) at `place` on a monitor: the window is centered on the
-/// Drop's center, so the Drop never moves inside the window when the place changes.
-pub fn drop_origin(mon: Monitor, place: DropPosition, m: DropMetrics, w: f64, h: f64) -> (i32, i32) {
-    let px = |v: f64| (v * mon.scale).round() as i32;
-    origin_for_center(anchor(mon.work, mon.scale, place, m), px(w), px(h))
 }
 
 /// The place whose center is nearest to `point` (physical px) on this monitor. A tie goes to the earlier place in
@@ -83,17 +97,48 @@ pub fn nearest_place(mon: Monitor, m: DropMetrics, point: (i32, i32)) -> DropPos
     DropPosition::ALL.into_iter().min_by_key(|&p| dist(p)).unwrap_or_default()
 }
 
-/// Smooth start and a soft landing: `t` from 0 to 1 (clamped) gives 0 to 1.
-pub fn ease_out(t: f64) -> f64 {
-    let t = t.clamp(0.0, 1.0);
-    1.0 - (1.0 - t).powi(3)
+/// The snap's spring for a short snap: ease-out-back of this strength goes past the target by 3.7 % of the way.
+const SPRING: f64 = 1.0;
+
+/// How far past the target ease-out-back of strength `s` goes, as a share of the way: 4s³ / 27(s + 1)².
+fn back_peak(s: f64) -> f64 {
+    4.0 * s.powi(3) / (27.0 * (s + 1.0).powi(2))
 }
 
-/// The point `t` (0…1, eased) of the way from `from` to `to`, rounded to whole pixels.
-pub fn lerp_point(from: (i32, i32), to: (i32, i32), t: f64) -> (i32, i32) {
-    let e = ease_out(t);
-    let mix = |a: i32, b: i32| (f64::from(a) + (f64::from(b) - f64::from(a)) * e).round() as i32;
-    (mix(from.0, to.0), mix(from.1, to.1))
+/// The spring for a snap of `distance` px that goes past the target by `max_over` px at most: `SPRING` for a short
+/// snap, a weaker one for a long snap (found by bisection: `back_peak` grows with the strength).
+fn spring_for(distance: f64, max_over: f64) -> f64 {
+    if distance * back_peak(SPRING) <= max_over {
+        return SPRING;
+    }
+    let want = max_over.max(0.0) / distance;
+    let (mut lo, mut hi) = (0.0, SPRING);
+    for _ in 0..40 {
+        let mid = (lo + hi) / 2.0;
+        if back_peak(mid) > want {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    lo
+}
+
+/// Ease-out-back of strength `s`: `t` from 0 to 1 (clamped) gives 0 to exactly 1, going a little past 1 shortly before
+/// the end. It never moves backwards at the start.
+pub fn ease_out_back(t: f64, s: f64) -> f64 {
+    let u = t.clamp(0.0, 1.0) - 1.0;
+    1.0 + (s + 1.0) * u.powi(3) + s * u.powi(2)
+}
+
+/// The snap after a drag: the point `t` (0…1) of the way from `from` to `to`, rounded to whole pixels. A short spring:
+/// near the end it goes past `to` (by 3.7 % of the way for a short snap, by `max_over` px at most), then settles
+/// exactly on `to` at t = 1.
+pub fn snap_point(from: (i32, i32), to: (i32, i32), t: f64, max_over: f64) -> (i32, i32) {
+    let (dx, dy) = (f64::from(to.0 - from.0), f64::from(to.1 - from.1));
+    let e = ease_out_back(t, spring_for(dx.hypot(dy), max_over));
+    let mix = |a: i32, d: f64| (f64::from(a) + d * e).round() as i32;
+    (mix(from.0, dx), mix(from.1, dy))
 }
 
 /// The monitor of the foreground window (the primary one when there is none).
@@ -183,6 +228,13 @@ mod tests {
 
     fn mon(work: PxRect, scale: f64) -> Monitor {
         Monitor { work, scale }
+    }
+
+    /// Top-left corner of a window of logical size `w`×`h` that already has the monitor's scale, centered on the Drop
+    /// at `place`.
+    fn drop_origin(mon: Monitor, place: DropPosition, m: DropMetrics, w: f64, h: f64) -> (i32, i32) {
+        let px = |v: f64| (v * mon.scale).round() as i32;
+        origin_for_center(anchor(mon.work, mon.scale, place, m), px(w), px(h))
     }
 
     #[test]
@@ -299,19 +351,80 @@ mod tests {
     }
 
     #[test]
-    fn snap_curve_starts_and_ends_exactly_and_never_goes_back() {
-        assert_eq!(lerp_point((10, 20), (110, -80), 0.0), (10, 20));
-        assert_eq!(lerp_point((10, 20), (110, -80), 1.0), (110, -80));
-        assert_eq!(lerp_point((10, 20), (110, -80), 7.0), (110, -80));
-        assert_eq!(lerp_point((10, 20), (110, -80), -1.0), (10, 20));
-        let mut last = 0.0;
-        for i in 1..=20 {
-            let e = ease_out(f64::from(i) / 20.0);
-            assert!(e >= last && e <= 1.0);
-            last = e;
+    fn overlap_area_and_the_largest_overlap() {
+        let a = PxRect { left: 0, top: 0, right: 100, bottom: 100 };
+        assert_eq!(a.overlap_area(&PxRect { left: 50, top: 90, right: 300, bottom: 300 }), 50 * 10);
+        assert_eq!(a.overlap_area(&PxRect { left: 100, top: 0, right: 200, bottom: 100 }), 0);
+        assert_eq!(a.overlap_area(&PxRect { left: -500, top: -500, right: -400, bottom: -400 }), 0);
+        let left = PxRect { left: -1000, top: 0, right: 0, bottom: 1000 };
+        let right = PxRect { left: 0, top: 0, right: 1000, bottom: 1000 };
+        assert_eq!(largest_overlap(PxRect { left: -100, top: 0, right: 300, bottom: 10 }, &[left, right]), Some(1));
+        assert_eq!(largest_overlap(PxRect { left: -300, top: 0, right: 100, bottom: 10 }, &[left, right]), Some(0));
+        // A tie goes to the earlier monitor; off every monitor there is none.
+        assert_eq!(largest_overlap(PxRect { left: -100, top: 0, right: 100, bottom: 10 }, &[left, right]), Some(0));
+        assert_eq!(largest_overlap(PxRect { left: 5000, top: 0, right: 5100, bottom: 10 }, &[left, right]), None);
+        assert_eq!(largest_overlap(a, &[]), None);
+    }
+
+    /// How far `p` is past `to` along the way from `from` (negative: not there yet).
+    fn past(from: (i32, i32), to: (i32, i32), p: (i32, i32)) -> f64 {
+        let (dx, dy) = (f64::from(to.0 - from.0), f64::from(to.1 - from.1));
+        let len = dx.hypot(dy);
+        if len == 0.0 {
+            return 0.0;
         }
-        // Eased out: more than half of the way in the first third of the time.
-        assert!(ease_out(1.0 / 3.0) > 0.5);
+        (f64::from(p.0 - to.0) * dx + f64::from(p.1 - to.1) * dy) / len
+    }
+
+    /// The farthest the snap goes past `to`, and when (in thousandths of the time).
+    fn most_past(from: (i32, i32), to: (i32, i32), max_over: f64) -> (f64, i32) {
+        (0..=1000)
+            .map(|i| (past(from, to, snap_point(from, to, f64::from(i) / 1000.0, max_over)), i))
+            .fold((f64::MIN, 0), |a, b| if b.0 > a.0 { b } else { a })
+    }
+
+    #[test]
+    fn snap_starts_and_ends_exactly_and_overshoots_a_few_px_at_most() {
+        let snaps = [
+            ((10, 20), (110, -80)),
+            ((600, 516), (30, 516)),
+            ((960, 700), (960, 1002)),
+            ((0, 0), (3000, 1500)),
+            ((500, 500), (500, 520)),
+            ((7, 7), (7, 7)),
+        ];
+        for (from, to) in snaps {
+            for max_over in [4.0, 6.0] {
+                assert_eq!(snap_point(from, to, 0.0, max_over), from);
+                assert_eq!(snap_point(from, to, -1.0, max_over), from);
+                assert_eq!(snap_point(from, to, 1.0, max_over), to);
+                assert_eq!(snap_point(from, to, 7.0, max_over), to);
+                // One pixel of rounding on top of the bound.
+                let (most, _) = most_past(from, to, max_over);
+                assert!(most <= max_over + 1.0, "{from:?} to {to:?}: {most} px past");
+            }
+        }
+    }
+
+    #[test]
+    fn snap_is_a_short_spring() {
+        // A long snap goes the whole allowed overshoot past the target, late in the snap.
+        let (from, to) = ((600, 516), (30, 516));
+        let (most, at) = most_past(from, to, 4.0);
+        assert!((3.0..=5.0).contains(&most), "{most}");
+        assert!(at > 700, "{at}");
+        // A short one goes 3.7 % of its 50 px past.
+        let (most, _) = most_past((80, 516), (30, 516), 4.0);
+        assert!((1.0..=2.5).contains(&most), "{most}");
+        // No step backwards on the way to the target.
+        let mut last = f64::MIN;
+        for i in 0..=600 {
+            let p = past(from, to, snap_point(from, to, f64::from(i) / 1000.0, 4.0));
+            assert!(p >= last, "step {i}");
+            last = p;
+        }
+        assert_eq!(ease_out_back(1.0, SPRING), 1.0);
+        assert!(ease_out_back(0.0, SPRING).abs() < 1e-12);
     }
 
     #[cfg(windows)]
