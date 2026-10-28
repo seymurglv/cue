@@ -362,7 +362,7 @@ impl Flow {
         fx.push(Effect::StopMic { id: self.id, keep: false });
         self.abort_stt(fx);
         self.cancel_record_timers(fx);
-        self.phase = Phase::Idle;
+        self.set_idle();
         self.chord_held = false;
         self.hold_mode = false;
     }
@@ -579,10 +579,15 @@ impl Flow {
     }
 
     fn enter_idle(&mut self, fx: &mut Vec<Effect>) {
+        self.set_idle();
+        self.push_ui(fx);
+    }
+
+    /// The only way into `Phase::Idle`.
+    fn set_idle(&mut self) {
         self.phase = Phase::Idle;
         // The idle Drop shows no mode; "restore" and "retry" do not live in idle, so nothing still needs it.
         self.mode = Mode::Dictate;
-        self.push_ui(fx);
     }
 
     fn enter_empty(&mut self, fx: &mut Vec<Effect>) {
@@ -1488,6 +1493,28 @@ mod tests {
         f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 6_000);
         let fx = f.handle(I::Timer(TimerKind::DoneHide), 7_500);
         assert_eq!(last_ui(&fx).map(|s| s.mode), Some(Mode::Dictate));
+    }
+
+    #[test]
+    fn quietly_discarded_translation_leaves_no_mode() {
+        let mut f = Flow::new(2, false);
+        f.handle(I::ChordDown(Mode::Translate), 0);
+        // Ctrl+Shift+Win+B: the third key comes within SYSTEM_CHORD_MS.
+        let fx = f.handle(I::ChordAborted, 120);
+        assert_eq!(last_ui(&fx).map(|s| (s.phase, s.mode)), Some((UiPhase::Idle, Mode::Dictate)));
+        assert_eq!(f.mode(), Mode::Dictate);
+    }
+
+    /// Every other way a recording is thrown away into idle: Ctrl+Win+V during start-up, a pause, a lock, a dead microphone.
+    #[test]
+    fn dropped_translation_leaves_no_mode() {
+        for input in [I::PasteLast, I::TogglePause, I::SessionLocked, I::MicDead] {
+            let mut f = Flow::new(2, true);
+            f.handle(I::ChordDown(Mode::Translate), 0);
+            let fx = f.handle(input.clone(), 100);
+            assert_eq!(last_ui(&fx).map(|s| (s.phase, s.mode)), Some((UiPhase::Idle, Mode::Dictate)), "{input:?}");
+            assert_eq!(f.mode(), Mode::Dictate, "{input:?}");
+        }
     }
 
     /// Random input sequences: no panic; the microphone is open exactly while recording;
