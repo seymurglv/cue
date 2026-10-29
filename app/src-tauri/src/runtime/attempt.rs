@@ -13,9 +13,9 @@
 //! An attempt without a stream (no Soniox key, the stream never connected) still bills the audio at the stream price:
 //! an overestimate in a rare failure, accepted.
 //! A refine cache warm-up is not an attempt but has a row of its own (`warmup_record`).
-//! An "Ask" attempt adds its request's tokens and searches (and those of a request aborted by Esc before "restore"
-//! asked again); its latency runs to the first words (an answer) or to Ctrl+V (a write); a follow-up is an attempt of
-//! its own, and so is Retry of a failed question.
+//! An "Ask" attempt adds its request's tokens, searches and page reads (and those of a request aborted by Esc before
+//! "restore" asked again); its latency runs to the first words (an answer) or to Ctrl+V (a write); a follow-up is an
+//! attempt of its own, and so is Retry of a failed question.
 //! No text here: only numbers, the path, the mode and the outcome.
 use std::collections::VecDeque;
 
@@ -43,6 +43,8 @@ pub struct Attempt {
     refine: claude::Usage,
     /// The web searches of an "Ask" request (all its continuations).
     web_searches: u32,
+    /// The pages an "Ask" request read (all its continuations).
+    web_fetches: u32,
     /// What earlier "Ask" requests of this attempt spent: one aborted by Esc before "restore" asked again.
     asked_before: AskUsage,
     pub refine_outcome: Option<RefineOutcome>,
@@ -79,6 +81,7 @@ impl Attempt {
             speech_language: None,
             refine: claude::Usage::default(),
             web_searches: 0,
+            web_fetches: 0,
             asked_before: AskUsage::default(),
             refine_outcome: None,
             finish_at: None,
@@ -185,6 +188,7 @@ impl Attempt {
             cache_creation_input_tokens: total.cache_write_tokens,
         };
         self.web_searches = total.web_searches;
+        self.web_fetches = total.web_fetches;
     }
 
     /// What this attempt's "Ask" requests have spent, all together.
@@ -195,11 +199,11 @@ impl Attempt {
             cache_read_tokens: self.refine.cache_read_input_tokens,
             cache_write_tokens: self.refine.cache_creation_input_tokens,
             web_searches: self.web_searches,
-            web_fetches: 0,
+            web_fetches: self.web_fetches,
         }
     }
 
-    /// The "Ask" request ended: its tokens (all continuations) and searches are this attempt's (spec 2 §10).
+    /// The "Ask" request ended: its tokens (all continuations), searches and page reads are this attempt's (spec 2 §10).
     pub fn ask_done(&mut self, usage: AskUsage, now: u64) {
         self.ask_spent(usage);
         if let Some((_, end)) = self.refine_at.as_mut() {
@@ -253,6 +257,7 @@ impl Attempt {
             outcome,
             mode: self.mode.into(),
             web_searches: self.web_searches,
+            web_fetches: self.web_fetches,
         }
     }
 }
@@ -274,11 +279,13 @@ pub fn warmup_record(usage: claude::Usage, ts: String, s: &Settings, model: &str
         outcome: Outcome::Discarded,
         mode: UsageMode::Warmup,
         web_searches: 0,
+        web_fetches: 0,
     }
 }
 
 /// The log line about the attempt's result: outcome, audio, transcription path, stage latencies as numbers (no stage,
-/// no field), refine outcome, and for a question how many web searches it ran. No text, no app, nothing searched.
+/// no field), refine outcome, and for a question how many web searches and page reads it ran. No text, no app, nothing
+/// searched or read.
 pub fn log_finished(outcome: Outcome, a: &Attempt) {
     let st = a.stages();
     tracing::info!(
@@ -291,6 +298,7 @@ pub fn log_finished(outcome: Outcome, a: &Attempt) {
         latency_ms = st.latency,
         refine = a.refine_outcome.map(tracing::field::debug),
         web_searches = (a.mode == Mode::Ask).then_some(a.web_searches),
+        web_fetches = (a.mode == Mode::Ask).then_some(a.web_fetches),
         "dictation finished"
     );
 }
@@ -503,7 +511,7 @@ mod tests {
         let s = Settings::default();
         let r = warmup_record(usage(12, 1), "2026-11-01T10:00:00Z".into(), &s, &s.refine.model);
         assert_eq!(r.ts, "2026-11-01T10:00:00Z");
-        assert_eq!((r.mode, r.outcome, r.web_searches), (UsageMode::Warmup, Outcome::Discarded, 0));
+        assert_eq!((r.mode, r.outcome, r.web_searches, r.web_fetches), (UsageMode::Warmup, Outcome::Discarded, 0, 0));
         assert_eq!((r.audio_ms, r.latency_ms), (0, 0));
         assert_eq!(r.refine_model, s.refine.model);
         assert_eq!((r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens), (12, 1, 7, 3));
@@ -529,10 +537,11 @@ mod tests {
         a.refine_started(10_400);
         a.first_words(11_900);
         a.first_words(12_500);
-        a.ask_done(AskUsage { input_tokens: 300, output_tokens: 80, cache_read_tokens: 1_300, cache_write_tokens: 0, web_searches: 2, web_fetches: 0 }, 13_000);
+        a.ask_done(AskUsage { input_tokens: 300, output_tokens: 80, cache_read_tokens: 1_300, cache_write_tokens: 0, web_searches: 2, web_fetches: 1 }, 13_000);
         let r = a.record(Outcome::Answered, "2026-10-28T10:00:00Z".into(), &s);
         assert_eq!(r.refine_model, "claude-sonnet-5-5", "priced with the model that answered, not refine's");
         assert_eq!((r.input_tokens, r.output_tokens, r.cache_read_tokens, r.web_searches), (300, 80, 1_300, 2));
+        assert_eq!(r.web_fetches, 1, "the pages it read");
         assert_eq!(r.latency_ms, 1_900, "the second press to the first words");
         assert_eq!(r.mode, UsageMode::Ask);
         assert_eq!(a.stages().refine, Some(2_600));
@@ -587,6 +596,21 @@ mod tests {
         a.ask_started(7_000);
         a.ask_spent(spent(50, 0));
         assert_eq!(a.record(Outcome::Answered, "t".into(), &s).input_tokens, 50, "a retry is a row of its own");
+    }
+
+    /// The pages read by a request aborted by Esc stay counted when "restore" asks again, like its searches.
+    #[test]
+    fn pages_read_before_restore_stay_counted() {
+        let s = Settings::default();
+        let mut a = Attempt::new(DictationId(6));
+        a.mode = Mode::Ask;
+        a.ask_started(1_000);
+        a.ask_spent(AskUsage { input_tokens: 200, web_fetches: 1, ..AskUsage::default() });
+        a.undo(4_000);
+        a.ask_started(4_000);
+        a.ask_done(AskUsage { input_tokens: 150, web_fetches: 1, ..AskUsage::default() }, 6_000);
+        let r = a.record(Outcome::Answered, "t".into(), &s);
+        assert_eq!((r.input_tokens, r.web_fetches), (350, 2));
     }
 
     /// "Retry" of a failed question (`AskAgain`) is a new attempt: the failed one's searches are its own row's.
@@ -705,19 +729,21 @@ mod tests {
         a.refine_done(usage(1, 1), RefineOutcome::RawKeyProblem, 1_900);
         let line = logged(Outcome::Failed, &a);
         assert!(line.contains("refine_ms=613") && line.contains("refine=RawKeyProblem"), "{line}");
-        assert!(!line.contains("web_searches"), "a dictation searches nothing: {line}");
+        assert!(!line.contains("web_searches") && !line.contains("web_fetches"), "a dictation searches and reads nothing: {line}");
     }
 
-    /// The count of an answer's searches, never what was searched.
+    /// The count of an answer's searches and page reads, never what was searched or read.
     #[test]
     fn an_answered_question_logs_how_many_searches_it_ran() {
         let mut a = Attempt::new(DictationId(4));
         a.mode = Mode::Ask;
-        a.ask_done(AskUsage { input_tokens: 10, output_tokens: 5, web_searches: 2, ..AskUsage::default() }, 1_000);
+        a.ask_done(AskUsage { input_tokens: 10, output_tokens: 5, web_searches: 2, web_fetches: 1, ..AskUsage::default() }, 1_000);
         let line = logged(Outcome::Answered, &a);
         assert!(line.contains("outcome=\"answered\"") && line.contains("web_searches=2"), "{line}");
+        assert!(line.contains("web_fetches=1"), "{line}");
         a.ask_spent(AskUsage::default());
-        assert!(logged(Outcome::Answered, &a).contains("web_searches=0"), "a question without a search says so");
+        let line = logged(Outcome::Answered, &a);
+        assert!(line.contains("web_searches=0") && line.contains("web_fetches=0"), "a question without a search says so: {line}");
     }
 
     fn rec(ts: &str) -> UsageRecord {

@@ -56,6 +56,8 @@ export interface AnswerText {
   about: string;
   searching: string;
   reading: string;
+  /** A page the user pointed at is being read. */
+  fetching: string;
   writing: string;
   listening: string;
   /** The follow-up could not be transcribed (decision 7). */
@@ -122,6 +124,7 @@ export const en: Dict = {
     about: 'about the selection: “{Q}”',
     searching: 'Searching the web',
     reading: 'Reading sources',
+    fetching: 'Reading the page',
     writing: 'Writing the answer',
     listening: 'Listening for a follow-up…',
     missed: "Couldn't make out the follow-up",
@@ -179,6 +182,7 @@ export const ru: Dict = {
     about: 'по выделенному: «{Q}»',
     searching: 'Ищу в интернете',
     reading: 'Читаю источники',
+    fetching: 'Читаю страницу',
     writing: 'Пишу ответ',
     listening: 'Слушаю уточнение…',
     missed: 'Не расслышал уточнение',

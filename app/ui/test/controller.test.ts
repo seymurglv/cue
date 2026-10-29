@@ -99,7 +99,7 @@ describe('Dictionaries and language', () => {
   });
 
   it('answer texts are the approved ones', () => {
-    expect([ru.answer.searching, ru.answer.reading, ru.answer.writing]).toEqual(['Ищу в интернете', 'Читаю источники', 'Пишу ответ']);
+    expect([ru.answer.searching, ru.answer.reading, ru.answer.fetching, ru.answer.writing]).toEqual(['Ищу в интернете', 'Читаю источники', 'Читаю страницу', 'Пишу ответ']);
     expect([ru.answer.below, ru.answer.replace, ru.answer.listening]).toEqual(['Вставить ниже', 'Заменить', 'Слушаю уточнение…']);
     expect([ru.answer.refused, ru.answer.missed]).toEqual(['Не могу ответить на это', 'Не расслышал уточнение']);
     for (const lang of ['en', 'ru'] as const) expect(DICTS[lang].answer.about).toContain('{Q}');

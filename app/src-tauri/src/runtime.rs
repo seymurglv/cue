@@ -1254,7 +1254,7 @@ impl Runtime {
         let heard = c.end(&result, show_write, |how, text| write_may_paste(window, terminal, how, text));
         let opened = c.opened;
         // Kinds and counts only.
-        tracing::info!(heard = ?heard, searches = result.usage.web_searches, "ask: done");
+        tracing::info!(heard = ?heard, searches = result.usage.web_searches, fetches = result.usage.web_fetches, "ask: done");
         if heard.shows() {
             if !opened {
                 self.open_answer();

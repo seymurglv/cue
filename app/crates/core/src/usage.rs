@@ -10,8 +10,9 @@
 //!   separately, over pastes with audio up to `SHORT_AUDIO_MS` (the target figure itself);
 //! - rows and dollars per mode, in the order the modes first appear.
 //!
-//! The last three columns, `mode`, `web_searches` and `search_usd`, came with the modes (spec 2 §10). Old rows
-//! without these columns read as dictation; the header of an existing file is not rewritten. A refine cache warm-up
+//! The columns `mode`, `web_searches` and `search_usd` came with the modes (spec 2 §10); `web_fetches`, the pages
+//! "Ask" read, came after them (no price: their tokens are in the row's cost). Rows of 13 and 16 fields read too: the
+//! oldest as dictation, both as no pages read; the header of an existing file is not rewritten. A refine cache warm-up
 //! is a row of its own (`warmup`, outcome `discarded`, no audio): it costs money but is not a dictation; `answered`
 //! (an "Ask" answer shown in full) is not a dictation either.
 //!
@@ -97,6 +98,8 @@ pub struct UsageRecord {
     pub outcome: Outcome,
     pub mode: UsageMode,
     pub web_searches: u32,
+    /// Pages "Ask" read: no fee, their tokens are in the counts above.
+    pub web_fetches: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -112,6 +115,8 @@ pub struct Summary {
     pub avg_latency_short_ms: u64,
     /// Rows and dollars per value of the `mode` column, in the order of first appearance.
     pub modes: Vec<ModeTotal>,
+    /// Pages "Ask" read; no fee, their tokens are in `refine_usd`.
+    pub web_fetches: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -122,14 +127,16 @@ pub struct ModeTotal {
     pub usd: f64,
 }
 
-pub const HEADER: &str = "ts,audio_ms,stt_engine,stt_path,stt_usd,refine_model,input_tokens,cache_read_tokens,cache_write_tokens,output_tokens,refine_usd,latency_ms,outcome,mode,web_searches,search_usd";
+pub const HEADER: &str = "ts,audio_ms,stt_engine,stt_path,stt_usd,refine_model,input_tokens,cache_read_tokens,cache_write_tokens,output_tokens,refine_usd,latency_ms,outcome,mode,web_searches,search_usd,web_fetches";
 
 /// The bound of a "short" dictation for the latency target: ~30 words fit into 20 s of audio.
 pub const SHORT_AUDIO_MS: u64 = 20_000;
 
-const COLUMNS: usize = 16;
+const COLUMNS: usize = 17;
 /// A row written before the modes: no `mode`, `web_searches`, `search_usd`.
 const COLUMNS_V1: usize = 13;
+/// A row written before page reading: no `web_fetches`.
+const COLUMNS_V2: usize = 16;
 const DICTATE: &str = "dictate";
 const INSERTED: &str = "inserted";
 const NO_FIELD: &str = "no_field";
@@ -209,7 +216,7 @@ fn csv_field(s: &str) -> Cow<'_, str> {
 /// One record, without a trailing newline.
 pub fn line(r: &UsageRecord, p: &Pricing) -> String {
     format!(
-        "{},{},{},{},{:.6},{},{},{},{},{},{:.6},{},{},{},{},{:.6}",
+        "{},{},{},{},{:.6},{},{},{},{},{},{:.6},{},{},{},{},{:.6},{}",
         csv_field(&r.ts),
         r.audio_ms,
         engine_name(r.stt_engine),
@@ -225,7 +232,8 @@ pub fn line(r: &UsageRecord, p: &Pricing) -> String {
         outcome_name(r.outcome),
         r.mode.as_str(),
         r.web_searches,
-        f64::from(r.web_searches) * p.web_search_usd
+        f64::from(r.web_searches) * p.web_search_usd,
+        r.web_fetches
     )
 }
 
@@ -265,15 +273,17 @@ struct Row {
     latency_ms: u64,
     outcome: String,
     mode: String,
+    web_fetches: u64,
 }
 
 impl Row {
     fn parse(line: &str) -> Option<Row> {
         let mut c = split_record(line)?;
         let usd = |s: &str| s.parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0);
-        let (mode, search_usd) = match c.len() {
-            COLUMNS_V1 => (DICTATE.to_owned(), 0.0),
-            COLUMNS => (std::mem::take(&mut c[13]), usd(&c[15])?),
+        let (mode, search_usd, web_fetches) = match c.len() {
+            COLUMNS_V1 => (DICTATE.to_owned(), 0.0, 0),
+            COLUMNS_V2 => (std::mem::take(&mut c[13]), usd(&c[15])?, 0),
+            COLUMNS => (std::mem::take(&mut c[13]), usd(&c[15])?, c[16].parse().ok()?),
             _ => return None,
         };
         Some(Row {
@@ -285,6 +295,7 @@ impl Row {
             outcome: std::mem::take(&mut c[12]),
             ts: std::mem::take(&mut c[0]),
             mode,
+            web_fetches,
         })
     }
 }
@@ -301,6 +312,8 @@ pub fn summarize(csv: &str, month: &str) -> Summary {
         s.stt_usd += row.stt_usd;
         s.refine_usd += row.refine_usd;
         s.search_usd += row.search_usd;
+        // A huge garbage count in an edited file does not overflow the sum.
+        s.web_fetches = s.web_fetches.saturating_add(row.web_fetches);
         let usd = row.stt_usd + row.refine_usd + row.search_usd;
         match s.modes.iter_mut().find(|m| m.mode == row.mode) {
             Some(m) => {
@@ -404,6 +417,7 @@ mod tests {
             outcome: Outcome::Inserted,
             mode: UsageMode::Dictate,
             web_searches: 0,
+            web_fetches: 0,
         }
     }
 
@@ -449,7 +463,7 @@ mod tests {
         let l = line(&rec(), &Pricing::default());
         assert_eq!(l.split(',').count(), HEADER.split(',').count());
         assert!(l.starts_with("2026-10-27T09:00:00Z,30000,soniox,stream,0.001000,claude-haiku-5-5,1000,2000,0,200,"));
-        assert!(l.ends_with(",900,inserted,dictate,0,0.000000"), "{l}");
+        assert!(l.ends_with(",900,inserted,dictate,0,0.000000,0"), "{l}");
     }
 
     // ---- Modes (spec 2 §10) ----
@@ -472,6 +486,7 @@ mod tests {
             outcome,
             mode: UsageMode::Dictate,
             web_searches: 0,
+            web_fetches: 0,
         }
     }
 
@@ -495,7 +510,7 @@ mod tests {
         r.mode = UsageMode::Translate;
         r.web_searches = 2;
         let l = line(&r, &p);
-        assert!(l.ends_with(",inserted,translate,2,0.020000"), "{l}");
+        assert!(l.ends_with(",inserted,translate,2,0.020000,0"), "{l}");
         let s = summarize(&format!("{HEADER}\n{l}\n"), "2026-11");
         assert!((s.search_usd - 0.02).abs() < 1e-9, "{}", s.search_usd);
         let row_usd = s.stt_usd + s.refine_usd + s.search_usd;
@@ -538,6 +553,24 @@ mod tests {
         assert_eq!(s.modes.iter().map(|m| (m.mode.as_str(), m.rows)).collect::<Vec<_>>(), vec![("ask", 1)]);
     }
 
+    /// The pages "Ask" read are counted in a column of their own, with no price: their tokens are in the row's cost.
+    #[test]
+    fn rows_carry_the_pages_read_and_older_rows_read_none() {
+        let p = Pricing::default();
+        let mut r = rec_with("2026-11-01T10:00:00Z", Outcome::Answered);
+        r.mode = UsageMode::Ask;
+        r.web_fetches = 2;
+        let l = line(&r, &p);
+        assert_eq!(l.split(',').count(), HEADER.split(',').count());
+        assert!(l.ends_with(",ask,0,0.000000,2"), "{l}");
+        assert!(HEADER.ends_with(",search_usd,web_fetches"), "the new column goes at the end");
+        // A row written before page reading: 16 fields.
+        let older = l.rsplit_once(',').unwrap().0.to_owned();
+        let s = summarize(&format!("{HEADER}\n{l}\n{older}\n"), "2026-11");
+        assert_eq!(s.web_fetches, 2, "the older row reads as none");
+        assert_eq!(s.modes[0].rows, 2);
+    }
+
     /// A file started before the modes keeps its old header: old and new rows are summed together, modes in the order
     /// they first appear.
     #[test]
@@ -558,7 +591,7 @@ mod tests {
         assert!((by_mode - (s.stt_usd + s.refine_usd + s.search_usd)).abs() < 1e-9, "modes add up to the total");
     }
 
-    /// Only the two known widths are rows: 13 columns (before the modes) and 16.
+    /// Only the three known widths are rows: 13 columns (before the modes), 16 (before page reading) and 17.
     #[test]
     fn rows_of_other_widths_are_skipped() {
         let old = "2026-11-01T10:00:00Z,1000,soniox,stream,0.000033,claude-haiku-5-5,10,0,0,5,0.000004,900,inserted";
@@ -624,7 +657,7 @@ mod tests {
     #[test]
     fn outcome_is_written_by_its_stable_name() {
         let l = line(&with(Outcome::NoField, 0), &Pricing::default());
-        assert!(l.ends_with(",0,no_field,dictate,0,0.000000"), "{l}");
+        assert!(l.ends_with(",0,no_field,dictate,0,0.000000,0"), "{l}");
         assert_eq!(summarize(&format!("{HEADER}\n{l}\n"), "2026-10").dictations, 1);
     }
 
