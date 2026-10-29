@@ -77,7 +77,9 @@ pub fn tools(search: Option<SearchTool>) -> Value {
 }
 
 /// Thinking for "Ask" (spec 2 §6.2, decision 8): adaptive — the model's default, left out of the request — at low effort,
-/// or off. The bench compares the two; the app sends `DEFAULT`.
+/// or off. The bench compares the two; the app sends `DEFAULT`: off, chosen after the bench of 2026-10-29 — adaptive
+/// thinking timed out on 3 of 210 calls (its thinking reads as silence to the first-words deadline) and brought the first
+/// words later, while off met the same bar with none (see docs/ARCHITECTURE.md).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Thinking {
     Adaptive,
@@ -85,7 +87,7 @@ pub enum Thinking {
 }
 
 impl Thinking {
-    pub const DEFAULT: Thinking = Thinking::Adaptive;
+    pub const DEFAULT: Thinking = Thinking::Off;
 }
 
 /// The streaming request (spec 2 §6.2): the instruction with a cache mark (it covers the tools before it), low effort,
@@ -785,8 +787,8 @@ mod tests {
         let v = request_body("claude-haiku-5-5", Some(SearchTool::Basic { max_uses: 2 }), Thinking::DEFAULT, &[question()], None);
         assert_eq!(v["model"], "claude-haiku-5-5");
         assert_eq!(v["stream"], true);
-        assert_eq!(v["max_tokens"], 4_048, "the answer's budget and room for thinking");
-        assert!(v.get("thinking").is_none(), "adaptive thinking is the model's default (decision 8)");
+        assert_eq!(v["max_tokens"], 2_000, "the answer's budget: no room kept for thinking");
+        assert_eq!(v["thinking"], json!({ "type": "disabled" }), "thinking is off (decision 8, after the bench)");
         assert_eq!(v["output_config"], json!({ "effort": "low" }), "no output format: the answer streams as text");
         assert_eq!(v["tool_choice"], json!({ "type": "auto" }));
         assert_eq!(v["system"], json!([{ "type": "text", "text": ASK_PROMPT, "cache_control": { "type": "ephemeral" } }]));
@@ -839,12 +841,13 @@ mod tests {
         assert!(v["messages"][1]["content"][0].get("cache_control").is_none());
     }
 
-    /// The bench's other arm (decision 8): thinking off, and no room kept for it.
+    /// The bench's other arm (decision 8): adaptive thinking, the model's default, left out of the request, with room
+    /// for it on top of the answer's budget.
     #[test]
-    fn thinking_off_is_sent_as_disabled_without_headroom() {
-        let v = request_body("claude-haiku-5-5", None, Thinking::Off, &[question()], None);
-        assert_eq!(v["max_tokens"], 2_000);
-        assert_eq!(v["thinking"], json!({ "type": "disabled" }));
+    fn adaptive_thinking_is_left_out_with_headroom() {
+        let v = request_body("claude-haiku-5-5", None, Thinking::Adaptive, &[question()], None);
+        assert_eq!(v["max_tokens"], 4_048);
+        assert!(v.get("thinking").is_none());
     }
 
     #[test]

@@ -322,8 +322,9 @@ the mode the write should take. Each run asks every question once, one at a time
 cache) is left out of the medians. The summary counts the right decisions and modes, the median time to the first
 words with and without a search, and the cost; the run stops once more than `--max-usd` is spent. `--model` asks
 another model (`claude-haiku-5-5` by default; one without a default price is refused, since the budget could not count
-it), `--no-search` asks without web search, and `--thinking off` sends the request with thinking disabled, to compare
-with the app's default (`--thinking adaptive`).
+it), `--no-search` asks without web search, and `--thinking adaptive` sends the request with the model's adaptive
+thinking, to compare with the app's default (`--thinking off`). Each call in `out.json` also says whether the model
+wrote text before its first web search (`text_before_search`).
 
 ## Privacy
 
@@ -397,6 +398,8 @@ with the app's default (`--thinking adaptive`).
   whole computer is not read, and with the user setting still on, the fallback stays off.
 - A selection of more than 8,000 characters reaches "Ask" as its first and last 4,000: it is never replaced (no
   **Replace** button, and a change of it is shown with **Copy**), and an answer about it sees only those parts.
+- Thinking is off for "Ask", which keeps the first words within about a second and a half; before a web search, though,
+  the model usually writes a sentence saying it is going to check, and that sentence stays in the answer.
 - Editors that copy the current line on `Ctrl + C` with nothing selected (VS Code does by default) could hand that line
   to "Ask" as the selection when they do not report the selection themselves. None is listed yet (`COPIES_LINE` in
   `selection.rs`): VS Code was not available to check.

@@ -12,7 +12,8 @@
 //!   which measures the same), `cue_engines::ask::run` with its deadlines and continuations, the web search of
 //!   `ask.max_searches` = 2 (none with `--no-search`), thinking as `--thinking` says (the app's default when left out).
 //! - Runs 1..runs, each over all phrases, one call at a time. The very first call is cold (the prompt cache is empty) and
-//!   is left out of the medians; first words are split by whether the model searched.
+//!   is left out of the medians; first words are split by whether the model searched. A call that wrote text before its
+//!   first web search is marked (`text_before_search`): those words, not the answer, were its first words.
 //! - Stops as soon as more than `--max-usd` has been spent. A model without a default price is refused before any call:
 //!   its tokens would count as $0, and the budget would never stop the run.
 //! - `out.json` is written before the first call (a path that cannot be written stops the run before anything is paid)
@@ -142,8 +143,18 @@ struct Call {
     first_words_ms: Option<u64>,
     total_ms: u64,
     searches: u32,
+    /// The model wrote text before its first web search (a note that it is going to search): those words came first.
+    text_before_search: bool,
     /// The question and, for a follow-up phrase, the first answer too.
     cost_usd: f64,
+}
+
+/// Whether a text block with words comes before the first web search among a response's blocks.
+fn text_before_search(content: &[Value]) -> bool {
+    let first_search = content.iter().position(|b| b["type"] == "server_tool_use" && b["name"] == "web_search");
+    first_search.is_some_and(|i| {
+        content[..i].iter().any(|b| b["type"] == "text" && b["text"].as_str().is_some_and(|t| !t.trim().is_empty()))
+    })
 }
 
 struct Asked {
@@ -205,6 +216,7 @@ fn scored(p: &Phrase, run: usize, cold: bool, asked: &Asked, cost_usd: f64) -> C
         first_words_ms: asked.first_words_ms,
         total_ms: asked.total_ms,
         searches: r.usage.web_searches,
+        text_before_search: text_before_search(&r.content),
         cost_usd,
     }
 }
@@ -306,12 +318,13 @@ async fn main() -> anyhow::Result<()> {
             spent += usd;
             let c = scored(p, run, calls.is_empty(), &asked, usd);
             println!(
-                "{} run {run}: {}{} · first words {:?} ms · searches {} · ${usd:.4}",
+                "{} run {run}: {}{} · first words {:?} ms · searches {}{} · ${usd:.4}",
                 c.id,
                 c.decision,
                 c.mode.map(|m| format!(" ({m:?})")).unwrap_or_default(),
                 c.first_words_ms,
-                c.searches
+                c.searches,
+                if c.text_before_search { " (text before)" } else { "" }
             );
             calls.push(c);
             // After every call: a run cut short keeps what it paid for.
@@ -393,8 +406,21 @@ mod tests {
             first_words_ms: first,
             total_ms: 0,
             searches,
+            text_before_search: false,
             cost_usd: 0.25,
         }
+    }
+
+    #[test]
+    fn words_before_the_first_search_are_seen() {
+        let search = json!({ "type": "server_tool_use", "id": "s1", "name": "web_search", "input": {} });
+        let said = json!({ "type": "text", "text": "Сейчас проверю." });
+        let blank = json!({ "type": "text", "text": " \n" });
+        let answer = json!({ "type": "text", "text": "Rust 1.95." });
+        assert!(text_before_search(&[said.clone(), search.clone(), answer.clone()]));
+        assert!(!text_before_search(&[blank, search.clone(), answer.clone()]), "blank text is no words");
+        assert!(!text_before_search(&[search, answer.clone()]));
+        assert!(!text_before_search(&[said, answer]), "no search at all");
     }
 
     #[test]

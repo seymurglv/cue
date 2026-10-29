@@ -411,11 +411,16 @@ effects need, and `cue_engines::ask` talks to the API.
   request may carry four at most). The first follow-up writes the previous answer to the cache; the API looks back only
   about 20 blocks from a mark for an earlier entry, and an answer with citations is split into many blocks, so a
   follow-up after a long answer may read only the instruction from the cache (not an error).
-- `output_config.effort: "low"`, `tool_choice: auto`, no `temperature`, `top_p` or `top_k`. Thinking is adaptive, the
-  model's default, so it is left out of the request, with 2,048 tokens of room added to the answer's 2,000
-  (`Thinking::DEFAULT`). The bench compared it with thinking disabled on 2026-10-29: both met the bar (decisions of 90 %
-  or more, first words without a search within about 2 s), and then the default stays. The code execution container of
-  a filtered search is sent back with the next request of the conversation.
+- `output_config.effort: "low"`, `tool_choice: auto`, no `temperature`, `top_p` or `top_k`. Thinking is off
+  (`thinking: disabled`, `Thinking::DEFAULT`), chosen after the bench of 2026-10-29. Adaptive thinking, the model's
+  default (left out of the request, with 2,048 tokens of room added to the answer's 2,000), met the bar too (decisions
+  of 97 %, first words in 1.8 s without a search and 5.0 s with one), but timed out on 3 of 210 calls: its thinking is
+  silence to the first-words deadline. Off gave 98 % decisions, first words in 1.2 s without a search and 1.3 s with
+  one, and no timeouts. Without thinking the model says, before a search, that it is going to check: the instruction
+  asks it to search first and write nothing before it, yet in the check that followed (30 questions, twice: decisions
+  of 97 % and 98 %, format 100 %, format and checks 91 % and 88 %, first words in about 1.0–1.2 s) every question that
+  started a search began with such a sentence, which stays in the answer. The code execution container of a filtered
+  search is sent back with the next request of the conversation.
 
 ### Stream
 
@@ -788,7 +793,8 @@ on the direct path the model's own answer is not kept.
 unless `--no-search`, thinking as `--thinking adaptive|off` says, the app's default otherwise), one call at a time over
 `--runs` rounds, under a `--max-usd` budget. A phrase's `then` is a follow-up asked after the first answer, and the
 follow-up is what is scored. `out.json` holds every call (the decision, the mode of a write, its text or the answer's
-Markdown, the first words, the total time, the searches, the cost) and a summary: right decisions and modes, the median
+Markdown, the first words, the total time, the searches, whether text came before the first search, the cost) and a
+summary: right decisions and modes, the median
 first words of warm calls with and without a search (the very first call, with an empty cache, is left out), and the
 cost. `out.json` is written before the first call, so a path that cannot be written stops the run before anything is
 paid, and again after every call, so a run cut short keeps its results; a `--model` without a default price is refused,
