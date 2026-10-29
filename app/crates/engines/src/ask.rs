@@ -528,8 +528,10 @@ impl Limits {
 /// One question, streamed (spec 2 §6.2): the steps go to `on_step` as they come, and with them what the question has cost
 /// so far (`Step::Spent`); a paused turn is continued with its blocks and the same tools, at most `MAX_CONTINUATIONS` times
 /// and only while its searches are not spent (decision 9); a key without web search is asked again without it (§8); a
-/// write cut at `max_tokens` is asked again once with more room; the deadlines are `Limits::SPEC`. Never "fails" by
-/// panicking or hanging: every problem ends as `AskEnd::Failed`, with one log line of its reason.
+/// write cut at `max_tokens` is asked again once with more room, under deadlines of its own that start when the retry is
+/// sent (the cut call has usually used most of the whole answer's time); the deadlines are `Limits::SPEC`. Never "fails"
+/// by panicking or hanging: every problem ends as `AskEnd::Failed`, with one log line of its reason, and with what the
+/// question spent up to it, the response that failed part-way included.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     http: &reqwest::Client,
@@ -586,8 +588,8 @@ async fn run_at(
     let mut content: Vec<Value> = Vec::new();
     let mut usage = AskUsage::default();
     let Some(key) = key else { return failed(AskFailure::NoKey, content, usage, container) };
-    let t0 = Instant::now();
-    let total = t0 + limits.total;
+    let mut t0 = Instant::now();
+    let mut total = t0 + limits.total;
     let mut first_by = t0 + limits.first_words;
     let mut first_seen = false;
     let mut round = 0;
@@ -623,21 +625,28 @@ async fn run_at(
             return failed(classify(status, &text), content, usage, container);
         }
         let (mut sse, mut st) = (Sse::default(), StreamState::default());
-        loop {
+        let broke = loop {
             let chunk = match timeout_at(by(first_seen, first_by), resp.chunk()).await {
-                Err(_) => return failed(AskFailure::Timeout, content, usage, container),
-                Ok(Err(_)) => return failed(AskFailure::Network, content, usage, container),
+                Err(_) => break Some(AskFailure::Timeout),
+                Ok(Err(_)) => break Some(AskFailure::Network),
                 Ok(Ok(c)) => c,
             };
             let (events, end) = match chunk {
                 Some(bytes) => (sse.push(&bytes), false),
                 None => (sse.finish(), true),
             };
+            let mut broke = None;
             for data in events {
                 let steps = match st.feed(&data) {
                     Ok(steps) => steps,
-                    Err(StreamError::Api(kind)) => return failed(AskFailure::Stream(kind), content, usage, container),
-                    Err(StreamError::Malformed) => return failed(AskFailure::Malformed, content, usage, container),
+                    Err(StreamError::Api(kind)) => {
+                        broke = Some(AskFailure::Stream(kind));
+                        break;
+                    }
+                    Err(StreamError::Malformed) => {
+                        broke = Some(AskFailure::Malformed);
+                        break;
+                    }
                 };
                 for step in steps {
                     match &step {
@@ -648,19 +657,25 @@ async fn run_at(
                     on_step(step);
                 }
             }
+            // Reported before a failure too: the events before an `error` event in the same chunk were paid for.
             let mut spent = usage;
             spent.add(st.usage());
             if spent != last_spent {
                 last_spent = spent;
                 on_step(Step::Spent(spent));
             }
-            if st.done() || end {
-                break;
+            if broke.is_some() {
+                break broke;
             }
-        }
-        if !st.done() && st.stop_reason().is_none() {
-            // The body ended before the response did: the connection dropped.
-            return failed(AskFailure::Network, content, usage, container);
+            if st.done() || end {
+                // The body ended before the response did (no stop reason): the connection dropped.
+                break (!st.done() && st.stop_reason().is_none()).then_some(AskFailure::Network);
+            }
+        };
+        if let Some(why) = broke {
+            // A response that failed part-way is paid for as far as it came (spec 2 §10).
+            usage.add(st.usage());
+            return failed(why, content, usage, container);
         }
         let turn = st.finish();
         usage.add(turn.usage);
@@ -672,12 +687,21 @@ async fn run_at(
         let searches_left = search.is_none_or(|s| usage.web_searches < s.max_uses());
         if reason == Some("pause_turn") && round < core_ask::MAX_CONTINUATIONS && searches_left {
             round += 1;
+            // The next request follows at once: with the rest of this body read, it goes over the same connection.
+            let _ = timeout_at(by(first_seen, first_by), rest(&mut resp)).await;
             continue;
         }
         let cut_write = content.iter().any(|b| b["type"] == "tool_use" && b["name"] == core_ask::WRITE_TOOL);
         if reason == Some("max_tokens") && cut_write && !widened {
             widened = true;
             content.clear();
+            let _ = timeout_at(by(first_seen, first_by), rest(&mut resp)).await;
+            // The retry has deadlines of its own, from when it is sent: the cut call has usually used most of the whole
+            // answer's time, and a retry left with the rest of it would end in a timeout with both calls paid for.
+            t0 = Instant::now();
+            total = t0 + limits.total;
+            first_by = t0 + limits.first_words;
+            first_seen = false;
             continue;
         }
         let end = match decide(&content, reason) {
@@ -687,10 +711,21 @@ async fn run_at(
             Decision::Empty => return failed(AskFailure::Malformed, content, usage, container),
         };
         // A response dropped unread closes the connection, and the next request pays for a new TLS handshake: the rest of
-        // the body (the final empty chunk) is read in the background.
-        tokio::spawn(async move { while let Ok(Some(_)) = resp.chunk().await {} });
+        // the body (the final empty chunk) is read in the background, for `DRAIN` at most.
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(DRAIN, rest(&mut resp)).await;
+        });
         return AskResult { end, content, usage, container };
     }
+}
+
+/// How long the rest of an answered response's body is read in the background: a service that never ends it must not
+/// keep a task and a connection.
+const DRAIN: Duration = Duration::from_secs(5);
+
+/// Reads the rest of a response's body (the final empty chunk, after `message_stop`), so its connection can be reused.
+async fn rest(resp: &mut reqwest::Response) {
+    while let Ok(Some(_)) = resp.chunk().await {}
 }
 
 /// A warm-up that has not answered in 5 s is of no use to this question.
@@ -1132,7 +1167,7 @@ mod tests {
     }
 
     /// `run_at` with Haiku and basic search against a fake API: the result, the steps (without the cost reports), the ask
-    /// log lines, the service.
+    /// log lines, the service. Whatever the end, the last cost report is the whole cost of the result (spec 2 §10).
     async fn ask_with<F>(key: Option<&str>, limits: Limits, route: F) -> (AskResult, Vec<Step>, Vec<String>, FakeApi)
     where
         F: Fn(&str, &str, usize) -> Reply + Send + Sync + 'static,
@@ -1141,14 +1176,14 @@ mod tests {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let (logs, _guard) = capture_logs();
         let url = format!("{}/v1/messages", api.base);
-        let mut steps = Vec::new();
+        let (mut steps, mut spent) = (Vec::new(), AskUsage::default());
         let search = Some(SearchTool::Basic { max_uses: 2 });
-        let r = run_at(&url, &http, key, "claude-haiku-5-5", search, Thinking::DEFAULT, &[question()], None, limits, |s| {
-            if !matches!(s, Step::Spent(_)) {
-                steps.push(s)
-            }
+        let r = run_at(&url, &http, key, "claude-haiku-5-5", search, Thinking::DEFAULT, &[question()], None, limits, |s| match s {
+            Step::Spent(u) => spent = u,
+            s => steps.push(s),
         })
         .await;
+        assert_eq!(spent, r.usage, "the last cost report is the result's cost: {:?}", r.end);
         let lines = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::ask")).cloned().collect();
         (r, steps, lines, api)
     }
@@ -1308,6 +1343,7 @@ mod tests {
         events.push(json!({ "type": "error", "error": { "type": "overloaded_error", "message": "Overloaded" } }));
         let (r, _, lines, _) = ask_with(Some(KEY), FAST, move |_, _, _| stream(&events)).await;
         assert_eq!(r.end, AskEnd::Failed(AskFailure::Stream("overloaded_error".into())));
+        assert_eq!((r.usage.input_tokens, r.usage.cache_read_tokens), (40, 900), "what came before the error is paid for");
         assert_clean(&lines);
     }
 
@@ -1352,6 +1388,27 @@ mod tests {
         let (r, steps, _, _) = ask_with(Some(KEY), FAST, move |_, _, _| Reply::Stream(200, pieces.clone(), Duration::from_millis(600))).await;
         assert_eq!(r.end, AskEnd::Failed(AskFailure::Timeout));
         assert!(steps.contains(&Step::Text("Начало".into())), "the words that came were shown");
+        assert_eq!((r.usage.input_tokens, r.usage.cache_read_tokens), (40, 900), "an answer cut by the deadline is paid for");
+    }
+
+    /// The retry of a cut write has deadlines of its own, from when it is sent: the cut call has usually used most of the
+    /// whole answer's time, and a retry left with the rest of it would end in a timeout with both calls paid for.
+    #[tokio::test]
+    async fn the_retry_of_a_cut_write_has_its_own_deadlines() {
+        let mut cut = write_answer("Длинное письмо", "insert");
+        let n = cut.len();
+        cut[n - 2] = json!({ "type": "message_delta", "delta": { "stop_reason": "max_tokens" }, "usage": { "output_tokens": 4_048 } });
+        let whole = write_answer("Длинное письмо целиком.", "insert");
+        // Each call: the start of the write at once, the rest 0.8 s later. The two together take longer than the whole
+        // answer's 1.2 s.
+        fn slow(events: &[Value]) -> Reply {
+            Reply::Stream(200, vec![sse(&events[..2]), sse(&events[2..])], Duration::from_millis(800))
+        }
+        let limits = Limits { total: Duration::from_millis(1_200), ..FAST };
+        let (r, _, _, api) = ask_with(Some(KEY), limits, move |_, _, nth| if nth == 0 { slow(&cut) } else { slow(&whole) }).await;
+        assert_eq!(api.calls().len(), 2);
+        assert_eq!(r.end, AskEnd::Write { text: "Длинное письмо целиком.".into(), replace: false });
+        assert_eq!(r.usage.output_tokens, 4_068);
     }
 
     #[tokio::test]
