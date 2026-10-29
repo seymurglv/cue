@@ -1323,6 +1323,15 @@ describe('"Ask" answer in the tray', () => {
     expect(box().hidden).toBe(true);
   });
 
+  it('while a card answer is open, a chord shakes the card, not the Drop', () => {
+    ctl.answer({ place: 'card', quote: 'q', turns: [], sources: [], listening: false, missed: false, actions: ['below', 'replace', 'copy'] });
+    ctl.shake();
+    expect(document.querySelector('.drop')!.classList.contains('shake')).toBe(false);
+    ctl.answer(null);
+    ctl.shake();
+    expect(document.querySelector('.drop')!.classList.contains('shake')).toBe(true);
+  });
+
   it('its buttons and source chips reach the core', () => {
     const opened: number[] = [];
     document.body.innerHTML = '<div id="stage"></div>';

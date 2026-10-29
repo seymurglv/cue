@@ -1,3 +1,4 @@
+pub mod cardplace;
 pub mod chord;
 pub mod clipboard;
 pub mod focus;

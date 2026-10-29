@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod card_window;
 mod drop_window;
 mod ipc;
 mod lang;
@@ -43,12 +44,15 @@ fn main() {
         // The parameter matters only on macOS; on Windows autostart is the Run key.
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .manage(drop_window::HitState::default())
+        .manage(card_window::CardHits::default())
         .manage(ipc::CoreTx(core_tx))
         .invoke_handler(tauri::generate_handler![
             drop_window::drop_hit_rects,
             drop_window::drop_drag,
+            card_window::card_hit_rects,
             ipc::drop_action,
             ipc::drop_ready,
+            ipc::card_ready,
             ipc::answer_source
         ])
         .setup(move |app| {
@@ -107,6 +111,18 @@ fn setup(
     drop_window::spawn_placement(win, ui.clone(), place, drag_rx, hits, move |p| {
         let _ = tx.send(CoreEvent::DropMoved(p));
     });
+    // The "Ask" card at the selection; without it, answers go to the tray.
+    let card = match card_window::create(app.handle(), lang) {
+        Ok(win) => {
+            let hits = app.state::<card_window::CardHits>().inner().0.clone();
+            drop_window::spawn_hit_test(win.clone(), hits);
+            card_window::spawn(win)
+        }
+        Err(e) => {
+            tracing::error!("card window not created: {e}");
+            card_window::Card::none()
+        }
+    };
     // Without the icon there is no way to quit or pause: if it is not created, CUE does not start (reason in the log).
     tray::create(app.handle(), core_tx.clone(), paths.logs.clone(), lang).context("tray icon not created")?;
 
@@ -137,7 +153,7 @@ fn setup(
         }
     });
 
-    let rt = runtime::Runtime::new(ui, settings, can_save_settings, paths, core_tx);
+    let rt = runtime::Runtime::new(ui, card, settings, can_save_settings, paths, core_tx);
     // The core blocks its thread on short Windows calls (UI Automation, microphone), so it gets its own thread;
     // tasks (network, timers) run on the shared tokio runtime.
     std::thread::Builder::new()

@@ -73,6 +73,11 @@ pub struct HitState {
 }
 
 impl HitState {
+    /// The page's rectangles (the `*_hit_rects` commands of the Drop and the card windows).
+    pub fn set(&self, rects: Vec<HitRect>) {
+        *self.rects.lock().unwrap() = rects;
+    }
+
     fn set_moving(&self, on: bool) {
         self.moving.store(on, Ordering::Relaxed);
     }
@@ -145,9 +150,9 @@ fn place_init_script(place: DropPosition) -> String {
     format!("window.__CUE_PLACE__ = {:?};", place.code())
 }
 
-/// ~60 times a second while the Drop is visible: the window takes the mouse only over the capsule and the tray card.
-/// The window position and scale are read straight from the HWND; the thread goes to the window thread only to switch.
-/// Ends when the window is gone.
+/// ~60 times a second while the window is visible: it takes the mouse only over its page's rectangles (the Drop's capsule
+/// and tray cards; the "Ask" card in the card window). The window position and scale are read straight from the HWND; the
+/// thread goes to the window thread only to switch. Ends when the window is gone.
 pub fn spawn_hit_test(win: WebviewWindow, state: HitState) {
     std::thread::Builder::new()
         .name("cue-hit-test".into())
@@ -557,7 +562,7 @@ fn rest_rect(mon: Monitor, place: DropPosition, rect: PxRect, scale: f64) -> PxR
 
 #[tauri::command]
 pub fn drop_hit_rects(rects: Vec<HitRect>, state: tauri::State<'_, HitState>) {
-    *state.rects.lock().unwrap() = rects;
+    state.set(rects);
 }
 
 #[cfg(test)]

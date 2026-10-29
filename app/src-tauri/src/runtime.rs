@@ -52,16 +52,19 @@ use cue_engines::claude::{self, Job, RefineResult};
 use cue_engines::keys::{self, KeyName};
 use cue_engines::soniox::SonioxConfig;
 use cue_engines::stt::{self, Engine, Fallback, SttOutput, SttSession};
+use cue_platform_win::cardplace::{self, CARD};
 use cue_platform_win::chord::HotkeyEvent;
 use cue_platform_win::focus::{Editability, FocusInfo, FocusWorker, SelectionRead};
 use cue_platform_win::hook;
 use cue_platform_win::mic::{self, MicEvent, MicHandle};
 use cue_platform_win::selection::{copies_line, needs_copy_fallback};
 use cue_platform_win::wav::WavSink;
+use cue_platform_win::{placement, selection};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
-use crate::ipc::Ui;
+use crate::card_window::Card;
+use crate::ipc::{CardPlaceView, Ui};
 use crate::lang;
 use crate::paths::Paths;
 use crate::trayicon::TrayLook;
@@ -97,6 +100,8 @@ pub enum CoreEvent {
     UiAction(UiAction),
     /// The Drop window has subscribed to events.
     UiReady,
+    /// The card window has subscribed to events.
+    CardReady,
     Mic { id: DictationId, ev: MicEvent },
     /// `task` is the task generation; `path` is how the audio was actually transcribed (for the price in usage.csv).
     SttDone { id: DictationId, task: u64, result: Result<SttOutput, EngineError>, path: SttPath },
@@ -149,6 +154,8 @@ pub struct Runtime {
     t0: Instant,
     tx: UnboundedSender<CoreEvent>,
     ui: Ui,
+    /// The "Ask" card window (none — every answer goes to the tray).
+    card: Card,
     settings: Settings,
     /// The settings were read without error. Otherwise we run with defaults and do not overwrite the file for the
     /// whole session: the user's corrupt or unreadable settings.json must not be replaced with defaults.
@@ -214,6 +221,7 @@ pub struct Runtime {
 impl Runtime {
     pub fn new(
         ui: Ui,
+        card: Card,
         settings: Settings,
         can_save_settings: bool,
         paths: Paths,
@@ -244,6 +252,7 @@ impl Runtime {
             t0: Instant::now(),
             tx,
             ui,
+            card,
             settings,
             can_save_settings,
             translate_home,
@@ -391,6 +400,15 @@ impl Runtime {
                 self.ui.tray(self.tray);
                 self.ui.resend_idle_hidden();
                 self.ui.resend_place();
+                if let Some(c) = self.conversation.as_ref().filter(|c| c.opened) {
+                    self.ui.answer(Some(&c.view));
+                }
+            }
+            CoreEvent::CardReady => {
+                tracing::info!("card window ready");
+                // The answer's buttons and cross follow the phase in the card as in the tray.
+                self.ui.state(&self.flow.ui_state());
+                self.ui.resend_card_place();
                 if let Some(c) = self.conversation.as_ref().filter(|c| c.opened) {
                     self.ui.answer(Some(&c.view));
                 }
@@ -1211,11 +1229,24 @@ impl Runtime {
         self.feed(input);
     }
 
-    /// Where the answer shows (spec 2 §7): the tray from the Drop. (The card at the selection comes with its window.)
+    /// Where the answer shows (spec 2 §7): the card at the selection when the selection is on screen and there is room for a
+    /// card; otherwise the tray from the Drop.
     fn open_answer(&mut self) {
-        if let Some(c) = self.conversation.as_mut() {
-            c.open(AnswerPlace::Tray);
+        let Some(c) = self.conversation.as_mut() else { return };
+        let card = self.card.available().then(|| selection::bounds(&c.taken.rects)).flatten().and_then(|(first, all)| {
+            let mon = placement::monitor_at(first.center())?;
+            cardplace::card_place(first, all, mon, CARD)
+        });
+        match card {
+            Some(p) => {
+                c.open(AnswerPlace::Card);
+                self.ui.card_place(CardPlaceView { below: p.below, arrow_x: p.arrow_x, max_height: p.max_height });
+                self.card.show(p.rect);
+            }
+            None => c.open(AnswerPlace::Tray),
         }
+        // The place only: where the selection is stays out of the log.
+        tracing::info!(place = ?c.view.place, "ask: answer opened");
     }
 
     /// The answer view to the windows (spec 2 §7): at once for a new turn, an end, an opening or a follow-up row; while
@@ -1250,6 +1281,9 @@ impl Runtime {
 
     /// The answer closes (spec 2 §6.2: its conversation is forgotten).
     fn close_answer(&mut self) {
+        if self.conversation.as_ref().is_some_and(|c| c.view.place == AnswerPlace::Card) {
+            self.card.hide();
+        }
         self.conversation = None;
         self.ui.answer(None);
     }

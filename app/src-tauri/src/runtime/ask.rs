@@ -16,7 +16,6 @@ pub struct Taken {
     pub ctx: AskContext,
     pub sel: SelectionKind,
     /// The selection's lines on screen, physical px: where the card points (none — the tray).
-    #[allow(dead_code)] // not read until the card placement uses it
     pub rects: Vec<PxRect>,
     pub terminal: bool,
 }

@@ -56,6 +56,8 @@ export class DropController {
   private view: AnswerView;
   /** Answer tray generation: changes when it opens and when it closes, so an old fold timer leaves a newer answer alone. */
   private answerGen = 0;
+  /** A card answer is open: the chord's shake is the card's (its own window). */
+  private cardOpen = false;
   private lastRects = '';
   private fullscreen = false;
   private t: Dict;
@@ -322,6 +324,7 @@ export class DropController {
   /** The "Ask" answer from the core (spec 2 §7). A tray answer grows out of the Drop toward the screen center, pinned like
    *  the tray cards (drop.css, [data-place]); a card answer is the card window's; null — the answer closed. */
   answer(a: Answer | null) {
+    this.cardOpen = a?.place === 'card';
     if (a?.place === 'tray') {
       if (!this.answerBox.isOpen) {
         this.endDrag(true);
@@ -344,8 +347,9 @@ export class DropController {
   }
 
   /** A chord that only shakes: the answer's header while the answer tray is open (the tray's own transform holds its
-   *  place), the Drop otherwise. */
+   *  place), nothing here while a card answer is open (the card window shakes it), the Drop otherwise. */
   shake() {
+    if (this.cardOpen) return;
     const head = this.answerBox.isOpen ? (this.answerBox.in.querySelector('.ah') as HTMLElement | null) : null;
     const d = head ?? this.dropEl;
     d.classList.remove('shake');
