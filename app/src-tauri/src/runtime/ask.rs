@@ -238,8 +238,8 @@ impl Conversation {
         self.buttons();
     }
 
-    /// A step of the stream, on the last turn. `true` — the answer has something to show now (a search, its sources, the
-    /// first word): the flow opens it then (spec 2 §7: the thinking line names only real steps).
+    /// A step of the stream, on the last turn. `true` — the answer has something to show now (a search, a page read, its
+    /// sources, the first word): the flow opens it then (spec 2 §7: the thinking line names only real steps).
     pub fn step(&mut self, step: Step) -> bool {
         let Some(turn) = self.view.turns.last_mut() else { return false };
         // The words of a cut write's response never reach the conversation: the retry's start in its place.
@@ -254,6 +254,17 @@ impl Conversation {
             }
             Step::Reading => {
                 turn.step = Some(ThinkStep::Reading);
+                true
+            }
+            Step::Fetching => {
+                turn.step = Some(ThinkStep::Fetching);
+                true
+            }
+            // A read page gets its number and its chip at once, cited or not: the answer came from the page the user
+            // pointed at (spec 2 §12.12).
+            Step::Fetched { url, title } => {
+                self.sources.number(&url, &title);
+                self.view.sources = self.sources.views();
                 true
             }
             Step::TextStart => {
@@ -558,6 +569,27 @@ mod tests {
         assert_eq!(c.view.sources, [SourceView { n: 1, site: "blog.rust-lang.org".into(), title: "Rust Blog".into() }]);
         assert!(!c.step(Step::WriteStart), "a write never opens the answer");
         assert!(!c.step(Step::Spent(AskUsage::default())), "the cost is the runtime's, not the view's");
+    }
+
+    /// Spec 2 §12.12: a page being read is a real step; a page that came in gets its chip at once, and a citation of it
+    /// later takes the same number.
+    #[test]
+    fn a_read_page_shows_its_step_and_its_chip() {
+        let mut c = Conversation::new(taken(SelectionKind::Writable, false));
+        c.ask("о чём эта страница");
+        assert!(c.step(Step::Fetching), "reading a page shows");
+        assert_eq!(c.view.turns[0].step, Some(ThinkStep::Fetching));
+        let (page, title) =
+            ("https://en.wikipedia.org/wiki/Hyper_Text_Coffee_Pot_Control_Protocol", "Hyper Text Coffee Pot Control Protocol");
+        assert!(c.step(Step::Fetched { url: page.into(), title: title.into() }));
+        assert_eq!(c.view.sources, [SourceView { n: 1, site: "en.wikipedia.org".into(), title: title.into() }]);
+        assert_eq!(c.view.turns[0].step, Some(ThinkStep::Fetching), "still reading until the words");
+        c.step(Step::TextStart);
+        assert_eq!(c.view.turns[0].step, Some(ThinkStep::Writing));
+        c.step(Step::Text("Шуточный протокол.".into()));
+        c.step(Step::Cite { url: page.into(), title: title.into() });
+        assert_eq!(c.view.turns[0].segments[0].cites, [1], "the page's own number");
+        assert_eq!(c.source_url(1), Some(page));
     }
 
     /// A write cut at `max_tokens` is asked again with more room, and its steps come again from the start: the turn's

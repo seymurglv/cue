@@ -195,6 +195,7 @@ impl Attempt {
             cache_read_tokens: self.refine.cache_read_input_tokens,
             cache_write_tokens: self.refine.cache_creation_input_tokens,
             web_searches: self.web_searches,
+            web_fetches: 0,
         }
     }
 
@@ -528,7 +529,7 @@ mod tests {
         a.refine_started(10_400);
         a.first_words(11_900);
         a.first_words(12_500);
-        a.ask_done(AskUsage { input_tokens: 300, output_tokens: 80, cache_read_tokens: 1_300, cache_write_tokens: 0, web_searches: 2 }, 13_000);
+        a.ask_done(AskUsage { input_tokens: 300, output_tokens: 80, cache_read_tokens: 1_300, cache_write_tokens: 0, web_searches: 2, web_fetches: 0 }, 13_000);
         let r = a.record(Outcome::Answered, "2026-10-28T10:00:00Z".into(), &s);
         assert_eq!(r.refine_model, "claude-sonnet-5-5", "priced with the model that answered, not refine's");
         assert_eq!((r.input_tokens, r.output_tokens, r.cache_read_tokens, r.web_searches), (300, 80, 1_300, 2));
@@ -543,7 +544,7 @@ mod tests {
         let s = Settings::default();
         let mut a = Attempt::new(DictationId(6));
         a.mode = Mode::Ask;
-        a.ask_spent(AskUsage { input_tokens: 200, output_tokens: 10, cache_read_tokens: 0, cache_write_tokens: 0, web_searches: 1 });
+        a.ask_spent(AskUsage { input_tokens: 200, output_tokens: 10, cache_read_tokens: 0, cache_write_tokens: 0, web_searches: 1, web_fetches: 0 });
         let r = a.record(Outcome::Cancelled, "t".into(), &s);
         assert_eq!((r.input_tokens, r.output_tokens, r.web_searches), (200, 10, 1));
     }
@@ -567,6 +568,7 @@ mod tests {
             cache_read_tokens: 10,
             cache_write_tokens: 0,
             web_searches,
+            web_fetches: 0,
         };
         let mut a = Attempt::new(DictationId(6));
         a.mode = Mode::Ask;
@@ -593,7 +595,7 @@ mod tests {
         let s = Settings::default();
         let mut a = Attempt::new(DictationId(8));
         a.mode = Mode::Ask;
-        a.ask_spent(AskUsage { input_tokens: 90, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, web_searches: 2 });
+        a.ask_spent(AskUsage { input_tokens: 90, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, web_searches: 2, web_fetches: 0 });
         a.retry_text(4_000);
         let r = a.record(Outcome::Answered, "t".into(), &s);
         assert_eq!((r.input_tokens, r.web_searches, r.mode), (0, 0, UsageMode::Ask));

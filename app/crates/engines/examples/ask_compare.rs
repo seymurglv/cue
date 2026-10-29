@@ -10,7 +10,8 @@
 //!   (`replace` / `insert`) the write's mode when it matters.
 //! - The request is the app's: `cue_core::ask::first_message` with today's date (UTC here: a day off only around midnight,
 //!   which measures the same), `cue_engines::ask::run` with its deadlines and continuations, the web search of
-//!   `ask.max_searches` = 2 (none with `--no-search`), thinking as `--thinking` says (the app's default when left out).
+//!   `ask.max_searches` = 2 and page reading (`--no-search`: no web search and no page reading), thinking as `--thinking`
+//!   says (the app's default when left out).
 //! - Runs 1..runs, each over all phrases, one call at a time. The very first call is cold (the prompt cache is empty) and
 //!   is left out of the medians; first words are split by whether the model searched. A call that wrote text before its
 //!   first web search is marked (`text_before_search`): those words, not the answer, were its first words.
@@ -29,7 +30,7 @@ use anyhow::{anyhow, bail, Context};
 use cue_core::ask::{first_message, follow_up_message, AskContext};
 use cue_core::settings::Pricing;
 use cue_core::usage::{refine_cost, utc_timestamp};
-use cue_engines::ask::{self, AskEnd, AskResult, SearchTool, Thinking};
+use cue_engines::ask::{self, AskEnd, AskResult, Thinking, WebTools};
 use cue_engines::keys::{self, KeyName};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -168,14 +169,14 @@ async fn ask_once(
     http: &reqwest::Client,
     key: &str,
     model: &str,
-    search: Option<SearchTool>,
+    web: WebTools,
     thinking: Thinking,
     messages: &[Value],
     container: Option<String>,
 ) -> Asked {
     let t0 = Instant::now();
     let mut first = None;
-    let result = ask::run(http, Some(key), model, search, thinking, messages, container, |s| {
+    let result = ask::run(http, Some(key), model, web, thinking, messages, container, |s| {
         let words = s.is_first_words();
         if words && first.is_none() {
             first = Some(t0.elapsed().as_millis() as u64);
@@ -287,7 +288,7 @@ async fn main() -> anyhow::Result<()> {
     write_out(&args, false, &[])?;
     let key = keys::get(KeyName::Anthropic)?;
     let http = reqwest::Client::new();
-    let search = if args.search { ask::search_tool(MAX_SEARCHES) } else { None };
+    let web = if args.search { WebTools::on(MAX_SEARCHES) } else { WebTools::NONE };
     let today = utc_timestamp(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())[..10].to_owned();
     let (mut calls, mut spent, mut stopped) = (Vec::new(), 0.0, false);
     'runs: for run in 1..=args.runs {
@@ -303,7 +304,7 @@ async fn main() -> anyhow::Result<()> {
                 today: today.clone(),
             };
             let mut messages = vec![ask::user_turn(&first_message(&p.question, &ctx), None)];
-            let mut asked = ask_once(&http, &key, &args.model, search, args.thinking, &messages, None).await;
+            let mut asked = ask_once(&http, &key, &args.model, web, args.thinking, &messages, None).await;
             let mut usd = cost(&pricing, &args.model, &asked.result);
             if let Some(then) = &p.then
                 && asked.result.end == AskEnd::Answer
@@ -312,7 +313,7 @@ async fn main() -> anyhow::Result<()> {
                 let container = asked.result.container.clone();
                 messages.push(ask::assistant_turn(&previous));
                 messages.push(ask::user_turn(&follow_up_message(then), Some(&previous)));
-                asked = ask_once(&http, &key, &args.model, search, args.thinking, &messages, container).await;
+                asked = ask_once(&http, &key, &args.model, web, args.thinking, &messages, container).await;
                 usd += cost(&pricing, &args.model, &asked.result);
             }
             spent += usd;

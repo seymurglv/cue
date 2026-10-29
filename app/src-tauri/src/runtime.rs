@@ -849,10 +849,10 @@ impl Runtime {
         }
         let Ok(Some(key)) = keys::lookup(KeyName::Anthropic) else { return };
         let model = self.settings.ask.model().to_owned();
-        let search = self.ask_search();
+        let web = self.ask_web();
         let (http, tx) = (self.http.clone(), self.tx.clone());
         tokio::spawn(async move {
-            if let Some(usage) = engine_ask::warm(&http, &key, &model, search).await {
+            if let Some(usage) = engine_ask::warm(&http, &key, &model, web).await {
                 let _ = tx.send(CoreEvent::Warmed { usage, model });
             }
         });
@@ -1136,10 +1136,10 @@ impl Runtime {
         self.spawn_ask(id);
     }
 
-    /// The web search of "Ask", if on and if the model takes one.
-    fn ask_search(&self) -> Option<engine_ask::SearchTool> {
+    /// The server tools of "Ask": web search and page reading, on together (`ask.web_search`, spec 2 §12.12).
+    fn ask_web(&self) -> engine_ask::WebTools {
         let a = &self.settings.ask;
-        if a.web_search() { engine_ask::search_tool(a.max_searches()) } else { None }
+        if a.web_search() { engine_ask::WebTools::on(a.max_searches()) } else { engine_ask::WebTools::NONE }
     }
 
     /// The request of the conversation's last question, in a task of its own. The steps and the end come back as events
@@ -1154,7 +1154,7 @@ impl Runtime {
         };
         let core = self.tx.clone();
         let model = self.settings.ask.model().to_owned();
-        let search = self.ask_search();
+        let web = self.ask_web();
         let key = keys::lookup(KeyName::Anthropic).unwrap_or_else(|e| {
             tracing::warn!("Anthropic key: {e}");
             None
@@ -1165,7 +1165,13 @@ impl Runtime {
             self.attempt.ask_started(now);
         }
         // Counts only: no text.
-        tracing::info!(turns = messages.len(), search = search.is_some(), copy = copy.is_some(), "ask: asking");
+        tracing::info!(
+            turns = messages.len(),
+            search = web.search.is_some(),
+            fetch = web.fetch.is_some(),
+            copy = copy.is_some(),
+            "ask: asking"
+        );
         let (http, tx) = (self.http.clone(), self.tx.clone());
         let old = self.ask_task.start(id, |task| {
             // The wait for the copy is not this request's: should Esc drop the request, the copy still reaches the core.
@@ -1180,7 +1186,7 @@ impl Runtime {
                 let steps = tx.clone();
                 let body = async {
                     let thinking = engine_ask::Thinking::DEFAULT;
-                    engine_ask::run(&http, key.as_deref(), &model, search, thinking, &messages, container, move |step| {
+                    engine_ask::run(&http, key.as_deref(), &model, web, thinking, &messages, container, move |step| {
                         let _ = steps.send(CoreEvent::AskStep { id, task, step });
                     })
                     .await
