@@ -627,6 +627,8 @@ mod tests {
         assert!(translation_ok_with_selection(raw, &format!("Take a look at this project: {link}"), link, &[], "en"));
         assert!(!translation_ok_with_selection(raw, &format!("Take a look at this project: {link}/"), link, &[], "en"), "a changed link");
         assert!(!translation_ok_with_selection(raw, &format!("Посмотри на этот проект: {link}"), link, &[], "en"), "not translated");
+        // Chinese glues its full-width punctuation to the link.
+        assert!(translation_ok_with_selection(raw, &format!("请看这个项目：{link}。"), link, &[], "zh"));
         // A name kept as it is in another script: only the speech around it shows the translation.
         assert!(translation_ok_with_selection("оплати через этот банк", "Pay through this bank, Сбербанк.", "Сбербанк", &[], "en"));
         // A replaced word whose translation is the selected word itself is a plain translation.

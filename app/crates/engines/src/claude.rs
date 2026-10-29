@@ -88,16 +88,10 @@ pub fn request_body_for(model: &str, raw: &str, ctx: &RefineContext, terms: &[St
     }
     // The selection's block goes last, after the cache mark too (spec 2 §12.13): the cached prefix stays the one every
     // dictation reads, and the message carries the selection itself.
-    if sent_selection(ctx).is_some() {
+    if ctx.sent_selection().is_some() {
         v["system"].as_array_mut().expect("system is an array").push(json!({ "type": "text", "text": SELECTION_PROMPT }));
     }
     v
-}
-
-/// The selection the request carries, by the same test as its tag in the message ([`user_message`]): the block, the tag
-/// and the check of the answer agree, and a selection with nothing in it goes nowhere.
-fn sent_selection(ctx: &RefineContext) -> Option<&str> {
-    ctx.selection.as_deref().filter(|s| !s.trim().is_empty())
 }
 
 /// Whether a cache warm-up is possible for the model: a model whose thinking cannot be turned off (Opus 5.5) would need a
@@ -340,7 +334,8 @@ async fn refine_at(
         (Parsed::Truncated, _) => "response truncated at max_tokens",
         (Parsed::Malformed, _) => "response does not match the schema",
     };
-    let decided = match (job, sent_selection(ctx)) {
+    // The check goes by the selection the request carried ([`RefineContext::sent_selection`]), as the body does.
+    let decided = match (job, ctx.sent_selection()) {
         (Job::Clean, None) => decide(raw, parsed, terms, s),
         (Job::Clean, Some(sel)) => decide_with_selection(raw, sel, parsed, terms, s),
         (Job::Translate(to), None) => decide_translation(raw, parsed, terms, to),
@@ -947,6 +942,24 @@ mod tests {
         assert_one_warning(&lines, "sanity check");
         for leak in ["github", "seymurglv"] {
             assert!(!lines[0].contains(leak), "{lines:?}");
+        }
+    }
+
+    /// A selection set on the field directly goes only when it is one to send: a blank or two-line one is neither sent
+    /// nor checked as sent.
+    #[tokio::test]
+    async fn a_selection_set_on_the_field_goes_only_when_it_is_one_to_send() {
+        for sel in ["  ", "`cargo test`\nx"] {
+            let c = RefineContext { selection: Some(sel.into()), ..ctx() };
+            assert_eq!(serde_json::to_string(&request_body("claude-haiku-5-5", "ну привет", &c, &[])).unwrap(), golden_body(), "{sel:?}");
+            let tr = request_body_for("claude-haiku-5-5", "ну привет", &c, &[], Job::Translate("en"));
+            assert_eq!(serde_json::to_string(&tr).unwrap(), golden_translation_body(), "{sel:?}");
+            // Checked as plain: the backticks nobody said are stripped, and the words nobody said fail the check.
+            let raw = "запусти вот это перед коммитом";
+            let answer = message("Запусти `cargo test` перед коммитом.", "end_turn");
+            let (r, _, api) = run_in(raw, Job::Clean, c, move |_, _, _| reply(200, &answer)).await;
+            assert_eq!((r.text.as_str(), r.outcome), (raw, RefineOutcome::RawFallback), "{sel:?}");
+            assert_eq!(api.body(0), serde_json::to_vec(&request_body("claude-haiku-5-5", raw, &ctx(), &[])).unwrap(), "{sel:?}");
         }
     }
 

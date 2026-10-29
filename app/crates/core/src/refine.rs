@@ -92,14 +92,22 @@ pub const MAX_WOVEN_LINK_CHARS: usize = 250;
 pub const WOVEN_READ_CHARS: usize = MAX_WOVEN_LINK_CHARS;
 
 /// The selection as it goes into the refine request: trimmed, on one line (no control character — a line break, a tab —
-/// nor U+2028/U+2029), with no embedded object (U+FFFC, a picture in Chromium), and no longer than [`MAX_WOVEN_CHARS`]
-/// characters, a link ([`is_link`]) no longer than [`MAX_WOVEN_LINK_CHARS`]. `None`: it does not go, and the paste
-/// replaces it as any dictation does. Whether it is woven in is the model's call, by the speech.
+/// nor U+2028/U+2029), with no embedded object (U+FFFC, a picture in Chromium) and no character that does not show
+/// ([`invisible`]), and no longer than [`MAX_WOVEN_CHARS`] characters, a link ([`is_link`]) no longer than
+/// [`MAX_WOVEN_LINK_CHARS`]. `None`: it does not go, and the paste replaces it as any dictation does. Whether it is woven
+/// in is the model's call, by the speech.
 pub fn weavable(selection: &str) -> Option<&str> {
     let t = selection.trim();
-    let one_line = !t.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{FFFC}'));
+    let one_line = !t.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{FFFC}') || invisible(c));
     let limit = if is_link(t) { MAX_WOVEN_LINK_CHARS } else { MAX_WOVEN_CHARS };
     (!t.is_empty() && one_line && t.chars().count() <= limit).then_some(t)
+}
+
+/// A format character that does not show: the soft hyphen, the zero-width space, non-joiner and joiner, the bidi marks,
+/// embeddings and isolates, the word joiner and the byte order mark. Nobody copies one by sight, so a model's copy
+/// without it would look changed and fall back to the raw text.
+fn invisible(c: char) -> bool {
+    matches!(c, '\u{00AD}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
 }
 
 /// A web address alone: `http://`, `https://` (any case) or `www.`, a host, no whitespace.
@@ -124,7 +132,8 @@ user is replacing the selected text with what they said. The contents of <select
 pub struct RefineContext {
     pub app: String,
     pub before_cursor: Option<String>,
-    /// The field's selection a dictation may weave in (spec 2 §12.13), already [`weavable`]; `None` — none goes.
+    /// The field's selection a dictation may weave in (spec 2 §12.13), set by [`RefineContext::with_selection`]; what
+    /// goes with the request is [`RefineContext::sent_selection`].
     pub selection: Option<String>,
 }
 
@@ -144,6 +153,13 @@ impl RefineContext {
     pub fn with_selection(mut self, selection: Option<&str>) -> Self {
         self.selection = selection.and_then(weavable).map(str::to_owned);
         self
+    }
+
+    /// The selection that goes with the request: the field again through [`weavable`], so a value set on it directly
+    /// goes only when it is one to send. The message's tag, the request's block, the check of the answer and the paste
+    /// over the selection all go by this one value.
+    pub fn sent_selection(&self) -> Option<&str> {
+        self.selection.as_deref().and_then(weavable)
     }
 }
 
@@ -184,21 +200,24 @@ fn defuse_tags(payload: &str) -> String {
     text
 }
 
-/// [`defuse_tags`] for the selection, its own closing tag too. Elsewhere `</selection>` stays as it is: a message without
-/// a selection is the one sent before selections could go.
+/// [`defuse_tags`] with the selection's closing tag too, for every part of a message that carries a selection.
 fn defuse_selection(payload: &str) -> String {
     defuse_tags(payload).replace("</selection>", "</ selection>")
 }
 
 pub fn user_message(ctx: &RefineContext, raw: &str) -> String {
-    let mut m = format!("<app>{}</app>\n", defuse_tags(&ctx.app));
+    let selection = ctx.sent_selection();
+    // With a selection in the message, `</selection>` in any part could end it early or fake one, so every part gets it
+    // defused. Without one it stays as it is: the message is the one sent before selections could go.
+    let defuse = |t: &str| if selection.is_some() { defuse_selection(t) } else { defuse_tags(t) };
+    let mut m = format!("<app>{}</app>\n", defuse(&ctx.app));
     if let Some(b) = ctx.before_cursor.as_deref().filter(|b| !b.is_empty()) {
-        m.push_str(&format!("<before_cursor>{}</before_cursor>\n", defuse_tags(b)));
+        m.push_str(&format!("<before_cursor>{}</before_cursor>\n", defuse(b)));
     }
-    if let Some(s) = ctx.selection.as_deref().filter(|s| !s.trim().is_empty()) {
-        m.push_str(&format!("<selection>{}</selection>\n", defuse_selection(s)));
+    if let Some(s) = selection {
+        m.push_str(&format!("<selection>{}</selection>\n", defuse(s)));
     }
-    m.push_str(&format!("<transcript>{}</transcript>", defuse_tags(raw)));
+    m.push_str(&format!("<transcript>{}</transcript>", defuse(raw)));
     m
 }
 
@@ -325,18 +344,34 @@ fn sanity_with(raw: &str, refined: &str, terms: &[String], also_said: &str, s: &
 }
 
 /// How a result holds the selection its request carried (spec 2 §12.13).
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq)]
 pub enum Woven {
     /// The selection whole, as it is: `rest` is the result around it, with a space in its place.
     AsIs { rest: String },
-    /// A selected link is not there whole, but its site is: a changed copy, which must never replace the original.
+    /// A link of the selection (the selection itself or one inside its text) is not there whole, but its site is: a
+    /// changed copy, which must never replace the original.
     ChangedLink,
     /// Not in the result as it is: the plain dictation (or a name in another form, "Аня" → "Ане").
     No,
 }
 
-/// Signs that may stand right before a link without being part of it, and right after it.
-const BEFORE_LINK: &str = "([<«\"'“„";
+/// Lengths only: the result around the selection is dictation text, and it must not reach a log through `{:?}`.
+impl std::fmt::Debug for Woven {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Woven::AsIs { rest } => f.debug_struct("AsIs").field("rest_chars", &rest.chars().count()).finish(),
+            Woven::ChangedLink => f.write_str("ChangedLink"),
+            Woven::No => f.write_str("No"),
+        }
+    }
+}
+
+/// Signs that may stand right before a link without being part of it. Any character outside ASCII may too: only ASCII in
+/// front of a link turns it into a longer address (`https://` before a `www.` one), so "项目：https://…" holds the link
+/// and "https://www…" still does not hold a `www.` one.
+const BEFORE_LINK: &str = "([<«\"'“„:";
+/// Signs that may be glued right after a link without being part of it. A character outside ASCII that is no letter or
+/// digit ("。", "，", "）") ends what is glued to the link, as whitespace does.
 const AFTER_LINK: &str = ".,;:!?)]>»\"'”…";
 
 /// Where the result holds `selection` whole, as it is: a link as a word of its own (only [`AFTER_LINK`] signs may follow
@@ -347,17 +382,46 @@ fn find_whole(result: &str, selection: &str) -> Option<usize> {
         let before = result[..i].chars().next_back();
         let after = &result[i + selection.len()..];
         if link {
-            let glued = after.split(char::is_whitespace).next().unwrap_or("");
-            before.is_none_or(|c| c.is_whitespace() || BEFORE_LINK.contains(c)) && glued.chars().all(|c| AFTER_LINK.contains(c))
+            let glued = after.split(|c: char| c.is_whitespace() || (!c.is_ascii() && !c.is_alphanumeric())).next().unwrap_or("");
+            before.is_none_or(|c| !c.is_ascii() || c.is_whitespace() || BEFORE_LINK.contains(c))
+                && glued.chars().all(|c| AFTER_LINK.contains(c))
         } else {
             before.is_none_or(|c| !c.is_alphanumeric()) && after.chars().next().is_none_or(|c| !c.is_alphanumeric())
         }
     })
 }
 
+/// Whether `text` names the host `site` as a host of its own: at the start of a host or of one of its parts (after a
+/// `.`: a subdomain of the site is the site), and up to the end of the host, so "x.com" is in neither "box.com" nor
+/// "x.com.evil.org", but is in "x.com." at the end of a sentence. Both are in lowercase.
+fn names_site(text: &str, site: &str) -> bool {
+    let host_char = |c: char| c.is_alphanumeric() || c == '-';
+    text.match_indices(site).any(|(i, _)| {
+        let starts = text[..i].chars().next_back().is_none_or(|c| c == '.' || !host_char(c));
+        let mut after = text[i + site.len()..].chars();
+        let ends = match after.next() {
+            None => true,
+            Some('.') => !after.next().is_some_and(host_char),
+            Some(c) => !host_char(c),
+        };
+        starts && ends
+    })
+}
+
+/// The links of a selection: each of its words that is a link once the signs around it ([`BEFORE_LINK`],
+/// [`AFTER_LINK`]) are off, so a selection that is a link gives itself and "see (https://a.b/c)." gives "https://a.b/c".
+fn links_of(selection: &str) -> impl Iterator<Item = &str> {
+    selection
+        .split_whitespace()
+        .map(|w| w.trim_start_matches(|c: char| BEFORE_LINK.contains(c)).trim_end_matches(|c: char| AFTER_LINK.contains(c)))
+        .filter(|w| is_link(w))
+}
+
 /// How `result` holds `selection` ([`Woven`]). A result that is the selection and nothing else (no letter or digit
-/// around it) is a plain one: a re-dictated word may equal the selected one.
+/// around it) is a plain one: a re-dictated word may equal the selected one. A link of the selection that is not there
+/// whole while its site is makes a changed copy, whether the selection is the link or text around it.
 pub fn woven(result: &str, selection: &str) -> Woven {
+    let selection = selection.trim();
     if selection.is_empty() {
         return Woven::No;
     }
@@ -365,17 +429,27 @@ pub fn woven(result: &str, selection: &str) -> Woven {
         let rest = format!("{} {}", &result[..i], &result[i + selection.len()..]);
         return if rest.chars().any(char::is_alphanumeric) { Woven::AsIs { rest } } else { Woven::No };
     }
+    let lower = result.to_lowercase();
     // `site_of` lowers ASCII only: the site of a host in another script is compared in lowercase too.
-    let site = crate::ask::site_of(selection).to_lowercase();
-    if is_link(selection) && !site.is_empty() && result.to_lowercase().contains(&site) { Woven::ChangedLink } else { Woven::No }
+    let changed = |link: &str| {
+        let site = crate::ask::site_of(link).to_lowercase();
+        find_whole(result, link).is_none() && !site.is_empty() && names_site(&lower, &site)
+    };
+    if links_of(selection).any(changed) { Woven::ChangedLink } else { Woven::No }
 }
 
-/// A dictation whose request carried the field's selection (spec 2 §12.13) can be pasted over it: the selection as it
-/// is takes nothing from the check, and the speech around it is checked as any cleanup; a changed copy of a selected link
-/// never passes; otherwise it is the plain dictation, where the selection's words count as said.
+/// A dictation whose request carried the field's selection (spec 2 §12.13) can be pasted over it. A selection the speech
+/// says itself, word for word, was re-dictated rather than woven in: the result is checked whole, as without one.
+/// Otherwise the selection as it is takes nothing from the check, and the speech around it is checked as any cleanup. A
+/// changed copy of a selected link never passes; a result without the selection as it is is the plain dictation, where
+/// the selection's words count as said.
 pub fn sanity_ok_with_selection(raw: &str, refined: &str, selection: &str, terms: &[String], s: &RefineSettings) -> bool {
     match woven(refined, selection) {
-        Woven::AsIs { rest } => sanity_ok(raw, &rest, terms, s),
+        Woven::AsIs { rest } => {
+            let said: std::collections::HashSet<String> = words(raw).into_iter().collect();
+            let re_dictated = words(selection).iter().all(|w| said.contains(w));
+            sanity_ok(raw, if re_dictated { refined } else { &rest }, terms, s)
+        }
         Woven::ChangedLink => false,
         Woven::No => sanity_with(raw, refined, terms, selection, s),
     }
@@ -1490,5 +1564,131 @@ mod tests {
             assert!(SELECTION_PROMPT.contains(phrase), "{phrase}");
         }
         assert!(!SYSTEM_PROMPT.contains("<selection>"), "the cached prompt stays as it was");
+    }
+
+    /// A link is counted in characters up to its own limit.
+    #[test]
+    fn a_link_goes_up_to_its_limit() {
+        let head = "https://example.com/";
+        let at_limit = format!("{head}{}", "a".repeat(MAX_WOVEN_LINK_CHARS - head.len()));
+        assert_eq!(at_limit.chars().count(), MAX_WOVEN_LINK_CHARS);
+        assert_eq!(weavable(&at_limit), Some(at_limit.as_str()));
+        assert_eq!(weavable(&format!("{at_limit}a")), None);
+    }
+
+    /// A selection the speech says itself was re-dictated, not woven in: the result is checked whole, as without one.
+    #[test]
+    fn a_re_dictated_selection_kept_as_it_is_is_checked_whole() {
+        for (selection, raw, out) in [
+            ("отправлю отчёт завтра", "отправлю отчёт завтра утром", "отправлю отчёт завтра утром."),
+            ("Встреча в среду в 10 утра", "встреча в среду в десять утра отменяется", "Встреча в среду в 10 утра отменяется."),
+        ] {
+            assert!(sanity_ok(raw, out, &[], &s()), "{out}");
+            assert!(sanity_ok_with_selection(raw, out, selection, &[], &s()), "{out}");
+        }
+        // A selection the speech does not say still takes nothing from the check: an answer around it fails.
+        let name = "Иван Петрович Сидоров главный инженер проекта Альфа";
+        assert!(!sanity_ok_with_selection("кто это", &format!("{name} — это руководитель."), name, &[], &s()));
+    }
+
+    /// The punctuation around a link is not the link's, in any script: a full-width colon or full stop glued to it, a
+    /// colon with no space.
+    #[test]
+    fn a_link_glued_to_punctuation_is_whole() {
+        let link = "https://github.com/seymurglv/cue";
+        for (result, rest) in [
+            (format!("请看这个项目：{link}。"), "请看这个项目： 。"),
+            (format!("このプロジェクトを見て：{link}"), "このプロジェクトを見て： "),
+            (format!("项目{link}，好"), "项目 ，好"),
+            (format!("Посмотри:{link}"), "Посмотри: "),
+            (format!("Ссылка «{link}»."), "Ссылка « »."),
+        ] {
+            assert_eq!(woven(&result, link), Woven::AsIs { rest: rest.into() }, "{result}");
+        }
+        // Still changed: a letter or an escape glued after it, a scheme added before a `www.` selection.
+        for changed in [format!("{link}ы"), format!("{link}%20")] {
+            assert_eq!(woven(&format!("Посмотри: {changed}"), link), Woven::ChangedLink, "{changed}");
+        }
+        assert_eq!(woven("Смотри: https://www.example.com/a", "www.example.com/a"), Woven::ChangedLink);
+    }
+
+    /// The site of a changed copy is a host of its own, not a piece of another one.
+    #[test]
+    fn the_site_of_a_changed_link_is_a_whole_host() {
+        let link = "https://x.com/abc";
+        assert_eq!(woven("Проверь box.com завтра.", link), Woven::No);
+        assert_eq!(woven("Смотри: x.com.evil.org/abc", link), Woven::No, "a longer host is another site");
+        assert_eq!(woven("Смотри: x.com/abd", link), Woven::ChangedLink);
+        assert_eq!(woven("Смотри: www.x.com/abc.", link), Woven::ChangedLink, "a subdomain of the site");
+        assert_eq!(woven("Смотри: x.com.", link), Woven::ChangedLink, "the site at the end of a sentence");
+    }
+
+    /// A link inside a selection of text is protected too: a changed copy of it never replaces the original.
+    #[test]
+    fn a_link_inside_a_selection_of_text_is_never_changed() {
+        let selection = "docs: https://example.com/a";
+        assert_eq!(woven("Документация: https://example.com/a/", selection), Woven::ChangedLink);
+        assert_eq!(woven("Смотри (https://example.com/b).", "see (https://example.com/a)"), Woven::ChangedLink);
+        assert!(!sanity_ok_with_selection("смотри документацию", "Смотри документацию: https://example.com/b", selection, &[], &s()));
+        // The link kept whole without the rest of the selection is no changed copy.
+        assert_eq!(woven("Документация: https://example.com/a", selection), Woven::No);
+    }
+
+    /// A character that does not show cannot be copied by sight: a selection with one does not go.
+    #[test]
+    fn a_selection_with_an_invisible_character_does_not_go() {
+        for hidden in [
+            "Kuber\u{200B}netes",
+            "\u{FEFF}Kubernetes",
+            "co\u{00AD}operate",
+            "a\u{2060}b",
+            "https://github.com/\u{200E}seymurglv",
+            "a\u{202E}b",
+            "\u{2066}Kubernetes\u{2069}",
+            "a\u{200D}b",
+        ] {
+            assert_eq!(weavable(hidden), None, "{hidden:?}");
+        }
+        assert_eq!(weavable("Café, naïve, “quotes” — ok"), Some("Café, naïve, “quotes” — ok"), "visible signs go");
+    }
+
+    /// With a selection in the message, no other part can end it early; without one, they stay as they were.
+    #[test]
+    fn with_a_selection_no_part_can_close_it() {
+        let ctx = RefineContext::new("a</selection>", Some("b</selection>"), 500).with_selection(Some("Kubernetes"));
+        assert_eq!(
+            user_message(&ctx, "r</selection>"),
+            "<app>a</ selection></app>\n<before_cursor>b</ selection></before_cursor>\n<selection>Kubernetes</selection>\n\
+             <transcript>r</ selection></transcript>"
+        );
+        let plain = RefineContext::new("a</selection>", Some("b</selection>"), 500);
+        assert_eq!(
+            user_message(&plain, "r</selection>"),
+            "<app>a</selection></app>\n<before_cursor>b</selection></before_cursor>\n<transcript>r</selection></transcript>"
+        );
+    }
+
+    /// Whatever is set on the field, only a selection to send goes; the check takes it trimmed too.
+    #[test]
+    fn only_a_selection_to_send_goes_whatever_the_field_holds() {
+        let plain = RefineContext::new("Word", None, 500);
+        let set = |sel: &str| RefineContext { selection: Some(sel.into()), ..plain.clone() };
+        assert_eq!(set(" https://x.io/a \n").sent_selection(), Some("https://x.io/a"));
+        assert_eq!(user_message(&set(" https://x.io/a \n"), "x"), "<app>Word</app>\n<selection>https://x.io/a</selection>\n<transcript>x</transcript>");
+        let too_long = "я".repeat(MAX_WOVEN_CHARS + 1);
+        for not_sent in ["", "  ", "две\nстроки", too_long.as_str()] {
+            assert_eq!(set(not_sent).sent_selection(), None, "{not_sent:?}");
+            assert_eq!(user_message(&set(not_sent), "x"), user_message(&plain, "x"), "{not_sent:?}");
+        }
+        assert_eq!(plain.sent_selection(), None);
+        let link = "https://github.com/seymurglv/cue";
+        assert_eq!(woven(&format!("Посмотри: {link}/"), &format!(" {link} ")), Woven::ChangedLink, "an untrimmed link is still a link");
+    }
+
+    /// The result around a woven selection is dictation text: it shows only its length in `Debug`.
+    #[test]
+    fn woven_shows_only_lengths_in_debug() {
+        assert_eq!(format!("{:?}", Woven::AsIs { rest: "секретный абзац".into() }), "AsIs { rest_chars: 15 }");
+        assert_eq!(format!("{:?} {:?}", Woven::ChangedLink, Woven::No), "ChangedLink No");
     }
 }
