@@ -7,6 +7,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use crate::focus::WindowRef;
 
+/// The clipboard's Unicode text format.
+const CF_UNICODETEXT: u32 = 13;
+
 /// Clipboard contents: (format, bytes) pairs in the order they are put back.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Snapshot {
@@ -288,7 +291,7 @@ pub fn copy_selection(
         // Only the app's own write is its answer to Ctrl+C: the user's clipboard never becomes "the selection".
         match clip.take_back(target.process, &snap) {
             TakeBack::Busy => {}
-            TakeBack::Done { text, restored } => return caught(text, restored, since),
+            TakeBack::Done { text, restored } => return caught(text, restored, since, &snap),
             TakeBack::Other => {
                 tracing::info!("ask: the clipboard changed after Ctrl+C, but not by the app it went to; left alone");
                 return nothing(since);
@@ -376,7 +379,7 @@ pub fn guard_late_copy<R>(
                     Act::Leave
                 }
                 TakeBack::Done { text, restored } => {
-                    let copy = caught(text, restored, late.since);
+                    let copy = caught(text, restored, late.since, &late.snap);
                     let then = on_caught(&copy);
                     Act::Done((copy, then))
                 }
@@ -398,8 +401,11 @@ fn input_since(keys: &impl CopyKeys, mark: Option<u32>) -> bool {
     mark.is_none() || keys.last_input() != mark
 }
 
-/// The app's copy as taken: its text unless blank; a failed restore logged, without text.
-fn caught(text: Option<String>, restored: Result<(), String>, since: SystemTime) -> SelectionCopy {
+/// The app's copy as taken: its text, unless blank or the very text the user had in the clipboard before Ctrl+C
+/// (`saved`): a clipboard listener re-rendering the user's own clipboard moves the number with the owner unchanged, and
+/// that must never become "the selection". A selection of exactly that text is lost as context, accepted. A failed
+/// restore is logged, without text.
+fn caught(text: Option<String>, restored: Result<(), String>, since: SystemTime, saved: &Snapshot) -> SelectionCopy {
     let restore_failed = match restored {
         Ok(()) => false,
         Err(e) => {
@@ -407,7 +413,17 @@ fn caught(text: Option<String>, restored: Result<(), String>, since: SystemTime)
             true
         }
     };
-    SelectionCopy { text: text.filter(|t| !t.trim().is_empty()), since, restore_failed }
+    let before = saved_text(saved);
+    let text = text.filter(|t| !t.trim().is_empty() && Some(t) != before.as_ref());
+    SelectionCopy { text, since, restore_failed }
+}
+
+/// The text of a saved clipboard (`CF_UNICODETEXT`, UTF-16 up to its null); `None` — there was none.
+fn saved_text(snap: &Snapshot) -> Option<String> {
+    let (_, bytes) = snap.items.iter().find(|(fmt, _)| *fmt == CF_UNICODETEXT)?;
+    let (pairs, _) = bytes.as_chunks::<2>();
+    let units: Vec<u16> = pairs.iter().map(|&b| u16::from_le_bytes(b)).take_while(|&c| c != 0).collect();
+    Some(String::from_utf16_lossy(&units))
 }
 
 /// What became of the copied selection in the Windows clipboard history (decision 27).
@@ -465,13 +481,14 @@ mod win {
         WINDOW_STYLE,
     };
 
-    use super::{ClipboardApi, HistoryForget, KeysApi, LateCopy, Operations, Snapshot, TakeBack, WindowRef};
+    use super::{
+        CF_UNICODETEXT, ClipboardApi, HistoryForget, KeysApi, LateCopy, Operations, Snapshot, TakeBack, WindowRef,
+    };
 
     /// CUE's clipboard operations in this process: every `WinClipboard` counts here, the late-copy guard's own too.
     static OPERATIONS: Operations = Operations::new();
 
     const CF_DIB: u32 = 8;
-    const CF_UNICODETEXT: u32 = 13;
     const CF_HDROP: u32 = 15;
 
     /// The Windows clipboard. Keeps no window between operations: an owner window is created for each operation (`Owner`).
@@ -1609,6 +1626,24 @@ mod copy_tests {
         let (_, watched, w) = copy_and_watch(World { render_at: Some(41), ..late_app() });
         assert_eq!(watched.and_then(|c| c.text).as_deref(), Some("поздно"));
         assert_eq!(w.restored, Some(user_clip()));
+    }
+
+    /// The number moved with the target still the owner, but the text is the one the user had before Ctrl+C: a listener
+    /// re-rendering the user's own clipboard, not a copy. Never the selection — on the main path or a late one.
+    #[test]
+    fn the_users_own_text_moved_again_is_never_the_selection() {
+        let own = World { content: user_clip(), text: Some("A".into()), owner: Some(APP), ..World::default() };
+        let (got, late, w) = copy(World { render_at: Some(3), ..own });
+        assert_eq!((got.text, late, got.restore_failed), (None, false, false));
+        assert_eq!(w.restored, Some(user_clip()), "the user's clipboard stays as it was");
+
+        let own = World { content: user_clip(), text: Some("A".into()), owner: Some(APP), ..World::default() };
+        let (got, watched, _) = copy_and_watch(World { render_at: Some(30), ..own });
+        assert_eq!(got.text, None);
+        assert_eq!(watched.map(|c| c.text), Some(None), "a late move of the same text is no copy either");
+
+        assert_eq!(saved_text(&user_clip()).as_deref(), Some("A"), "the saved text, up to its null");
+        assert_eq!(saved_text(&Snapshot::default()), None);
     }
 
     /// Another app holds the clipboard open when the app's copy is to be read: tried again; held for good, the copy is
