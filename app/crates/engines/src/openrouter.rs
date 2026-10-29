@@ -620,7 +620,7 @@ mod tests {
     const KEY: &str = "sk-or-v1-TEST-0123456789";
 
     fn ctx() -> RefineContext {
-        RefineContext { app: "Telegram Desktop".into(), before_cursor: None }
+        RefineContext { app: "Telegram Desktop".into(), before_cursor: None, selection: None }
     }
 
     // ---- SSE ----

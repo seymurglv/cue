@@ -292,6 +292,17 @@ pub fn translation_ok(raw: &str, out: &str, terms: &[String], to: &str) -> bool 
     }
 }
 
+/// A translation whose request carried the field's selection (spec 2 §12.13): the selection stays as it is, so only the
+/// speech around it has to show the translation; a changed copy of a selected link never passes (it would replace the
+/// original); without the selection as it is, the plain translation check.
+pub fn translation_ok_with_selection(raw: &str, out: &str, selection: &str, terms: &[String], to: &str) -> bool {
+    match crate::refine::woven(out, selection) {
+        crate::refine::Woven::AsIs { rest } => translation_ok(raw, &rest, terms, to),
+        crate::refine::Woven::ChangedLink => false,
+        crate::refine::Woven::No => translation_ok(raw, out, terms, to),
+    }
+}
+
 /// The result is written in the `target` script. Only words that can show a translation count: never the words of the
 /// dictionary, in any script (the model writes them as listed); never a word in the target script that the speech
 /// already has (names, product names and code kept as said: "запусти npm install" → "Run npm install." counts only
@@ -607,5 +618,18 @@ mod tests {
     fn translation_gets_a_second_more_than_a_cleanup() {
         assert_eq!(timeout_ms("a b"), 4_000);
         assert_eq!(timeout_ms("a b"), crate::refine::timeout_ms("a b") + 1_000);
+    }
+
+    #[test]
+    fn a_woven_translation_is_checked_without_its_selection() {
+        let link = "https://github.com/seymurglv/cue";
+        let raw = "посмотри на этот проект";
+        assert!(translation_ok_with_selection(raw, &format!("Take a look at this project: {link}"), link, &[], "en"));
+        assert!(!translation_ok_with_selection(raw, &format!("Take a look at this project: {link}/"), link, &[], "en"), "a changed link");
+        assert!(!translation_ok_with_selection(raw, &format!("Посмотри на этот проект: {link}"), link, &[], "en"), "not translated");
+        // A name kept as it is in another script: only the speech around it shows the translation.
+        assert!(translation_ok_with_selection("оплати через этот банк", "Pay through this bank, Сбербанк.", "Сбербанк", &[], "en"));
+        // A replaced word whose translation is the selected word itself is a plain translation.
+        assert!(translation_ok_with_selection("привет", "Hello.", "Hello", &[], "en"));
     }
 }
