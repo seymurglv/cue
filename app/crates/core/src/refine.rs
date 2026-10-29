@@ -430,17 +430,30 @@ fn link_word(word: &str) -> &str {
     w
 }
 
+/// Signs of the sentence that a drag may catch at the end of a selected link; a copy may leave them out. Never a closing
+/// bracket or quote: those may be the link's own.
+const CAUGHT_AFTER_LINK: &[char] = &['.', ',', ';', ':', '!', '?', '…'];
+
 /// How `result` holds `selection` ([`Woven`]). A result that is the selection and nothing else (no letter or digit
-/// around it) is a plain one: a re-dictated word may equal the selected one. A link of the selection that is not there
-/// whole while its site is makes a changed copy, whether the selection is the link or text around it.
+/// around it) is a plain one: a re-dictated word may equal the selected one. A selected link that caught the sentence's
+/// signs after it ([`CAUGHT_AFTER_LINK`]) is held by a copy without them too: in the middle of a sentence the copy leaves
+/// them out. A link of the selection that is not there whole while its site is makes a changed copy, whether the
+/// selection is the link or text around it.
 pub fn woven(result: &str, selection: &str) -> Woven {
     let selection = selection.trim();
     if selection.is_empty() {
         return Woven::No;
     }
-    if let Some(i) = find_whole(result, selection) {
-        let rest = format!("{} {}", &result[..i], &result[i + selection.len()..]);
-        return if rest.chars().any(char::is_alphanumeric) { Woven::AsIs { rest } } else { Woven::No };
+    if let Some(held) = held_whole(result, selection) {
+        return held;
+    }
+    let link = selection.trim_end_matches(CAUGHT_AFTER_LINK);
+    if link.len() < selection.len()
+        && is_link(selection)
+        && is_link(link)
+        && let Some(held) = held_whole(result, link)
+    {
+        return held;
     }
     let lower = result.to_lowercase();
     // `site_of` lowers ASCII only: the site of a host in another script is compared in lowercase too.
@@ -449,6 +462,15 @@ pub fn woven(result: &str, selection: &str) -> Woven {
         find_whole(result, link).is_none() && !site.is_empty() && names_site(&lower, &site)
     };
     if links_of(selection).any(changed) { Woven::ChangedLink } else { Woven::No }
+}
+
+/// `text` held whole in `result` ([`find_whole`]): `AsIs` with the result around it, or `No` when no letter or digit is
+/// around it.
+fn held_whole(result: &str, text: &str) -> Option<Woven> {
+    find_whole(result, text).map(|i| {
+        let rest = format!("{} {}", &result[..i], &result[i + text.len()..]);
+        if rest.chars().any(char::is_alphanumeric) { Woven::AsIs { rest } } else { Woven::No }
+    })
 }
 
 /// A dictation whose request carried the field's selection (spec 2 §12.13) can be pasted over it. A selection the speech
@@ -1718,6 +1740,33 @@ mod tests {
         assert_eq!(links_of("see (https://example.com/a)").collect::<Vec<_>>(), ["https://example.com/a"]);
         assert_eq!(links_of("docs: https://example.com/a").collect::<Vec<_>>(), ["https://example.com/a"]);
         assert_eq!(links_of("see https://ms.com/a(v=vs.85), here").collect::<Vec<_>>(), ["https://ms.com/a(v=vs.85)"]);
+    }
+
+    /// A drag that selects a link may catch the sentence's sign after it; a copy in the middle of a sentence leaves the
+    /// sign out and is still the link. A closing bracket is never such a sign: it may be the link's.
+    #[test]
+    fn a_link_selected_with_the_sentences_sign_may_lose_it() {
+        let caught = "https://github.com/seymurglv/cue.";
+        let wiki = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        for (result, selection, rest) in [
+            ("Глянь https://github.com/seymurglv/cue и скажи.", caught, "Глянь   и скажи."),
+            ("Глянь https://github.com/seymurglv/cue, круто.", caught, "Глянь  , круто."),
+            ("Глянь https://x.com/faq и скажи", "https://x.com/faq?!", "Глянь   и скажи"),
+            (&format!("Почитай {wiki} сегодня"), &format!("{wiki}."), "Почитай   сегодня"),
+        ] {
+            assert_eq!(woven(result, selection), Woven::AsIs { rest: rest.into() }, "{result}");
+        }
+        let cut = &wiki[..wiki.len() - 1];
+        for (result, selection) in [
+            ("Глянь: https://github.com/seymurglv/cue/", caught),
+            ("Глянь: https://github.com/seymurglv/cue.git", caught),
+            ("Глянь: https://github.com/seymurglv/cue.git", "https://github.com/seymurglv/cue"),
+            (&format!("Почитай: {cut}"), &format!("{wiki}.")),
+            (&format!("Почитай: {cut}."), &format!("{wiki}.")),
+            (&format!("Почитай: {cut}"), wiki),
+        ] {
+            assert_eq!(woven(result, selection), Woven::ChangedLink, "{selection} in {result}");
+        }
     }
 
     /// The result around a woven selection is dictation text: it shows only its length in `Debug`.
