@@ -1,10 +1,11 @@
 //! "Ask" selection probe (spec 2 §13.2, §13.5): select text in the app to check within 5 s; prints what CUE reads of it —
 //! the kind, the length, the rectangles, read-only — and, when the field cannot say, what the Ctrl+C fallback copies (its
-//! length) and whether the copy left the Win+V history (decision 27). The text itself is never printed.
+//! length), whether the copy left the Win+V history (decision 27), and whether a late copy was caught. The text itself is
+//! never printed.
 //! Run: cargo run -p cue-platform-win --example selection_probe
 use std::time::Duration;
 
-use cue_platform_win::clipboard::{copy_selection, forget_in_history, WinClipboard, WinKeys};
+use cue_platform_win::clipboard::{copy_selection, forget_in_history, spawn_late_guard, WinClipboard, WinKeys};
 use cue_platform_win::focus::{FocusWorker, SelectionRead};
 use cue_platform_win::selection::{bounds, needs_copy_fallback};
 
@@ -22,10 +23,18 @@ fn main() {
     // The probe is not run in a terminal app: the terminal rule is the caller's.
     if needs_copy_fallback(&info.selection, info.editable, false) {
         let mut clip = WinClipboard::new().expect("clipboard");
-        let copied = copy_selection(&mut clip, &mut WinKeys);
-        println!("Ctrl+C fallback: {:?} characters", copied.as_ref().map(|t| t.chars().count()));
-        if let Some(handle) = copied.and_then(forget_in_history) {
+        let mut late_guard = None;
+        let copy = copy_selection(&mut clip, &mut WinKeys, |late| late_guard = spawn_late_guard(late));
+        println!(
+            "Ctrl+C fallback: {:?} characters, restore failed: {}",
+            copy.text.as_ref().map(|t| t.chars().count()),
+            copy.restore_failed
+        );
+        if let Some(handle) = copy.text.and_then(|text| forget_in_history(text, copy.since)) {
             println!("Win+V history: {:?}", handle.join());
+        }
+        if let Some(handle) = late_guard {
+            println!("late copy (watched for 2 s): {:?}", handle.join());
         }
     }
 }

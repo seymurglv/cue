@@ -5,6 +5,8 @@
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
+use cue_core::ask::join_head_tail;
+
 use crate::placement::PxRect;
 
 pub const UIA_EDIT: i32 = 50004;
@@ -47,9 +49,10 @@ pub enum SelectionRead {
     /// The selected text, already limited (`cue_core::ask::MAX_SELECTION_CHARS`, start and end); its rectangles on
     /// screen in physical px when the app gives them (none from a classic field); whether the text there can be changed.
     Text { text: String, rects: Vec<PxRect>, read_only: bool },
-    /// A password field: never read.
+    /// A password field, or one that would not say whether it is one: never read, never copied.
     Password,
-    /// The field has no way to report a selection (no text pattern, not a classic field): there may be one.
+    /// The field has no way to report a selection (no text pattern, not a classic field), and it is not a password: there
+    /// may be one.
     Unknown,
 }
 
@@ -175,6 +178,19 @@ fn mark_line_start(mut text: String, at_line_start: bool) -> String {
     text
 }
 
+/// How many UTF-16 units the first read of a selection asks for. Providers limit `GetText` in UTF-16 units, and a
+/// character may take two: twice `max + 1`, so a selection longer than `max` characters always comes back longer than
+/// `max` (and gets its end read too), however many of its characters are emoji.
+fn selection_head_units(max: usize) -> i32 {
+    i32::try_from(max).unwrap_or(i32::MAX).saturating_mul(2).saturating_add(2)
+}
+
+/// The selection's text from its first read (`head`, up to `selection_head_units(max)`): all of it when it has no more than
+/// `max` characters, otherwise its start and its end around `ELISION` — the end read by `tail(n)`, up to `n` characters.
+fn selection_text(head: String, max: usize, tail: impl FnOnce(usize) -> Option<String>) -> String {
+    if head.chars().count() <= max { head } else { join_head_tail(&head, &tail(max / 2).unwrap_or_default(), max) }
+}
+
 /// The moment after which nobody waits for the answer to the request any more; `None` — no deadline.
 #[derive(Clone, Copy, Debug)]
 struct Deadline(Option<Instant>);
@@ -272,12 +288,14 @@ mod win {
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
     };
     use windows::Win32::System::Ole::{
-        SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayUnaccessData,
+        SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetElemsize, SafeArrayGetLBound, SafeArrayGetUBound,
+        SafeArrayGetVartype, SafeArrayUnaccessData,
     };
     use windows::Win32::System::Threading::{
         GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
+    use windows::Win32::System::Variant::VT_R8;
     use windows::Win32::UI::Accessibility::{
         CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationTextPattern,
         IUIAutomationTextRange, IUIAutomationValuePattern, TextPatternRangeEndpoint_End, TextPatternRangeEndpoint_Start,
@@ -289,11 +307,11 @@ mod win {
         SMTO_ABORTIFHUNG, WM_GETTEXT,
     };
 
-    use cue_core::ask::{clip_selection, join_head_tail};
+    use cue_core::ask::clip_selection;
 
     use super::{
-        classify, context_tail, file_and_stem, line_break_may_be_missing, mark_line_start, unknown, Deadline, FocusFacts,
-        FocusInfo, SelectionRead,
+        classify, context_tail, file_and_stem, line_break_may_be_missing, mark_line_start, selection_head_units,
+        selection_text, unknown, Deadline, FocusFacts, FocusInfo, SelectionRead,
     };
     use crate::placement::PxRect;
     use crate::selection::px_rect;
@@ -479,7 +497,9 @@ mod win {
             }
             let password = el.CurrentIsPassword().map(|b| b.as_bool());
             info.is_password = matches!(password, Ok(true));
-            if selection_chars.is_some() && info.is_password {
+            // A field that would not say whether it is a password is taken for one: no Ctrl+C there, whatever the app does
+            // with a copy from a password field.
+            if selection_chars.is_some() && !matches!(password, Ok(false)) {
                 info.selection = SelectionRead::Password;
             }
             let readable = matches!(password, Ok(false)) && context_chars > 0;
@@ -584,17 +604,12 @@ mod win {
                 return SelectionRead::Empty;
             }
             let Ok(range) = ranges.GetElement(0) else { return SelectionRead::Unknown };
-            let max32 = i32::try_from(max).unwrap_or(i32::MAX);
-            let Ok(head) = range.GetText(max32.saturating_add(1)) else { return SelectionRead::Unknown };
+            let Ok(head) = range.GetText(selection_head_units(max)) else { return SelectionRead::Unknown };
             let head = head.to_string();
             if head.trim().is_empty() {
                 return SelectionRead::Empty;
             }
-            let text = if head.chars().count() <= max {
-                head
-            } else {
-                join_head_tail(&head, &tail_text(&range, max / 2).unwrap_or_default(), max)
-            };
+            let text = selection_text(head, max, |n| tail_text(&range, n));
             if deadline.passed() {
                 return SelectionRead::Unknown;
             }
@@ -618,7 +633,8 @@ mod win {
     /// The range's lines on screen (physical px: CUE is per-monitor DPI aware). A SAFEARRAY of doubles, four per line.
     unsafe fn bounding_rects(range: &IUIAutomationTextRange) -> Vec<PxRect> {
         // SAFETY: the array comes from UI Automation and is ours to destroy; it is read only between AccessData and
-        // UnaccessData, no further than its bounds (an empty array may have no data at all: then it is not read).
+        // UnaccessData, no further than its bounds (an empty array may have no data at all: then it is not read), and only
+        // when its elements are 8 bytes — doubles by check, not only by UI Automation's contract.
         unsafe {
             let Ok(array) = range.GetBoundingRectangles() else { return Vec::new() };
             if array.is_null() {
@@ -626,7 +642,10 @@ mod win {
             }
             let mut out = Vec::new();
             let mut data: *mut std::ffi::c_void = std::ptr::null_mut();
-            if let (Ok(lo), Ok(hi)) = (SafeArrayGetLBound(array, 1), SafeArrayGetUBound(array, 1))
+            // An array that does not record its type is taken by its element size alone.
+            let doubles = SafeArrayGetElemsize(array) == 8 && SafeArrayGetVartype(array).map_or(true, |vt| vt == VT_R8);
+            if doubles
+                && let (Ok(lo), Ok(hi)) = (SafeArrayGetLBound(array, 1), SafeArrayGetUBound(array, 1))
                 && SafeArrayAccessData(array, &mut data).is_ok()
             {
                 let n = usize::try_from(hi - lo + 1).unwrap_or(0);
@@ -1119,5 +1138,23 @@ mod tests {
         assert!(shown.contains("chars: 15") && shown.contains("rects: 1") && shown.contains("read_only: true"), "{shown}");
         let info = FocusInfo { selection: read, ..notepad() };
         assert!(!format!("{info:?}").contains("секрет"));
+    }
+
+    /// UI Automation providers (Chromium, WPF, RichEdit) limit `GetText` in UTF-16 units, not characters: one emoji in a
+    /// long selection must not make its first read look like all of it.
+    #[test]
+    fn a_long_selection_with_emoji_keeps_its_start_and_end() {
+        use cue_core::ask::{clip_selection, ELISION};
+        let units = |s: &str, n: usize| String::from_utf16_lossy(&s.encode_utf16().take(n).collect::<Vec<_>>());
+        let selection = format!("😀{}конец", "а".repeat(9_000));
+        let tail = |n: usize| Some(selection.chars().skip(selection.chars().count() - n).collect::<String>());
+        let max = 8_000;
+        let head = units(&selection, usize::try_from(selection_head_units(max)).unwrap());
+        let text = selection_text(head, max, tail);
+        assert!(text.starts_with('😀') && text.contains(ELISION) && text.ends_with("конец"), "{} chars", text.chars().count());
+        assert_eq!(text, clip_selection(&selection, max), "as if the whole selection had been read");
+        let short = format!("😀{}", "б".repeat(10));
+        assert_eq!(selection_text(units(&short, usize::try_from(selection_head_units(max)).unwrap()), max, |_| None), short);
+        assert!(selection_head_units(usize::MAX) > 0, "no overflow");
     }
 }
