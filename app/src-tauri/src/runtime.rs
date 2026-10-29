@@ -19,6 +19,9 @@
 //! - the last-dictation files (`last\`) change only on success (`files`); the last text is also kept in memory;
 //! - a refine cache warm-up (`warm_cache`) is paid for and gets a usage.csv row of its own (`warmup`);
 //! - the log gets events, per-stage latencies and error codes; no text, no audio, no keys.
+// Wired into the runtime by the next change.
+#[cfg_attr(not(test), expect(dead_code))]
+mod ask;
 mod attempt;
 mod files;
 mod insert;
@@ -668,7 +671,7 @@ impl Runtime {
             cache_read = usage.cache_read_input_tokens,
             "refine cache warmed"
         );
-        let rec = warmup_record(usage, utc_now(), &self.settings);
+        let rec = warmup_record(usage, utc_now(), &self.settings, &self.settings.refine.model);
         self.append_usage(rec);
     }
 

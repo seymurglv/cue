@@ -13,6 +13,8 @@
 //! An attempt without a stream (no Soniox key, the stream never connected) still bills the audio at the stream price:
 //! an overestimate in a rare failure, accepted.
 //! A refine cache warm-up is not an attempt but has a row of its own (`warmup_record`).
+//! An "Ask" attempt adds its request's tokens and searches; its latency runs to the first words (an answer) or to Ctrl+V
+//! (a write); a follow-up is an attempt of its own.
 //! No text here: only numbers, the path, the mode and the outcome.
 use std::collections::VecDeque;
 
@@ -20,6 +22,7 @@ use cue_core::flow::{DictationId, Outcome, RefineOutcome, STARTING_MS};
 use cue_core::settings::{Pricing, Settings};
 use cue_core::ui::Mode;
 use cue_core::usage::{self, SttPath, UsageMode, UsageRecord};
+use cue_engines::ask::AskUsage;
 use cue_engines::claude;
 use cue_engines::stt::SAMPLES_PER_MS;
 
@@ -37,6 +40,8 @@ pub struct Attempt {
     /// A retry clears it: the new transcription gives its own; a retry of the translation keeps it.
     pub speech_language: Option<String>,
     refine: claude::Usage,
+    /// The web searches of an "Ask" request (all its continuations).
+    web_searches: u32,
     pub refine_outcome: Option<RefineOutcome>,
     /// The second press (`FinishStt`) or "retry" (`TranscribeSaved`): transcription is timed from here. Core ms.
     finish_at: Option<u64>,
@@ -70,6 +75,7 @@ impl Attempt {
             mode: Mode::Dictate,
             speech_language: None,
             refine: claude::Usage::default(),
+            web_searches: 0,
             refine_outcome: None,
             finish_at: None,
             latency_from: None,
@@ -146,6 +152,39 @@ impl Attempt {
         }
     }
 
+    /// What the question has cost so far (`Step::Spent`, all its responses): an answer closed mid-stream still writes it
+    /// (spec 2 §10).
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub fn ask_spent(&mut self, usage: AskUsage) {
+        self.refine = claude::Usage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_input_tokens: usage.cache_read_tokens,
+            cache_creation_input_tokens: usage.cache_write_tokens,
+        };
+        self.web_searches = usage.web_searches;
+    }
+
+    /// The "Ask" request ended: its tokens (all continuations) and searches are this attempt's (spec 2 §10).
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub fn ask_done(&mut self, usage: AskUsage, now: u64) {
+        self.ask_spent(usage);
+        if let Some((_, end)) = self.refine_at.as_mut() {
+            *end = Some(now);
+        }
+    }
+
+    /// The first words of an answer: an answered row's latency runs from the second press to here (spec 2 §11: the first
+    /// words in 2.5 s). Only the first call counts.
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub fn first_words(&mut self, now: u64) {
+        if self.latency_ms == 0
+            && let Some(t) = self.latency_from
+        {
+            self.latency_ms = now.saturating_sub(t).max(1);
+        }
+    }
+
     pub fn insert_started(&mut self, now: u64) {
         self.insert_at = Some((now, None));
     }
@@ -173,7 +212,7 @@ impl Attempt {
             audio_ms: self.audio_ms(),
             stt_engine: s.stt.engine,
             stt_path: self.stt_path,
-            refine_model: s.refine.model.clone(),
+            refine_model: if self.mode == Mode::Ask { s.ask.model().to_owned() } else { s.refine.model.clone() },
             input_tokens: self.refine.input_tokens,
             cache_read_tokens: self.refine.cache_read_input_tokens,
             cache_write_tokens: self.refine.cache_creation_input_tokens,
@@ -181,20 +220,20 @@ impl Attempt {
             latency_ms: self.latency_ms,
             outcome,
             mode: self.mode.into(),
-            web_searches: 0,
+            web_searches: self.web_searches,
         }
     }
 }
 
-/// The usage.csv row of a refine cache warm-up: the tokens are paid for, but there is no audio, no paste and no
-/// dictation (`discarded`).
-pub fn warmup_record(usage: claude::Usage, ts: String, s: &Settings) -> UsageRecord {
+/// The usage.csv row of a cache warm-up: the tokens are paid for, but there is no audio, no paste and no dictation
+/// (`discarded`); it is priced with the model it warmed (refine's, or "Ask"'s).
+pub fn warmup_record(usage: claude::Usage, ts: String, s: &Settings, model: &str) -> UsageRecord {
     UsageRecord {
         ts,
         audio_ms: 0,
         stt_engine: s.stt.engine,
         stt_path: SttPath::Stream,
-        refine_model: s.refine.model.clone(),
+        refine_model: model.to_owned(),
         input_tokens: usage.input_tokens,
         cache_read_tokens: usage.cache_read_input_tokens,
         cache_write_tokens: usage.cache_creation_input_tokens,
@@ -427,12 +466,71 @@ mod tests {
     #[test]
     fn warm_up_row_has_tokens_and_nothing_else() {
         let s = Settings::default();
-        let r = warmup_record(usage(12, 1), "2026-11-01T10:00:00Z".into(), &s);
+        let r = warmup_record(usage(12, 1), "2026-11-01T10:00:00Z".into(), &s, &s.refine.model);
         assert_eq!(r.ts, "2026-11-01T10:00:00Z");
         assert_eq!((r.mode, r.outcome, r.web_searches), (UsageMode::Warmup, Outcome::Discarded, 0));
         assert_eq!((r.audio_ms, r.latency_ms), (0, 0));
         assert_eq!(r.refine_model, s.refine.model);
         assert_eq!((r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens), (12, 1, 7, 3));
+    }
+
+    #[test]
+    fn a_warm_up_row_names_the_model_it_warmed() {
+        let s = Settings::default();
+        let r = warmup_record(usage(5, 0), "t".into(), &s, "claude-sonnet-5-5");
+        assert_eq!((r.refine_model.as_str(), r.mode), ("claude-sonnet-5-5", UsageMode::Warmup));
+    }
+
+    #[test]
+    fn an_answered_question_is_a_row_of_its_own_with_its_searches() {
+        let s = Settings::default();
+        let mut a = Attempt::new(DictationId(5));
+        a.mode = Mode::Ask;
+        for _ in 0..50 {
+            a.add_audio(320);
+        }
+        a.finish_stt(10_000);
+        a.refine_started(10_400);
+        a.first_words(11_900);
+        a.first_words(12_500);
+        a.ask_done(AskUsage { input_tokens: 300, output_tokens: 80, cache_read_tokens: 1_300, cache_write_tokens: 0, web_searches: 2 }, 13_000);
+        let r = a.record(Outcome::Answered, "2026-10-28T10:00:00Z".into(), &s);
+        assert_eq!(r.refine_model, s.ask.model());
+        assert_eq!((r.input_tokens, r.output_tokens, r.cache_read_tokens, r.web_searches), (300, 80, 1_300, 2));
+        assert_eq!(r.latency_ms, 1_900, "the second press to the first words");
+        assert_eq!(r.mode, UsageMode::Ask);
+        assert_eq!(a.stages().refine, Some(2_600));
+    }
+
+    /// Spec 2 §10: an answer closed mid-stream still writes what it spent (`Step::Spent`).
+    #[test]
+    fn an_aborted_question_still_counts_what_it_spent() {
+        let s = Settings::default();
+        let mut a = Attempt::new(DictationId(6));
+        a.mode = Mode::Ask;
+        a.ask_spent(AskUsage { input_tokens: 200, output_tokens: 10, cache_read_tokens: 0, cache_write_tokens: 0, web_searches: 1 });
+        let r = a.record(Outcome::Cancelled, "t".into(), &s);
+        assert_eq!((r.input_tokens, r.output_tokens, r.web_searches), (200, 10, 1));
+    }
+
+    #[test]
+    fn a_dictation_row_keeps_the_refine_model_and_no_searches() {
+        let mut s = Settings::default();
+        s.ask.model = Some("claude-sonnet-5-5".into());
+        let r = Attempt::new(DictationId(1)).record(Outcome::Inserted, "t".into(), &s);
+        assert_eq!((r.refine_model.as_str(), r.web_searches), ("claude-haiku-5-5", 0));
+    }
+
+    /// "Retry" of a failed question (`AskAgain`) is a new attempt: the failed one's searches are its own row's.
+    #[test]
+    fn a_retry_counts_its_own_searches() {
+        let s = Settings::default();
+        let mut a = Attempt::new(DictationId(8));
+        a.mode = Mode::Ask;
+        a.ask_spent(AskUsage { input_tokens: 90, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, web_searches: 2 });
+        a.retry_text(4_000);
+        let r = a.record(Outcome::Answered, "t".into(), &s);
+        assert_eq!((r.input_tokens, r.web_searches, r.mode), (0, 0, UsageMode::Ask));
     }
 
     #[test]

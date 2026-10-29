@@ -1,10 +1,11 @@
-//! Core tasks (transcription, refine) report a result whatever happens: a panic inside a task must not leave
+//! Core tasks (transcription, refine, "Ask") report a result whatever happens: a panic inside a task must not leave
 //! the dictation in "Thinking" forever and lose the recording.
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 
 use cue_core::flow::RefineOutcome;
 use cue_engines::EngineError;
+use cue_engines::ask::{AskEnd, AskFailure, AskResult};
 use cue_engines::claude::RefineResult;
 use futures_util::FutureExt;
 
@@ -28,6 +29,12 @@ pub fn stt_panicked() -> EngineError {
 /// Refine crashed: the raw text, as with any other refine failure.
 pub fn refine_panicked(raw: String) -> RefineResult {
     RefineResult { text: raw, outcome: RefineOutcome::RawFallback, usage: Default::default() }
+}
+
+/// "Ask" crashed: for the flow this is a failure with Retry.
+#[cfg_attr(not(test), expect(dead_code))]
+pub fn ask_panicked() -> AskResult {
+    AskResult { end: AskEnd::Failed(AskFailure::Network), content: Vec::new(), usage: Default::default(), container: None }
 }
 
 #[cfg(test)]
@@ -71,5 +78,10 @@ mod tests {
         let r = refine_panicked("сырой текст".into());
         assert_eq!((r.text.as_str(), r.outcome), ("сырой текст", RefineOutcome::RawFallback));
         assert_eq!(r.usage, Default::default());
+    }
+
+    #[test]
+    fn panicked_ask_is_a_failure_with_retry() {
+        assert!(matches!(ask_panicked().end, AskEnd::Failed(f) if !f.is_key()));
     }
 }

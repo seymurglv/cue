@@ -1,5 +1,6 @@
 //! Small executor rules with no OS and no network: timer generations, whose microphone frames to accept,
-//! the insert watchdog, when to send the voice level, when to warm up the connection and the refine cache.
+//! the insert watchdog, when to send the voice level and the answer view, when to warm up the connection and the refine
+//! cache.
 use std::collections::HashMap;
 
 use cue_core::flow::{DictationId, TimerKind};
@@ -219,6 +220,74 @@ impl<H> TaskSlot<H> {
     pub fn take_for(&mut self, id: DictationId) -> Option<H> {
         self.current.take_if(|(i, _, _)| *i == id).map(|(_, _, h)| h)
     }
+
+    /// Whether the task of generation `generation` is the current one (a step of a stream that is still wanted).
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub fn running(&self, generation: u64) -> bool {
+        self.current.as_ref().is_some_and(|(_, g, _)| *g == generation)
+    }
+
+    /// Whether the task in flight belongs to dictation `id` (an answer still printing when a follow-up starts).
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub fn is_for(&self, id: DictationId) -> bool {
+        self.current.as_ref().is_some_and(|(i, _, _)| *i == id)
+    }
+}
+
+/// While the words of an answer stream, the view goes to the windows at most this often: every delta would redraw the
+/// answer up to 50 times a second (spec 2 §7 reveals words at its own pace anyway).
+#[cfg_attr(not(test), expect(dead_code))]
+pub const VIEW_EVERY_MS: u64 = 50;
+
+/// What to do with a change of the answer view.
+#[cfg_attr(not(test), expect(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewSend {
+    Now,
+    /// Send it in this many ms (one flush).
+    Later(u64),
+    /// A flush is already on its way: it will carry this change too.
+    Wait,
+}
+
+/// When the answer view goes to the windows while it streams.
+#[cfg_attr(not(test), expect(dead_code))]
+#[derive(Debug, Default)]
+pub struct ViewGate {
+    last: Option<u64>,
+    flush_armed: bool,
+}
+
+#[cfg_attr(not(test), expect(dead_code))]
+impl ViewGate {
+    /// A change at `now`.
+    pub fn change(&mut self, now: u64) -> ViewSend {
+        match self.last {
+            Some(t) if now.saturating_sub(t) < VIEW_EVERY_MS => {
+                if self.flush_armed {
+                    ViewSend::Wait
+                } else {
+                    self.flush_armed = true;
+                    ViewSend::Later(VIEW_EVERY_MS - now.saturating_sub(t))
+                }
+            }
+            _ => {
+                self.last = Some(now);
+                ViewSend::Now
+            }
+        }
+    }
+
+    /// The flush fired at `now`: the view goes out.
+    pub fn flushed(&mut self, now: u64) {
+        self.flush_armed = false;
+        self.last = Some(now);
+    }
+
+    /// The view went out at once (a new turn, the end, the opening).
+    pub fn sent(&mut self, now: u64) {
+        self.last = Some(now);
+    }
 }
 
 #[cfg(test)]
@@ -378,5 +447,30 @@ mod tests {
         };
         assert_eq!(s.take_for(two), Some(third), "cancel");
         assert!(!s.finished(third), "the result of a cancelled task is not accepted");
+    }
+
+    #[test]
+    fn the_answer_view_goes_out_at_most_every_50_ms() {
+        let mut g = ViewGate::default();
+        assert_eq!(g.change(0), ViewSend::Now);
+        assert_eq!(g.change(20), ViewSend::Later(30));
+        assert_eq!(g.change(30), ViewSend::Wait, "the armed flush carries it");
+        g.flushed(50);
+        assert_eq!(g.change(60), ViewSend::Later(40));
+        g.flushed(100);
+        assert_eq!(g.change(160), ViewSend::Now);
+        g.sent(170);
+        assert_eq!(g.change(180), ViewSend::Later(40));
+    }
+
+    #[test]
+    fn a_running_task_is_recognized_without_being_cleared() {
+        let mut slot: TaskSlot<()> = TaskSlot::default();
+        slot.start(DictationId(1), |_| ());
+        assert!(slot.running(1) && !slot.running(2));
+        assert!(slot.is_for(DictationId(1)) && !slot.is_for(DictationId(2)));
+        assert!(slot.running(1), "asking does not clear");
+        assert!(slot.finished(1));
+        assert!(!slot.running(1) && !slot.is_for(DictationId(1)));
     }
 }
