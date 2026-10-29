@@ -483,7 +483,8 @@ mod tests {
 
     #[test]
     fn an_answered_question_is_a_row_of_its_own_with_its_searches() {
-        let s = Settings::default();
+        let mut s = Settings::default();
+        s.ask.model = Some("claude-sonnet-5-5".into());
         let mut a = Attempt::new(DictationId(5));
         a.mode = Mode::Ask;
         for _ in 0..50 {
@@ -495,7 +496,7 @@ mod tests {
         a.first_words(12_500);
         a.ask_done(AskUsage { input_tokens: 300, output_tokens: 80, cache_read_tokens: 1_300, cache_write_tokens: 0, web_searches: 2 }, 13_000);
         let r = a.record(Outcome::Answered, "2026-10-28T10:00:00Z".into(), &s);
-        assert_eq!(r.refine_model, s.ask.model());
+        assert_eq!(r.refine_model, "claude-sonnet-5-5", "priced with the model that answered, not refine's");
         assert_eq!((r.input_tokens, r.output_tokens, r.cache_read_tokens, r.web_searches), (300, 80, 1_300, 2));
         assert_eq!(r.latency_ms, 1_900, "the second press to the first words");
         assert_eq!(r.mode, UsageMode::Ask);

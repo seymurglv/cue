@@ -2,8 +2,7 @@
 //! the windows draw it. The flow decides when to ask, paste and close; this module keeps what those effects need and turns
 //! the stream into the view. Nothing of the question, the answer, the selection or the sources goes to the log.
 use cue_core::ask::{
-    self, AnswerAction, AnswerPlace, AnswerView, AskContext, Segment, SelectionKind, Sources, ThinkStep, TurnState, TurnView,
-    WriteTarget,
+    self, AnswerPlace, AnswerView, AskContext, Segment, SelectionKind, Sources, ThinkStep, TurnState, TurnView, WriteTarget,
 };
 use cue_core::flow::{AskError, DictationId, PasteHow};
 use cue_engines::ask::{AskEnd, AskResult, Step, assistant_turn, user_turn};
@@ -17,7 +16,7 @@ pub struct Taken {
     pub ctx: AskContext,
     pub sel: SelectionKind,
     /// The selection's lines on screen, physical px: where the card points (none — the tray).
-    #[allow(dead_code)] // read where the card is placed (Task 7)
+    #[allow(dead_code)] // not read until the card placement uses it
     pub rects: Vec<PxRect>,
     pub terminal: bool,
 }
@@ -124,9 +123,7 @@ impl Conversation {
         self.write = None;
         self.wrote = false;
         // A refused turn took the buttons away; a new question brings them back.
-        if self.opened {
-            self.view.actions = self.actions();
-        }
+        self.buttons();
     }
 
     /// The question in flight (or the last one asked).
@@ -144,6 +141,7 @@ impl Conversation {
         {
             self.pending = Some(first_turn(&question, &self.taken.ctx));
         }
+        self.buttons();
     }
 
     /// Retry after a failure: the same question again, its turn starts over.
@@ -167,6 +165,8 @@ impl Conversation {
             self.view.turns.push(turn);
             self.pending = Some(message);
         }
+        // The turn that is the last again keeps its own buttons: none under a refusal.
+        self.buttons();
     }
 
     /// The messages of the request: the answered ones, then the question in flight.
@@ -174,12 +174,19 @@ impl Conversation {
         self.messages.iter().cloned().chain(self.pending.clone()).collect()
     }
 
-    fn actions(&self) -> Vec<AnswerAction> {
-        ask::answer_actions(self.taken.sel, self.taken.terminal)
+    /// The buttons of the open answer, for its last turn: none under a refusal (nothing to paste, spec 2 §8), the
+    /// selection's otherwise (spec 2 §7). Every change of the last turn or of the selection sets them again here; before
+    /// the answer opens there are none.
+    fn buttons(&mut self) {
+        if !self.opened {
+            return;
+        }
+        let refused = self.view.turns.last().is_some_and(|t| t.state == TurnState::Refused);
+        self.view.actions = if refused { Vec::new() } else { ask::answer_actions(self.taken.sel, self.taken.terminal) };
     }
 
-    /// The answer opens where it is shown, with the selection's buttons (spec 2 §7). A refused turn keeps none: a refusal
-    /// that came before anything showed opens the answer after `end` (decision 18).
+    /// The answer opens where it is shown, with the buttons of its last turn. A refusal that came before anything showed
+    /// opens the answer after `end` (decision 18), still without buttons.
     pub fn open(&mut self, place: AnswerPlace) {
         self.opened = true;
         self.view.place = place;
@@ -187,8 +194,7 @@ impl Conversation {
             (AnswerPlace::Card, Some(s)) => Some(ask::quote_of(s)),
             _ => None,
         };
-        let refused = self.view.turns.last().is_some_and(|t| t.state == TurnState::Refused);
-        self.view.actions = if refused { Vec::new() } else { self.actions() };
+        self.buttons();
     }
 
     /// A step of the stream, on the last turn. `true` — the answer has something to show now (a search, its sources, the
@@ -250,7 +256,8 @@ impl Conversation {
 
     /// The request ended: the last turn shows how, the exchange joins the conversation (a refusal and an empty one never
     /// do), and the flow hears what to do next (spec 2 §6.2). A failure keeps the question for Retry. `show_write` — a
-    /// follow-up is being recorded: a write is shown, not pasted (decision 12).
+    /// follow-up is under way, as the flow counts it (recording, being transcribed, held until this answer ends, or missed
+    /// with its Retry): a write is shown, not pasted under the user's hands (decision 12).
     pub fn end(&mut self, result: &AskResult, show_write: bool) -> Heard {
         self.replaced = None;
         let heard = match &result.end {
@@ -261,7 +268,7 @@ impl Conversation {
             AskEnd::Refused => {
                 // The partial words are discarded and the exchange is forgotten; nothing to paste (spec 2 §8).
                 self.finish_turn(TurnState::Refused, true);
-                self.view.actions.clear();
+                self.buttons();
                 self.pending = None;
                 return Heard::Answered;
             }
@@ -272,19 +279,19 @@ impl Conversation {
             AskEnd::Write { text, replace } => {
                 let text = ask::field_text(self.question().unwrap_or(""), text);
                 let target = if show_write { WriteTarget::Show } else { ask::write_target(*replace, self.taken.sel, self.taken.terminal) };
+                // The turn ends with the text either way: a write that is pasted closes the answer, but should it stay
+                // on screen (a follow-up under way), the turn still shows what was written.
+                if let Some(turn) = self.view.turns.last_mut() {
+                    turn.segments = vec![Segment { text: text.clone(), cites: Vec::new() }];
+                }
+                self.finish_turn(TurnState::Done, false);
                 match target {
                     WriteTarget::Paste(how) => {
                         self.write = Some(text);
                         Heard::Write(how)
                     }
                     // Shown instead of written: an answer to copy.
-                    WriteTarget::Show => {
-                        if let Some(turn) = self.view.turns.last_mut() {
-                            turn.segments = vec![Segment { text, cites: Vec::new() }];
-                        }
-                        self.finish_turn(TurnState::Done, false);
-                        Heard::Answered
-                    }
+                    WriteTarget::Show => Heard::Answered,
                 }
             }
         };
@@ -491,6 +498,17 @@ mod tests {
         e.end(&result(AskEnd::Answer, vec![]), false);
         e.ask("q2");
         assert_eq!(e.request().len(), 1, "never an assistant message with no blocks");
+
+        // A follow-up aborted after a refusal: the refused turn is the last again, and its buttons stay off.
+        let mut f = Conversation::new(taken(SelectionKind::Writable, false));
+        f.ask("q");
+        f.open(AnswerPlace::Tray);
+        f.end(&result(AskEnd::Refused, vec![]), false);
+        f.ask("а другое");
+        assert_eq!(f.view.actions, [AnswerAction::Below, AnswerAction::Replace, AnswerAction::Copy]);
+        f.abort();
+        assert_eq!((f.view.turns.len(), f.view.turns[0].state), (1, TurnState::Refused));
+        assert!(f.view.actions.is_empty(), "no paste of a refused answer");
     }
 
     #[test]
@@ -501,6 +519,11 @@ mod tests {
         assert_eq!(c.end(&write("**Пришлю** в четверг.", false), false), Heard::Write(PasteHow::Below));
         assert!(c.has_write());
         assert_eq!(c.paste_text().as_deref(), Some("Пришлю в четверг."), "markup the question did not ask for goes");
+        assert_eq!(
+            (c.view.turns[0].text(), c.view.turns[0].state),
+            ("Пришлю в четверг.".to_owned(), TurnState::Done),
+            "the turn ends with the text it wrote, should it stay on screen"
+        );
 
         // Decisions 3–4: a write about read-only text is shown in the answer, with Copy.
         let mut c = Conversation::new(taken(SelectionKind::ReadOnly, false));
@@ -533,7 +556,7 @@ mod tests {
         assert_eq!(c.paste_text().as_deref(), Some("Коротко: оба.\n- первый"));
     }
 
-    /// S-C1: the buttons follow the selection, in the tray too.
+    /// The buttons follow the selection, in the tray too.
     #[test]
     fn the_card_quotes_the_selection_and_both_places_offer_the_selections_buttons() {
         let mut c = Conversation::new(taken(SelectionKind::Writable, false));
@@ -571,7 +594,7 @@ mod tests {
         assert_eq!(next[2]["content"][0]["tool_use_id"], "toolu_1");
     }
 
-    /// Esc on a follow-up: its question and its turn go, the answer it followed is the last again (K-I2).
+    /// Esc on a follow-up: its question and its turn go, the answer it followed is the last again.
     #[test]
     fn an_aborted_follow_up_leaves_the_answer_it_follows() {
         let mut c = Conversation::new(taken(SelectionKind::None, false));
@@ -624,9 +647,16 @@ mod tests {
         assert_eq!(c.request()[0], first_turn("переведи", &ctx), "the same message the request task sends");
         c.open(AnswerPlace::Tray);
         assert_eq!(c.view.actions, [AnswerAction::Below, AnswerAction::Replace, AnswerAction::Copy], "a copied selection can be changed");
+
+        let mut o = Conversation::new(taken(SelectionKind::None, false));
+        o.ask("переведи");
+        o.open(AnswerPlace::Tray);
+        assert_eq!(o.view.actions, [AnswerAction::Insert, AnswerAction::Copy]);
+        o.copied("Спасибо");
+        assert_eq!(o.view.actions, [AnswerAction::Below, AnswerAction::Replace, AnswerAction::Copy], "the open answer's buttons follow");
     }
 
-    /// "Restore" after Esc asks with the context taken for its dictation (S-I1): the first ask used up the focus query.
+    /// "Restore" after Esc asks with the context taken for its dictation: the first ask used up the focus query.
     #[test]
     fn restore_asks_with_the_context_kept_for_its_dictation() {
         let mut kept = KeptTaken::default();

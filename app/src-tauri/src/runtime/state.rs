@@ -284,8 +284,11 @@ impl ViewGate {
         self.last = Some(now);
     }
 
-    /// The view went out at once (a new turn, the end, the opening).
+    /// The view went out at once (a new turn, the end, the opening). It carries every change so far, so a flush armed
+    /// before it no longer holds back the next change: that one arms a flush of its own. The runtime may have dropped the
+    /// armed timer (with its conversation); if it still fires, the view goes out once more, whole and harmless.
     pub fn sent(&mut self, now: u64) {
+        self.flush_armed = false;
         self.last = Some(now);
     }
 }
@@ -461,6 +464,17 @@ mod tests {
         assert_eq!(g.change(160), ViewSend::Now);
         g.sent(170);
         assert_eq!(g.change(180), ViewSend::Later(40));
+    }
+
+    /// A view sent at once carries every change so far: a flush armed before it never holds back a later change, even if
+    /// its timer was dropped (with the conversation it belonged to).
+    #[test]
+    fn a_view_sent_at_once_disarms_the_flush() {
+        let mut g = ViewGate::default();
+        assert_eq!(g.change(0), ViewSend::Now);
+        assert_eq!(g.change(10), ViewSend::Later(40));
+        g.sent(20);
+        assert_eq!(g.change(30), ViewSend::Later(40), "a flush of its own, not one that may never come");
     }
 
     #[test]
