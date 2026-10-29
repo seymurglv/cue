@@ -251,18 +251,18 @@ pub enum WriteTarget {
     Show,
 }
 
-/// Spec 2 §6.2: in a terminal a write goes to the caret whatever is selected, as the answer's buttons there are Insert
-/// and Copy: terminal text cannot be replaced, and a paste at the prompt is what dictation does (the console paste keeps
-/// it on one line). Elsewhere "replace" goes over a selection that can be changed, and "insert" below a selection (the
-/// card's "Insert below") or at the caret without one; any write about read-only text (someone else's message, a page)
-/// is shown, not written: the user copies it (decisions 3–4).
+/// Spec 2 §6.2: "replace" over a selection that can be changed; "insert" below a selection (the card's "Insert below"),
+/// at the caret without one. Any write about read-only text (someone else's message, a page) is shown, not written, in a
+/// terminal too: the user copies it (decisions 3–4). A terminal's text cannot be replaced, so a replace there is shown
+/// as well, and an insert goes to the caret (a line break there is Enter, so it never goes below).
 pub fn write_target(replace: bool, sel: SelectionKind, terminal: bool) -> WriteTarget {
     match (replace, sel) {
-        _ if terminal => WriteTarget::Paste(PasteHow::AtCaret),
         (_, SelectionKind::ReadOnly) => WriteTarget::Show,
+        (true, SelectionKind::None) => WriteTarget::Paste(PasteHow::AtCaret),
+        (true, SelectionKind::Writable) if terminal => WriteTarget::Show,
         (true, SelectionKind::Writable) => WriteTarget::Paste(PasteHow::Replace),
-        (false, SelectionKind::Writable) => WriteTarget::Paste(PasteHow::Below),
-        (_, SelectionKind::None) => WriteTarget::Paste(PasteHow::AtCaret),
+        (false, SelectionKind::Writable) if !terminal => WriteTarget::Paste(PasteHow::Below),
+        (false, _) => WriteTarget::Paste(PasteHow::AtCaret),
     }
 }
 
@@ -278,13 +278,14 @@ pub enum AnswerAction {
 
 /// The buttons follow the selection, in the tray as in the card (spec 2 §7): with a selection that can be changed, Insert
 /// below, Replace and Copy — the caret's Insert would paste over the selection, which is still active; at read-only text,
-/// Copy alone; without a selection, or in a terminal (a line break there is Enter), Insert and Copy.
+/// Copy alone, in a terminal too (decisions 3–4); otherwise in a terminal (a line break there is Enter), and without a
+/// selection, Insert and Copy.
 pub fn answer_actions(sel: SelectionKind, terminal: bool) -> Vec<AnswerAction> {
     use AnswerAction::*;
     match sel {
+        SelectionKind::ReadOnly => vec![Copy],
         _ if terminal => vec![Insert, Copy],
         SelectionKind::Writable => vec![Below, Replace, Copy],
-        SelectionKind::ReadOnly => vec![Copy],
         SelectionKind::None => vec![Insert, Copy],
     }
 }
@@ -504,13 +505,13 @@ mod tests {
             ((false, S::Writable, false), W::Paste(PasteHow::Below)),
             // New text about read-only text is shown in the answer, with Copy (decisions 3–4).
             ((false, S::ReadOnly, false), W::Show),
-            // A terminal wins over the selection: its text cannot be replaced, and the write goes to the prompt.
+            // In a terminal: its text cannot be replaced, so a replace is shown; read-only text wins there too.
             ((true, S::None, true), W::Paste(PasteHow::AtCaret)),
-            ((true, S::Writable, true), W::Paste(PasteHow::AtCaret)),
-            ((true, S::ReadOnly, true), W::Paste(PasteHow::AtCaret)),
+            ((true, S::Writable, true), W::Show),
+            ((true, S::ReadOnly, true), W::Show),
             ((false, S::None, true), W::Paste(PasteHow::AtCaret)),
             ((false, S::Writable, true), W::Paste(PasteHow::AtCaret)),
-            ((false, S::ReadOnly, true), W::Paste(PasteHow::AtCaret)),
+            ((false, S::ReadOnly, true), W::Show),
         ];
         for ((replace, sel, terminal), want) in cases {
             assert_eq!(write_target(replace, sel, terminal), want, "replace={replace} {sel:?} terminal={terminal}");
@@ -528,7 +529,7 @@ mod tests {
         assert_eq!(answer_actions(S::Writable, true), [Insert, Copy], "no Replace or Below in a terminal");
         assert_eq!(answer_actions(S::ReadOnly, false), [Copy]);
         assert_eq!(answer_actions(S::None, true), [Insert, Copy]);
-        assert_eq!(answer_actions(S::ReadOnly, true), [Insert, Copy], "a terminal wins over the selection, as in a write");
+        assert_eq!(answer_actions(S::ReadOnly, true), [Copy], "read-only text wins over a terminal, as in a write");
     }
 
     /// Spec 2 §6.2: text for the field takes the dictation's form in code, not only by the instruction.
