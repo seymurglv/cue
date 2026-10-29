@@ -97,9 +97,11 @@ impl FetchTool {
     }
 }
 
-/// The page reader the app sends, for `FETCH_MAX_USES` pages; `None` when the model takes none. The basic version, unless
-/// the first probe of page reading (`examples/fetch_probe.rs`) finds that Haiku 5.5 does not take it next to the filtered
-/// search: one page the user pointed at gains little from filtering in code, which adds code runs before the first words.
+/// The page reader the app sends, for `FETCH_MAX_USES` pages; `None` when the model takes none. The basic version: one page
+/// the user pointed at gains little from filtering in code, which adds code runs before the first words. On 2026-10-29
+/// (`examples/fetch_probe.rs`) Haiku 5.5 took both versions next to the filtered search, warm-ups included; the basic one
+/// read the selected page in one call and cited it (first words in 2.1 s), the filtered one's first read failed on its
+/// input and its answer cited nothing.
 pub fn fetch_tool() -> Option<FetchTool> {
     Some(FetchTool::Basic { max_uses: core_ask::FETCH_MAX_USES })
 }
