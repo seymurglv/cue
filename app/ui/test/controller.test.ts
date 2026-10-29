@@ -1413,6 +1413,27 @@ describe('"Ask" answer in the tray', () => {
     }
   });
 
+  it('an answer back while the last one folds (or just has) starts afresh: its words are revealed anew', () => {
+    vi.useFakeTimers();
+    try {
+      const turnOf = (question: string, text: string) => ({ question, step: null, segments: [{ text, cites: [] }], state: 'done' as const });
+      // 200 ms: the tray is still folding; 440 ms: it is hidden, but the old words are not cleared yet (450 ms).
+      for (const after of [200, 440]) {
+        ctl.answer(done({ turns: [turnOf('First?', 'one two three four five')] }));
+        for (let t = 0; t < 1_000; t += 60) ctl.frame(t);
+        ctl.answer(null);
+        vi.advanceTimersByTime(after);
+        ctl.answer(done({ turns: [turnOf('Second?', 'six seven eight')] }));
+        expect(box().querySelectorAll('.aa .w.on'), `${after} ms`).toHaveLength(0);
+        expect(box().querySelector('.aq')!.textContent).toBe('Second?');
+        ctl.answer(null);
+        vi.advanceTimersByTime(1_000);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('an answer over a full-screen app sends no rectangle for the hidden Drop', () => {
     const d = document.querySelector('.drop') as HTMLElement;
     (d as any).getBoundingClientRect = () => ({ x: 302, y: 182, width: 110, height: 36, left: 302, top: 182, right: 412, bottom: 218, toJSON() {} });

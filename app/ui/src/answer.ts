@@ -40,6 +40,10 @@ export const REVEAL_EVERY_MS = 60;
 /** "Copied" stays this long before the button says "Copy" again (the design). */
 export const COPIED_MS = 1600;
 
+/** The marks' spring, as the Drop's own (drop.js): with reduced motion stiff, so a mark takes each pose at once. */
+const SPRING = { k: 0.17, d: 0.7 };
+const STIFF = { k: 20, d: 0.05 };
+
 const COMMAND: Record<AnswerAction, AnswerCommand> = {
   insert: 'answerInsert',
   below: 'answerBelow',
@@ -97,6 +101,8 @@ export class AnswerView {
   private tick = 0;
   /** The scroll follows the end until the user scrolls up. */
   private stick = true;
+  /** Where toEnd last put the scroll: its own scroll event is not the user's. */
+  private autoTop = 0;
   private footKey = '';
   private copyGen = 0;
   /** The core takes the buttons and the cross now (see ready). */
@@ -120,6 +126,7 @@ export class AnswerView {
       this.ear = null;
       this.miss = null;
       this.footKey = '';
+      this.stick = true;
       return;
     }
     if (!this.parts) this.build(a.place);
@@ -128,6 +135,8 @@ export class AnswerView {
     this.syncListening(a.listening);
     this.syncMissed(a.missed);
     this.foot(a);
+    // A reduced-motion change reaches the marks with the next update.
+    for (const m of [this.mark, this.ear?.morph]) if (m) Object.assign(m, this.reduced() ? STIFF : SPRING);
     this.toEnd();
     this.io.resized?.();
     this.io.wake?.();
@@ -197,8 +206,13 @@ export class AnswerView {
       if (!close.disabled) this.io.act('answerClose');
     });
     const scr = this.parts.scr;
+    this.stick = true;
+    this.autoTop = 0;
     scr.addEventListener('scroll', () => {
-      this.stick = scr.scrollTop + scr.clientHeight >= scr.scrollHeight - 4;
+      // The view's own scroll to the end fires this too, maybe only once more has come in under it: only a scroll to
+      // elsewhere than where toEnd put it, the user's, lets go of the end.
+      if (scr.scrollTop + scr.clientHeight >= scr.scrollHeight - 4) this.stick = true;
+      else if (Math.abs(scr.scrollTop - this.autoTop) > 1) this.stick = false;
     });
   }
 
@@ -328,6 +342,8 @@ export class AnswerView {
         src.appendChild(chip);
       });
       it.body.appendChild(src);
+      // The sources come into view like the words before them.
+      this.toEnd();
     }
     for (const c of it.body.querySelectorAll<HTMLElement>('.cite')) {
       const n = Number(c.dataset.n);
@@ -453,6 +469,8 @@ export class AnswerView {
 
   private toEnd() {
     const scr = this.parts?.scr;
-    if (scr && this.stick) scr.scrollTop = scr.scrollHeight;
+    if (!scr || !this.stick) return;
+    scr.scrollTop = scr.scrollHeight;
+    this.autoTop = scr.scrollTop;
   }
 }

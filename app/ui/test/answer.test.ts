@@ -26,6 +26,43 @@ const revealAll = () => {
   view.frame(t);
 };
 const make = (lang = en) => new AnswerView(root, { act: (a) => acts.push(a), source: (n) => opened.push(n) }, lang, () => reduced);
+/** The answer's scroll area as a browser lays it out: 300 px of view over the content (20 px a shown word, 30 the sources,
+ *  24 a row). A browser fires "scroll" only after the frame, when more may be in: settle() stands for that. */
+const scroller = () => {
+  const scr = root.querySelector<HTMLElement>('.scr')!;
+  let top = 0;
+  let extra = 0;
+  const content = () =>
+    words().filter((w) => w.classList.contains('on')).length * 20 +
+    root.querySelectorAll('.src').length * 30 +
+    root.querySelectorAll('.lsn, .uq').length * 24 +
+    extra;
+  const max = () => Math.max(0, content() - 300);
+  Object.defineProperty(scr, 'clientHeight', { configurable: true, get: () => 300 });
+  Object.defineProperty(scr, 'scrollHeight', { configurable: true, get: () => Math.max(300, content()) });
+  Object.defineProperty(scr, 'scrollTop', {
+    configurable: true,
+    get: () => top,
+    set: (v: number) => {
+      top = Math.min(Math.max(0, v), max());
+    },
+  });
+  const settle = () => scr.dispatchEvent(new Event('scroll'));
+  return {
+    top: () => top,
+    atEnd: () => top >= max(),
+    grow: (px: number) => {
+      extra += px;
+    },
+    settle,
+    /** The user scrolls to `v`. */
+    user: (v: number) => {
+      scr.scrollTop = v;
+      settle();
+    },
+  };
+};
+const many = Array.from({ length: 40 }, (_, i) => `w${i}`).join(' ');
 
 beforeEach(() => {
   document.body.innerHTML = '<div id="in"></div>';
@@ -260,6 +297,84 @@ describe('The "Ask" answer', () => {
     expect([x.disabled, ...buttons().map((b) => b.disabled)]).toEqual([false, false]);
     buttons()[0].click();
     expect(acts).toEqual(['retry', 'answerRetry']);
+  });
+
+  it('the view follows the end: the sources come into view, then a follow-up\'s listening row; with reduced motion too', () => {
+    const a = answer({
+      sources: [{ n: 1, site: 's.io', title: 'S' }],
+      turns: [turn({ state: 'done', segments: [{ text: many, cites: [1] }] })],
+    });
+    for (const rm of [false, true]) {
+      view.update(null);
+      reduced = rm;
+      view.update(a);
+      const s = scroller();
+      let t = 10_000;
+      do {
+        view.frame(t);
+        s.settle();
+        t += REVEAL_EVERY_MS;
+      } while (view.revealing());
+      view.frame(t);
+      s.settle();
+      expect(root.querySelector('.src'), `reduced: ${rm}`).not.toBeNull();
+      expect(s.atEnd(), `sources, reduced: ${rm}`).toBe(true);
+      view.update({ ...a, listening: true });
+      s.settle();
+      expect(root.querySelector('.lsn'), `reduced: ${rm}`).not.toBeNull();
+      expect(s.atEnd(), `listening, reduced: ${rm}`).toBe(true);
+    }
+  });
+
+  it('only the user\'s scroll lets go of the end, never the view\'s own', () => {
+    const streaming = (text: string) => answer({ turns: [turn({ state: 'streaming', segments: [{ text, cites: [] }] })] });
+    view.update(streaming(many));
+    const s = scroller();
+    revealAll();
+    // The event of the view's own scroll comes once more is in: still following.
+    s.grow(50);
+    s.settle();
+    view.update(streaming(`${many} more`));
+    expect(s.atEnd()).toBe(true);
+    // The user scrolls up: the view stays there.
+    s.user(100);
+    view.update(streaming(`${many} more words`));
+    revealAll();
+    expect(s.top()).toBe(100);
+    // Back at the end: following again.
+    s.user(1e6);
+    view.update(streaming(`${many} more words still`));
+    revealAll();
+    expect(s.atEnd()).toBe(true);
+  });
+
+  it('a new answer follows the end again, however the last one was scrolled', () => {
+    view.update(answer({ turns: [done(many)] }));
+    let s = scroller();
+    revealAll();
+    s.user(0);
+    view.update(null);
+    view.update(answer({ turns: [done(many)] }));
+    s = scroller();
+    revealAll();
+    expect(s.atEnd()).toBe(true);
+  });
+
+  it('with reduced motion the marks take their pose at once, like the Drop\'s', () => {
+    const cursorX = () => Number(root.querySelector('.am .m-l')!.getAttribute('x1'));
+    view.update(answer({ turns: [done('x')] }));
+    view.frame(0);
+    expect(cursorX(), 'the soft spring is still on its way from the asterisk').not.toBe(11);
+    view.update(null);
+    reduced = true;
+    view.update(answer({ turns: [done('x')] }));
+    view.frame(0);
+    expect(cursorX()).toBe(11);
+    view.update(answer({ listening: true, turns: [done('x')] }));
+    view.level(1);
+    view.frame(16);
+    const middleBar = root.querySelectorAll('.lsn .m-l')[1];
+    expect(Number(middleBar.getAttribute('y1'))).toBeCloseTo(6.1875, 2);
   });
 
   it('the cross asks the core to close; null empties the view', () => {

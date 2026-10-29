@@ -25,6 +25,19 @@ const FENCE_END = /^\s*```\s*$/;
 const BULLET = /^\s*[-*+]\s+(.*)$/;
 const NUMBERED = /^\s*(\d{1,9})[.)]\s+(.*)$/;
 const HEADING = /^\s*#{1,6}\s+(.*)$/;
+/** Every citation mark in a run of text. */
+const CITES = new RegExp(`${CITE_OPEN}(\\d{1,4})${CITE_CLOSE}`, 'g');
+
+/** Code and a link's address are not markup, so a citation mark that a segment's end put there is no citation in place: it
+ *  comes out of the text, and its number follows the code or the link. */
+function liftCites(s: string): { text: string; cites: Inline[] } {
+  const cites: Inline[] = [];
+  const text = s.replace(CITES, (_, n: string) => {
+    cites.push({ t: 'cite', n: Number(n) });
+    return '';
+  });
+  return { text, cites };
+}
 
 /** The answer's blocks, line by line. A fence still open runs to the end: the answer may still be streaming. */
 export function parseMarkdown(src: string): Block[] {
@@ -39,9 +52,17 @@ export function parseMarkdown(src: string): Block[] {
     const line = lines[i];
     if (FENCE.test(line)) {
       flush();
+      // Marks on the opening line, in the code or on the closing line (which still closes it) follow the block.
+      const cites = liftCites(line).cites;
       const code: string[] = [];
-      for (i++; i < lines.length && !FENCE_END.test(lines[i]); i++) code.push(lines[i]);
+      for (i++; i < lines.length; i++) {
+        const { text, cites: more } = liftCites(lines[i]);
+        cites.push(...more);
+        if (FENCE_END.test(text)) break;
+        code.push(text);
+      }
       out.push({ t: 'pre', v: code.join('\n') });
+      if (cites.length) out.push({ t: 'p', c: cites });
       continue;
     }
     const bullet = BULLET.exec(line);
@@ -85,7 +106,9 @@ export function parseInline(s: string): Inline[] {
       out.push({ t: 'cite', n: Number(m[1]) });
     } else if ((m = /^`([^`\n]+)`/.exec(rest))) {
       push();
-      out.push({ t: 'code', v: m[1] });
+      const { text: code, cites } = liftCites(m[1]);
+      if (code) out.push({ t: 'code', v: code });
+      out.push(...cites);
     } else if ((m = /^\*\*(?=\S)([\s\S]*?\S)\*\*/.exec(rest))) {
       push();
       out.push({ t: 'b', c: parseInline(m[1]) });
@@ -94,7 +117,7 @@ export function parseInline(s: string): Inline[] {
       out.push({ t: 'i', c: parseInline(m[1]) });
     } else if ((m = /^\[([^\]\n]+)\]\(([^)\s]+)\)/.exec(rest))) {
       push();
-      out.push(...parseInline(m[1]));
+      out.push(...parseInline(m[1]), ...liftCites(m[2]).cites);
     } else {
       text += s[i];
       i++;

@@ -61,6 +61,28 @@ describe('Safe Markdown of answers', () => {
     expect(d.textContent).toBe('Rust  1.951.');
   });
 
+  it('a citation caught in code or a link address is not code: its number follows it', () => {
+    const c = (n: number) => `${CITE_OPEN}${n}${CITE_CLOSE}`;
+    expect(parseInline(`run \`docker${c(1)} init\` [docs](https://x.io/${c(2)})`)).toEqual([
+      { t: 'text', v: 'run ' },
+      { t: 'code', v: 'docker init' },
+      { t: 'cite', n: 1 },
+      { t: 'text', v: ' ' },
+      { t: 'text', v: 'docs' },
+      { t: 'cite', n: 2 },
+    ]);
+    // A fence: marks on its opening line, its lines and its closing line (which still closes it).
+    const src = `\`\`\`bash${c(3)}\nls${c(4)}\n\`\`\`${c(5)}\nDone`;
+    expect(parseMarkdown(src)).toEqual([
+      { t: 'pre', v: 'ls' },
+      { t: 'p', c: [{ t: 'cite', n: 3 }, { t: 'cite', n: 4 }, { t: 'cite', n: 5 }] },
+      { t: 'p', c: [{ t: 'text', v: 'Done' }] },
+    ]);
+    const d = html(src);
+    expect(d.querySelector('pre')!.textContent).toBe('ls');
+    expect(d.textContent).not.toMatch(/[]/);
+  });
+
   it('HTML in an answer is text, never markup', () => {
     const d = html('<img src=x onerror="alert(1)"> and <script>alert(1)</script>');
     expect(d.querySelector('img, script')).toBeNull();

@@ -326,6 +326,9 @@ export class DropController {
       if (!this.answerBox.isOpen) {
         this.endDrag(true);
         this.answerGen++;
+        // The last answer's words stay until its fold is over (and a little after): a new one starts from an empty view,
+        // so its words are revealed anew.
+        this.view.update(null);
         this.answerBox.open(null);
       }
       this.view.update(a);
