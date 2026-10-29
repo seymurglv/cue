@@ -41,7 +41,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use cue_core::ask::{AnswerPlace, AskContext, MAX_SELECTION_CHARS, SelectionKind};
 use cue_core::audio::{Silence, SilenceDetector};
 use cue_core::flow::{DictationId, Effect, Flow, InsertOutcome, Input, Outcome, PasteHow, SttError, TimerKind};
-use cue_core::refine::{RefineContext, join_for_insert};
+use cue_core::refine::RefineContext;
 use cue_core::settings::{self, DropPosition, Settings};
 use cue_core::translate;
 use cue_core::ui::{Mode, TrayKind, UiAction, UiPhase, UiState};
@@ -54,10 +54,12 @@ use cue_engines::soniox::SonioxConfig;
 use cue_engines::stt::{self, Engine, Fallback, SttOutput, SttSession};
 use cue_platform_win::cardplace::{self, CARD};
 use cue_platform_win::chord::HotkeyEvent;
-use cue_platform_win::focus::{Editability, FocusInfo, FocusWorker, SelectionRead};
+use cue_platform_win::clipboard::{WinKeys, cloud_clipboard_uploads, may_paste};
+use cue_platform_win::focus::{Editability, FocusInfo, FocusWorker, SelectionRead, WindowRef};
 use cue_platform_win::hook;
 use cue_platform_win::mic::{self, MicEvent, MicHandle};
 use cue_platform_win::selection::{copies_line, needs_copy_fallback};
+use cue_platform_win::terminal::terminal_app;
 use cue_platform_win::wav::WavSink;
 use cue_platform_win::{placement, selection};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -70,7 +72,7 @@ use crate::paths::Paths;
 use crate::trayicon::TrayLook;
 use attempt::{Attempt, UsageLog, log_finished, needs_row, warmup_record};
 use files::LastFiles;
-use insert::{InsertJob, first_known_app, insert_app, is_terminal, known_app, one_line, trim_edges};
+use insert::{InsertJob, first_known_app, insert_app, known_app, one_line, pasted_text, trim_edges};
 use state::{CacheWarm, InsertWatch, LevelGate, MicGate, ShownOnce, TaskSlot, Timers, ViewGate, ViewSend, WarmUp};
 use tasks::{ask_panicked, guarded, refine_panicked, stt_panicked};
 
@@ -203,6 +205,8 @@ pub struct Runtime {
     /// conversation; its request in flight; its own prompt cache warm-up; how often the answer view goes out; whether
     /// the flow has heard that the request's answer shows.
     ask_query: Option<(DictationId, std::sync::mpsc::Receiver<FocusInfo>)>,
+    /// Windows uploads copied text to the cloud clipboard by itself, as read at the chord: no Ctrl+C fallback then.
+    ask_cloud: bool,
     ask_info: Option<(DictationId, FocusInfo)>,
     ask_copy: Option<(DictationId, std::sync::mpsc::Receiver<Option<String>>)>,
     ask_taken: ask::KeptTaken,
@@ -281,6 +285,7 @@ impl Runtime {
             attempt: Attempt::new(DictationId::default()),
             usage: UsageLog::default(),
             ask_query: None,
+            ask_cloud: false,
             ask_info: None,
             ask_copy: None,
             ask_taken: ask::KeptTaken::default(),
@@ -933,7 +938,7 @@ impl Runtime {
         }
         self.final_text = Some((id, text.clone()));
         self.watch_insert(id);
-        self.dispatch_insert(text, Some(id));
+        self.dispatch_insert(text, Some(id), None, None);
     }
 
     /// The flow waits for the insert of `id`: its result is awaited, and a watchdog stands in for one that never comes.
@@ -948,7 +953,7 @@ impl Runtime {
 
     fn paste_last(&mut self) {
         if let Some(text) = self.last_result() {
-            self.dispatch_insert(text, None);
+            self.dispatch_insert(text, None, None, None);
         }
     }
 
@@ -967,25 +972,23 @@ impl Runtime {
         }
     }
 
-    /// One path for dictation and Ctrl+Win+V: the focused field (one short query) → text edges without spaces →
-    /// join space based on the text before the caret → one line in a terminal → the insert thread. No field:
-    /// the text goes to the clipboard. If the query was late ("unknown"), the terminal safeguard looks at the last
-    /// known app, then at the app at the start of recording (`insert_app`). Within one dictation the last known app
-    /// is never older than the app at the start of recording (`note_app` runs both at the start of recording and on
-    /// every later query).
-    fn dispatch_insert(&mut self, text: String, id: Option<DictationId>) {
+    /// One path for dictation, Ctrl+Win+V and an "Ask" paste at the caret or over the selection: the focused field (one
+    /// short query) → the text as it is pasted (`pasted_text`: edges and the join space, or the replaced selection's own
+    /// edges; one line in a terminal) → the insert thread. No field: the text goes to the clipboard. If the query was
+    /// late ("unknown"), the terminal safeguard looks at the last known app, then at the app at the start of recording
+    /// (`insert_app`). Within one dictation the last known app is never older than the app at the start of recording
+    /// (`note_app` runs both at the start of recording and on every later query). `target` — an "Ask" paste: only into
+    /// that window (`InsertJob::Paste`); `replaced` — the selection a Replace goes over.
+    fn dispatch_insert(&mut self, text: String, id: Option<DictationId>, target: Option<WindowRef>, replaced: Option<&str>) {
         let info = self.focus.query(INSERT_CONTEXT_CHARS, FOCUS_TIMEOUT);
         let started = if id.is_some_and(|i| i == self.attempt.id) { self.attempt.app.as_str() } else { "" };
-        let terminal = is_terminal(insert_app(&info.app, &self.last_app, started));
+        let terminal = terminal_app(insert_app(&info.app, &self.last_app, started));
         self.note_app(&info.app);
-        let mut text = join_for_insert(info.before_cursor.as_deref(), trim_edges(&text));
-        if terminal {
-            text = one_line(&text);
-        }
+        let text = pasted_text(&text, info.before_cursor.as_deref(), terminal, replaced);
         let job = if info.editable == Editability::No {
             InsertJob::Leave { id, text }
         } else {
-            InsertJob::Paste { id, text, collapse: false }
+            InsertJob::Paste { id, text, collapse: false, target }
         };
         self.send_job(job, id);
     }
@@ -1011,6 +1014,8 @@ impl Runtime {
             let _ = tx.send(focus.query_with_selection(chars, MAX_SELECTION_CHARS, ASK_FOCUS_TIMEOUT));
         });
         self.ask_query = Some((id, rx));
+        // Once per chord, two short registry reads: whether a Ctrl+C copy would go to the user's other devices.
+        self.ask_cloud = cloud_clipboard_uploads();
         self.ask_info = None;
         self.ask_copy = None;
         self.ask_taken.clear();
@@ -1020,14 +1025,16 @@ impl Runtime {
     /// At the end of the recording: the selection read at the chord, and the Ctrl+C copy when the field could not say
     /// (spec 2 §6.1). The copy needs the chord's keys up — they are only now — and runs on the insert thread, which
     /// owns the clipboard, alongside the transcription; the request task waits for it. Never in a terminal, nor in an
-    /// editor that copies its current line when nothing is selected.
+    /// editor that copies its current line when nothing is selected, nor while Windows uploads copies to the cloud
+    /// clipboard by itself (the selection then reads as none).
     fn read_ask_context(&mut self, id: DictationId) {
         let info = match self.ask_query.take() {
             Some((q, rx)) if q == id => rx.recv_timeout(ASK_FOCUS_TIMEOUT).unwrap_or_default(),
             _ => FocusInfo::default(),
         };
         let app = first_known_app(&[&info.app, &self.attempt.app]).to_owned();
-        let copy = needs_copy_fallback(&info.selection, info.editable, is_terminal(&app) || copies_line(&app));
+        let skip = terminal_app(&app) || copies_line(&app);
+        let copy = needs_copy_fallback(&info.selection, info.editable, skip, self.ask_cloud);
         // Only into the window the field was read in: the insert thread looks again right before Ctrl+C.
         let target = info.window.filter(|_| copy);
         if let Some(target) = target {
@@ -1036,8 +1043,8 @@ impl Runtime {
                 self.ask_copy = Some((id, rx));
             }
         }
-        // The kind and the length only (`SelectionRead`'s `Debug`).
-        tracing::info!(selection = ?info.selection, copy = target.is_some(), "ask: context");
+        // The kind and the length only (`SelectionRead`'s `Debug`), and states.
+        tracing::info!(selection = ?info.selection, copy = target.is_some(), cloud_upload = self.ask_cloud, "ask: context");
         self.ask_info = Some((id, info));
     }
 
@@ -1063,16 +1070,17 @@ impl Runtime {
     fn taken(&mut self, id: DictationId) -> ask::Taken {
         let info = self.ask_info.take().filter(|(i, _)| *i == id).map(|(_, info)| info).unwrap_or_default();
         let app = first_known_app(&[&info.app, &self.attempt.app]).to_owned();
-        let (selection, sel, rects) = match info.selection {
-            SelectionRead::Text { text, rects, read_only } => {
-                (Some(text), if read_only { SelectionKind::ReadOnly } else { SelectionKind::Writable }, rects)
+        let (selection, sel, rects, clipped) = match info.selection {
+            SelectionRead::Text { text, rects, read_only, clipped } => {
+                (Some(text), if read_only { SelectionKind::ReadOnly } else { SelectionKind::Writable }, rects, clipped)
             }
-            _ => (None, SelectionKind::None, Vec::new()),
+            _ => (None, SelectionKind::None, Vec::new(), false),
         };
         let chars = self.settings.refine.context_chars;
         let before_cursor = RefineContext::new(String::new(), info.before_cursor.as_deref(), chars).before_cursor;
-        let terminal = is_terminal(&app);
-        ask::Taken { ctx: AskContext { app, before_cursor, selection, today: local_today() }, sel, rects, terminal }
+        let terminal = terminal_app(&app);
+        let ctx = AskContext { app, before_cursor, selection, today: local_today() };
+        ask::Taken { ctx, sel, clipped, rects, terminal, window: info.window }
     }
 
     /// An "Ask" question goes out (spec 2 §6.2): a first one starts a new conversation with its context — the one kept
@@ -1208,10 +1216,12 @@ impl Runtime {
             a.ask_done(result.usage, now);
         }
         // A write is shown, not pasted, while a follow-up is under way (decision 12: not under the user's hands) or CUE
-        // is paused (no input is injected then).
+        // is paused (no input is injected then), and when the window the question was asked in is not in front any more
+        // (ruling 6b; the insert thread checks again right before the paste).
         let show_write = self.flow.shows_write(id);
         let Some(c) = self.conversation.as_mut() else { return };
-        let heard = c.end(&result, show_write);
+        let (window, terminal) = (c.taken.window, c.taken.terminal);
+        let heard = c.end(&result, show_write, |how, text| write_may_paste(window, terminal, how, text));
         let opened = c.opened;
         // Kinds and counts only.
         tracing::info!(heard = ?heard, searches = result.usage.web_searches, "ask: done");
@@ -1290,10 +1300,14 @@ impl Runtime {
 
     /// Insert, Insert below, Replace, or the model's write (spec 2 §6.2, §7). A write is its attempt's result
     /// (`Finished` commits it); an answer pasted with its button was counted when it was complete, so its text becomes
-    /// the last result here, for Ctrl+Win+V (§4).
+    /// the last result here, for Ctrl+Win+V (§4). Every paste goes only into the window the question was asked in
+    /// (ruling 6b): the insert thread checks it right before the paste, and when it is not known nothing is pasted —
+    /// the text stays in the clipboard, with the "Nowhere to paste" card.
     fn ask_paste(&mut self, id: DictationId, how: PasteHow) {
-        let found = self.conversation.as_ref().and_then(|c| Some((c.paste_text()?, c.has_write())));
-        let Some((text, write)) = found else {
+        let found = self.conversation.as_ref().and_then(|c| {
+            Some((c.paste_text()?, c.has_write(), c.taken.window, c.taken.ctx.selection.clone()))
+        });
+        let Some((text, write, window, selection)) = found else {
             // Nothing to paste (a guard: a refused turn has no buttons). The flow waits in "inserting" for this answer,
             // and `InsertDone` reaches it only for a watched paste: unwatched, Esc would stay swallowed everywhere.
             tracing::warn!("ask: nothing to paste");
@@ -1311,23 +1325,29 @@ impl Runtime {
             self.commit_text(&text);
         }
         self.watch_insert(id);
-        if how == PasteHow::Below {
-            self.dispatch_below(text, id);
-        } else {
-            self.dispatch_insert(text, Some(id));
+        let Some(window) = window else {
+            tracing::info!("ask: the window the question was asked in is not known: text left in the clipboard");
+            self.send_job(InsertJob::Leave { id: Some(id), text }, Some(id));
+            return;
+        };
+        match how {
+            PasteHow::Below => self.dispatch_below(text, id, window),
+            PasteHow::Replace => self.dispatch_insert(text, Some(id), Some(window), selection.as_deref()),
+            PasteHow::AtCaret => self.dispatch_insert(text, Some(id), Some(window), None),
         }
     }
 
     /// "Insert below" (spec 2 §7): the caret goes to the end of the selection (Right), then a line break and the text
-    /// in one paste — an Enter would send a chat message. The insert thread adds the line break. Never in a terminal.
-    fn dispatch_below(&mut self, text: String, id: DictationId) {
+    /// in one paste — an Enter would send a chat message. The insert thread adds the line break, only in `target`, and
+    /// never in a terminal (`InsertJob::Paste`).
+    fn dispatch_below(&mut self, text: String, id: DictationId, target: WindowRef) {
         let info = self.focus.query(0, FOCUS_TIMEOUT);
         self.note_app(&info.app);
         let text = trim_edges(&text).to_owned();
         let job = if info.editable == Editability::No {
             InsertJob::Leave { id: Some(id), text }
         } else {
-            InsertJob::Paste { id: Some(id), text, collapse: true }
+            InsertJob::Paste { id: Some(id), text, collapse: true, target: Some(target) }
         };
         self.send_job(job, Some(id));
     }
@@ -1560,6 +1580,20 @@ fn wait_for_copy(
         let _ = to_request.send(text);
     });
     copied
+}
+
+/// Whether a write of the model may be pasted now (ruling 6b): the window the question was asked in (`window`; not known —
+/// no) is in front and takes the text as `how` would paste it — after a line break below the selection, on one line in a
+/// terminal the chord named (`terminal`) — by `clipboard::may_paste`. A short look at the window in front, on the core
+/// thread; the insert thread looks again right before Ctrl+V.
+fn write_may_paste(window: Option<WindowRef>, terminal: bool, how: PasteHow, text: &str) -> bool {
+    let Some(target) = window else { return false };
+    let pasted = match how {
+        PasteHow::Below => format!("\n{text}"),
+        _ if terminal => one_line(text),
+        _ => text.to_owned(),
+    };
+    may_paste(&WinKeys, target, &pasted)
 }
 
 /// Today's local date, `YYYY-MM-DD` (spec 2 §6.1): it grounds searches, so a user east of UTC must not get yesterday.

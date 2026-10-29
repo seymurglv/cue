@@ -5,7 +5,9 @@
 //! Run: cargo run -p cue-platform-win --example selection_probe
 use std::time::Duration;
 
-use cue_platform_win::clipboard::{copy_selection, forget_in_history, spawn_late_guard, WinClipboard, WinKeys};
+use cue_platform_win::clipboard::{
+    cloud_clipboard_uploads, copy_selection, forget_in_history, spawn_late_guard, WinClipboard, WinKeys,
+};
 use cue_platform_win::focus::{FocusWorker, SelectionRead};
 use cue_platform_win::selection::{bounds, needs_copy_fallback};
 
@@ -20,8 +22,11 @@ fn main() {
         println!("lines: {rects:?}");
         println!("first line and box: {:?}", bounds(rects));
     }
-    // The probe is not run in a terminal app: the terminal rule is the caller's (and the copy's own check).
-    if needs_copy_fallback(&info.selection, info.editable, false)
+    // The probe is not run in a terminal app: the terminal rule is the caller's (and the copy's own check). With Windows
+    // uploading copies to the cloud clipboard there is no copy, as in the app.
+    let cloud = cloud_clipboard_uploads();
+    println!("copies uploaded to the cloud clipboard: {cloud}");
+    if needs_copy_fallback(&info.selection, info.editable, false, cloud)
         && let Some(target) = info.window
     {
         let mut clip = WinClipboard::new().expect("clipboard");

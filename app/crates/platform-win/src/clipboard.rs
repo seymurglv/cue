@@ -31,13 +31,14 @@ pub trait ClipboardApi {
     fn operations(&self) -> &'static Operations;
 }
 
-/// CUE's clipboard operations in this process — pastes, texts left in it and Ctrl+C copies: how many have begun, and one
-/// lock. A late-copy guard acts under the lock, and only while its copy is still the newest operation; `begin` takes the
-/// same lock. So a newer operation begins either before the guard acts, and the guard stands down, or after it is done.
-/// The guard never waits for another app to let the clipboard go while it holds the lock (`ReadClipboard::take_back`:
-/// one try), but under it the copying app may be asked to render its text (`WM_RENDERFORMAT`) and to let its copy go
-/// (`WM_DESTROYCLIPBOARD`): a slow app keeps a newer `begin` waiting that long, with no timeout. It happens at most
-/// once per copy, 0.4–2.4 s after its Ctrl+C, so a paste would have to begin at that very moment.
+/// CUE's clipboard operations in this process — pastes, texts left in the clipboard and Ctrl+C copies: how many have
+/// begun, and one lock. A late-copy guard acts under the lock, and only while its copy is still the newest operation;
+/// `begin` takes the same lock. So a newer operation begins either before the guard acts, and the guard stands down, or
+/// after it is done. The guard never waits for another app to let the clipboard go while it holds the lock
+/// (`ReadClipboard::take_back`: one try), but under it the copying app may be asked to render its text
+/// (`WM_RENDERFORMAT`) and to let its copy go (`WM_DESTROYCLIPBOARD`): a slow app keeps a newer `begin` waiting that
+/// long, with no timeout. It happens at most once per copy, 0.4–2.4 s after its Ctrl+C, so a paste would have to begin,
+/// or a text be left in the clipboard, at that very moment.
 #[derive(Default)]
 pub struct Operations {
     count: AtomicU64,
@@ -83,14 +84,39 @@ pub enum PasteResult {
     /// No paste happened, the text is left in the clipboard the ordinary way (without marks): the modifiers were not
     /// released within 5 s or Ctrl+V did not reach the window.
     LeftInClipboard,
+    /// No paste happened because the window in front may not take this text (`paste_text_if`'s `allowed`): the text is
+    /// left in the clipboard the ordinary way, as with `LeftInClipboard`.
+    NotAllowed,
 }
 
 /// `on_pasted` is called once right after Ctrl+V, before the wait and the restore — this is the "done" moment.
-/// Without a paste (`LeftInClipboard`, error) it is not called. `Err` — the text could not be put in the clipboard, no paste happened.
+/// Without a paste (`LeftInClipboard`, `NotAllowed`, error) it is not called. `Err` — the text could not be put in the
+/// clipboard, no paste happened.
 pub fn paste_text(
     clip: &mut impl ClipboardApi,
     keys: &mut impl KeysApi,
     text: &str,
+    on_pasted: impl FnOnce(),
+) -> Result<PasteResult, String> {
+    paste_text_if(clip, keys, text, || true, on_pasted)
+}
+
+/// Whether an "Ask" paste may go into the window in front now (spec 2 §6.2): it is still `target`, the window the
+/// question was asked in — the same check as before the Ctrl+C fallback's Ctrl+C (`WindowRef::same_window`) — and, for a
+/// text that starts with a line break or spans lines, it is not a terminal, where a line break is Enter. A write lands
+/// seconds after the question, and the user may have moved on to another window by then.
+pub fn may_paste(keys: &impl CopyKeys, target: WindowRef, text: &str) -> bool {
+    let spans_lines = text.contains(['\n', '\r', '\u{0B}', '\u{0C}', '\u{85}', '\u{2028}', '\u{2029}']);
+    keys.foreground().is_some_and(|front| front.same_window(target)) && !(spans_lines && keys.terminal(target))
+}
+
+/// `paste_text`, with `allowed` asked once more right before Ctrl+V, the clipboard already holding the text: `false` —
+/// no Ctrl+V, the text is left in the clipboard the ordinary way (`NotAllowed`).
+pub fn paste_text_if(
+    clip: &mut impl ClipboardApi,
+    keys: &mut impl KeysApi,
+    text: &str,
+    allowed: impl FnOnce() -> bool,
     on_pasted: impl FnOnce(),
 ) -> Result<PasteResult, String> {
     let text = crlf(text);
@@ -115,6 +141,11 @@ pub fn paste_text(
     }
     // The number once the write is finished and the clipboard is closed: from here on only someone else's write changes it.
     let ours = clip.sequence();
+    // The last moment before Ctrl+V: the window in front may have changed while the keys were held.
+    if !allowed() {
+        clip.write_text(&text, false)?;
+        return Ok(PasteResult::NotAllowed);
+    }
     if !keys.press_ctrl_v() {
         // Like "no field": the text stays in the clipboard and goes into the history, the user pastes it themselves.
         clip.write_text(&text, false)?;
@@ -150,6 +181,15 @@ fn crlf(text: &str) -> String {
         prev = c;
     }
     out
+}
+
+/// Whether Windows uploads text copied on this computer to the cloud clipboard by itself, from the user's two values
+/// under `HKCU\Software\Microsoft\Clipboard` (Settings → System → Clipboard): `EnableCloudClipboard` (1: "Clipboard
+/// history across your devices" on; missing: off, the default) and `CloudClipboardAutomaticUpload` (1: "Automatically
+/// sync text that I copy", 0: "Manually sync text that I copy"). A missing upload value with sync on counts as automatic:
+/// what Windows does then is not documented, and a selection must not reach other devices on a guess.
+pub fn uploads_to_cloud(sync: Option<u32>, automatic: Option<u32>) -> bool {
+    sync.is_some_and(|on| on != 0) && automatic != Some(0)
 }
 
 /// Reading the clipboard for the Ctrl+C fallback of "Ask".
@@ -191,7 +231,7 @@ pub trait CopyKeys {
     fn press_ctrl_c(&mut self) -> bool;
     /// The window the keys go to — the foreground one — and its process. `None` — no foreground window.
     fn foreground(&self) -> Option<WindowRef>;
-    /// The window is a terminal, by its class or its executable (`selection::terminal_window`).
+    /// The window is a terminal, by its class or its executable (`terminal::terminal_window`).
     fn terminal(&self, window: WindowRef) -> bool;
     /// When the session's last input came in (a tick in ms): any key, click or mouse move, the user's or injected.
     /// `None` — not known.
@@ -337,7 +377,9 @@ fn not_put_back(why: &str, since: SystemTime) -> SelectionCopy {
 ///   window is a frame, or none (another app's write is a newer copy the user may want);
 /// - there was no input at all since CUE's Ctrl+C went through — no key, click or mouse move: the user's own Ctrl+C,
 ///   Shift+Delete or a menu's Copy in the same app would look just the same otherwise;
-/// - the clipboard was not written again after it;
+/// - the clipboard was not written again after it by another process: its owner is checked once more, with the
+///   clipboard open, right before the take-back. A second write of the app's own, or a second one with no owner, in
+///   between is taken back like the first: the owner is all that tells writes apart;
 /// - no newer clipboard operation of CUE's has begun (a paste, a text left in the clipboard, the next Ctrl+C copy): the
 ///   clipboard is that one's. The last of these checks, the restore and `on_caught` happen under the operations lock
 ///   (`Operations::while_newest`), so none begins in between.
@@ -496,6 +538,7 @@ mod win {
     };
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DestroyWindow, GetForegroundWindow, GetWindowThreadProcessId, HWND_MESSAGE, WINDOW_EX_STYLE,
@@ -802,7 +845,7 @@ mod win {
 
         fn terminal(&self, window: WindowRef) -> bool {
             let (class, exe) = crate::focus::window_kind(window);
-            crate::selection::terminal_window(&class, &exe)
+            crate::terminal::terminal_window(&class, &exe)
         }
 
         fn last_input(&self) -> Option<u32> {
@@ -810,6 +853,32 @@ mod win {
             // SAFETY: `info` with `cbSize` filled in lives until the end of the call.
             unsafe { GetLastInputInfo(&mut info) }.as_bool().then_some(info.dwTime)
         }
+    }
+
+    /// `super::uploads_to_cloud` with the user's two values as the registry has them now: two short reads, one per "Ask"
+    /// chord. A value that cannot be read counts as missing.
+    pub fn cloud_clipboard_uploads() -> bool {
+        super::uploads_to_cloud(clipboard_value(w!("EnableCloudClipboard")), clipboard_value(w!("CloudClipboardAutomaticUpload")))
+    }
+
+    /// A DWORD under `HKCU\Software\Microsoft\Clipboard`; `None` — missing, of another type, or not readable.
+    fn clipboard_value(name: PCWSTR) -> Option<u32> {
+        let mut value: u32 = 0;
+        let mut len = size_of::<u32>() as u32;
+        // SAFETY: the key and the name are `w!` constants; the data goes into our own `u32`, `len` is its size, and
+        // RRF_RT_REG_DWORD lets nothing larger be written.
+        let read = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                w!("Software\\Microsoft\\Clipboard"),
+                name,
+                RRF_RT_REG_DWORD,
+                None,
+                Some((&raw mut value).cast()),
+                Some(&mut len),
+            )
+        };
+        read.is_ok().then_some(value)
     }
 
     /// The process of a window; `None` for none or a closed one.
@@ -896,7 +965,7 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{forget_in_history, spawn_late_guard, WinClipboard, WinKeys};
+pub use win::{cloud_clipboard_uploads, forget_in_history, spawn_late_guard, WinClipboard, WinKeys};
 
 #[cfg(test)]
 mod tests {
@@ -1159,6 +1228,22 @@ mod tests {
         assert!(!log.borrow().contains(&Ev::Restore));
     }
 
+    /// Only sync on with automatic upload — or with no upload value at all — sends copied text to the cloud by itself.
+    #[test]
+    fn copied_text_goes_to_the_cloud_only_with_sync_and_automatic_upload() {
+        for (sync, automatic, want) in [
+            (None, None, false),
+            (None, Some(1), false),
+            (Some(0), Some(1), false),
+            (Some(1), Some(1), true),
+            (Some(1), Some(0), false),
+            (Some(1), None, true),
+            (Some(2), Some(2), true),
+        ] {
+            assert_eq!(uploads_to_cloud(sync, automatic), want, "{sync:?} {automatic:?}");
+        }
+    }
+
     #[test]
     fn bare_lf_becomes_crlf() {
         assert_eq!(crlf("a\nb"), "a\r\nb");
@@ -1405,6 +1490,37 @@ mod copy_tests {
 
     fn user_clip() -> Snapshot {
         Snapshot { items: vec![(13, vec![65, 0, 0, 0])] }
+    }
+
+    /// An "Ask" paste on `w`, checked against the window read at the chord as the insert thread checks it.
+    fn ask_paste(w: World, text: &str) -> (PasteResult, World) {
+        let w = Rc::new(RefCell::new(w));
+        let keys = Keys(w.clone());
+        let allowed = || may_paste(&keys, TARGET, text);
+        let got = paste_text_if(&mut Clip(w.clone()), &mut Keys(w.clone()), text, allowed, || {}).unwrap();
+        drop(keys);
+        (got, Rc::try_unwrap(w).ok().unwrap().into_inner())
+    }
+
+    /// Ruling 6b, for a paste too: only into the window the question was asked in, and never a text that spans lines (or
+    /// starts with a line break) into a terminal. Otherwise nothing is pasted, and the text stays in the clipboard.
+    #[test]
+    fn an_ask_paste_goes_only_into_the_chords_window_and_no_line_break_into_a_terminal() {
+        let (got, w) = ask_paste(World { content: user_clip(), ..Default::default() }, "ответ");
+        assert_eq!((got, w.ctrl_v), (PasteResult::Pasted { restored: true }, 1));
+        for (world, text) in [
+            (World { moved: true, ..Default::default() }, "ответ"),
+            (World { gone: true, ..Default::default() }, "ответ"),
+            (World { terminal: true, ..Default::default() }, "git status\ngit diff"),
+            (World { terminal: true, ..Default::default() }, "\ngit status"),
+        ] {
+            let (got, w) = ask_paste(World { content: user_clip(), ..world }, text);
+            assert_eq!((got, w.ctrl_v), (PasteResult::NotAllowed, 0), "{text:?}");
+            assert_eq!(w.text.as_deref(), Some(crlf(text).as_str()), "left in the clipboard for the user");
+            assert_eq!(w.restored, None, "nothing to put back over it");
+        }
+        let (got, w) = ask_paste(World { terminal: true, content: user_clip(), ..Default::default() }, "git status");
+        assert_eq!((got, w.ctrl_v), (PasteResult::Pasted { restored: true }, 1), "one line into a terminal is a paste");
     }
 
     /// The world after a copy and its guard: neither ever pastes or writes the clipboard itself.

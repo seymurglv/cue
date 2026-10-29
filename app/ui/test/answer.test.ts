@@ -257,6 +257,20 @@ describe('The "Ask" answer', () => {
     expect(root.querySelectorAll('.it')[1].querySelector('.uq')!.textContent).toBe('And for ten?');
   });
 
+  it('a failure after words were shown keeps them, with the error and Retry under them', () => {
+    view.update(answer({ turns: [turn({ state: 'streaming', segments: [{ text: 'The first words', cites: [] }] })] }));
+    view.update(answer({ turns: [turn({ state: 'failed', segments: [{ text: 'The first words', cites: [] }] })] }));
+    expect(shown()).toEqual(['The', 'first', 'words']);
+    expect(view.revealing()).toBe(false);
+    const body = root.querySelector('.it')!.lastElementChild!;
+    expect([...body.children].map((c) => c.className)).toEqual(['aa', 'note']);
+    expect(root.querySelector('.note')!.textContent).toBe("Couldn't get an answer");
+    expect(buttons().map((b) => b.dataset.cmd)).toEqual(['answerRetry']);
+    // Retry starts the turn over.
+    view.update(answer({ turns: [turn({ state: 'pending' })] }));
+    expect([root.querySelector('.note'), root.querySelector('.aa')]).toEqual([null, null]);
+  });
+
   it('a refusal and a failure; a failure offers Retry', () => {
     // A refused turn comes with no buttons (the core clears them): nothing to paste.
     view.update(answer({ turns: [turn({ state: 'refused' })], actions: [] }));

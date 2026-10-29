@@ -6,6 +6,7 @@ use cue_core::ask::{
 };
 use cue_core::flow::{AskError, DictationId, PasteHow};
 use cue_engines::ask::{AskEnd, AskResult, Step, assistant_turn, user_turn};
+use cue_platform_win::focus::WindowRef;
 use cue_platform_win::placement::PxRect;
 use serde_json::Value;
 
@@ -15,9 +16,15 @@ use serde_json::Value;
 pub struct Taken {
     pub ctx: AskContext,
     pub sel: SelectionKind,
+    /// The selection was longer than `MAX_SELECTION_CHARS` and reached the model as its start and its end: it is never
+    /// replaced (`ask::write_target`).
+    pub clipped: bool,
     /// The selection's lines on screen, physical px: where the card points (none — the tray).
     pub rects: Vec<PxRect>,
     pub terminal: bool,
+    /// The window the question was asked in, read at the chord: the only one an "Ask" paste goes to (ruling 6b). `None` —
+    /// not known, and then nothing is pasted.
+    pub window: Option<WindowRef>,
 }
 
 impl Taken {
@@ -25,6 +32,7 @@ impl Taken {
     pub fn copied(&mut self, text: &str) {
         self.ctx = with_copied(&self.ctx, text);
         self.sel = SelectionKind::Writable;
+        self.clipped = text.chars().count() > ask::MAX_SELECTION_CHARS;
     }
 }
 
@@ -106,6 +114,9 @@ pub struct Conversation {
     pub opened: bool,
     /// A write_to_field text waiting for `AskPaste`, already in the dictation's form.
     write: Option<String>,
+    /// The turn whose text is a write shown instead of written: already in the field's form, it is pasted and copied as
+    /// it is, not as an answer's Markdown (which would take off the markup the selection had).
+    shown_write: Option<usize>,
     /// A write_to_field call began in the last turn's stream. One cut at `max_tokens` is asked again with more room, and
     /// that response's steps come from its start (`cue_engines::ask::run`): its first block starts the turn's words over.
     wrote: bool,
@@ -131,6 +142,7 @@ impl Conversation {
             sources: Sources::default(),
             opened: false,
             write: None,
+            shown_write: None,
             wrote: false,
         }
     }
@@ -210,7 +222,8 @@ impl Conversation {
             return;
         }
         let refused = self.view.turns.last().is_some_and(|t| t.state == TurnState::Refused);
-        self.view.actions = if refused { Vec::new() } else { ask::answer_actions(self.taken.sel, self.taken.terminal) };
+        let t = &self.taken;
+        self.view.actions = if refused { Vec::new() } else { ask::answer_actions(t.sel, t.terminal, t.clipped) };
     }
 
     /// The answer opens where it is shown, with the buttons of its last turn. A refusal that came before anything showed
@@ -285,12 +298,15 @@ impl Conversation {
     /// The request ended: the last turn shows how, the exchange joins the conversation (a refusal and an empty one never
     /// do), and the flow hears what to do next (spec 2 §6.2). A failure keeps the question for Retry. `show_write` — a
     /// follow-up is under way, as the flow counts it (recording, being transcribed, held until this answer ends, or missed
-    /// with its Retry): a write is shown, not pasted under the user's hands (decision 12).
-    pub fn end(&mut self, result: &AskResult, show_write: bool) -> Heard {
+    /// with its Retry): a write is shown, not pasted under the user's hands (decision 12). `may_paste(how, text)` — the
+    /// window the question was asked in is still in front and may take the write as `how` would paste it: otherwise the
+    /// write is shown too (ruling 6b, for a paste as for the Ctrl+C fallback).
+    pub fn end(&mut self, result: &AskResult, show_write: bool, may_paste: impl FnOnce(PasteHow, &str) -> bool) -> Heard {
         self.replaced = None;
         let heard = match &result.end {
             AskEnd::Failed(why) => {
-                self.finish_turn(TurnState::Failed, true);
+                // The words already shown stay, with the error and Retry under them (Retry starts the turn over).
+                self.finish_turn(TurnState::Failed, false);
                 return Heard::Failed(if why.is_key() { AskError::Key } else { AskError::Failed });
             }
             AskEnd::Refused => {
@@ -305,8 +321,16 @@ impl Conversation {
                 Heard::Answered
             }
             AskEnd::Write { text, replace } => {
-                let text = ask::field_text(self.question().unwrap_or(""), text);
-                let target = if show_write { WriteTarget::Show } else { ask::write_target(*replace, self.taken.sel, self.taken.terminal) };
+                let text = ask::field_text(self.question().unwrap_or(""), &self.taken.ctx, text);
+                let t = &self.taken;
+                let target = match ask::write_target(*replace, t.sel, t.terminal, t.clipped) {
+                    _ if show_write => WriteTarget::Show,
+                    WriteTarget::Paste(how) if !may_paste(how, &text) => {
+                        tracing::info!("ask: the window in front is not the one asked in, or is a terminal: the write is shown");
+                        WriteTarget::Show
+                    }
+                    target => target,
+                };
                 // The turn ends with the text either way: a write that is pasted closes the answer, but should it stay
                 // on screen (a follow-up under way), the turn still shows what was written.
                 if let Some(turn) = self.view.turns.last_mut() {
@@ -318,8 +342,11 @@ impl Conversation {
                         self.write = Some(text);
                         Heard::Write(how)
                     }
-                    // Shown instead of written: an answer to copy.
-                    WriteTarget::Show => Heard::Answered,
+                    // Shown instead of written: an answer to copy, as it was written.
+                    WriteTarget::Show => {
+                        self.shown_write = self.view.turns.len().checked_sub(1);
+                        Heard::Answered
+                    }
                 }
             }
         };
@@ -359,8 +386,9 @@ impl Conversation {
             return Some(w.clone());
         }
         let turn = self.view.turns.last().filter(|t| t.state == TurnState::Done)?;
-        let text = ask::plain_answer(&turn.text());
-        (!text.is_empty()).then_some(text)
+        let shown_write = self.shown_write.is_some_and(|i| i + 1 == self.view.turns.len());
+        let text = if shown_write { turn.text() } else { ask::plain_answer(&turn.text()) };
+        (!text.trim().is_empty()).then_some(text)
     }
 
     /// The page a click on source `n` opens: only a web page (spec 2 §7).
@@ -385,13 +413,103 @@ mod tests {
                 today: "2026-10-28".into(),
             },
             sel,
+            clipped: false,
             rects: Vec::new(),
             terminal,
+            window: Some(WindowRef { window: 0x10, process: 100, app_process: None }),
         }
+    }
+
+    /// The window the question was asked in is in front and takes any paste.
+    fn anywhere(_how: PasteHow, _text: &str) -> bool {
+        true
     }
 
     fn result(end: AskEnd, content: Vec<Value>) -> AskResult {
         AskResult { end, content, usage: AskUsage::default(), container: None }
+    }
+
+    /// Ruling 6b, for a write: the window the question was asked in is not in front any more (or is a terminal for a
+    /// text with line breaks), so the write is shown in the answer, with Copy, and the conversation records it as shown.
+    #[test]
+    fn a_write_whose_window_is_gone_is_shown_with_copy() {
+        let call = json!({ "type": "tool_use", "id": "toolu_1", "name": "write_to_field", "input": { "text": "x", "mode": "insert" } });
+        let mut c = Conversation::new(taken(SelectionKind::Writable, false));
+        c.ask("ответь");
+        let mut asked = None;
+        let heard = c.end(&result(AskEnd::Write { text: "Пришлю в четверг.".into(), replace: false }, vec![call]), false, |how, text| {
+            asked = Some((how, text.to_owned()));
+            false
+        });
+        assert_eq!(heard, Heard::Answered, "shown instead of written");
+        assert_eq!(asked, Some((PasteHow::Below, "Пришлю в четверг.".to_owned())), "asked with where and what it would paste");
+        assert!(!c.has_write());
+        c.open(AnswerPlace::Tray);
+        assert_eq!((c.view.turns[0].text(), c.paste_text().as_deref()), ("Пришлю в четверг.".to_owned(), Some("Пришлю в четверг.")));
+        c.ask("а короче");
+        assert_eq!(c.request()[2]["content"][0]["type"], "tool_result", "the follow-up says the text was shown");
+        // A write that is shown anyway (a follow-up under way) never asks.
+        let mut d = Conversation::new(taken(SelectionKind::None, false));
+        d.ask("напиши");
+        let shown = d.end(&result(AskEnd::Write { text: "x".into(), replace: false }, vec![]), true, |_, _| panic!("not asked"));
+        assert_eq!(shown, Heard::Answered);
+    }
+
+    /// A selection that reached the model clipped is never replaced: the write is shown, and there is no Replace button.
+    #[test]
+    fn a_clipped_selection_is_never_replaced() {
+        let mut c = Conversation::new(Taken { clipped: true, ..taken(SelectionKind::Writable, false) });
+        c.ask("исправь опечатки");
+        assert_eq!(c.end(&result(AskEnd::Write { text: "Fixed.".into(), replace: true }, vec![]), false, anywhere), Heard::Answered);
+        c.open(AnswerPlace::Card);
+        assert_eq!(c.view.actions, [AnswerAction::Below, AnswerAction::Copy]);
+        let mut t = Taken::default();
+        t.copied(&"а".repeat(ask::MAX_SELECTION_CHARS + 1));
+        assert!(t.clipped && t.ctx.selection.as_deref().is_some_and(|s| s.contains(ask::ELISION)), "a long Ctrl+C copy is clipped too");
+        t.copied("коротко");
+        assert!(!t.clipped);
+    }
+
+    /// Audit M1: a failure after words were shown keeps them, with the error and Retry under them; Retry starts over.
+    #[test]
+    fn a_failure_keeps_the_words_already_shown() {
+        let mut c = Conversation::new(taken(SelectionKind::None, false));
+        c.ask("объясни подробно");
+        c.step(Step::TextStart);
+        c.step(Step::Text("Начало ответа".into()));
+        assert_eq!(c.end(&result(AskEnd::Failed(AskFailure::Timeout), vec![]), false, anywhere), Heard::Failed(AskError::Failed));
+        assert_eq!((c.view.turns[0].state, c.view.turns[0].text()), (TurnState::Failed, "Начало ответа".to_owned()));
+        assert_eq!(c.paste_text(), None, "a cut answer is not pasted");
+        c.again();
+        assert!(c.view.turns[0].segments.is_empty(), "Retry starts the words over");
+    }
+
+    /// The selection counts as said (C1): a replace over Markdown keeps its markup, end to end.
+    #[test]
+    fn a_replace_over_markdown_keeps_its_markup() {
+        let readme = "## Install\n- one;\n- two;";
+        let mut c = Conversation::new(Taken {
+            ctx: AskContext { selection: Some(readme.into()), ..taken(SelectionKind::Writable, false).ctx },
+            ..taken(SelectionKind::Writable, false)
+        });
+        c.ask("исправь");
+        let fixed = "## Installation\n- one;\n- two;";
+        assert_eq!(c.end(&result(AskEnd::Write { text: fixed.into(), replace: true }, vec![]), false, anywhere), Heard::Write(PasteHow::Replace));
+        assert_eq!(c.paste_text().as_deref(), Some(fixed));
+
+        // Shown instead (the window moved on): Copy and Insert give the text as written, not as an answer's Markdown.
+        let mut s = Conversation::new(Taken {
+            ctx: AskContext { selection: Some(readme.into()), ..taken(SelectionKind::Writable, false).ctx },
+            ..taken(SelectionKind::Writable, false)
+        });
+        s.ask("исправь");
+        assert_eq!(s.end(&result(AskEnd::Write { text: fixed.into(), replace: true }, vec![]), false, |_, _| false), Heard::Answered);
+        assert_eq!(s.paste_text().as_deref(), Some(fixed));
+        s.ask("а теперь объясни");
+        s.step(Step::TextStart);
+        s.step(Step::Text("**Важно:** заголовок".into()));
+        s.end(&result(AskEnd::Answer, vec![text_block("x")]), false, anywhere);
+        assert_eq!(s.paste_text().as_deref(), Some("Важно: заголовок"), "a later answer is pasted as an answer again");
     }
 
     fn text_block(t: &str) -> Value {
@@ -412,7 +530,7 @@ mod tests {
         assert!(first_text(&c).starts_with("<question>ответь что пришлю в четверг</question>\n<selection>Can you send"));
         c.step(Step::TextStart);
         c.step(Step::Text("Пришлю в четверг.".into()));
-        assert_eq!(c.end(&result(AskEnd::Answer, vec![text_block("Пришлю в четверг.")]), false), Heard::Answered);
+        assert_eq!(c.end(&result(AskEnd::Answer, vec![text_block("Пришлю в четверг.")]), false, anywhere), Heard::Answered);
         c.ask("а короче");
         let next = c.request();
         assert_eq!(next.len(), 3, "the question, the answer, the follow-up");
@@ -463,7 +581,7 @@ mod tests {
         c.step(Step::TextStart);
         c.step(Step::Text(" Отправить?".into()));
         assert_eq!(c.view.turns[0].text(), "Письмо готово. Отправить?", "a second block of the retry adds to it");
-        assert_eq!(c.end(&result(AskEnd::Answer, vec![text_block("Письмо готово. Отправить?")]), false), Heard::Answered);
+        assert_eq!(c.end(&result(AskEnd::Answer, vec![text_block("Письмо готово. Отправить?")]), false, anywhere), Heard::Answered);
         assert_eq!(c.paste_text().as_deref(), Some("Письмо готово. Отправить?"));
 
         // The retry writes again: its call starts the words over too, after a search of its own.
@@ -475,7 +593,7 @@ mod tests {
         assert!(w.step(Step::Searching));
         assert!(!w.step(Step::WriteStart));
         assert_eq!((w.view.turns[0].segments.len(), w.view.turns[0].state), (0, TurnState::Pending));
-        assert_eq!(w.end(&result(AskEnd::Write { text: "Привет, Аня!".into(), replace: false }, vec![]), false), Heard::Write(PasteHow::AtCaret));
+        assert_eq!(w.end(&result(AskEnd::Write { text: "Привет, Аня!".into(), replace: false }, vec![]), false, anywhere), Heard::Write(PasteHow::AtCaret));
         assert_eq!(w.paste_text().as_deref(), Some("Привет, Аня!"));
     }
 
@@ -484,12 +602,12 @@ mod tests {
         let mut c = Conversation::new(taken(SelectionKind::None, false));
         c.ask("курс евро");
         c.step(Step::Searching);
-        assert_eq!(c.end(&result(AskEnd::Failed(AskFailure::Timeout), vec![]), false), Heard::Failed(AskError::Failed));
+        assert_eq!(c.end(&result(AskEnd::Failed(AskFailure::Timeout), vec![]), false, anywhere), Heard::Failed(AskError::Failed));
         assert_eq!(c.view.turns[0].state, TurnState::Failed);
         assert_eq!(c.request().len(), 1, "the question is kept for Retry");
         c.again();
         assert_eq!((c.view.turns.len(), c.view.turns[0].state), (1, TurnState::Pending));
-        assert_eq!(c.end(&result(AskEnd::Failed(AskFailure::Key(401)), vec![]), false), Heard::Failed(AskError::Key));
+        assert_eq!(c.end(&result(AskEnd::Failed(AskFailure::Key(401)), vec![]), false, anywhere), Heard::Failed(AskError::Key));
         c.ask("курс доллара");
         assert_eq!(c.view.turns.len(), 1, "the failed turn gives way to the new question");
         let text = first_text(&c);
@@ -505,7 +623,7 @@ mod tests {
         c.open(AnswerPlace::Tray);
         c.step(Step::TextStart);
         c.step(Step::Text("Я не".into()));
-        assert_eq!(c.end(&result(AskEnd::Refused, vec![]), false), Heard::Answered);
+        assert_eq!(c.end(&result(AskEnd::Refused, vec![]), false, anywhere), Heard::Answered);
         assert_eq!((c.view.turns[0].state, c.view.turns[0].segments.len()), (TurnState::Refused, 0));
         assert!(c.view.actions.is_empty(), "nothing to paste");
         assert_eq!(c.paste_text(), None);
@@ -517,13 +635,13 @@ mod tests {
         // Refused before anything showed: the answer opens only after the end, still without buttons.
         let mut r = Conversation::new(taken(SelectionKind::None, false));
         r.ask("q");
-        r.end(&result(AskEnd::Refused, vec![]), false);
+        r.end(&result(AskEnd::Refused, vec![]), false, anywhere);
         r.open(AnswerPlace::Tray);
         assert!(r.view.actions.is_empty(), "opened after a refusal: no buttons");
 
         let mut e = Conversation::new(taken(SelectionKind::None, false));
         e.ask("q");
-        e.end(&result(AskEnd::Answer, vec![]), false);
+        e.end(&result(AskEnd::Answer, vec![]), false, anywhere);
         e.ask("q2");
         assert_eq!(e.request().len(), 1, "never an assistant message with no blocks");
 
@@ -531,7 +649,7 @@ mod tests {
         let mut f = Conversation::new(taken(SelectionKind::Writable, false));
         f.ask("q");
         f.open(AnswerPlace::Tray);
-        f.end(&result(AskEnd::Refused, vec![]), false);
+        f.end(&result(AskEnd::Refused, vec![]), false, anywhere);
         f.ask("а другое");
         assert_eq!(f.view.actions, [AnswerAction::Below, AnswerAction::Replace, AnswerAction::Copy]);
         f.abort();
@@ -544,7 +662,7 @@ mod tests {
         let write = |text: &str, replace: bool| result(AskEnd::Write { text: text.into(), replace }, vec![]);
         let mut c = Conversation::new(taken(SelectionKind::Writable, false));
         c.ask("ответь");
-        assert_eq!(c.end(&write("**Пришлю** в четверг.", false), false), Heard::Write(PasteHow::Below));
+        assert_eq!(c.end(&write("**Пришлю** в четверг.", false), false, anywhere), Heard::Write(PasteHow::Below));
         assert!(c.has_write());
         assert_eq!(c.paste_text().as_deref(), Some("Пришлю в четверг."), "markup the question did not ask for goes");
         assert_eq!(
@@ -556,20 +674,20 @@ mod tests {
         // Decisions 3–4: a write about read-only text is shown in the answer, with Copy.
         let mut c = Conversation::new(taken(SelectionKind::ReadOnly, false));
         c.ask("ответь");
-        assert_eq!(c.end(&write("Пришлю.", false), false), Heard::Answered);
+        assert_eq!(c.end(&write("Пришлю.", false), false, anywhere), Heard::Answered);
         c.open(AnswerPlace::Tray);
         assert_eq!((c.view.turns[0].text(), c.view.actions.as_slice()), ("Пришлю.".to_owned(), &[AnswerAction::Copy][..]));
         assert!(!c.has_write());
 
         let mut c = Conversation::new(taken(SelectionKind::Writable, true));
         c.ask("исправь");
-        assert_eq!(c.end(&write("git push origin main", true), false), Heard::Answered, "no replace in a terminal: shown");
+        assert_eq!(c.end(&write("git push origin main", true), false, anywhere), Heard::Answered, "no replace in a terminal: shown");
         assert_eq!(c.view.turns[0].text(), "git push origin main");
 
         // Decision 12: the request ended while a follow-up records — a write is shown, never pasted under the user's hands.
         let mut c = Conversation::new(taken(SelectionKind::None, false));
         c.ask("напиши письмо");
-        assert_eq!(c.end(&write("Привет!", false), true), Heard::Answered);
+        assert_eq!(c.end(&write("Привет!", false), true, anywhere), Heard::Answered);
         assert_eq!(c.paste_text().as_deref(), Some("Привет!"));
     }
 
@@ -592,7 +710,7 @@ mod tests {
         assert_eq!(c.paste_text(), None, "nothing yet");
         c.step(Step::TextStart);
         c.step(Step::Text("**Коротко:** оба.\n* первый".into()));
-        c.end(&result(AskEnd::Answer, vec![text_block("x")]), false);
+        c.end(&result(AskEnd::Answer, vec![text_block("x")]), false, anywhere);
         assert_eq!(c.paste_text().as_deref(), Some("Коротко: оба.\n- первый"));
     }
 
@@ -627,7 +745,7 @@ mod tests {
         let call = json!({ "type": "tool_use", "id": "toolu_1", "name": "write_to_field", "input": { "text": "x", "mode": "replace" } });
         let mut c = Conversation::new(taken(SelectionKind::Writable, true));
         c.ask("исправь");
-        c.end(&result(AskEnd::Write { text: "x".into(), replace: true }, vec![call]), false);
+        c.end(&result(AskEnd::Write { text: "x".into(), replace: true }, vec![call]), false, anywhere);
         c.ask("а иначе");
         let next = c.request();
         assert_eq!(next[2]["content"][0]["type"], "tool_result");
@@ -639,7 +757,7 @@ mod tests {
     fn an_aborted_follow_up_leaves_the_answer_it_follows() {
         let mut c = Conversation::new(taken(SelectionKind::None, false));
         c.ask("q");
-        c.end(&result(AskEnd::Answer, vec![text_block("a")]), false);
+        c.end(&result(AskEnd::Answer, vec![text_block("a")]), false, anywhere);
         c.ask("а подробнее");
         c.step(Step::TextStart);
         c.abort();
@@ -654,7 +772,7 @@ mod tests {
     fn an_aborted_follow_up_brings_back_the_failed_question_it_replaced() {
         let mut c = Conversation::new(taken(SelectionKind::None, false));
         c.ask("курс евро");
-        c.end(&result(AskEnd::Failed(AskFailure::Timeout), vec![]), false);
+        c.end(&result(AskEnd::Failed(AskFailure::Timeout), vec![]), false, anywhere);
         c.ask("а доллара");
         c.step(Step::Searching);
         c.abort();
@@ -667,9 +785,9 @@ mod tests {
         // Once the new question has ended, the failed one is gone for good.
         let mut d = Conversation::new(taken(SelectionKind::None, false));
         d.ask("курс евро");
-        d.end(&result(AskEnd::Failed(AskFailure::Timeout), vec![]), false);
+        d.end(&result(AskEnd::Failed(AskFailure::Timeout), vec![]), false, anywhere);
         d.ask("а доллара");
-        d.end(&result(AskEnd::Answer, vec![text_block("90")]), false);
+        d.end(&result(AskEnd::Answer, vec![text_block("90")]), false, anywhere);
         d.ask("а юаня");
         d.abort();
         assert_eq!(d.view.turns.iter().map(|t| t.question.as_str()).collect::<Vec<_>>(), ["а доллара"]);

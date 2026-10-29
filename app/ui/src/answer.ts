@@ -270,10 +270,23 @@ export class AnswerView {
     it.state = turn.state;
     it.cites = [...new Set(turn.segments.flatMap((s) => s.cites))];
     if (turn.state === 'refused') return this.note(it, this.t.answer.refused);
-    if (turn.state === 'failed') return this.note(it, this.t.answer.failed);
     const text = markedText(turn.segments);
+    if (turn.state === 'failed') return this.failed(it, text);
     if (!text.trim()) return this.thinking(it, turn.step);
     if (text !== it.text) this.render(it, text);
+  }
+
+  /** A failed turn (spec 2 §8): the words already shown stay, all of them now, with the error under them and Retry below;
+   *  with no words, the error alone. */
+  private failed(it: Item, text: string) {
+    if (!text.trim()) return this.note(it, this.t.answer.failed);
+    if (text !== it.text) this.render(it, text);
+    this.showAll(it);
+    if (it.body.querySelector('.note')) return;
+    const n = this.root.ownerDocument.createElement('div');
+    n.className = 'note';
+    n.textContent = this.t.answer.failed;
+    it.body.appendChild(n);
   }
 
   /** Before the words: the real step the model is on, if any (spec 2 §7), over shimmering placeholder lines. */

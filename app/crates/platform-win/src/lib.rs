@@ -5,6 +5,7 @@ pub mod focus;
 pub mod mic;
 pub mod placement;
 pub mod selection;
+pub mod terminal;
 pub mod wav;
 #[cfg(windows)]
 pub mod dropwin;

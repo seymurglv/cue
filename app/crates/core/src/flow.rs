@@ -82,7 +82,7 @@ pub enum Outcome {
 pub enum Input {
     /// The chord formed; the mode is what the held Shift / Alt picked.
     ChordDown(Mode),
-    /// Alt was pressed while the chord is held: the mode it picks ("Ask"; switched off in this version).
+    /// Alt was pressed while the chord is held: the mode it picks ("Ask", when `ask.enabled` is on).
     ModeChange(Mode),
     /// A fresh Shift press, with the chord held or on its own after a tap: dictation and translation swap while
     /// recording. The hook sends one more to take it back when that Shift turns out to be part of other keys.

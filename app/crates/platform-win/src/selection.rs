@@ -15,46 +15,14 @@ pub fn copies_line(app: &str) -> bool {
     COPIES_LINE.iter().any(|a| app.eq_ignore_ascii_case(a))
 }
 
-/// Window classes of terminals: the console host (cmd, PowerShell), Windows Terminal and its pseudo-console, mintty
-/// (Git Bash, Cygwin), ConEmu, PuTTY.
-const TERMINAL_CLASSES: &[&str] = &[
-    "ConsoleWindowClass",
-    "CASCADIA_HOSTING_WINDOW_CLASS",
-    "PseudoConsoleWindow",
-    "mintty",
-    "VirtualConsoleClass",
-    "PuTTY",
-];
-/// Executables of terminals and shells, without `.exe`.
-const TERMINAL_EXES: &[&str] = &[
-    "windowsterminal",
-    "openconsole",
-    "conhost",
-    "cmd",
-    "powershell",
-    "pwsh",
-    "mintty",
-    "wsl",
-    "wezterm-gui",
-    "alacritty",
-    "conemu",
-    "conemu64",
-    "putty",
-];
-
-/// A terminal, by its window class or its executable (`focus::window_kind`): the check right before the fallback's
-/// Ctrl+C, on the window it would go to — Ctrl+C there stops the running program, whatever the app was called at the
-/// chord.
-pub fn terminal_window(class: &str, exe: &str) -> bool {
-    let known = |names: &[&str], name: &str| names.iter().any(|n| name.eq_ignore_ascii_case(n));
-    known(TERMINAL_CLASSES, class) || known(TERMINAL_EXES, exe)
-}
-
 /// Ctrl+C fallback (spec 2 §6.1): only when the field could not say whether anything is selected (no text pattern, not a
 /// classic field), there may be a field at all (never in File Explorer's list or on the desktop, where Ctrl+C copies files),
-/// and the app is not a terminal (Ctrl+C there stops the running program).
-pub fn needs_copy_fallback(read: &SelectionRead, editable: Editability, terminal: bool) -> bool {
-    COPY_FALLBACK && matches!(read, SelectionRead::Unknown) && editable != Editability::No && !terminal
+/// the app is not a terminal (Ctrl+C there stops the running program; `terminal::terminal_app`), and Windows does not
+/// upload what is copied to the cloud clipboard by itself (`clipboard::uploads_to_cloud`): the app's copy carries none of
+/// CUE's marks, so the selection would reach the user's other devices (decision of 29.10). The selection then reads as
+/// none.
+pub fn needs_copy_fallback(read: &SelectionRead, editable: Editability, terminal: bool, cloud_upload: bool) -> bool {
+    COPY_FALLBACK && matches!(read, SelectionRead::Unknown) && editable != Editability::No && !terminal && !cloud_upload
 }
 
 /// The selection on screen: its first line (the card's arrow points at its start) and the box around all of it. `None`
@@ -94,7 +62,7 @@ mod tests {
     #[test]
     fn ctrl_c_only_when_the_field_cannot_say_and_never_in_a_terminal() {
         use Editability::*;
-        let text = SelectionRead::Text { text: "x".into(), rects: vec![], read_only: false };
+        let text = SelectionRead::Text { text: "x".into(), rects: vec![], read_only: false, clipped: false };
         for (read, editable, terminal, want) in [
             (&SelectionRead::Unknown, Yes, false, true),
             (&SelectionRead::Unknown, Unknown, false, true),
@@ -105,29 +73,17 @@ mod tests {
             (&SelectionRead::NotAsked, Yes, false, false),
             (&text, Yes, false, false),
         ] {
-            assert_eq!(needs_copy_fallback(read, editable, terminal), want && COPY_FALLBACK, "{read:?} {editable:?} terminal={terminal}");
+            let got = needs_copy_fallback(read, editable, terminal, false);
+            assert_eq!(got, want && COPY_FALLBACK, "{read:?} {editable:?} terminal={terminal}");
         }
     }
 
-    /// The window Ctrl+C would go to, looked at right before it: a console of any shell, Windows Terminal, mintty and
-    /// the like by their class or executable, whatever the app was called at the chord.
+    /// Windows uploads what is copied to the cloud clipboard by itself: the app's copy would reach the user's other
+    /// devices, so there is no Ctrl+C, and the selection reads as none.
     #[test]
-    fn terminal_windows_are_known_by_class_or_executable() {
-        for (class, exe) in [
-            ("ConsoleWindowClass", "conhost"),
-            ("CASCADIA_HOSTING_WINDOW_CLASS", "windowsterminal"),
-            ("mintty", "mintty"),
-            ("SomethingNew", "pwsh"),
-            ("SomethingNew", "PowerShell"),
-            ("VirtualConsoleClass", "conemu64"),
-            ("Chrome_WidgetWin_1", "wezterm-gui"),
-        ] {
-            assert!(terminal_window(class, exe), "{class} {exe}");
-        }
-        let others = [("Chrome_WidgetWin_1", "telegram"), ("Notepad", "notepad"), ("", ""), ("Console", "code")];
-        for (class, exe) in others {
-            assert!(!terminal_window(class, exe), "{class} {exe}");
-        }
+    fn no_ctrl_c_while_windows_uploads_copies_to_the_cloud() {
+        assert!(!needs_copy_fallback(&SelectionRead::Unknown, Editability::Yes, false, true));
+        assert!(!needs_copy_fallback(&SelectionRead::Unknown, Editability::Unknown, false, true));
     }
 
     #[test]

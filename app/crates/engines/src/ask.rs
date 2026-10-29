@@ -246,6 +246,10 @@ pub struct StreamState {
     json: Vec<String>,
     stop_reason: Option<String>,
     usage: AskUsage,
+    /// Web searches the stream started (`server_tool_use` blocks): what the response has searched before its end reports
+    /// the count (`ended`), which only `message_delta` does.
+    searches_seen: u32,
+    ended: bool,
     container: Option<String>,
     stopped: bool,
 }
@@ -274,7 +278,10 @@ impl StreamState {
                 let block = v["content_block"].clone();
                 let name = block["name"].as_str().unwrap_or("");
                 match block["type"].as_str().unwrap_or("") {
-                    "server_tool_use" if name == "web_search" => steps.push(Step::Searching),
+                    "server_tool_use" if name == "web_search" => {
+                        self.searches_seen = self.searches_seen.saturating_add(1);
+                        steps.push(Step::Searching);
+                    }
                     "web_search_tool_result" => steps.push(Step::Reading),
                     "tool_use" if name == core_ask::WRITE_TOOL => steps.push(Step::WriteStart),
                     "text" => {
@@ -336,6 +343,7 @@ impl StreamState {
                     self.stop_reason = Some(r.to_owned());
                 }
                 self.read_usage(&v["usage"]);
+                self.ended = true;
                 self.read_container(&v["delta"]["container"]);
             }
             "message_stop" => self.stopped = true,
@@ -354,16 +362,23 @@ impl StreamState {
         self.stop_reason.as_deref()
     }
 
-    /// The counts of this response so far.
+    /// The counts of this response so far. The searches are the ones the stream started until the response's end reports
+    /// them (spec 2 §10: a question closed or cut after it searched still pays for the search); then the reported count,
+    /// which leaves out a search the API deferred and never ran. The tokens are the ones reported so far.
     pub fn usage(&self) -> AskUsage {
-        self.usage
+        let mut usage = self.usage;
+        if !self.ended {
+            usage.web_searches = usage.web_searches.max(self.searches_seen);
+        }
+        usage
     }
 
     pub fn finish(self) -> StreamTurn {
+        let usage = self.usage();
         StreamTurn {
             content: self.blocks.into_iter().filter(|b| !b.is_null()).collect(),
             stop_reason: self.stop_reason,
-            usage: self.usage,
+            usage,
             container: self.container,
         }
     }
@@ -1136,6 +1151,31 @@ mod tests {
         assert_eq!(st.finish().container.as_deref(), Some("container_011"));
     }
 
+    /// The API reports a response's searches only at its end: until then each search the stream started counts, so a
+    /// question closed or cut after it searched still writes the search (spec 2 §10). The end's count is the one billed.
+    #[test]
+    fn searches_count_from_the_stream_until_the_end_reports_them() {
+        let events = search_answer();
+        let mut st = StreamState::default();
+        for e in &events[..2] {
+            st.feed(&e.to_string()).unwrap();
+        }
+        assert_eq!(st.usage().web_searches, 1, "the search began");
+        assert_eq!(st.usage().input_tokens, 50, "tokens stay as known");
+        for e in &events[2..] {
+            st.feed(&e.to_string()).unwrap();
+        }
+        assert_eq!(st.usage().web_searches, 1, "the end's count, not one more");
+        let mut deferred = StreamState::default();
+        deferred.feed(&start(json!({ "input_tokens": 5 })).to_string()).unwrap();
+        deferred.feed(&block_start(0, json!({ "type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {} })).to_string()).unwrap();
+        assert_eq!(deferred.usage().web_searches, 1);
+        for e in end("tool_use", json!({ "output_tokens": 9 })) {
+            deferred.feed(&e.to_string()).unwrap();
+        }
+        assert_eq!(deferred.usage().web_searches, 0, "a search the end does not report was never run");
+    }
+
     #[test]
     fn usage_adds_up_over_continuations() {
         let mut u = AskUsage { input_tokens: 1, output_tokens: 2, cache_read_tokens: 3, cache_write_tokens: 4, web_searches: 1 };
@@ -1377,6 +1417,19 @@ mod tests {
         })
         .await;
         assert_eq!(r.end, AskEnd::Failed(AskFailure::Timeout), "no search: 0.4 s");
+    }
+
+    /// A search began, then the deadline cut the question: the search is in what it spent.
+    #[tokio::test]
+    async fn a_question_cut_after_its_search_still_counts_the_search() {
+        let searching = vec![
+            start(json!({ "input_tokens": 50, "cache_read_input_tokens": 900 })),
+            block_start(0, json!({ "type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {} })),
+            stop(0),
+        ];
+        let (r, _, _, _) = ask_with(Some(KEY), FAST, move |_, _, _| Reply::Stream(200, vec![sse(&searching)], Duration::from_secs(5))).await;
+        assert_eq!(r.end, AskEnd::Failed(AskFailure::Timeout));
+        assert_eq!((r.usage.web_searches, r.usage.cache_read_tokens), (1, 900));
     }
 
     #[tokio::test]

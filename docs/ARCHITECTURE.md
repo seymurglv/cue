@@ -319,9 +319,12 @@ The same path serves dictation and `Ctrl + Win + V`:
 
 1. One short focus query: is there a field, which app, the last few characters before the caret.
 2. Trim the text's edges, then add a join space only when the caret sits right after a word.
-3. In a terminal (Windows Terminal, PowerShell, Command Prompt, conhost, mintty, WSL) every line break becomes a
-   space, so pasting never presses Enter. If the query was late, the last known app or the app at recording start
-   decides.
+3. In a terminal every line break becomes a space, so pasting never presses Enter. One list in `platform-win`
+   (`terminal.rs`) names the terminals for every check: Windows Terminal, PowerShell, Command Prompt, conhost, mintty
+   and Git Bash, WSL, WezTerm, Alacritty, Warp, Tabby, Hyper, Termius, WindTerm, MobaXterm, PuTTY, KiTTY, ConEmu and
+   Cmder, Fluent Terminal, by the name Windows shows or the exe (`terminal_app`), and by window class or exe right
+   before an input (`terminal_window`; for a Store app's frame, the exe of the app in it). If the query was late, the
+   last known app or the app at recording start decides.
 4. On `cue-insert`: wait until Ctrl and Win are physically released (up to 5 s), open the clipboard (up to 10 tries,
    50 ms apart), snapshot RTF, HTML, PNG, DIB, file list and text, put the text with the
    `ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory = 0` and
@@ -350,16 +353,21 @@ effects need, and `cue_engines::ask` talks to the API.
   gives its selection through `EM_GETSEL` and `WM_GETTEXT`, with no rectangles; `ES_READONLY` is read-only. Password
   fields, and fields that will not say whether they are one, are never read. A selection of more than 8,000 characters
   (`MAX_SELECTION_CHARS`) keeps 4,000 from its start and 4,000 from its end with a note between them, from two short
-  reads, one at each end, so a whole document selected costs no more. The answer is `SelectionRead`: `Empty`, `Text`,
-  `Password` or `Unknown` (the field has no way to report a selection); its `Debug` shows lengths only. Chromium gives
+  reads, one at each end, so a whole document selected costs no more; `SelectionRead::Text` says it was `clipped`, and
+  such a selection is never replaced. The answer is `SelectionRead`: `Empty`, `Text`, `Password` or `Unknown` (the
+  field has no way to report a selection); its `Debug` shows lengths only. Chromium gives
   rectangles too; `CHROMIUM_RECTS` in `focus.rs` turns them off should a browser page or an Electron app place them
   wrongly.
 - **The `Ctrl + C` fallback**, at the end of the recording (the chord's keys are up only then): when the field said
-  `Unknown`, there may be a field (not the desktop or File Explorer's list), and the app named at the chord is not a
-  terminal (`is_terminal`) nor an editor that copies its current line with nothing selected (`COPIES_LINE`, empty for
-  now). It runs on `cue-insert` (`InsertJob::CopySelection`), alongside the transcription, and only into the window read
-  at the chord: right before `Ctrl + C` that window must still be in front and must not be a terminal by its class or
-  executable (`selection::terminal_window`). The clipboard is saved, `Ctrl + C` sent, and for 0.4 s CUE waits for the
+  `Unknown`, there may be a field (not the desktop or File Explorer's list), the app named at the chord is not a
+  terminal (`terminal_app`) nor an editor that copies its current line with nothing selected (`COPIES_LINE`, empty for
+  now), and Windows does not upload copied text to the cloud clipboard by itself: `clipboard::uploads_to_cloud`, read
+  once per chord from `HKCU\Software\Microsoft\Clipboard` (`EnableCloudClipboard` on, and `CloudClipboardAutomaticUpload`
+  not 0, a missing value counting as automatic), since the app's copy carries none of CUE's marks; the selection then
+  reads as none, and the log gets the state only. It runs on `cue-insert` (`InsertJob::CopySelection`), alongside the
+  transcription, and only into the window read at the chord: right before `Ctrl + C` that window must still be in front
+  and must not be a terminal by its class or executable (`terminal::terminal_window`). The clipboard is saved,
+  `Ctrl + C` sent, and for 0.4 s CUE waits for the
   app's copy: a write owned by the window's process, by the app in it when the window is a Store app's frame
   (`WindowRef::app_process`), or by no window (`the_apps_copy`), checked again with the clipboard open. Any other
   process's write is never taken for the selection, and a copy whose text is the user's clipboard text again counts as
@@ -369,13 +377,14 @@ effects need, and `cue_engines::ask` talks to the API.
   covers the late guard's check and restore and every paste, left text and copy). The app's copy reaches the Win+V
   history before CUE can mark it, so `forget_in_history` looks among the three newest history items for exactly that
   text, stamped no earlier than just before `Ctrl + C`, and deletes it if Windows allows (`HistoryForget`: removed, not
-  found, refused; logged as a kind). That copy carries none of CUE's marks, so with Windows clipboard sync on Windows
-  may also upload it to the user's other devices, which removing it from the history does not undo (Windows behaviour,
-  not checked live). The request task waits for the copy (2 s at most), never the core; a copied text is a selection
-  that can be changed. `COPY_FALLBACK` in `selection.rs` switches the whole fallback off.
+  found, refused; logged as a kind). That copy carries none of CUE's marks, so with clipboard sync on and its upload
+  set to manual, the user may still send it to other devices from Win+V until it is removed there. The request task
+  waits for the copy (2 s at most), never the core; a copied text is a selection that can be changed (clipped like a
+  read one beyond 8,000 characters). `COPY_FALLBACK` in `selection.rs` switches the whole fallback off.
 - What the question is asked with (`runtime::ask::Taken`): the `AskContext` (app, text before the caret, the clipped
-  selection, today's local date from `GetLocalTime`), the selection kind (`None`, `Writable`, `ReadOnly`), its
-  rectangles, and whether the app is a terminal. The first question of a dictation keeps it until the next chord
+  selection, today's local date from `GetLocalTime`), the selection kind (`None`, `Writable`, `ReadOnly`), whether it
+  was clipped, its rectangles, whether the app is a terminal, and the window the question was asked in (`WindowRef`,
+  the only one an "Ask" paste goes to). The first question of a dictation keeps it until the next chord
   (`KeptTaken`), so Restore after `Esc` asks the same question with the same context, a late copy included, though the
   first ask used up the focus query and the copy.
 
@@ -429,8 +438,11 @@ effects need, and `cue_engines::ask` talks to the API.
   key problem: `AskError::Key`, the Drop's "Claude key problem" without Retry); 404, the model in `ask.model` does not
   exist (`NoModel`, the log says to check `settings.json`); a timeout; the network; another HTTP status (429 and 5xx
   too: a rate limit passes, so Retry may help, unlike a key problem); an `error` event in the stream (its type); a
-  stream against the protocol. Everything but a key problem shows "Couldn't get an answer" with Retry. A failure keeps
-  what the question spent, the response that failed part-way included.
+  stream against the protocol. Everything but a key problem shows "Couldn't get an answer" with Retry, under the words
+  already shown, which stay. A failure keeps what the question spent, the response that failed part-way included: the
+  API reports a response's searches only at its end, so until then each search the stream started counts
+  (`StreamState::usage`), and a question closed or cut after it searched still pays for the search; once the end
+  reports the count, that one is used (it leaves out a search the API deferred and never ran).
 
 ### Conversation and the answer
 
@@ -449,21 +461,35 @@ effects need, and `cue_engines::ask` talks to the API.
 - Where it opens (`open_answer`): in the card when the card window exists, the selection has a rectangle with a size,
   and `cardplace::card_place` finds room for it on the selection's monitor; otherwise in the tray from the Drop. The log
   gets the place only.
-- A written text takes the dictation's form in code (`field_text`: Markdown the question did not ask for taken off,
-  list separators tidied), whatever the instruction achieved. Where it goes (`write_target`): about read-only text, it
-  is shown in the answer (in a terminal too); a `replace` in a terminal is shown (its text cannot be replaced); a
-  `replace` over a writable selection goes over it; an `insert` goes to the caret in a terminal (a line break there is
-  Enter, so never below), below a writable selection, or to the caret without one. A text shown instead of written is
-  an answer to copy.
+- A written text takes the dictation's form in code (`field_text`: Markdown the user did not give taken off, list
+  separators tidied), whatever the instruction achieved. What the user gave is the question and the context the model
+  was shown, the selection and the text before the caret: a sign there (a README's heading, a `# comment`, a list that
+  ends its items with ";") is content, and its rule is off, so a replace keeps what the user did not ask to change. Code
+  is never touched: a ``` block goes in as written (one that is the whole text loses only its fence lines), and inline
+  code keeps its backticks; the code is set aside while the rules run over the rest. Where it goes (`write_target`):
+  about read-only text, it is shown in the answer (in a terminal too); a `replace` in a terminal, or over a clipped
+  selection (its middle would be erased), is shown; a `replace` over a writable selection goes over it; an `insert`
+  goes to the caret in a terminal (a line break there is Enter, so never below), below a writable selection, or to the
+  caret without one. A text shown instead of written is an answer to copy. A write that would be pasted is shown too
+  when the window the question was asked in is not in front any more, or is a terminal for a text with line breaks
+  (`clipboard::may_paste`, the same window check as before the fallback's `Ctrl + C`, ruling 6b): a write lands
+  seconds after the question, and the user may have moved on.
 - The buttons (`answer_actions`) follow the selection: read-only → Copy (in a terminal too); a terminal → Insert,
-  Copy; writable → Insert below, Replace, Copy; none → Insert, Copy. A refused turn has none. They paste or copy the
-  last turn's plain text (`plain_answer`: the Markdown taken off) or the written text. A pasted answer, by a button or
-  as a write, becomes the last result (`last\result.txt`), so `Ctrl + Win + V` pastes it again.
-- Insert and Replace paste the way a dictation does (Replace pastes over the selection, which is still selected).
-  Insert below (`InsertJob::Paste { collapse: true }`) waits for the modifiers to be up (2 s at most), presses Right to
-  collapse the selection to its end, and pastes a line break and the text in one paste (an Enter would send a chat
-  message). A selection that cannot be collapsed is never pasted over: the text stays in the clipboard, and the flow
-  hears "no field". Copy leaves the text in the clipboard the normal way.
+  Copy; writable → Insert below, Replace, Copy (no Replace over a clipped selection); none → Insert, Copy. A refused
+  turn has none. They paste or copy the last turn's plain text (`plain_answer`: the Markdown taken off; the lines of a
+  ``` block as they are, without the fence lines, and inline code without its backticks) or the written text. A pasted
+  answer, by a button or as a write, becomes the last result (`last\result.txt`), so `Ctrl + Win + V` pastes it again.
+- Every "Ask" paste, a write or a button's, carries the window read at the chord (`InsertJob::Paste { target }`):
+  right before the Right arrow and the Ctrl+V, `cue-insert` checks that it is still in front and, for a text that
+  starts with a line break or spans lines, that it is not a terminal (`may_paste`). Otherwise nothing is pasted: the
+  text stays in the clipboard and the flow hears "no field" (the "Nowhere to paste" card); a chord window that was not
+  known pastes nowhere either. Insert pastes the way a dictation does. Replace pastes over the selection, which is
+  still selected, with the selection's own leading and trailing whitespace in place of the text's (`replace_edges`): no
+  join space, and a paragraph selected with its line break keeps it. Insert below (`InsertJob::Paste { collapse: true }`)
+  waits for the modifiers to be up (2 s at most), presses Right to collapse the selection to its end, and pastes a line
+  break and the text in one paste (an Enter would send a chat message). A selection that cannot be collapsed is never
+  pasted over: the text stays in the clipboard, and the flow hears "no field". Copy leaves the text in the clipboard
+  the normal way.
 - A click on a source chip sends only its number (`answer_source`); the core opens the URL only when it is a web page
   (`openable`: `http` or `https` with a host, no spaces, control characters or quotes, 2,048 characters at most), with
   `ShellExecuteW` on a short thread of its own.
@@ -614,7 +640,8 @@ and the card always match.
 410 high), with the Drop's material, growing toward the screen center from any of the four places. It holds the header
 (the mark, the question, the cross), the turns (a follow-up's question, the thinking line, the answer revealed a few
 words at a time, its source chips), the row of a follow-up being recorded ("Listening for a follow-up…") or one that
-could not be made out (with Retry), and the buttons. The thinking line names only real steps ("Searching the web",
+could not be made out (with Retry), and the buttons. A request that fails after its first words keeps them, shown
+whole, with the error and Retry under them. The thinking line names only real steps ("Searching the web",
 "Reading sources", "Writing the answer"); before the first one it is shimmering placeholder lines, and the answer opens
 only with a real step. The buttons are disabled while the answer is still coming or still being revealed (Retry
 excepted), and all of them and the cross are disabled outside the `answer` phase. While any tray is open the Drop steps
@@ -710,7 +737,7 @@ An `ask` row carries `ask.model` in `refine_model`, the tokens of all the questi
 write, and a request aborted by `Esc` before Restore asked again), and its searches in `web_searches`, priced in
 `search_usd` (searches × `pricing.web_search_usd`). What a question has spent reaches the attempt as the stream goes
 (`Step::Spent`), so an answer closed or aborted mid-stream, a failed one and one cut by a deadline still write their
-cost. Its latency runs from the second press to the first words for an `answered` row (the target for the first words of
+cost: the tokens reported so far, and every search the stream started. Its latency runs from the second press to the first words for an `answered` row (the target for the first words of
 an answer without a search is 2.5 s), and to Ctrl+V for a written text. A follow-up is an attempt of its own, and so is
 the Retry of a failed question (no audio). An answer still printing when a follow-up starts waits aside (`answering`)
 and gets its own row when it ends. Pasting a complete answer with its button adds no row.

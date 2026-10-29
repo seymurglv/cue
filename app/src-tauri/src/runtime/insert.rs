@@ -1,12 +1,15 @@
-//! Inserting text at the caret: the insert thread (it owns the clipboard operations) and the terminal safeguard.
+//! Inserting text at the caret: the insert thread (it owns the clipboard operations), the text as it is pasted, and the
+//! app the terminal safeguard looks at (which apps are terminals: `cue_platform_win::terminal`).
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::{Sender, channel};
 use std::time::{Duration, Instant};
 
+use cue_core::ask;
 use cue_core::flow::{DictationId, InsertOutcome};
+use cue_core::refine::join_for_insert;
 use cue_platform_win::clipboard::{
-    ClipboardApi, PasteResult, WinClipboard, WinKeys, copy_selection, forget_in_history, leave_text, paste_text,
-    spawn_late_guard,
+    ClipboardApi, PasteResult, WinClipboard, WinKeys, copy_selection, forget_in_history, leave_text, may_paste,
+    paste_text_if, spawn_late_guard,
 };
 use cue_platform_win::focus::{UNKNOWN_APP, WindowRef};
 use cue_platform_win::input::{press_right, wait_modifiers_released};
@@ -19,8 +22,12 @@ use super::CoreEvent;
 pub enum InsertJob {
     /// There is a field (or it is unknown): paste through the clipboard. `collapse` — "Insert below" (spec 2 §7): first
     /// the Right arrow, which collapses the selection to its end, then the text on a line of its own after it. A
-    /// selection that cannot be collapsed is never pasted over: the text stays in the clipboard ("no field").
-    Paste { id: Option<DictationId>, text: String, collapse: bool },
+    /// selection that cannot be collapsed is never pasted over: the text stays in the clipboard ("no field"). `target` —
+    /// an "Ask" paste: only into that window, the one the question was asked in, and never a text that spans lines (or
+    /// starts with a line break) into a terminal (`clipboard::may_paste`), checked right before the Right arrow and the
+    /// Ctrl+V; otherwise the text stays in the clipboard ("no field"). `None` — a dictation or Ctrl+Win+V: wherever the
+    /// caret is.
+    Paste { id: Option<DictationId>, text: String, collapse: bool, target: Option<WindowRef> },
     /// No field: leave the text in the clipboard the normal way (without markers).
     Leave { id: Option<DictationId>, text: String },
     /// The Ctrl+C fallback of "Ask" (spec 2 §6.1): the selection, read through the clipboard, which is put back; the
@@ -85,26 +92,40 @@ fn run(clip: &mut Option<WinClipboard>, job: InsertJob, core: &UnboundedSender<C
     }
     let Some(clip) = clip.as_mut() else { return };
     match job {
-        InsertJob::Paste { id, text, collapse } => {
-            let text = if collapse {
+        InsertJob::Paste { id, text, collapse, target } => {
+            let pasted_text = if collapse { format!("\n{text}") } else { text.clone() };
+            let allowed = || target.is_none_or(|t| may_paste(&WinKeys, t, &pasted_text));
+            if collapse {
                 // Shift must be up first, or Right would extend the selection instead of collapsing it.
-                if !(wait_modifiers_released(COLLAPSE_WAIT) && press_right()) {
+                if !wait_modifiers_released(COLLAPSE_WAIT) {
                     tracing::info!("insert below: the selection was not collapsed; text left in the clipboard");
                     leave(clip, &text);
                     report(core, id, InsertOutcome::NoField);
                     return;
                 }
-                format!("\n{text}")
-            } else {
-                text
-            };
-            let pasted = paste_text(clip, &mut WinKeys, &text, || report(core, id, InsertOutcome::Pasted));
+                // Not even the Right arrow goes to another window.
+                if !allowed() {
+                    not_here(clip, &text, core, id);
+                    return;
+                }
+                if !press_right() {
+                    tracing::info!("insert below: the selection was not collapsed; text left in the clipboard");
+                    leave(clip, &text);
+                    report(core, id, InsertOutcome::NoField);
+                    return;
+                }
+            }
+            let pasted = paste_text_if(clip, &mut WinKeys, &pasted_text, allowed, || report(core, id, InsertOutcome::Pasted));
             match pasted {
                 Ok(PasteResult::Pasted { restored: true }) => {}
                 // Pasted; the previous clipboard was not restored (it was changed or not read): not a failure.
                 Ok(PasteResult::Pasted { restored: false }) => tracing::info!("insert: previous clipboard not restored"),
                 Ok(PasteResult::LeftInClipboard) => {
                     tracing::info!("insert not done (keys held or Ctrl+V not delivered): text left in the clipboard");
+                    report(core, id, InsertOutcome::NoField);
+                }
+                Ok(PasteResult::NotAllowed) => {
+                    tracing::info!("ask: the window in front is not the one asked in, or is a terminal: text left in the clipboard");
                     report(core, id, InsertOutcome::NoField);
                 }
                 Err(e) => {
@@ -141,29 +162,13 @@ fn leave(clip: &mut WinClipboard, text: &str) {
     }
 }
 
-/// Terminal names (the description from the exe properties, or the file name without `.exe`), case-insensitive.
-/// The Russian entries are the names Windows shows in Russian.
-/// Known limitation: the VS Code built-in terminal looks like the editor (`Visual Studio Code`), so there is
-/// no safeguard there.
-const TERMINALS: [&str; 17] = [
-    "windows terminal",
-    "windowsterminal",
-    "openconsole",
-    "windows powershell",
-    "powershell",
-    "pwsh",
-    "командная строка",
-    "windows command processor",
-    "обработчик команд windows",
-    "cmd",
-    "cmd.exe",
-    "console window host",
-    "windows console host",
-    "узел окна консоли",
-    "conhost",
-    "mintty",
-    "wsl",
-];
+/// An "Ask" paste whose window is not in front any more, or is a terminal for its line breaks: nothing is pasted, and
+/// the text stays in the clipboard ("no field").
+fn not_here(clip: &mut WinClipboard, text: &str, core: &UnboundedSender<CoreEvent>, id: Option<DictationId>) {
+    tracing::info!("ask: the window in front is not the one asked in, or is a terminal: text left in the clipboard");
+    leave(clip, text);
+    report(core, id, InsertOutcome::NoField);
+}
 
 /// The app name, if it is a real one: not empty and not the "unknown" placeholder (`UNKNOWN_APP`) from the field query.
 pub fn known_app(app: &str) -> Option<&str> {
@@ -185,12 +190,6 @@ pub fn insert_app<'a>(now: &'a str, last: &'a str, started: &'a str) -> &'a str 
     first_known_app(&[now, last, started])
 }
 
-/// The app in focus is a terminal: a line break there is Enter, so the command would run by itself.
-pub fn is_terminal(app: &str) -> bool {
-    let app = app.trim().to_lowercase();
-    TERMINALS.contains(&app.as_str()) || app.starts_with("powershell ")
-}
-
 /// The text on one line: each line break (`\r\n`, `\n`, `\r` and runs of them) becomes one space;
 /// nothing at the start and the end (Enter at the end would run the command); no second space next to a space.
 pub fn one_line(text: &str) -> String {
@@ -208,6 +207,17 @@ pub fn one_line(text: &str) -> String {
         out.push(c);
     }
     out
+}
+
+/// The text as it is pasted: its edges trimmed (`trim_edges`) and the join space added by the text before the caret
+/// (`join_for_insert`); over a selection (`replaced`, "Ask"'s Replace), the selection's own edges instead
+/// (`ask::replace_edges`), since the text takes its place exactly; on one line in a terminal.
+pub fn pasted_text(text: &str, before_cursor: Option<&str>, terminal: bool, replaced: Option<&str>) -> String {
+    let text = match replaced {
+        Some(selection) => ask::replace_edges(selection, text),
+        None => join_for_insert(before_cursor, trim_edges(text)),
+    };
+    if terminal { one_line(&text) } else { text }
 }
 
 /// Edges of the insert: no spaces at the start (a leading line break stays: it is part of the text, e.g. a list item
@@ -233,33 +243,8 @@ mod tests {
         let target = WindowRef { window: 0x10, process: 100, app_process: None };
         assert_eq!(InsertJob::CopySelection { reply, target }.id(), None);
         let id = Some(DictationId(3));
-        assert_eq!(InsertJob::Paste { id, text: "x".into(), collapse: true }.id(), id);
+        assert_eq!(InsertJob::Paste { id, text: "x".into(), collapse: true, target: Some(target) }.id(), id);
         assert_eq!(InsertJob::Leave { id, text: "x".into() }.id(), id);
-    }
-
-    #[test]
-    fn terminals_are_recognized_by_name() {
-        for app in [
-            "Windows Terminal",
-            "WindowsTerminal",
-            "Windows PowerShell",
-            "PowerShell",
-            "PowerShell 7",
-            "pwsh",
-            "Командная строка",
-            "Windows Command Processor",
-            "Обработчик команд Windows",
-            "cmd",
-            "cmd.exe",
-            "Console Window Host",
-            "Windows Console Host",
-            "  WINDOWS TERMINAL ",
-        ] {
-            assert!(is_terminal(app), "{app}");
-        }
-        for app in ["Telegram Desktop", "Visual Studio Code", "Блокнот", "Microsoft Word", "приложение", "", "Terminal Velocity"] {
-            assert!(!is_terminal(app), "{app}");
-        }
     }
 
     #[test]
@@ -277,7 +262,7 @@ mod tests {
         // switched to it during the recording); the recording started in Notepad.
         let app = first_known_app(&[UNKNOWN_APP, "Windows Terminal", "Блокнот"]);
         assert_eq!(app, "Windows Terminal");
-        assert!(is_terminal(app), "the terminal safeguard stays on");
+        assert!(cue_platform_win::terminal::terminal_app(app), "the terminal safeguard stays on");
         // The last known app is unknown: the app at the start of recording.
         assert_eq!(first_known_app(&[UNKNOWN_APP, "", "Windows Terminal"]), "Windows Terminal");
         // Ctrl+Win+V: no app at the start of recording, so the last known one.
@@ -325,6 +310,21 @@ mod tests {
         assert_eq!(join_for_insert(Some("минут.\n"), trim_edges(" Привет, как дела?")), "Привет, как дела?");
         assert_eq!(join_for_insert(None, trim_edges(" Привет ")), "Привет");
         assert_eq!(join_for_insert(Some("Список:"), trim_edges(" \n- пункт")), "\n- пункт");
+    }
+
+    /// A replace goes over the selection exactly: two paragraphs selected with the line break after them (a triple click,
+    /// Shift+Down) come back as two paragraphs with that line break, and a selection that starts inside a word gets no
+    /// join space before it.
+    #[test]
+    fn a_replace_keeps_its_line_breaks_and_the_selections_edges() {
+        let selected = "Первый абзац с ошибкой.\n\nВторой абзац.\n";
+        let written = "Первый абзац без ошибки.\n\nВторой абзац.";
+        assert_eq!(pasted_text(written, Some("Итак, вот"), false, Some(selected)), "Первый абзац без ошибки.\n\nВторой абзац.\n");
+        assert_eq!(pasted_text("слово.\n", Some("пол"), false, Some("слово")), "слово.", "no stray line break or space");
+        assert_eq!(pasted_text("Fixed", Some("a"), false, Some("  broken\r\n")), "  Fixed\r\n", "both edges are the selection's");
+        // A dictation and Insert keep their rules.
+        assert_eq!(pasted_text(" мы решили. \n", Some("Итак,"), false, None), " мы решили.");
+        assert_eq!(pasted_text("git status\ngit diff", None, true, None), "git status git diff");
     }
 
     #[test]

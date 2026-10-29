@@ -30,18 +30,22 @@ is built for personal use with your own Soniox and Anthropic API keys.
   - The answer opens with its first real step: a web search starting, its sources coming in, or the first words. Until
     then the Drop shows that it is thinking. Answers from a web search number their sources, and a chip under the
     answer opens each one in your browser.
-  - The buttons depend on what was selected: **Insert below**, **Replace** and **Copy** for text you can edit; only
+  - The buttons depend on what was selected: **Insert below**, **Replace** and **Copy** for text you can edit (no
+    **Replace** for a selection of more than 8,000 characters, which reaches the model as its start and its end); only
     **Copy** for text you cannot (a received message, a web page); **Insert** and **Copy** with nothing selected. They
-    wait until the answer has finished printing. An answer pasted with a button becomes the last result, so
-    `Ctrl + Win + V` pastes it again.
+    wait until the answer has finished printing, and paste only into the window you asked in: with another window in
+    front, the text stays in the clipboard and the "Nowhere to paste" card offers Copy. An answer pasted with a button
+    becomes the last result, so `Ctrl + Win + V` pastes it again.
   - `Ctrl + Win` while the answer is open records a follow-up in the same conversation, even while the answer is
     still printing (the follow-up goes once it has finished). A follow-up CUE could not make out shows **Retry**, and
     the answer stays. `Esc` or the cross closes the answer, and the conversation is forgotten.
   - "Write…", "fix…", "translate…", "reply…": the text goes straight into the field, as a dictation would. It replaces
     the selection when you asked to change it, and otherwise goes at the caret, or on a new line below the selection
-    (in a terminal always at the caret, on one line). A text written about something you cannot edit, a change of a
-    terminal's text, and a text that comes while a follow-up is on its way or while CUE is paused are shown in the
-    answer instead, with its buttons (only **Copy** for text you cannot edit).
+    (in a terminal always at the caret, on one line). Code and Markdown already in the selection or before the caret
+    are kept as written. A text written about something you cannot edit, a change of a terminal's text or of a
+    selection of more than 8,000 characters, a text that comes while a follow-up is on its way or while CUE is paused,
+    and one that comes once the window you asked in is no longer in front are shown in the answer instead, with its
+    buttons (only **Copy** for text you cannot edit).
   - A question about the present ("the latest version of…", "the exchange rate today") makes the model search the web
     first (`ask.web_search`); facts that do not change, explanations and writing need no search.
 - **Translation** (`Ctrl + Win + Shift`). Speech that is not in your target language (`translate.target`, English
@@ -254,7 +258,7 @@ The last three columns of `usage.csv` are `mode`, `web_searches` and `search_usd
 `ask` or `warmup`.
 - An `ask` row is one question: its audio, the tokens of `ask.model` (in the `refine_model` and token columns) and its
   web searches at $0.01 each (`web_searches`, `search_usd`). An answer you close while it is still printing is paid
-  for as far as it came, and so is a question cancelled with `Esc`. Each follow-up gets a row of its own, and so does
+  for as far as it came, its web searches included, and so is a question cancelled with `Esc`. Each follow-up gets a row of its own, and so does
   the Retry of a failed question (without audio). Pasting an answer with its button adds no row: the answer was counted
   when it was complete. A shown answer has the outcome `answered`, and its latency runs from the second key press to
   the first words; a text written into the field is `inserted` (or `no_field`), with the latency to the paste.
@@ -342,13 +346,16 @@ with the app's default (`--thinking adaptive`).
   the answer is open.
 - **The `Ctrl + C` fallback of "Ask".** When the app does not tell CUE what is selected, CUE presses `Ctrl + C` in that
   window once the recording ends (never in a terminal CUE knows, nor in another window than the one you asked in), reads
-  the selection from the clipboard and puts your clipboard back as it was. Only a copy made by that app counts (or one
+  the selection from the clipboard and puts your clipboard back as it was. It never does while Windows syncs copied
+  text to your other devices by itself (Settings → System → Clipboard: clipboard history across your devices, with
+  "Automatically sync text that I copy"): the app's copy would be uploaded at once, so the selection then reads as
+  none. CUE reads that setting from the registry at each "Ask" chord and logs only whether it is on. Only a copy made by that app counts (or one
   with no owner, as some apps copy), and a copy that is the same text as your clipboard already held counts as nothing
   selected. The app's copy reaches the Windows clipboard history (Win+V) before CUE can mark it, so CUE then tries to
   remove it from there; whether Windows allows that has not been confirmed for every app (see Known limitations). CUE's
   own writes (each paste, and your clipboard put back) carry the marks that keep them out of the history and the cloud
-  clipboard, but the app's copy carries none: with Windows clipboard sync on, Windows may upload it to your other
-  devices, and removing it from Win+V does not take that back. This is Windows behaviour and was not checked live.
+  clipboard, but the app's copy carries none: with clipboard sync set to manual, it can be sent to your other devices
+  from Win+V by hand until CUE removes it there.
 - **Inside CUE:** the Drop and the card windows get the text of the question and the answer, the card's short quote of
   the selection (40 characters at most), and the titles and sites of the sources, to draw them; never the addresses. A
   click on a source asks the core to open it, and the core opens only `http` and `https` pages, in the default browser.
@@ -363,8 +370,10 @@ with the app's default (`--thinking adaptive`).
 - Windows does not let a normal app intercept keys in, or paste into, windows running as administrator; CUE does not
   react there. The lock screen and UAC prompts are out of reach too.
 - Clipboard restore covers text, HTML, RTF, images (PNG and DIB) and file lists; rarer formats are not restored.
-- The terminal one-line rule recognizes Windows Terminal, PowerShell, Command Prompt, conhost, mintty and WSL by
-  name; the VS Code integrated terminal looks like the editor.
+- The terminal rules (one line when pasting, no `Ctrl + C`, no line break from "Ask") recognize Windows Terminal,
+  PowerShell, Command Prompt, conhost, mintty and Git Bash, WSL, WezTerm, Alacritty, Warp, Tabby, Hyper, Termius,
+  WindTerm, MobaXterm, PuTTY, KiTTY, ConEmu and Cmder, and Fluent Terminal, by app name, executable or window class; a
+  terminal outside that list is treated as an ordinary app, and the VS Code integrated terminal looks like the editor.
 - A translation is checked by length and by script, not by meaning. Between two languages written in the same script
   (English and German) only the length is checked, so untranslated text can pass there. English speech with a word in
   the target script (a Cyrillic name, translated into Russian) counts as such a pair too and gets the length check
@@ -379,9 +388,15 @@ with the app's default (`--thinking adaptive`).
   text or in Electron apps, where a misplaced card would be the sign to switch it off (`CHROMIUM_RECTS` in
   `focus.rs`).
 - The `Ctrl + C` fallback's copy may stay in the Win+V history when Windows does not let CUE remove it. Its removal has
-  not been seen working live yet: in the one app checked, nothing was selected, so nothing was copied. With Windows
-  clipboard sync on, that copy may also reach your other devices, since it carries none of CUE's marks; this was not
-  checked live either. Turning clipboard sync off (Settings → System → Clipboard), or "Ask" off, avoids it.
+  not been seen working live yet: in the one app checked, nothing was selected, so nothing was copied.
+- While Windows syncs copied text to your other devices automatically, there is no `Ctrl + C` fallback, so "Ask" sees
+  no selection in apps that do not report it themselves. Setting clipboard sync to manual (Settings → System →
+  Clipboard) brings the fallback back; its copy carries none of CUE's marks, so until CUE removes it from Win+V it can
+  be synced from there by hand. CUE reads the setting the way Settings stores it (`EnableCloudClipboard` and
+  `CloudClipboardAutomaticUpload` under `HKCU\Software\Microsoft\Clipboard`); a policy that turns sync off for the
+  whole computer is not read, and with the user setting still on, the fallback stays off.
+- A selection of more than 8,000 characters reaches "Ask" as its first and last 4,000: it is never replaced (no
+  **Replace** button, and a change of it is shown with **Copy**), and an answer about it sees only those parts.
 - Editors that copy the current line on `Ctrl + C` with nothing selected (VS Code does by default) could hand that line
   to "Ask" as the selection when they do not report the selection themselves. None is listed yet (`COPIES_LINE` in
   `selection.rs`): VS Code was not available to check.
@@ -392,10 +407,9 @@ with the app's default (`--thinking adaptive`).
   the text stays in the clipboard and the "Nowhere to paste" card offers Copy.
 - When web search fails or is not available to your key, the model answers from what it knows, which may be out of
   date. A key without web search is asked again without it, at once.
-- The `Ctrl + C` fallback stays out of the terminals it knows by window class or executable (the console host with
-  Command Prompt and PowerShell, Windows Terminal, mintty, ConEmu, PuTTY, WezTerm, Alacritty, WSL). In a terminal
-  outside that list that does not report its selection, a question asked there would press `Ctrl + C`, which stops the
-  program running in it.
+- The `Ctrl + C` fallback stays out of the terminals listed above, by app name, executable or window class. In a
+  terminal outside that list that does not report its selection, a question asked there would press `Ctrl + C`, which
+  stops the program running in it.
 
 ## Repository layout
 

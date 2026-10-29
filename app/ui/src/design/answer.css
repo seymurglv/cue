@@ -38,6 +38,7 @@
 .sk i:last-child{width:62%}
 @keyframes shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
 .note{font-size:13.5px;color:var(--a-muted)}
+.aa+.note{margin-top:6px}
 .src{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
 .sc{display:inline-flex;align-items:center;gap:6px;height:26px;max-width:100%;padding:0 10px 0 4px;border-radius:999px;background:var(--a-code);font-size:12px;color:var(--a-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;animation:scIn .45s var(--e-spring) both;animation-delay:calc(var(--i)*80ms);transition:box-shadow .2s}
 .sc i{flex:none;width:18px;height:18px;border-radius:50%;display:grid;place-items:center;font-style:normal;font-size:10px;font-weight:700;color:#fff;background:var(--ask)}

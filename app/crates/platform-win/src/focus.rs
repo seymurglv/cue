@@ -47,8 +47,10 @@ pub enum SelectionRead {
     /// Nothing is selected: a caret only.
     Empty,
     /// The selected text, already limited (`cue_core::ask::MAX_SELECTION_CHARS`, start and end); its rectangles on
-    /// screen in physical px when the app gives them (none from a classic field); whether the text there can be changed.
-    Text { text: String, rects: Vec<PxRect>, read_only: bool },
+    /// screen in physical px when the app gives them (none from a classic field); whether the text there can be changed;
+    /// whether it was longer than the limit, so that only its start and its end are here (a replace would erase the
+    /// rest).
+    Text { text: String, rects: Vec<PxRect>, read_only: bool, clipped: bool },
     /// A password field, or one that would not say whether it is one, or could not be checked at all: never read, never
     /// copied.
     Password,
@@ -61,11 +63,12 @@ pub enum SelectionRead {
 impl std::fmt::Debug for SelectionRead {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SelectionRead::Text { text, rects, read_only } => f
+            SelectionRead::Text { text, rects, read_only, clipped } => f
                 .debug_struct("Text")
                 .field("chars", &text.chars().count())
                 .field("rects", &rects.len())
                 .field("read_only", read_only)
+                .field("clipped", clipped)
                 .finish(),
             SelectionRead::NotAsked => f.write_str("NotAsked"),
             SelectionRead::Empty => f.write_str("Empty"),
@@ -153,8 +156,9 @@ pub fn classify(f: &FocusFacts) -> Editability {
     Editability::Unknown
 }
 
-/// The class of a window and its executable's name without `.exe`: what the check right before the Ctrl+C fallback
-/// looks at (`selection::terminal_window`). Empty strings for what cannot be read.
+/// The class of a window and its executable's name without `.exe` — of the app in it when the window is a Store app's
+/// frame: what the check right before the Ctrl+C fallback or an "Ask" paste looks at (`terminal::terminal_window`).
+/// Empty strings for what cannot be read.
 #[cfg(windows)]
 pub(crate) fn window_kind(w: WindowRef) -> (String, String) {
     win::window_kind(w)
@@ -217,9 +221,14 @@ fn selection_head_units(max: usize) -> i32 {
 }
 
 /// The selection's text from its first read (`head`, up to `selection_head_units(max)`): all of it when it has no more than
-/// `max` characters, otherwise its start and its end around `ELISION` — the end read by `tail(n)`, up to `n` characters.
-fn selection_text(head: String, max: usize, tail: impl FnOnce(usize) -> Option<String>) -> String {
-    if head.chars().count() <= max { head } else { join_head_tail(&head, &tail(max / 2).unwrap_or_default(), max) }
+/// `max` characters, otherwise its start and its end around `ELISION` — the end read by `tail(n)`, up to `n` characters;
+/// and whether it was clipped so (an end that could not be read is clipped all the more).
+fn selection_text(head: String, max: usize, tail: impl FnOnce(usize) -> Option<String>) -> (String, bool) {
+    if head.chars().count() <= max {
+        (head, false)
+    } else {
+        (join_head_tail(&head, &tail(max / 2).unwrap_or_default(), max), true)
+    }
 }
 
 /// The moment after which nobody waits for the answer to the request any more; `None` — no deadline.
@@ -507,7 +516,9 @@ mod win {
 
     pub(super) fn window_kind(w: WindowRef) -> (String, String) {
         let class = class_name(HWND(w.window as *mut _));
-        let exe = exe_path(w.process).map(|p| file_and_stem(&String::from_utf16_lossy(&p)).1).unwrap_or_default();
+        // A Store app's frame says nothing of the app in it (Fluent Terminal): its exe is the one that tells.
+        let process = w.app_process.unwrap_or(w.process);
+        let exe = exe_path(process).map(|p| file_and_stem(&String::from_utf16_lossy(&p)).1).unwrap_or_default();
         (class, exe)
     }
 
@@ -657,12 +668,12 @@ mod win {
             if head.trim().is_empty() {
                 return SelectionRead::Empty;
             }
-            let text = selection_text(head, max, |n| tail_text(&range, n));
+            let (text, clipped) = selection_text(head, max, |n| tail_text(&range, n));
             if deadline.passed() {
                 return SelectionRead::Unknown;
             }
             let rects = if chromium && !CHROMIUM_RECTS { Vec::new() } else { bounding_rects(&range) };
-            SelectionRead::Text { text, rects, read_only: read_only(&range) }
+            SelectionRead::Text { text, rects, read_only: read_only(&range), clipped }
         }
     }
 
@@ -743,7 +754,13 @@ mod win {
         if text.trim().is_empty() {
             return Some(SelectionRead::Empty);
         }
-        Some(SelectionRead::Text { text: clip_selection(&text, max), rects: Vec::new(), read_only: style & ES_READONLY != 0 })
+        let clipped = text.chars().count() > max;
+        Some(SelectionRead::Text {
+            text: clip_selection(&text, max),
+            rects: Vec::new(),
+            read_only: style & ES_READONLY != 0,
+            clipped,
+        })
     }
 
     /// A classic Win32 field (`Edit` and its descendants, for example the WinForms `TextBox`). Such a field often answers
@@ -1167,7 +1184,7 @@ mod tests {
             Some(|chars: usize, sel: Option<usize>, _d: Deadline| FocusInfo {
                 before_cursor: Some(chars.to_string()),
                 selection: match sel {
-                    Some(max) => SelectionRead::Text { text: "x".repeat(max.min(3)), rects: vec![], read_only: false },
+                    Some(max) => SelectionRead::Text { text: "x".repeat(max.min(3)), rects: vec![], read_only: false, clipped: false },
                     None => SelectionRead::NotAsked,
                 },
                 ..notepad()
@@ -1175,16 +1192,18 @@ mod tests {
         });
         assert_eq!(w.query(16, Duration::from_secs(2)).selection, SelectionRead::NotAsked);
         let asked = w.query_with_selection(500, 8_000, Duration::from_secs(2));
-        assert_eq!(asked.selection, SelectionRead::Text { text: "xxx".into(), rects: vec![], read_only: false });
+        assert_eq!(asked.selection, SelectionRead::Text { text: "xxx".into(), rects: vec![], read_only: false, clipped: false });
         assert_eq!(asked.before_cursor.as_deref(), Some("500"));
     }
 
     #[test]
     fn selection_debug_shows_lengths_not_text() {
-        let read = SelectionRead::Text { text: "секретный текст".into(), rects: vec![PxRect { left: 0, top: 0, right: 1, bottom: 1 }], read_only: true };
+        let rects = vec![PxRect { left: 0, top: 0, right: 1, bottom: 1 }];
+        let read = SelectionRead::Text { text: "секретный текст".into(), rects, read_only: true, clipped: false };
         let shown = format!("{read:?}");
         assert!(!shown.contains("секрет"), "{shown}");
         assert!(shown.contains("chars: 15") && shown.contains("rects: 1") && shown.contains("read_only: true"), "{shown}");
+        assert!(shown.contains("clipped: false"), "{shown}");
         let info = FocusInfo { selection: read, ..notepad() };
         assert!(!format!("{info:?}").contains("секрет"));
     }
@@ -1199,11 +1218,14 @@ mod tests {
         let tail = |n: usize| Some(selection.chars().skip(selection.chars().count() - n).collect::<String>());
         let max = 8_000;
         let head = units(&selection, usize::try_from(selection_head_units(max)).unwrap());
-        let text = selection_text(head, max, tail);
+        let (text, clipped) = selection_text(head.clone(), max, tail);
         assert!(text.starts_with('😀') && text.contains(ELISION) && text.ends_with("конец"), "{} chars", text.chars().count());
         assert_eq!(text, clip_selection(&selection, max), "as if the whole selection had been read");
+        assert!(clipped, "only its start and its end: a replace would erase the rest");
+        assert!(selection_text(head, max, |_| None).1, "an end that could not be read: clipped all the more");
         let short = format!("😀{}", "б".repeat(10));
-        assert_eq!(selection_text(units(&short, usize::try_from(selection_head_units(max)).unwrap()), max, |_| None), short);
+        let units_max = usize::try_from(selection_head_units(max)).unwrap();
+        assert_eq!(selection_text(units(&short, units_max), max, |_| None), (short, false));
         assert!(selection_head_units(usize::MAX) > 0, "no overflow");
     }
 }

@@ -350,7 +350,7 @@ impl Markup {
 }
 
 /// The line is only a code fence: ```` ``` ```` and maybe a language name.
-fn is_code_fence(line: &str) -> bool {
+pub(crate) fn is_code_fence(line: &str) -> bool {
     line.trim()
         .strip_prefix("```")
         .is_some_and(|lang| !lang.trim().contains(|c: char| c == '`' || c.is_whitespace()))
