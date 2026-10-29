@@ -4,25 +4,32 @@ use std::sync::mpsc::{Sender, channel};
 use std::time::Instant;
 
 use cue_core::flow::{DictationId, InsertOutcome};
-use cue_platform_win::clipboard::{ClipboardApi, PasteResult, WinClipboard, WinKeys, paste_text};
+use cue_platform_win::clipboard::{
+    ClipboardApi, PasteResult, WinClipboard, WinKeys, copy_selection, forget_in_history, paste_text, spawn_late_guard,
+};
 use cue_platform_win::focus::UNKNOWN_APP;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::CoreEvent;
 
-/// A job for the insert thread. `id` is the dictation waiting for the result; `None` is Ctrl+Win+V and "Copy" on the
-/// tray card: the flow does not wait for their result.
+/// A job for the insert thread. `id` is the dictation waiting for the result; `None` is Ctrl+Win+V, "Copy" on the
+/// tray card and the answer's Copy: the flow does not wait for their result.
 pub enum InsertJob {
-    /// There is a field (or it is unknown): paste through the clipboard.
-    Paste { id: Option<DictationId>, text: String },
+    /// There is a field (or it is unknown): paste through the clipboard. `collapse` — first the Right arrow, which
+    /// collapses the selection to its end ("Insert below", spec 2 §7).
+    Paste { id: Option<DictationId>, text: String, collapse: bool },
     /// No field: leave the text in the clipboard the normal way (without markers).
     Leave { id: Option<DictationId>, text: String },
+    /// The Ctrl+C fallback of "Ask" (spec 2 §6.1): the selection, read through the clipboard, which is put back; the
+    /// copy then leaves the Win+V history if Windows allows (decision 27).
+    CopySelection { reply: Sender<Option<String>> },
 }
 
 impl InsertJob {
     fn id(&self) -> Option<DictationId> {
         match self {
             InsertJob::Paste { id, .. } | InsertJob::Leave { id, .. } => *id,
+            InsertJob::CopySelection { .. } => None,
         }
     }
 }
@@ -31,7 +38,8 @@ impl InsertJob {
 ///
 /// Each job ends within a bounded time: waiting for Ctrl and Win to be released takes up to 5 s, each clipboard open
 /// up to 10 attempts of 50 ms (snapshot, write, restore: ≤ ~1.5 s), the pause before restoring the clipboard
-/// is 0.5 s; ≤ ~7 s in total. On top of that the core keeps its own watchdog (`INSERT_WATCHDOG`, 10 s).
+/// is 0.5 s; ≤ ~7 s in total. On top of that the core keeps its own watchdog (`INSERT_WATCHDOG`, 10 s). The Ctrl+C copy
+/// of "Ask" takes less: the keys up within 1.5 s, the app's copy within 0.4 s, the clipboard read and put back.
 /// `Pasted` is sent from `on_pasted` right after Ctrl+V, before the pause and the clipboard restore
 /// (that is the "done" moment).
 pub fn spawn_inserter(core: UnboundedSender<CoreEvent>) -> std::io::Result<Sender<InsertJob>> {
@@ -68,7 +76,11 @@ fn run(clip: &mut Option<WinClipboard>, job: InsertJob, core: &UnboundedSender<C
     }
     let Some(clip) = clip.as_mut() else { return };
     match job {
-        InsertJob::Paste { id, text } => {
+        InsertJob::Paste { id, text, collapse } => {
+            // Shift must be up first, or Right would extend the selection instead of collapsing it.
+            if collapse && cue_platform_win::input::wait_modifiers_released(std::time::Duration::from_secs(5)) {
+                let _ = cue_platform_win::input::press_right();
+            }
             let pasted = paste_text(clip, &mut WinKeys, &text, || report(core, id, InsertOutcome::Pasted));
             match pasted {
                 Ok(PasteResult::Pasted { restored: true }) => {}
@@ -92,6 +104,17 @@ fn run(clip: &mut Option<WinClipboard>, job: InsertJob, core: &UnboundedSender<C
                 tracing::warn!("text not put in the clipboard: {e}");
             }
             report(core, id, InsertOutcome::NoField);
+        }
+        InsertJob::CopySelection { reply } => {
+            // A copy too late for this read is still caught, on a thread of its own: the user's clipboard comes back.
+            let copy = copy_selection(clip, &mut WinKeys, |late| {
+                let _ = spawn_late_guard(late);
+            });
+            if let Some(text) = &copy.text {
+                // Detached: the outcome goes to the log as a kind.
+                let _ = forget_in_history(text.clone(), copy.since);
+            }
+            let _ = reply.send(copy.text);
         }
     }
 }
@@ -180,6 +203,16 @@ fn is_line_break(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The flow waits for a paste of its dictation; nothing waits for the copy of a selection (the request task does).
+    #[test]
+    fn only_a_dictations_paste_or_leave_reports_to_the_flow() {
+        let (reply, _rx) = channel();
+        assert_eq!(InsertJob::CopySelection { reply }.id(), None);
+        let id = Some(DictationId(3));
+        assert_eq!(InsertJob::Paste { id, text: "x".into(), collapse: true }.id(), id);
+        assert_eq!(InsertJob::Leave { id, text: "x".into() }.id(), id);
+    }
 
     #[test]
     fn terminals_are_recognized_by_name() {

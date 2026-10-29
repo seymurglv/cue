@@ -48,7 +48,8 @@ fn main() {
             drop_window::drop_hit_rects,
             drop_window::drop_drag,
             ipc::drop_action,
-            ipc::drop_ready
+            ipc::drop_ready,
+            ipc::answer_source
         ])
         .setup(move |app| {
             // We log the reason ourselves: Tauri turns a `setup` error into a panic, and the panic hook does not

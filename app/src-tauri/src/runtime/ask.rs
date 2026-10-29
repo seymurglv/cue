@@ -59,6 +59,14 @@ pub enum Heard {
     Failed(AskError),
 }
 
+impl Heard {
+    /// The answer shows this end (and opens, if nothing showed before): all but a write that is pasted — the answer
+    /// closes with it — and a key problem, which the Drop shows itself (spec 2 §8).
+    pub fn shows(self) -> bool {
+        !matches!(self, Heard::Write(_) | Heard::Failed(AskError::Key))
+    }
+}
+
 /// The conversation of one open answer: from the first question until `CloseAnswer` (spec 2 §6.2: forgotten after).
 pub struct Conversation {
     pub taken: Taken,
@@ -543,6 +551,18 @@ mod tests {
         c.ask("напиши письмо");
         assert_eq!(c.end(&write("Привет!", false), true), Heard::Answered);
         assert_eq!(c.paste_text().as_deref(), Some("Привет!"));
+    }
+
+    /// The answer shows for every end but a write that is pasted (the answer never shows then) and a key problem (the
+    /// Drop's own error instead, spec 2 §8).
+    #[test]
+    fn every_end_but_a_pasted_write_or_a_key_problem_shows_the_answer() {
+        assert!(Heard::Answered.shows());
+        assert!(Heard::Failed(AskError::Failed).shows(), "the error with Retry");
+        assert!(!Heard::Failed(AskError::Key).shows());
+        for how in [PasteHow::AtCaret, PasteHow::Below, PasteHow::Replace] {
+            assert!(!Heard::Write(how).shows(), "{how:?}");
+        }
     }
 
     #[test]

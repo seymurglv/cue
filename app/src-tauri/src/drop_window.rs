@@ -21,11 +21,17 @@ pub const DROP_SIZE: f64 = 36.0;
 pub const GAP_PX: f64 = 12.0;
 pub const METRICS: DropMetrics = DropMetrics { size: DROP_SIZE, gap: GAP_PX };
 /// Logical px. The window is centered on the Drop's center in every place (the page puts the Drop at its center), so a
-/// new place never moves the Drop inside the window: only the window moves. It reaches far enough every way for the
-/// widest Drop and the largest tray card growing toward the screen center, with their shadows. The part beyond the
-/// edge of the work area is transparent and lets the mouse through, like the rest of the window.
-pub const WINDOW_W: f64 = 640.0;
-pub const WINDOW_H: f64 = 400.0;
+/// new place never moves the Drop inside the window. It reaches far enough every way for the widest Drop, the tray
+/// cards and the "Ask" answer tray (420 × up to 410, 2 % of spring overshoot, its shadow: 28 px to the sides, 12 up,
+/// 44 down) growing toward the screen center: tall at the top and bottom, wide at the sides. A square big enough for
+/// both would lie mostly on the old monitor after a move to one of another scale (see the test of rest moves). The
+/// part beyond the edge of the work area is transparent and lets the mouse through, like the rest of the window.
+pub fn window_size(place: DropPosition) -> (f64, f64) {
+    match place {
+        DropPosition::Bottom | DropPosition::Top => (640.0, 860.0),
+        DropPosition::Left | DropPosition::Right => (900.0, 540.0),
+    }
+}
 /// How often the window's place, the z-order and full screen are checked while the Drop is at rest.
 const TICK: Duration = Duration::from_millis(500);
 /// How often the Drop follows the cursor while dragged, and the step of the snap.
@@ -101,6 +107,7 @@ pub fn drop_drag(phase: DragPhase, placer: tauri::State<'_, Placer>) {
 }
 
 pub fn create(app: &AppHandle, lang: crate::lang::Lang, place: DropPosition) -> anyhow::Result<WebviewWindow> {
+    let (w, h) = window_size(place);
     let win = WebviewWindowBuilder::new(app, DROP_LABEL, WebviewUrl::App("drop.html".into()))
         .initialization_script(lang.init_script())
         .initialization_script(place_init_script(place))
@@ -113,7 +120,7 @@ pub fn create(app: &AppHandle, lang: crate::lang::Lang, place: DropPosition) -> 
         .skip_taskbar(true)
         .focused(false)
         .focusable(false)
-        .inner_size(WINDOW_W, WINDOW_H)
+        .inner_size(w, h)
         .visible(false)
         .build()?;
     let hwnd = win.hwnd()?;
@@ -249,6 +256,9 @@ trait Desk {
     fn animations(&self) -> bool;
     /// Asks for the window's top-left corner at `origin` (physical px); false when the request failed.
     fn move_to(&mut self, origin: (i32, i32)) -> bool;
+    /// Gives the window the size `size` (logical px) for the place, around the center of `rect`; the rect it asked for
+    /// (or `rect` if the size is already that, or the request failed).
+    fn resize(&mut self, size: (f64, f64), rect: PxRect) -> PxRect;
     /// Sends the place to the page.
     fn send_place(&mut self, place: DropPosition);
     /// Saves a new place (settings.json, through the core).
@@ -291,6 +301,23 @@ impl Desk for WinDesk {
 
     fn move_to(&mut self, origin: (i32, i32)) -> bool {
         dropwin::move_to(self.hwnd, origin.0, origin.1).is_ok()
+    }
+
+    fn resize(&mut self, size: (f64, f64), rect: PxRect) -> PxRect {
+        let Seen::Shown { scale, .. } = dropwin::observe(self.hwnd) else { return rect };
+        let (w, h) = ((size.0 * scale).round() as i32, (size.1 * scale).round() as i32);
+        if (w, h) == (rect.width(), rect.height()) {
+            return rect;
+        }
+        let (x, y) = placement::origin_for_center(rect.center(), w, h);
+        let to = PxRect { left: x, top: y, right: x + w, bottom: y + h };
+        match dropwin::set_rect(self.hwnd, to) {
+            Ok(()) => to,
+            Err(e) => {
+                tracing::warn!("Drop window not resized: {e}");
+                rect
+            }
+        }
     }
 
     fn send_place(&mut self, place: DropPosition) {
@@ -380,6 +407,9 @@ impl Motion {
             }
         }
         desk.send_place(self.place);
+        // The window turns with the place (decision 14), around the Drop's center: the Drop stays where it was let go.
+        // No drag happens while the answer tray is open (the page refuses it), so no tray is cut by the change.
+        let rect = desk.resize(window_size(self.place), rect);
         let Some(mon) = desk.foreground_monitor().or_else(|| desk.monitor_at(center)) else { return };
         let to = placement::anchor(mon.work, mon.scale, self.place, METRICS);
         if desk.animations() {
@@ -593,10 +623,11 @@ mod tests {
             (screen(0, -1440, 2560, 1440, 1.75), screen(0, 0, 1920, 1080, 1.0)),
         ];
         for ((old_bounds, old), (new_bounds, new)) in pairs {
-            // The window as it is on the old monitor: its size there, at the old monitor's bottom place.
-            let (w, h) = ((WINDOW_W * old.scale).round() as i32, (WINDOW_H * old.scale).round() as i32);
-            let rect = window_at(placement::anchor(old.work, old.scale, DropPosition::Bottom, METRICS), w, h);
             for place in DropPosition::ALL {
+                // The window as it is on the old monitor at this place: its size there.
+                let (lw, lh) = window_size(place);
+                let (w, h) = ((lw * old.scale).round() as i32, (lh * old.scale).round() as i32);
+                let rect = window_at(placement::anchor(old.work, old.scale, place, METRICS), w, h);
                 let (x, y) = rest_origin(new, place, rect);
                 let moved = PxRect { left: x, top: y, right: x + w, bottom: y + h };
                 assert_eq!(moved.center(), placement::anchor(new.work, new.scale, place, METRICS));
@@ -645,7 +676,7 @@ mod tests {
         fn new() -> Self {
             let bottom = placement::anchor(FHD.work, 1.0, DropPosition::Bottom, METRICS);
             Self {
-                window: Some(window_at(bottom, 640, 400)),
+                window: Some(window_at(bottom, 640, 860)),
                 cursor: (bottom.0, bottom.1 - 2),
                 button: true,
                 animations: true,
@@ -691,6 +722,13 @@ mod tests {
                 *r = PxRect { left: origin.0, top: origin.1, right: origin.0 + r.width(), bottom: origin.1 + r.height() };
             }
             true
+        }
+
+        /// At 100 %: the logical size is the physical one.
+        fn resize(&mut self, size: (f64, f64), rect: PxRect) -> PxRect {
+            let to = window_at(rect.center(), size.0 as i32, size.1 as i32);
+            self.window = Some(to);
+            to
         }
 
         fn send_place(&mut self, place: DropPosition) {
@@ -784,11 +822,34 @@ mod tests {
             assert!(t - t0 <= SNAP + FRAME, "the snap does not end");
         }
         assert_eq!(d.center(), (30, 516));
-        assert_eq!(*d.moves.last().unwrap(), (30 - 320, 516 - 200));
+        assert_eq!(*d.moves.last().unwrap(), (30 - 450, 516 - 270));
         // A short spring: it goes past the place by a few px at most (moving left here), then comes back.
         let leftmost = centers.iter().map(|c| c.0).min().unwrap();
         assert!((30 - 5..30).contains(&leftmost), "{leftmost}");
         assert!(centers.iter().all(|c| c.1 >= 514), "{centers:?}");
+    }
+
+    /// Decision 14: the window turns with the place, around the Drop's center.
+    #[test]
+    fn a_new_place_turns_the_window_around_the_drop() {
+        let now = Instant::now();
+        let (mut m, mut d) = (Motion::new(DropPosition::Bottom), Fake::new());
+        drag_to(&mut m, &mut d, (300, 602), now);
+        m.end(&mut d, now);
+        assert_eq!(d.window.map(|r| (r.width(), r.height(), r.center())), Some((900, 540, (300, 602))));
+        let (mut m, mut d) = (Motion::new(DropPosition::Bottom), Fake::new());
+        drag_to(&mut m, &mut d, (800, 900), now);
+        m.end(&mut d, now);
+        assert_eq!(d.window.map(|r| (r.width(), r.height())), Some((640, 860)), "the same place: the same window");
+    }
+
+    /// Tall where the answer grows up or down, wide where it grows sideways; the same for opposite places.
+    #[test]
+    fn the_window_size_follows_the_place() {
+        assert_eq!(window_size(DropPosition::Bottom), (640.0, 860.0));
+        assert_eq!(window_size(DropPosition::Top), window_size(DropPosition::Bottom));
+        assert_eq!(window_size(DropPosition::Left), (900.0, 540.0));
+        assert_eq!(window_size(DropPosition::Right), window_size(DropPosition::Left));
     }
 
     #[test]

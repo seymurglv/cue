@@ -32,7 +32,6 @@ pub fn refine_panicked(raw: String) -> RefineResult {
 }
 
 /// "Ask" crashed: for the flow this is a failure with Retry.
-#[cfg_attr(not(test), expect(dead_code))]
 pub fn ask_panicked() -> AskResult {
     AskResult { end: AskEnd::Failed(AskFailure::Network), content: Vec::new(), usage: Default::default(), container: None }
 }

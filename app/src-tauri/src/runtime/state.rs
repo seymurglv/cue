@@ -1,6 +1,6 @@
 //! Small executor rules with no OS and no network: timer generations, whose microphone frames to accept,
-//! the insert watchdog, when to send the voice level and the answer view, when to warm up the connection and the refine
-//! cache.
+//! the insert watchdog, when to send the voice level and the answer view (and to tell the flow it shows), when to warm
+//! up the connection and the prompt caches.
 use std::collections::HashMap;
 
 use cue_core::flow::{DictationId, TimerKind};
@@ -155,12 +155,15 @@ impl WarmUp {
     }
 }
 
-/// The refine prompt cache lives 5 minutes from the start of the last request that used it (spec 2 §6.3).
+/// A prompt cache (refine's, and "Ask"'s of its own) lives 5 minutes from the start of the last request that used it
+/// (spec 2 §6.3).
 pub const CACHE_TTL_MS: u64 = 5 * 60_000;
-/// A warm-up goes out once the cache may expire before refine starts: the recording itself takes time, a minute of margin.
+/// A warm-up goes out once the cache may expire before its request starts: the recording itself takes time, a minute of
+/// margin.
 pub const CACHE_WARM_AFTER_MS: u64 = CACHE_TTL_MS - 60_000;
 
-/// When to warm the refine cache: on a new dictation, if no refine or warm-up started in the last `CACHE_WARM_AFTER_MS`.
+/// When to warm a prompt cache: on a new recording, if no request of its own or warm-up started in the last
+/// `CACHE_WARM_AFTER_MS`. Refine and "Ask" keep one each.
 #[derive(Debug, Default)]
 pub struct CacheWarm {
     last: Option<u64>,
@@ -222,13 +225,11 @@ impl<H> TaskSlot<H> {
     }
 
     /// Whether the task of generation `generation` is the current one (a step of a stream that is still wanted).
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn running(&self, generation: u64) -> bool {
         self.current.as_ref().is_some_and(|(_, g, _)| *g == generation)
     }
 
     /// Whether the task in flight belongs to dictation `id` (an answer still printing when a follow-up starts).
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn is_for(&self, id: DictationId) -> bool {
         self.current.as_ref().is_some_and(|(i, _, _)| *i == id)
     }
@@ -236,11 +237,9 @@ impl<H> TaskSlot<H> {
 
 /// While the words of an answer stream, the view goes to the windows at most this often: every delta would redraw the
 /// answer up to 50 times a second (spec 2 §7 reveals words at its own pace anyway).
-#[cfg_attr(not(test), expect(dead_code))]
 pub const VIEW_EVERY_MS: u64 = 50;
 
 /// What to do with a change of the answer view.
-#[cfg_attr(not(test), expect(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewSend {
     Now,
@@ -251,14 +250,12 @@ pub enum ViewSend {
 }
 
 /// When the answer view goes to the windows while it streams.
-#[cfg_attr(not(test), expect(dead_code))]
 #[derive(Debug, Default)]
 pub struct ViewGate {
     last: Option<u64>,
     flush_armed: bool,
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 impl ViewGate {
     /// A change at `now`.
     pub fn change(&mut self, now: u64) -> ViewSend {
@@ -290,6 +287,20 @@ impl ViewGate {
     pub fn sent(&mut self, now: u64) {
         self.flush_armed = false;
         self.last = Some(now);
+    }
+}
+
+/// The flow hears that an answer shows (`AskOpened`) once per request: on the first step of its task that has something
+/// to show. A new task (Retry, a follow-up) is a request of its own.
+#[derive(Debug, Default)]
+pub struct ShownOnce {
+    task: Option<u64>,
+}
+
+impl ShownOnce {
+    /// A step with something to show came from task `task`: `true` the first time.
+    pub fn first(&mut self, task: u64) -> bool {
+        self.task.replace(task) != Some(task)
     }
 }
 
@@ -475,6 +486,15 @@ mod tests {
         assert_eq!(g.change(10), ViewSend::Later(40));
         g.sent(20);
         assert_eq!(g.change(30), ViewSend::Later(40), "a flush of its own, not one that may never come");
+    }
+
+    #[test]
+    fn the_flow_hears_once_per_request_that_its_answer_shows() {
+        let mut s = ShownOnce::default();
+        assert!(s.first(1));
+        assert!(!s.first(1), "the next steps of the same request");
+        assert!(s.first(2), "Retry or a follow-up: a request of its own");
+        assert!(!s.first(2));
     }
 
     #[test]

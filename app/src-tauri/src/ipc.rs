@@ -11,8 +11,8 @@ use crate::runtime::CoreEvent;
 /// Channel to the core for window commands.
 pub struct CoreTx(pub tokio::sync::mpsc::UnboundedSender<CoreEvent>);
 
-/// Sends events to the Drop window. No dictation text and no audio: only the state, the level, tray card kinds and
-/// the Drop's place.
+/// Sends events to the Drop window: the state, the level, tray card kinds and the Drop's place. No dictation text and
+/// no audio; an "Ask" answer goes to the windows that draw it (`answer`).
 #[derive(Clone)]
 pub struct Ui {
     app: AppHandle,
@@ -46,6 +46,12 @@ impl Ui {
 
     pub fn shake(&self) {
         self.emit("cue://shake", ());
+    }
+
+    /// The "Ask" answer (spec 2 §7), `None` once it closed. The windows get the question, the answer and the sources'
+    /// sites and titles: they draw them. Never the URLs: only the core opens a source.
+    pub fn answer(&self, view: Option<&cue_core::ask::AnswerView>) {
+        self.emit("cue://answer", view);
     }
 
     /// The idle bar hides over a full-screen app.
@@ -82,6 +88,12 @@ impl Ui {
 #[tauri::command]
 pub fn drop_action(action: UiAction, core: State<'_, CoreTx>) {
     let _ = core.0.send(CoreEvent::UiAction(action));
+}
+
+/// A source chip of the answer was clicked: the core opens its page.
+#[tauri::command]
+pub fn answer_source(n: u32, core: State<'_, CoreTx>) {
+    let _ = core.0.send(CoreEvent::AnswerSource(n));
 }
 
 fn place_index(place: DropPosition) -> usize {

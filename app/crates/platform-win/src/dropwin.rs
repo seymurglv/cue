@@ -142,6 +142,14 @@ pub fn move_to(hwnd: HWND, x: i32, y: i32) -> windows::core::Result<()> {
     unsafe { SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS) }
 }
 
+/// Moves and resizes the Drop window at once (physical px): no z-order change, no activation. From any thread: the
+/// request is posted to the window's thread.
+pub fn set_rect(hwnd: HWND, r: PxRect) -> windows::core::Result<()> {
+    let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
+    // SAFETY: only the position and size of our own window; a destroyed HWND gives an error.
+    unsafe { SetWindowPos(hwnd, None, r.left, r.top, r.width(), r.height(), flags) }
+}
+
 /// A visible top-level window above the Drop in z-order, as the z-order guard sees it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Above {

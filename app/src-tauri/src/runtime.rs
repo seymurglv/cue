@@ -17,10 +17,15 @@
 //!   An attempt without a stream (no Soniox key, the stream did not connect) is billed at the stream price: an
 //!   overestimate in a rare failure, accepted;
 //! - the last-dictation files (`last\`) change only on success (`files`); the last text is also kept in memory;
-//! - a refine cache warm-up (`warm_cache`) is paid for and gets a usage.csv row of its own (`warmup`);
-//! - the log gets events, per-stage latencies and error codes; no text, no audio, no keys.
-// Wired into the runtime by the next change.
-#[cfg_attr(not(test), expect(dead_code))]
+//! - a prompt cache warm-up (refine's `warm_cache`, "Ask"'s `warm_ask_cache`) is paid for and gets a usage.csv row of
+//!   its own (`warmup`);
+//! - "Ask" (spec 2 §6–7): the context is taken at the chord, on the focus thread; the request streams in a task of its
+//!   own (`ask_task`, with a generation like the others); the answer view goes to the windows at once for a new turn,
+//!   an end or an opening, and at most every 50 ms while words stream (`state::ViewGate`); the flow hears once per
+//!   request that its answer shows (`state::ShownOnce`). The attempt of an answer still printing when a follow-up
+//!   starts waits aside (`answering`) and gets its own row when it ends;
+//! - the log gets events, per-stage latencies and error codes; no text, no audio, no keys. Never `Effect` or `Input`
+//!   with `{:?}`: their `Debug` prints text.
 mod ask;
 mod attempt;
 mod files;
@@ -33,22 +38,25 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use cue_core::ask::{AnswerPlace, AskContext, MAX_SELECTION_CHARS, SelectionKind};
 use cue_core::audio::{Silence, SilenceDetector};
-use cue_core::flow::{DictationId, Effect, Flow, InsertOutcome, Input, Outcome, SttError, TimerKind};
+use cue_core::flow::{DictationId, Effect, Flow, InsertOutcome, Input, Outcome, PasteHow, SttError, TimerKind};
 use cue_core::refine::{RefineContext, join_for_insert};
 use cue_core::settings::{self, DropPosition, Settings};
 use cue_core::translate;
 use cue_core::ui::{Mode, TrayKind, UiAction, UiPhase, UiState};
 use cue_core::usage::{self, SttPath, UsageRecord};
 use cue_engines::EngineError;
+use cue_engines::ask as engine_ask;
 use cue_engines::claude::{self, Job, RefineResult};
 use cue_engines::keys::{self, KeyName};
 use cue_engines::soniox::SonioxConfig;
 use cue_engines::stt::{self, Engine, Fallback, SttOutput, SttSession};
 use cue_platform_win::chord::HotkeyEvent;
-use cue_platform_win::focus::{Editability, FocusInfo, FocusWorker};
+use cue_platform_win::focus::{Editability, FocusInfo, FocusWorker, SelectionRead};
 use cue_platform_win::hook;
 use cue_platform_win::mic::{self, MicEvent, MicHandle};
+use cue_platform_win::selection::{copies_line, needs_copy_fallback};
 use cue_platform_win::wav::WavSink;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
@@ -60,11 +68,17 @@ use crate::trayicon::TrayLook;
 use attempt::{Attempt, UsageLog, log_finished, needs_row, warmup_record};
 use files::LastFiles;
 use insert::{InsertJob, first_known_app, insert_app, is_terminal, known_app, one_line, trim_edges};
-use state::{CacheWarm, InsertWatch, LevelGate, MicGate, TaskSlot, Timers, WarmUp};
-use tasks::{guarded, refine_panicked, stt_panicked};
+use state::{CacheWarm, InsertWatch, LevelGate, MicGate, ShownOnce, TaskSlot, Timers, ViewGate, ViewSend, WarmUp};
+use tasks::{ask_panicked, guarded, refine_panicked, stt_panicked};
 
 /// Timeout for each UI Automation query.
 const FOCUS_TIMEOUT: Duration = Duration::from_millis(150);
+/// The focus query of an "Ask" question (spec 2 §6.1): the selection of a long document and its rectangles take longer
+/// than the text before the caret.
+const ASK_FOCUS_TIMEOUT: Duration = Duration::from_millis(500);
+/// How long the request task waits for the Ctrl+C fallback (keys up ≤ 1.5 s, the app's copy ≤ 0.4 s): the core never
+/// waits.
+const COPY_WAIT: Duration = Duration::from_secs(2);
 /// Text before the caret on insert: the join (`join_for_insert`) needs only its end. A short read is a
 /// quick query that is rarely late (a late one answers "unknown").
 const INSERT_CONTEXT_CHARS: usize = 16;
@@ -91,8 +105,18 @@ pub enum CoreEvent {
     InsertDone { id: DictationId, outcome: InsertOutcome, at: Instant },
     InsertTimeout { id: DictationId, generation: u64 },
     TimerFired { kind: TimerKind, generation: u64 },
-    /// The refine cache warm-up got an answer: its tokens go to usage.csv.
-    Warmed { usage: claude::Usage },
+    /// A step of the "Ask" request `task` of dictation `id`.
+    AskStep { id: DictationId, task: u64, step: engine_ask::Step },
+    /// The Ctrl+C copy the request `task` waited for came: it is the first question's selection.
+    AskCopied { id: DictationId, task: u64, text: String },
+    /// The "Ask" request `task` ended.
+    AskDone { id: DictationId, task: u64, result: engine_ask::AskResult },
+    /// The answer view changed sooner than `VIEW_EVERY_MS` after it last went out: send it now.
+    AnswerFlush,
+    /// A source chip was clicked: open its page.
+    AnswerSource(u32),
+    /// A cache warm-up got an answer: its tokens go to usage.csv, priced with the model it warmed.
+    Warmed { usage: claude::Usage, model: String },
     /// Wake from sleep or unlock: the pooled connections are most likely dead.
     Wake,
     /// The Drop was dragged to a new place: saved in settings.json.
@@ -166,6 +190,24 @@ pub struct Runtime {
     cache_warm: CacheWarm,
     attempt: Attempt,
     usage: UsageLog,
+    /// "Ask": the focus query with the selection taken at the chord (spec 2 §6.1) and its answer once read; the Ctrl+C
+    /// copy started at the end of the recording; what the first question was asked with (for "restore"); the open
+    /// conversation; its request in flight; its own prompt cache warm-up; how often the answer view goes out; whether
+    /// the flow has heard that the request's answer shows.
+    ask_query: Option<(DictationId, std::sync::mpsc::Receiver<FocusInfo>)>,
+    ask_info: Option<(DictationId, FocusInfo)>,
+    ask_copy: Option<(DictationId, std::sync::mpsc::Receiver<Option<String>>)>,
+    ask_taken: ask::KeptTaken,
+    conversation: Option<ask::Conversation>,
+    ask_task: TaskSlot<JoinHandle<()>>,
+    ask_warm: CacheWarm,
+    view_gate: ViewGate,
+    ask_shown: ShownOnce,
+    /// A request was dropped while its effects ran (`AbortAsk`): the view goes out once they all have, unless the
+    /// answer closed with them — never just before it folds.
+    view_changed: bool,
+    /// The attempt of an answer still printing when a follow-up started (decision 12): its row is written when it ends.
+    answering: Option<Attempt>,
 }
 
 impl Runtime {
@@ -193,6 +235,9 @@ impl Runtime {
         );
         // Language codes only, no user text.
         tracing::info!(to = target, home = translate_home.unwrap_or("none"), "translation pair");
+        // Alt picks "Ask" only when it is on (spec 2 §9); the hook reads the switch on every key.
+        hook::ASK_ENABLED.store(settings.ask.enabled(), Ordering::Relaxed);
+        tracing::info!(ask = settings.ask.enabled(), web_search = settings.ask.web_search(), "ask");
         Self {
             flow: Flow::new(settings.hold_hints_left, has_last),
             t0: Instant::now(),
@@ -225,6 +270,17 @@ impl Runtime {
             cache_warm: CacheWarm::default(),
             attempt: Attempt::new(DictationId::default()),
             usage: UsageLog::default(),
+            ask_query: None,
+            ask_info: None,
+            ask_copy: None,
+            ask_taken: ask::KeptTaken::default(),
+            conversation: None,
+            ask_task: TaskSlot::default(),
+            ask_warm: CacheWarm::default(),
+            view_gate: ViewGate::default(),
+            ask_shown: ShownOnce::default(),
+            view_changed: false,
+            answering: None,
         }
     }
 
@@ -276,6 +332,23 @@ impl Runtime {
         for e in later {
             self.exec(e);
         }
+        self.sync_answer();
+    }
+
+    /// Once the flow's effects have run: the answer's rows of a follow-up (spec 2 §7 "Listening to the follow-up…";
+    /// decision 7: one that could not be transcribed), and the view a dropped request changed. Sent only if the answer
+    /// is still there, so it never goes out just before the answer closes.
+    fn sync_answer(&mut self) {
+        let (listening, missed) =
+            follow_up_rows(self.flow.answer_open(), self.flow.recording_now(), self.flow.ui_state().phase);
+        let dropped = std::mem::take(&mut self.view_changed);
+        let Some(c) = self.conversation.as_mut() else { return };
+        let rows = (c.view.listening, c.view.missed) != (listening, missed);
+        c.view.listening = listening;
+        c.view.missed = missed;
+        if rows || dropped {
+            self.send_view(true);
+        }
     }
 
     fn on_event(&mut self, ev: CoreEvent) {
@@ -285,12 +358,20 @@ impl Runtime {
                 // Only the flow decides the mode, and only while recording: the attempt follows, so one that ends
                 // before refine (Esc, a failed transcription) writes the mode it was recording in.
                 if self.flow.recording_now() {
-                    self.attempt.follow_mode(self.flow.current_id(), self.flow.mode());
+                    let id = self.flow.current_id();
+                    self.attempt.follow_mode(id, self.flow.mode());
+                    // Alt picked "Ask" while the chord is held: the context is taken now, the focus is still in place.
+                    let taken = self.ask_query.as_ref().is_some_and(|(q, _)| *q == id);
+                    if self.flow.mode() == Mode::Ask && !self.flow.answer_open() && !taken {
+                        self.take_ask_context(id);
+                    }
                 }
             }
             CoreEvent::Input(i) => self.feed(i),
             CoreEvent::UiAction(UiAction::TrayAction) => self.on_tray_action(),
             CoreEvent::UiAction(UiAction::TrayClose) => self.tray = None,
+            // The flow does not change: the runtime copies the answer.
+            CoreEvent::UiAction(UiAction::AnswerCopy) => self.copy_answer(),
             CoreEvent::UiAction(a) => {
                 // "Restore" (the flow accepts it only in "Cancelled"): the dictation latency is counted from it.
                 let now = self.now();
@@ -309,6 +390,9 @@ impl Runtime {
                 self.ui.tray(self.tray);
                 self.ui.resend_idle_hidden();
                 self.ui.resend_place();
+                if let Some(c) = self.conversation.as_ref().filter(|c| c.opened) {
+                    self.ui.answer(Some(&c.view));
+                }
             }
             CoreEvent::Mic { id, ev } => self.on_mic(id, ev),
             CoreEvent::SttDone { id, task, result, path } => self.on_stt_done(id, task, result, path),
@@ -316,8 +400,8 @@ impl Runtime {
             CoreEvent::InsertDone { id, outcome, at } => {
                 if self.insert_watch.done(id) {
                     let at = self.ms(at);
-                    if self.attempt.id == id {
-                        self.attempt.inserted(at);
+                    if let Some(a) = self.attempt_for(id) {
+                        a.inserted(at);
                     }
                     self.feed(Input::Inserted { id, outcome });
                 }
@@ -326,8 +410,8 @@ impl Runtime {
                 if self.insert_watch.expired(id, generation) {
                     tracing::warn!("insert did not finish within {} s: \"no field\"", INSERT_WATCHDOG.as_secs());
                     let now = self.now();
-                    if self.attempt.id == id {
-                        self.attempt.inserted(now);
+                    if let Some(a) = self.attempt_for(id) {
+                        a.inserted(now);
                     }
                     self.feed(Input::Inserted { id, outcome: InsertOutcome::NoField });
                 }
@@ -337,10 +421,30 @@ impl Runtime {
                     self.feed(Input::Timer(kind));
                 }
             }
-            CoreEvent::Warmed { usage } => self.on_warmed(usage),
+            CoreEvent::AskStep { id, task, step } => self.on_ask_step(id, task, step),
+            CoreEvent::AskCopied { id, task, text } => {
+                if self.ask_task.running(task)
+                    && let Some(c) = self.conversation.as_mut()
+                {
+                    c.copied(&text);
+                    // "Restore" after Esc asks with the copied selection too.
+                    self.ask_taken.keep(id, &c.taken);
+                }
+            }
+            CoreEvent::AskDone { id, task, result } => self.on_ask_done(id, task, result),
+            CoreEvent::AnswerFlush => {
+                let now = self.now();
+                self.view_gate.flushed(now);
+                if let Some(c) = self.conversation.as_ref().filter(|c| c.opened) {
+                    self.ui.answer(Some(&c.view));
+                }
+            }
+            CoreEvent::AnswerSource(n) => self.open_source(n),
+            CoreEvent::Warmed { usage, model } => self.on_warmed(usage, &model),
             CoreEvent::Wake => {
                 self.warm.reset();
                 self.cache_warm.reset();
+                self.ask_warm.reset();
             }
             CoreEvent::DropMoved(place) => {
                 self.settings.drop.position = place;
@@ -438,16 +542,33 @@ impl Runtime {
                     task.abort();
                 }
             }
-            // "Ask" is off (`hook::ASK_ENABLED` is false): Alt never picks it, and these effects never come.
-            Effect::Ask { .. }
-            | Effect::AskAgain { .. }
-            | Effect::AbortAsk { .. }
-            | Effect::AskPaste { .. }
-            | Effect::CloseAnswer => {}
+            Effect::Ask { id, question, follow_up } => self.ask(id, &question, follow_up),
+            Effect::AskAgain { id } => {
+                let now = self.now();
+                self.attempt.ask_again(id, now);
+                if let Some(c) = self.conversation.as_mut() {
+                    c.again();
+                }
+                self.send_view(true);
+                self.spawn_ask(id);
+            }
+            Effect::AbortAsk { id } => {
+                if let Some(task) = self.ask_task.take_for(id) {
+                    task.abort();
+                }
+                // A follow-up's turn goes; for a first question the conversation closes right after.
+                if let Some(c) = self.conversation.as_mut() {
+                    c.abort();
+                    self.view_changed = true;
+                }
+            }
+            Effect::AskPaste { id, how } => self.ask_paste(id, how),
+            Effect::CloseAnswer => self.close_answer(),
             Effect::Insert { id, text } => self.insert(id, text),
             Effect::PasteLast => self.paste_last(),
             Effect::Ui(s) => self.emit_state(&s),
             Effect::Shake => self.ui.shake(),
+            // The tray card only: `None` — a new recording, a follow-up's too — never closes an open answer.
             Effect::Tray(kind) => {
                 self.tray = kind;
                 self.ui.tray(kind);
@@ -483,7 +604,12 @@ impl Runtime {
         if let Some(old) = self.mic.take() {
             stop_mic_soon(old);
         }
-        self.attempt = Attempt::new(id);
+        let old = std::mem::replace(&mut self.attempt, Attempt::new(id));
+        // A follow-up starts while the answer it follows still prints (decision 12): that attempt waits aside for its
+        // end.
+        if self.ask_task.is_for(old.id) {
+            self.answering = Some(old);
+        }
         self.silence = SilenceDetector::new();
         self.heard = false;
         // The attempt's audio goes to current.wav; a file left from the previous attempt is replaced.
@@ -535,6 +661,14 @@ impl Runtime {
         self.note_app(&info.app);
         self.attempt.app = info.app;
         self.attempt.mode = self.flow.mode();
+        if self.flow.mode() == Mode::Ask {
+            if self.flow.answer_open() {
+                // A follow-up after a pause reads a warm cache too.
+                self.warm_ask_cache();
+            } else {
+                self.take_ask_context(id);
+            }
+        }
         self.warm_up();
         self.warm_cache();
         if let Some(old) = self.stream.take() {
@@ -557,6 +691,11 @@ impl Runtime {
         if self.attempt.id == id {
             let now = self.now();
             self.attempt.finish_stt(now);
+        }
+        // Not for a question cancelled by Esc while recording (the flow is "cancelled" then): "restore" reads it if
+        // asked.
+        if self.flow.mode() == Mode::Ask && !self.flow.answer_open() && self.flow.ui_state().phase == UiPhase::Think {
+            self.read_ask_context(id);
         }
         self.warm_up();
         self.prefetch_focus(id);
@@ -649,7 +788,8 @@ impl Runtime {
     }
 
     /// Warms the refine prompt cache when a dictation starts and the cache may have expired (spec 2 §6.3): the first refine
-    /// after a pause reads the prompt from the cache. Dictation and translation share the prefix; "Ask" has its own (queue 2b).
+    /// after a pause reads the prompt from the cache. Dictation and translation share the prefix; "Ask" has its own
+    /// (`warm_ask_cache`).
     fn warm_cache(&mut self) {
         let model = self.settings.refine.model.clone();
         if self.flow.mode() == Mode::Ask || !claude::can_warm(&model) || !self.cache_warm.due(self.now()) {
@@ -659,19 +799,39 @@ impl Runtime {
         let (http, tx, terms) = (self.http.clone(), self.tx.clone(), self.settings.dictionary.terms.clone());
         tokio::spawn(async move {
             if let Some(usage) = claude::warm(&http, &key, &model, &terms).await {
-                let _ = tx.send(CoreEvent::Warmed { usage });
+                let _ = tx.send(CoreEvent::Warmed { usage, model });
             }
         });
     }
 
-    /// The warm-up's tokens are paid for: a usage.csv row of its own. The log gets the token counts only.
-    fn on_warmed(&mut self, usage: claude::Usage) {
+    /// Warms the "Ask" prompt cache at its chord when it may have expired (spec 2 §6.3): its own prefix — the tools and
+    /// the "Ask" instruction — with the thinking and effort of the request. Four minutes, like the refine cache.
+    fn warm_ask_cache(&mut self) {
+        let now = self.now();
+        if !self.settings.ask.enabled() || !self.ask_warm.due(now) {
+            return;
+        }
+        let Ok(Some(key)) = keys::lookup(KeyName::Anthropic) else { return };
+        let model = self.settings.ask.model().to_owned();
+        let search = self.ask_search();
+        let (http, tx) = (self.http.clone(), self.tx.clone());
+        tokio::spawn(async move {
+            if let Some(usage) = engine_ask::warm(&http, &key, &model, search).await {
+                let _ = tx.send(CoreEvent::Warmed { usage, model });
+            }
+        });
+    }
+
+    /// The warm-up's tokens are paid for: a usage.csv row of its own, priced with the model it warmed. The log gets the
+    /// token counts only.
+    fn on_warmed(&mut self, usage: claude::Usage, model: &str) {
         tracing::info!(
+            model,
             cache_write = usage.cache_creation_input_tokens,
             cache_read = usage.cache_read_input_tokens,
-            "refine cache warmed"
+            "prompt cache warmed"
         );
-        let rec = warmup_record(usage, utc_now(), &self.settings, &self.settings.refine.model);
+        let rec = warmup_record(usage, utc_now(), &self.settings, model);
         self.append_usage(rec);
     }
 
@@ -707,7 +867,10 @@ impl Runtime {
             None
         });
         let now = self.now();
-        self.cache_warm.touched(now);
+        // "Ask" has a prefix of its own (`ask_warm`).
+        if mode != Mode::Ask {
+            self.cache_warm.touched(now);
+        }
         if self.attempt.id == id {
             self.attempt.refine_started(now);
             // The mode is final by the time refine starts.
@@ -748,13 +911,18 @@ impl Runtime {
             self.attempt.insert_started(now);
         }
         self.final_text = Some((id, text.clone()));
+        self.watch_insert(id);
+        self.dispatch_insert(text, Some(id));
+    }
+
+    /// The flow waits for the insert of `id`: its result is awaited, and a watchdog stands in for one that never comes.
+    fn watch_insert(&mut self, id: DictationId) {
         let generation = self.insert_watch.start(id);
         let tx = self.tx.clone();
         tokio::spawn(async move {
             tokio::time::sleep(INSERT_WATCHDOG).await;
             let _ = tx.send(CoreEvent::InsertTimeout { id, generation });
         });
-        self.dispatch_insert(text, Some(id));
     }
 
     fn paste_last(&mut self) {
@@ -796,7 +964,7 @@ impl Runtime {
         let job = if info.editable == Editability::No {
             InsertJob::Leave { id, text }
         } else {
-            InsertJob::Paste { id, text }
+            InsertJob::Paste { id, text, collapse: false }
         };
         self.send_job(job, id);
     }
@@ -808,6 +976,333 @@ impl Runtime {
         tracing::error!("insert thread is not running");
         if let Some(id) = id {
             let _ = self.tx.send(CoreEvent::InsertDone { id, outcome: InsertOutcome::NoField, at: Instant::now() });
+        }
+    }
+
+    /// The context of an "Ask" question, at the chord (or when Alt picked "Ask"), while the focus and the selection are
+    /// where the user left them (spec 2 §6.1): on the focus thread, not to delay the Drop. Its prompt cache warms up
+    /// here too (§6.3). A new question forgets what the last one was asked with.
+    fn take_ask_context(&mut self, id: DictationId) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let focus = Arc::clone(&self.focus);
+        let chars = self.settings.refine.context_chars;
+        tokio::task::spawn_blocking(move || {
+            let _ = tx.send(focus.query_with_selection(chars, MAX_SELECTION_CHARS, ASK_FOCUS_TIMEOUT));
+        });
+        self.ask_query = Some((id, rx));
+        self.ask_info = None;
+        self.ask_copy = None;
+        self.ask_taken.clear();
+        self.warm_ask_cache();
+    }
+
+    /// At the end of the recording: the selection read at the chord, and the Ctrl+C copy when the field could not say
+    /// (spec 2 §6.1). The copy needs the chord's keys up — they are only now — and runs on the insert thread, which
+    /// owns the clipboard, alongside the transcription; the request task waits for it. Never in a terminal, nor in an
+    /// editor that copies its current line when nothing is selected.
+    fn read_ask_context(&mut self, id: DictationId) {
+        let info = match self.ask_query.take() {
+            Some((q, rx)) if q == id => rx.recv_timeout(ASK_FOCUS_TIMEOUT).unwrap_or_default(),
+            _ => FocusInfo::default(),
+        };
+        let app = first_known_app(&[&info.app, &self.attempt.app]).to_owned();
+        let copy = needs_copy_fallback(&info.selection, info.editable, is_terminal(&app) || copies_line(&app));
+        if copy {
+            let (reply, rx) = std::sync::mpsc::channel();
+            if self.insert.as_ref().is_some_and(|tx| tx.send(InsertJob::CopySelection { reply }).is_ok()) {
+                self.ask_copy = Some((id, rx));
+            }
+        }
+        // The kind and the length only (`SelectionRead`'s `Debug`).
+        tracing::info!(selection = ?info.selection, copy, "ask: context");
+        self.ask_info = Some((id, info));
+    }
+
+    /// What the question is asked with (spec 2 §6.1): the selection read at the chord (a Ctrl+C copy joins later, in
+    /// the request task), the text before the caret, the app, today's local date.
+    fn taken(&mut self, id: DictationId) -> ask::Taken {
+        let info = self.ask_info.take().filter(|(i, _)| *i == id).map(|(_, info)| info).unwrap_or_default();
+        let app = first_known_app(&[&info.app, &self.attempt.app]).to_owned();
+        let (selection, sel, rects) = match info.selection {
+            SelectionRead::Text { text, rects, read_only } => {
+                (Some(text), if read_only { SelectionKind::ReadOnly } else { SelectionKind::Writable }, rects)
+            }
+            _ => (None, SelectionKind::None, Vec::new()),
+        };
+        let chars = self.settings.refine.context_chars;
+        let before_cursor = RefineContext::new(String::new(), info.before_cursor.as_deref(), chars).before_cursor;
+        let terminal = is_terminal(&app);
+        ask::Taken { ctx: AskContext { app, before_cursor, selection, today: local_today() }, sel, rects, terminal }
+    }
+
+    /// An "Ask" question goes out (spec 2 §6.2): a first one starts a new conversation with its context — the one kept
+    /// for its dictation when "restore" asks again; a follow-up joins the open one, and the answer shows the new
+    /// question at once.
+    fn ask(&mut self, id: DictationId, question: &str, follow_up: bool) {
+        if !follow_up || self.conversation.is_none() {
+            let taken = match self.ask_taken.get(id) {
+                Some(kept) => kept,
+                None => {
+                    // Esc while recording skipped the read at the end of the recording (the flow was not thinking):
+                    // "restore" reads the selection taken at the chord now, with the keys up for a Ctrl+C fallback.
+                    if !self.ask_info.as_ref().is_some_and(|(i, _)| *i == id) {
+                        self.read_ask_context(id);
+                    }
+                    let fresh = self.taken(id);
+                    self.ask_taken.keep(id, &fresh);
+                    fresh
+                }
+            };
+            self.conversation = Some(ask::Conversation::new(taken));
+        }
+        if let Some(c) = self.conversation.as_mut() {
+            c.ask(question);
+        }
+        if follow_up {
+            self.send_view(true);
+        }
+        self.spawn_ask(id);
+    }
+
+    /// The web search of "Ask", if on and if the model takes one.
+    fn ask_search(&self) -> Option<engine_ask::SearchTool> {
+        let a = &self.settings.ask;
+        if a.web_search() { engine_ask::search_tool(a.max_searches()) } else { None }
+    }
+
+    /// The request of the conversation's last question, in a task of its own. The steps and the end come back as events
+    /// of this task's generation: a dropped or replaced request's never reach the conversation.
+    fn spawn_ask(&mut self, id: DictationId) {
+        let Some(c) = self.conversation.as_ref() else { return };
+        let (messages, container) = (c.request(), c.container.clone());
+        // The Ctrl+C copy of a first question, still on its way: the request task waits for it, never the core.
+        let copy = match self.ask_copy.take() {
+            Some((i, rx)) if i == id => c.question().map(|q| (rx, q.to_owned(), c.taken.ctx.clone())),
+            _ => None,
+        };
+        let model = self.settings.ask.model().to_owned();
+        let search = self.ask_search();
+        let key = keys::lookup(KeyName::Anthropic).unwrap_or_else(|e| {
+            tracing::warn!("Anthropic key: {e}");
+            None
+        });
+        let now = self.now();
+        self.ask_warm.touched(now);
+        if self.attempt.id == id {
+            self.attempt.ask_started(now);
+        }
+        // Counts only: no text.
+        tracing::info!(turns = messages.len(), search = search.is_some(), copy = copy.is_some(), "ask: asking");
+        let (http, tx) = (self.http.clone(), self.tx.clone());
+        let old = self.ask_task.start(id, |task| {
+            tokio::spawn(async move {
+                let mut messages = messages;
+                if let Some((rx, question, ctx)) = copy {
+                    let wait = tokio::task::spawn_blocking(move || rx.recv_timeout(COPY_WAIT).ok().flatten());
+                    let copied = wait.await.ok().flatten();
+                    if let Some(text) = copied {
+                        let ctx = ask::with_copied(&ctx, &text);
+                        messages = vec![ask::first_turn(&question, &ctx)];
+                        let _ = tx.send(CoreEvent::AskCopied { id, task, text });
+                    }
+                }
+                let steps = tx.clone();
+                let body = async {
+                    let thinking = engine_ask::Thinking::DEFAULT;
+                    engine_ask::run(&http, key.as_deref(), &model, search, thinking, &messages, container, move |step| {
+                        let _ = steps.send(CoreEvent::AskStep { id, task, step });
+                    })
+                    .await
+                };
+                let result = guarded("ask", body, ask_panicked).await;
+                let _ = tx.send(CoreEvent::AskDone { id, task, result });
+            })
+        });
+        if let Some(old) = old {
+            old.abort();
+        }
+    }
+
+    /// The attempt of dictation `id`: the current one, or the one whose answer still prints while a follow-up records.
+    fn attempt_for(&mut self, id: DictationId) -> Option<&mut Attempt> {
+        if self.attempt.id == id { Some(&mut self.attempt) } else { self.answering.as_mut().filter(|a| a.id == id) }
+    }
+
+    fn on_ask_step(&mut self, id: DictationId, task: u64, step: engine_ask::Step) {
+        if !self.ask_task.running(task) {
+            return;
+        }
+        let now = self.now();
+        if let engine_ask::Step::Spent(usage) = &step {
+            if let Some(a) = self.attempt_for(id) {
+                a.ask_spent(*usage);
+            }
+            return;
+        }
+        // Text that is not blank, or the start of a write (decision 6).
+        if step.is_first_words()
+            && let Some(a) = self.attempt_for(id)
+        {
+            a.first_words(now);
+        }
+        let Some(c) = self.conversation.as_mut() else { return };
+        let (shows, opened) = (c.step(step), c.opened);
+        if shows && !opened {
+            self.open_answer();
+            self.send_view(true);
+        } else {
+            self.send_view(false);
+        }
+        // Once per request, on its first visible step — a follow-up's and a retry's too. The flow takes it only while
+        // it waits for the answer (thinking).
+        if shows && self.ask_shown.first(task) {
+            self.feed(Input::AskOpened { id });
+        }
+    }
+
+    fn on_ask_done(&mut self, id: DictationId, task: u64, result: engine_ask::AskResult) {
+        if !self.ask_task.finished(task) {
+            return;
+        }
+        let now = self.now();
+        if let Some(a) = self.attempt_for(id) {
+            a.ask_done(result.usage, now);
+        }
+        // Decision 12: the request ended while a follow-up is under way (recording, being transcribed, waiting for this
+        // answer, or missed) — a write is shown, never pasted under the user's hands.
+        let show_write = self.flow.follow_up_under_way(id);
+        let Some(c) = self.conversation.as_mut() else { return };
+        let heard = c.end(&result, show_write);
+        let opened = c.opened;
+        // Kinds and counts only.
+        tracing::info!(heard = ?heard, searches = result.usage.web_searches, "ask: done");
+        if heard.shows() {
+            if !opened {
+                self.open_answer();
+            }
+            self.send_view(true);
+        }
+        let input = match heard {
+            ask::Heard::Answered => Input::AskAnswered { id },
+            ask::Heard::Write(how) => Input::AskWrite { id, how },
+            ask::Heard::Failed(error) => Input::AskFailed { id, error },
+        };
+        self.feed(input);
+    }
+
+    /// Where the answer shows (spec 2 §7): the tray from the Drop. (The card at the selection comes with its window.)
+    fn open_answer(&mut self) {
+        if let Some(c) = self.conversation.as_mut() {
+            c.open(AnswerPlace::Tray);
+        }
+    }
+
+    /// The answer view to the windows (spec 2 §7): at once for a new turn, an end, an opening or a follow-up row; while
+    /// words stream, at most every `VIEW_EVERY_MS`, the rest with one flush.
+    fn send_view(&mut self, urgent: bool) {
+        let now = self.now();
+        if !self.conversation.as_ref().is_some_and(|c| c.opened) {
+            return;
+        }
+        let send = if urgent {
+            self.view_gate.sent(now);
+            ViewSend::Now
+        } else {
+            self.view_gate.change(now)
+        };
+        match send {
+            ViewSend::Now => {
+                if let Some(c) = self.conversation.as_ref() {
+                    self.ui.answer(Some(&c.view));
+                }
+            }
+            ViewSend::Later(after) => {
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(after)).await;
+                    let _ = tx.send(CoreEvent::AnswerFlush);
+                });
+            }
+            ViewSend::Wait => {}
+        }
+    }
+
+    /// The answer closes (spec 2 §6.2: its conversation is forgotten).
+    fn close_answer(&mut self) {
+        self.conversation = None;
+        self.ui.answer(None);
+    }
+
+    /// Insert, Insert below, Replace, or the model's write (spec 2 §6.2, §7). A write is its attempt's result
+    /// (`Finished` commits it); an answer pasted with its button was counted when it was complete, so its text becomes
+    /// the last result here, for Ctrl+Win+V (§4).
+    fn ask_paste(&mut self, id: DictationId, how: PasteHow) {
+        let found = self.conversation.as_ref().and_then(|c| Some((c.paste_text()?, c.has_write())));
+        let Some((text, write)) = found else {
+            // Nothing to paste (a guard: a refused turn has no buttons). The flow waits in "inserting" for this answer,
+            // and `InsertDone` reaches it only for a watched paste: unwatched, Esc would stay swallowed everywhere.
+            tracing::warn!("ask: nothing to paste");
+            self.watch_insert(id);
+            let _ = self.tx.send(CoreEvent::InsertDone { id, outcome: InsertOutcome::NoField, at: Instant::now() });
+            return;
+        };
+        let now = self.now();
+        if let Some(a) = self.attempt_for(id) {
+            a.insert_started(now);
+        }
+        if write {
+            self.final_text = Some((id, text.clone()));
+        } else {
+            self.commit_text(&text);
+        }
+        self.watch_insert(id);
+        if how == PasteHow::Below {
+            self.dispatch_below(text, id);
+        } else {
+            self.dispatch_insert(text, Some(id));
+        }
+    }
+
+    /// "Insert below" (spec 2 §7): the caret goes to the end of the selection (Right), then a line break and the text
+    /// in one paste — an Enter would send a chat message. Never offered in a terminal.
+    fn dispatch_below(&mut self, text: String, id: DictationId) {
+        let info = self.focus.query(0, FOCUS_TIMEOUT);
+        self.note_app(&info.app);
+        let text = trim_edges(&text).to_owned();
+        let job = if info.editable == Editability::No {
+            InsertJob::Leave { id: Some(id), text }
+        } else {
+            InsertJob::Paste { id: Some(id), text: format!("\n{text}"), collapse: true }
+        };
+        self.send_job(job, Some(id));
+    }
+
+    /// An answer pasted with its button becomes the last result (Ctrl+Win+V); it has no audio of its own.
+    fn commit_text(&mut self, text: &str) {
+        if let Err(e) = files::commit(&self.paths, text) {
+            tracing::warn!("last result not saved: {e}");
+        }
+        self.last_text = Some(text.to_owned());
+    }
+
+    /// Copy (spec 2 §7): the answer's plain text, into the clipboard the normal way.
+    fn copy_answer(&mut self) {
+        if let Some(text) = self.conversation.as_ref().and_then(|c| c.paste_text()) {
+            self.send_job(InsertJob::Leave { id: None, text }, None);
+        }
+    }
+
+    /// A click on a source chip (spec 2 §7): its page in the default browser. Only a web page (`openable`); on a short
+    /// thread of its own, so the shell never holds the core.
+    fn open_source(&self, n: u32) {
+        let Some(url) = self.conversation.as_ref().and_then(|c| c.source_url(n)).map(str::to_owned) else { return };
+        let spawned = std::thread::Builder::new().name("cue-open-source".into()).spawn(move || {
+            if let Err(e) = open_url(&url) {
+                tracing::warn!("source page did not open: {e}");
+            }
+        });
+        if let Err(e) = spawned {
+            tracing::warn!("source page not opened: {e}");
         }
     }
 
@@ -860,6 +1355,19 @@ impl Runtime {
     }
 
     fn on_finished(&mut self, id: DictationId, outcome: Outcome) {
+        if let Some(a) = self.answering.take_if(|a| a.id == id) {
+            // The follow-up's recording has replaced its audio: only its row (spec 2 §10) — and the text of a write it
+            // pasted once that follow-up was dropped, which becomes the last result like any other.
+            if files::last_files(outcome) == LastFiles::Commit {
+                self.commit_last(id);
+            }
+            log_finished(outcome, &a);
+            if needs_row(outcome, a.audio_ms()) {
+                let rec = a.record(outcome, utc_now(), &self.settings);
+                self.append_usage(rec);
+            }
+            return;
+        }
         // The attempt files (current.wav) and accounting belong to `self.attempt`: a result of another attempt is
         // a flow bug, and then we touch nothing.
         debug_assert_eq!(id, self.attempt.id, "Finished of the wrong attempt");
@@ -915,8 +1423,9 @@ impl Runtime {
     /// One usage.csv row, after the rows that could not be written before it.
     fn append_usage(&mut self, rec: UsageRecord) {
         let (path, settings) = (&self.paths.usage, &self.settings);
-        if self.usage.warn_no_price(&settings.pricing, &settings.refine.model) {
-            tracing::warn!("usage: no price for model {} in the settings, refine counted as 0", settings.refine.model);
+        // Refine's model, or the one "Ask" answered with.
+        if self.usage.warn_no_price(&settings.pricing, &rec.refine_model) {
+            tracing::warn!("usage: no price for model {} in the settings, its tokens counted as 0", rec.refine_model);
         }
         if let Err(e) = self.usage.write(rec, |r| usage::append(path, r, &settings.pricing)) {
             tracing::warn!(
@@ -972,6 +1481,38 @@ fn soniox_hints(mode: Mode, s: &Settings) -> Vec<String> {
 /// The usage.csv time: UTC, like the providers' invoices.
 fn utc_now() -> String {
     usage::utc_timestamp(SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()))
+}
+
+/// Today's local date, `YYYY-MM-DD` (spec 2 §6.1): it grounds searches, so a user east of UTC must not get yesterday.
+fn local_today() -> String {
+    // SAFETY: no arguments; returns a SYSTEMTIME by value.
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    format!("{:04}-{:02}-{:02}", t.wYear, t.wMonth, t.wDay)
+}
+
+/// The rows an open answer shows for a follow-up: (listening, missed). Listening while it records (spec 2 §7); missed
+/// while the error of one that could not be transcribed is up, with its Retry (decision 7). None once the answer
+/// closed.
+fn follow_up_rows(answer_open: bool, recording: bool, phase: UiPhase) -> (bool, bool) {
+    (answer_open && recording, answer_open && phase == UiPhase::Error)
+}
+
+/// A web page in the default browser (spec 2 §7). `ShellExecuteW` with the "open" verb takes the URL as one string: no
+/// command line of another program parses it.
+fn open_url(url: &str) -> Result<(), String> {
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::{HSTRING, PCWSTR, w};
+    // SAFETY: ShellExecute asks for a COM apartment on its thread (this one is ours alone); the strings outlive the
+    // call.
+    let r = unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        ShellExecuteW(None, w!("open"), &HSTRING::from(url), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL)
+    };
+    // Above 32 — done; 32 or less — an error code.
+    let code = r.0 as isize;
+    if code > 32 { Ok(()) } else { Err(format!("ShellExecute {code}")) }
 }
 
 /// JSON of a bench recording. If the app is unknown, `"app": null`, not the "unknown" placeholder.
@@ -1050,6 +1591,26 @@ mod tests {
         assert_eq!(input_of(HotkeyEvent::ChordAborted), Input::ChordAborted);
         assert_eq!(input_of(HotkeyEvent::Esc), Input::Esc);
         assert_eq!(input_of(HotkeyEvent::PasteLast), Input::PasteLast);
+    }
+
+    #[test]
+    fn today_is_a_local_date() {
+        let d = local_today();
+        let shape = d.char_indices().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() });
+        assert!(d.len() == 10 && shape, "{d}");
+    }
+
+    /// The listening row while a follow-up records, the missed row while it could not be transcribed (decision 7); none
+    /// once the answer has closed.
+    #[test]
+    fn the_answer_shows_a_follow_ups_rows_only_while_it_is_open() {
+        assert_eq!(follow_up_rows(true, true, UiPhase::Start), (true, false));
+        assert_eq!(follow_up_rows(true, true, UiPhase::Listen), (true, false));
+        assert_eq!(follow_up_rows(true, false, UiPhase::Think), (false, false));
+        assert_eq!(follow_up_rows(true, false, UiPhase::Error), (false, true));
+        assert_eq!(follow_up_rows(true, false, UiPhase::Answer), (false, false));
+        assert_eq!(follow_up_rows(false, true, UiPhase::Listen), (false, false), "a dictation records");
+        assert_eq!(follow_up_rows(false, false, UiPhase::Error), (false, false), "the Drop's own error");
     }
 
     #[test]

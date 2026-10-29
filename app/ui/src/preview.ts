@@ -19,8 +19,13 @@ document.documentElement.lang = lang;
 document.body.style.overflow = 'auto';
 document.body.style.background = '#c6d9f7'; // app.css makes body transparent and overrides the style in preview.html
 const grid = document.getElementById('grid')!;
-/** The Drop window's size in logical px (WINDOW_W × WINDOW_H in app/src-tauri/src/drop_window.rs). */
-const WINDOW = { w: 640, h: 400 };
+/** The Drop window's size in logical px at each place (`window_size` in app/src-tauri/src/drop_window.rs). */
+const WINDOW: Record<Place, { w: number; h: number }> = {
+  bottom: { w: 640, h: 860 },
+  top: { w: 640, h: 860 },
+  left: { w: 900, h: 540 },
+  right: { w: 900, h: 540 },
+};
 /** From the work area's edge to the Drop's center: the 12 px gap plus half the Drop. */
 const INSET = 'calc(12px + var(--h) / 2)';
 /** The Drop's center inside a cell whose border is the work area's edge. */
@@ -90,14 +95,14 @@ for (const place of ['bottom', 'top', 'left', 'right'] as Place[]) {
   for (const kind of ['noField', 'micSilent'] as TrayKind[]) tray(cell(row, place, `tray card · ${kind}`, 'tcell'), kind);
 }
 // The real window around the Drop: centered on the Drop's center; the solid line is the work area's edge.
-const winRow = section(`window ${WINDOW.w} × ${WINDOW.h} (dashed) and the work area edge (solid)`);
+const winRow = section('the window at each place (dashed) and the work area edge (solid)');
 for (const place of ['bottom', 'top', 'left', 'right'] as Place[]) {
   for (const what of ['error · net · hover', 'micSilent'] as const) {
     const c = document.createElement('div');
     c.className = `win ${place}`;
     c.dataset.place = place;
-    c.style.width = `${WINDOW.w}px`;
-    c.style.height = `${WINDOW.h}px`;
+    c.style.width = `${WINDOW[place].w}px`;
+    c.style.height = `${WINDOW[place].h}px`;
     c.innerHTML = `<span>${place} · ${what}</span><i class="edge"></i>`;
     winRow.append(c);
     if (what === 'micSilent') tray(c, 'micSilent');

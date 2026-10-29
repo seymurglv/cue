@@ -13,8 +13,9 @@
 //! An attempt without a stream (no Soniox key, the stream never connected) still bills the audio at the stream price:
 //! an overestimate in a rare failure, accepted.
 //! A refine cache warm-up is not an attempt but has a row of its own (`warmup_record`).
-//! An "Ask" attempt adds its request's tokens and searches; its latency runs to the first words (an answer) or to Ctrl+V
-//! (a write); a follow-up is an attempt of its own.
+//! An "Ask" attempt adds its request's tokens and searches (and those of a request aborted by Esc before "restore"
+//! asked again); its latency runs to the first words (an answer) or to Ctrl+V (a write); a follow-up is an attempt of
+//! its own, and so is Retry of a failed question.
 //! No text here: only numbers, the path, the mode and the outcome.
 use std::collections::VecDeque;
 
@@ -42,6 +43,8 @@ pub struct Attempt {
     refine: claude::Usage,
     /// The web searches of an "Ask" request (all its continuations).
     web_searches: u32,
+    /// What earlier "Ask" requests of this attempt spent: one aborted by Esc before "restore" asked again.
+    asked_before: AskUsage,
     pub refine_outcome: Option<RefineOutcome>,
     /// The second press (`FinishStt`) or "retry" (`TranscribeSaved`): transcription is timed from here. Core ms.
     finish_at: Option<u64>,
@@ -76,6 +79,7 @@ impl Attempt {
             speech_language: None,
             refine: claude::Usage::default(),
             web_searches: 0,
+            asked_before: AskUsage::default(),
             refine_outcome: None,
             finish_at: None,
             latency_from: None,
@@ -134,6 +138,16 @@ impl Attempt {
         self.latency_from = Some(now);
     }
 
+    /// "Retry" of a failed question (`AskAgain`): a new attempt without audio, like `retry_text`. The question can be
+    /// an earlier one than this attempt's — a follow-up recorded since was dropped, and its attempt has ended — and
+    /// then the retry is an "Ask" attempt of its own.
+    pub fn ask_again(&mut self, id: DictationId, now: u64) {
+        if self.id != id {
+            *self = Self { mode: Mode::Ask, ..Self::new(id) };
+        }
+        self.retry_text(now);
+    }
+
     /// The transcription result arrived; `path` is how the audio was actually transcribed.
     pub fn stt_done(&mut self, path: SttPath, now: u64) {
         self.stt_path = path;
@@ -152,21 +166,39 @@ impl Attempt {
         }
     }
 
+    /// An "Ask" request of this attempt goes out. What the requests before it spent stays counted: the question asked
+    /// again after Esc and "restore" (the aborted request was paid for, spec 2 §10).
+    pub fn ask_started(&mut self, now: u64) {
+        self.asked_before = self.ask_total();
+        self.refine_at = Some((now, None));
+    }
+
     /// What the question has cost so far (`Step::Spent`, all its responses): an answer closed mid-stream still writes it
     /// (spec 2 §10).
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn ask_spent(&mut self, usage: AskUsage) {
+        let mut total = self.asked_before;
+        total.add(usage);
         self.refine = claude::Usage {
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-            cache_read_input_tokens: usage.cache_read_tokens,
-            cache_creation_input_tokens: usage.cache_write_tokens,
+            input_tokens: total.input_tokens,
+            output_tokens: total.output_tokens,
+            cache_read_input_tokens: total.cache_read_tokens,
+            cache_creation_input_tokens: total.cache_write_tokens,
         };
-        self.web_searches = usage.web_searches;
+        self.web_searches = total.web_searches;
+    }
+
+    /// What this attempt's "Ask" requests have spent, all together.
+    fn ask_total(&self) -> AskUsage {
+        AskUsage {
+            input_tokens: self.refine.input_tokens,
+            output_tokens: self.refine.output_tokens,
+            cache_read_tokens: self.refine.cache_read_input_tokens,
+            cache_write_tokens: self.refine.cache_creation_input_tokens,
+            web_searches: self.web_searches,
+        }
     }
 
     /// The "Ask" request ended: its tokens (all continuations) and searches are this attempt's (spec 2 §10).
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn ask_done(&mut self, usage: AskUsage, now: u64) {
         self.ask_spent(usage);
         if let Some((_, end)) = self.refine_at.as_mut() {
@@ -176,7 +208,6 @@ impl Attempt {
 
     /// The first words of an answer: an answered row's latency runs from the second press to here (spec 2 §11: the first
     /// words in 2.5 s). Only the first call counts.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn first_words(&mut self, now: u64) {
         if self.latency_ms == 0
             && let Some(t) = self.latency_from
@@ -246,7 +277,7 @@ pub fn warmup_record(usage: claude::Usage, ts: String, s: &Settings, model: &str
 }
 
 /// The log line about the attempt's result: outcome, audio, transcription path, stage latencies as numbers (no stage,
-/// no field), refine outcome. No text and no app.
+/// no field), refine outcome, and for a question how many web searches it ran. No text, no app, nothing searched.
 pub fn log_finished(outcome: Outcome, a: &Attempt) {
     let st = a.stages();
     tracing::info!(
@@ -258,6 +289,7 @@ pub fn log_finished(outcome: Outcome, a: &Attempt) {
         insert_ms = st.insert,
         latency_ms = st.latency,
         refine = a.refine_outcome.map(tracing::field::debug),
+        web_searches = (a.mode == Mode::Ask).then_some(a.web_searches),
         "dictation finished"
     );
 }
@@ -522,6 +554,37 @@ mod tests {
         assert_eq!((r.refine_model.as_str(), r.web_searches), ("claude-haiku-5-5", 0));
     }
 
+    /// Esc before the answer showed, then "restore": the question goes again on the same attempt, and its row counts
+    /// what the aborted request spent as well (spec 2 §10).
+    #[test]
+    fn a_question_asked_again_after_restore_counts_both_requests() {
+        let s = Settings::default();
+        let spent = |input, web_searches| AskUsage {
+            input_tokens: input,
+            output_tokens: 3,
+            cache_read_tokens: 10,
+            cache_write_tokens: 0,
+            web_searches,
+        };
+        let mut a = Attempt::new(DictationId(6));
+        a.mode = Mode::Ask;
+        a.finish_stt(1_000);
+        a.ask_started(1_300);
+        a.ask_spent(spent(200, 1));
+        a.undo(4_000);
+        a.ask_started(4_000);
+        a.ask_spent(spent(150, 0));
+        a.ask_spent(spent(180, 1));
+        a.ask_done(spent(190, 1), 6_000);
+        let r = a.record(Outcome::Answered, "t".into(), &s);
+        assert_eq!((r.input_tokens, r.output_tokens, r.cache_read_tokens, r.web_searches), (390, 6, 20, 2));
+        assert_eq!(a.stages().refine, Some(2_000), "the request that answered");
+        a.retry_text(7_000);
+        a.ask_started(7_000);
+        a.ask_spent(spent(50, 0));
+        assert_eq!(a.record(Outcome::Answered, "t".into(), &s).input_tokens, 50, "a retry is a row of its own");
+    }
+
     /// "Retry" of a failed question (`AskAgain`) is a new attempt: the failed one's searches are its own row's.
     #[test]
     fn a_retry_counts_its_own_searches() {
@@ -531,6 +594,33 @@ mod tests {
         a.ask_spent(AskUsage { input_tokens: 90, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, web_searches: 2 });
         a.retry_text(4_000);
         let r = a.record(Outcome::Answered, "t".into(), &s);
+        assert_eq!((r.input_tokens, r.web_searches, r.mode), (0, 0, UsageMode::Ask));
+    }
+
+    /// Retry of a failed question after a follow-up was dropped: the current attempt is that follow-up's, which has
+    /// ended; the question gets an attempt of its own, which pays no audio again.
+    #[test]
+    fn retry_of_an_earlier_question_is_an_attempt_of_its_own() {
+        let s = Settings::default();
+        let mut a = Attempt::new(DictationId(8));
+        a.mode = Mode::Ask;
+        a.app = "Telegram Desktop".into();
+        a.add_audio(16 * 2_000);
+        a.ask_again(DictationId(7), 5_000);
+        assert_eq!((a.id, a.mode, a.audio_ms(), a.app.as_str()), (DictationId(7), Mode::Ask, 0, ""));
+        a.first_words(5_400);
+        let r = a.record(Outcome::Answered, "t".into(), &s);
+        assert_eq!((r.latency_ms, r.mode), (400, UsageMode::Ask), "from Retry to the first words");
+
+        // The same question: like a retry of a translation.
+        let mut b = Attempt::new(DictationId(7));
+        b.mode = Mode::Ask;
+        b.app = "Telegram Desktop".into();
+        b.add_audio(16 * 2_000);
+        b.ask_spent(AskUsage { input_tokens: 90, web_searches: 2, ..AskUsage::default() });
+        b.ask_again(DictationId(7), 6_000);
+        assert_eq!((b.id, b.audio_ms(), b.app.as_str()), (DictationId(7), 0, "Telegram Desktop"));
+        let r = b.record(Outcome::Answered, "t".into(), &s);
         assert_eq!((r.input_tokens, r.web_searches, r.mode), (0, 0, UsageMode::Ask));
     }
 
@@ -611,6 +701,19 @@ mod tests {
         a.refine_done(usage(1, 1), RefineOutcome::RawKeyProblem, 1_900);
         let line = logged(Outcome::Failed, &a);
         assert!(line.contains("refine_ms=613") && line.contains("refine=RawKeyProblem"), "{line}");
+        assert!(!line.contains("web_searches"), "a dictation searches nothing: {line}");
+    }
+
+    /// The count of an answer's searches, never what was searched.
+    #[test]
+    fn an_answered_question_logs_how_many_searches_it_ran() {
+        let mut a = Attempt::new(DictationId(4));
+        a.mode = Mode::Ask;
+        a.ask_done(AskUsage { input_tokens: 10, output_tokens: 5, web_searches: 2, ..AskUsage::default() }, 1_000);
+        let line = logged(Outcome::Answered, &a);
+        assert!(line.contains("outcome=\"answered\"") && line.contains("web_searches=2"), "{line}");
+        a.ask_spent(AskUsage::default());
+        assert!(logged(Outcome::Answered, &a).contains("web_searches=0"), "a question without a search says so");
     }
 
     fn rec(ts: &str) -> UsageRecord {

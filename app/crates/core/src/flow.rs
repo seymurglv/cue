@@ -494,7 +494,8 @@ impl Flow {
 
     /// A follow-up recorded after the request `id` is still under way: recording, being transcribed, waiting for the
     /// answer it follows, or showing that it could not be transcribed. One dropped since has left the flow at the answer.
-    fn follow_up_under_way(&self, id: DictationId) -> bool {
+    /// The runtime asks it too, when that request ends: a write is then shown, not pasted under the user's hands.
+    pub fn follow_up_under_way(&self, id: DictationId) -> bool {
         id != self.id && self.phase != Phase::Answer
     }
 
@@ -2227,6 +2228,32 @@ mod tests {
             vec![E::Finished { id: first, outcome: Outcome::Answered }, E::Ask { id, question: "а подробнее".into(), follow_up: true }]
         );
         assert_eq!(phase(&f.handle(I::AskOpened { id }, 11_000)), Some(UiPhase::Answer), "a follow-up's first step");
+    }
+
+    /// The runtime asks this when an answer ends, to show a write rather than paste it under the user's hands
+    /// (decision 12): from the follow-up's recording through its transcription, its wait and its miss, to its drop.
+    #[test]
+    fn a_follow_up_is_under_way_until_it_is_dropped() {
+        let mut f = Flow::new(2, false);
+        let first = answer_open(&mut f, 0);
+        assert!(!f.follow_up_under_way(first), "nothing records: the answer's own request");
+        let id = follow_up(&mut f, 7_000);
+        assert!(f.follow_up_under_way(first), "recording");
+        assert!(!f.follow_up_under_way(id), "the follow-up's own request is not one");
+        f.handle(I::ChordDown(Mode::Dictate), 9_000);
+        assert!(f.follow_up_under_way(first), "being transcribed");
+        f.handle(I::SttFinal { id, text: "а подробнее".into() }, 9_300);
+        assert!(f.follow_up_under_way(first), "waiting for the answer it follows");
+        f.handle(I::Esc, 9_500);
+        assert!(!f.follow_up_under_way(first), "dropped: back at the answer");
+
+        let mut f = Flow::new(2, false);
+        let first = answer_open(&mut f, 0);
+        let id = follow_up(&mut f, 7_000);
+        f.handle(I::ChordDown(Mode::Dictate), 9_000);
+        f.handle(I::SttFailed { id, error: SttError::Network }, 9_300);
+        assert_eq!(f.ui_state().phase, UiPhase::Error);
+        assert!(f.follow_up_under_way(first), "missed, with its Retry");
     }
 
     #[test]
