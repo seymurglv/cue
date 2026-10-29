@@ -1,5 +1,5 @@
-//! What "Ask" does with the selection the focused field reported (spec 2 §6.1, §7): whether to copy it with Ctrl+C, and
-//! where it is on screen. Pure logic.
+//! What "Ask" and a dictation do with the selection the focused field reported (spec 2 §6.1, §7, §12.13): whether "Ask"
+//! copies it with Ctrl+C, where it is on screen, and which one a dictation may send. Pure logic.
 use crate::focus::{Editability, SelectionRead};
 use crate::placement::PxRect;
 
@@ -23,6 +23,17 @@ pub fn copies_line(app: &str) -> bool {
 /// none.
 pub fn needs_copy_fallback(read: &SelectionRead, editable: Editability, terminal: bool, cloud_upload: bool) -> bool {
     COPY_FALLBACK && matches!(read, SelectionRead::Unknown) && editable != Editability::No && !terminal && !cloud_upload
+}
+
+/// The selection a dictation may send with its cleanup (spec 2 §12.13): text the field reported itself, through UI
+/// Automation or as a classic field, that can be changed (the paste goes over it) and that the read got whole. Read-only
+/// text (a page), a password field, a field that cannot say — a dictation never presses Ctrl+C: the clipboard and Win+V
+/// stay untouched — and nothing selected give none.
+pub fn dictation_selection(read: &SelectionRead) -> Option<&str> {
+    match read {
+        SelectionRead::Text { text, read_only: false, clipped: false, .. } => Some(text),
+        _ => None,
+    }
 }
 
 /// The selection on screen: its first line (the card's arrow points at its start) and the box around all of it. `None`
@@ -84,6 +95,17 @@ mod tests {
     fn no_ctrl_c_while_windows_uploads_copies_to_the_cloud() {
         assert!(!needs_copy_fallback(&SelectionRead::Unknown, Editability::Yes, false, true));
         assert!(!needs_copy_fallback(&SelectionRead::Unknown, Editability::Unknown, false, true));
+    }
+
+    #[test]
+    fn a_dictation_takes_only_a_whole_selection_it_may_paste_over() {
+        let text = |read_only, clipped| SelectionRead::Text { text: "Kubernetes".into(), rects: vec![], read_only, clipped };
+        assert_eq!(dictation_selection(&text(false, false)), Some("Kubernetes"));
+        assert_eq!(dictation_selection(&text(true, false)), None, "read-only text (a page)");
+        assert_eq!(dictation_selection(&text(false, true)), None, "longer than the read");
+        for read in [SelectionRead::Password, SelectionRead::Unknown, SelectionRead::Empty, SelectionRead::NotAsked] {
+            assert_eq!(dictation_selection(&read), None, "{read:?}: a dictation never presses Ctrl+C");
+        }
     }
 
     #[test]
