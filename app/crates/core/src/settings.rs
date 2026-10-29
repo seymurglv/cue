@@ -284,73 +284,6 @@ pub struct ModelPrice {
     pub output_per_mtok: f64,
     pub cache_read_per_mtok: f64,
     pub cache_write_per_mtok: f64,
-    /// The prices of a long prompt, when the file gives them. Absent or not valid: the model's own (`long_tier`), so a
-    /// price list of an earlier version keeps its meaning; not written while absent.
-    #[serde(default, deserialize_with = "valid_long_context", skip_serializing_if = "Option::is_none")]
-    pub long_context: Option<LongContextPrice>,
-}
-
-/// The higher prices of a long prompt: a request whose prompt — its new, cache write and cache read tokens together — is
-/// over `above_tokens` pays these for all of it (a cache write 1.25 ×, a cache read 0.1 × `input_per_mtok`).
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct LongContextPrice {
-    pub above_tokens: u64,
-    pub input_per_mtok: f64,
-    pub output_per_mtok: f64,
-}
-
-impl LongContextPrice {
-    fn is_valid(&self) -> bool {
-        let rate = |r: f64| r.is_finite() && r >= 0.0;
-        self.above_tokens > 0 && rate(self.input_per_mtok) && rate(self.output_per_mtok)
-    }
-}
-
-/// The long prompt tier of a model the app knows (Claude API reference, 2026-10): Claude Haiku 5.5 costs $0.50 / $2.50 per
-/// million tokens for a prompt over 100 000 tokens. The other models keep one price.
-fn long_context_default(model: &str) -> Option<LongContextPrice> {
-    (model == "claude-haiku-5-5").then_some(LongContextPrice { above_tokens: 100_000, input_per_mtok: 0.50, output_per_mtok: 2.50 })
-}
-
-/// A long tier that is not an object of the right fields, has a zero threshold or a rate that is negative or not a number
-/// reads as absent (the model's default): a wrong value never makes the file unreadable.
-fn valid_long_context<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<LongContextPrice>, D::Error> {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value::<LongContextPrice>(value).ok().filter(LongContextPrice::is_valid))
-}
-
-/// The prices per million tokens one request pays.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rates {
-    pub input: f64,
-    pub output: f64,
-    pub cache_read: f64,
-    pub cache_write: f64,
-}
-
-impl ModelPrice {
-    /// The long prompt tier in effect: the file's, or the model's own.
-    pub fn long_tier(&self) -> Option<LongContextPrice> {
-        self.long_context.or_else(|| long_context_default(&self.model))
-    }
-
-    /// The rates of a request whose prompt (new, cache write and cache read tokens) is `prompt_tokens`.
-    pub fn rates(&self, prompt_tokens: u64) -> Rates {
-        match self.long_tier() {
-            Some(l) if prompt_tokens > l.above_tokens => Rates {
-                input: l.input_per_mtok,
-                output: l.output_per_mtok,
-                cache_read: l.input_per_mtok * 0.1,
-                cache_write: l.input_per_mtok * 1.25,
-            },
-            _ => Rates {
-                input: self.input_per_mtok,
-                output: self.output_per_mtok,
-                cache_read: self.cache_read_per_mtok,
-                cache_write: self.cache_write_per_mtok,
-            },
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -418,14 +351,7 @@ impl Default for RefineSettings {
 
 fn price(model: &str, input: f64, output: f64, cache_read: f64) -> ModelPrice {
     // A write to the 5-minute cache costs 1.25 × the input price.
-    ModelPrice {
-        model: model.into(),
-        input_per_mtok: input,
-        output_per_mtok: output,
-        cache_read_per_mtok: cache_read,
-        cache_write_per_mtok: input * 1.25,
-        long_context: None,
-    }
+    ModelPrice { model: model.into(), input_per_mtok: input, output_per_mtok: output, cache_read_per_mtok: cache_read, cache_write_per_mtok: input * 1.25 }
 }
 
 impl Default for Pricing {
@@ -434,7 +360,6 @@ impl Default for Pricing {
             soniox_rt_per_hour: 0.12,
             soniox_async_per_hour: 0.10,
             claude: vec![
-                // Up to a prompt of 100 000 tokens; past it, `long_context_default`.
                 price("claude-haiku-5-5", 0.10, 0.50, 0.01),
                 price("claude-sonnet-5-5", 2.0, 10.0, 0.10),
                 price("claude-opus-5-5", 4.0, 20.0, 0.20),
@@ -736,72 +661,6 @@ mod tests {
         assert!(json.get("pricing").is_some());
         assert_eq!(load(&p).unwrap(), s);
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// A long prompt's tier is the model's own unless the file gives one: a price list from an earlier version has none, and
-    /// a wrong one is the default too, never an unreadable file.
-    #[test]
-    fn the_long_prompt_tier_is_the_models_default_unless_the_file_gives_one() {
-        let haiku_long = LongContextPrice { above_tokens: 100_000, input_per_mtok: 0.50, output_per_mtok: 2.50 };
-        let d = Pricing::default();
-        assert_eq!(d.claude_price("claude-haiku-5-5").unwrap().long_context, None, "the default is not stored");
-        assert_eq!(d.claude_price("claude-haiku-5-5").unwrap().long_tier(), Some(haiku_long));
-        assert_eq!(d.claude_price("claude-sonnet-5-5").unwrap().long_tier(), None);
-        let p = tmp("long-tier.json");
-        let haiku_with = |long: &str| {
-            format!(
-                r#"{{ "pricing": {{ "claude": [ {{ "model": "claude-haiku-5-5", "input_per_mtok": 0.1, "output_per_mtok": 0.5,
-                    "cache_read_per_mtok": 0.01, "cache_write_per_mtok": 0.125{long} }} ] }} }}"#
-            )
-        };
-        let tier_in = |file: &str| {
-            std::fs::write(&p, file).unwrap();
-            let s = load(&p).expect("a wrong long tier must not make the file unreadable");
-            let m = s.pricing.claude_price("claude-haiku-5-5").unwrap().clone();
-            (m.long_context, m.long_tier())
-        };
-        assert_eq!(tier_in(&haiku_with("")), (None, Some(haiku_long)), "a list of an earlier version: the default");
-        let own = LongContextPrice { above_tokens: 200_000, input_per_mtok: 0.4, output_per_mtok: 2.0 };
-        let given = r#", "long_context": { "above_tokens": 200000, "input_per_mtok": 0.4, "output_per_mtok": 2.0 }"#;
-        assert_eq!(tier_in(&haiku_with(given)), (Some(own), Some(own)), "the file's own tier");
-        for wrong in [
-            r#", "long_context": { "above_tokens": 0, "input_per_mtok": 0.5, "output_per_mtok": 2.5 }"#,
-            r#", "long_context": { "above_tokens": 100000, "input_per_mtok": -1, "output_per_mtok": 2.5 }"#,
-            r#", "long_context": { "above_tokens": 100000, "input_per_mtok": 0.5 }"#,
-            r#", "long_context": "cheap""#,
-            r#", "long_context": null"#,
-        ] {
-            assert_eq!(tier_in(&haiku_with(wrong)), (None, Some(haiku_long)), "{wrong}: the default");
-        }
-        std::fs::remove_file(p).unwrap();
-    }
-
-    /// The default tier is never written: a file with edited prices gets no `long_context` it did not have; one the user
-    /// gave is kept.
-    #[test]
-    fn the_long_prompt_tier_is_written_only_when_the_file_gave_one() {
-        let dir = tmp("long-tier-save");
-        let p = dir.join("settings.json");
-        let mut s = Settings::default();
-        s.pricing.soniox_rt_per_hour = 0.5;
-        save(&s, &p).unwrap();
-        let text = std::fs::read_to_string(&p).unwrap();
-        assert!(!text.contains("long_context"), "{text}");
-        s.pricing.claude[0].long_context = Some(LongContextPrice { above_tokens: 150_000, input_per_mtok: 0.4, output_per_mtok: 2.0 });
-        save(&s, &p).unwrap();
-        assert_eq!(load(&p).unwrap(), s, "a tier the user gave survives the round trip");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// A request's rates: the usual ones up to the tier's prompt, the tier's above it, its cache write 1.25 × and its cache
-    /// read 0.1 × its input price.
-    #[test]
-    fn the_rates_of_a_request_follow_its_prompt() {
-        let haiku = Pricing::default().claude_price("claude-haiku-5-5").unwrap().clone();
-        assert_eq!(haiku.rates(100_000), Rates { input: 0.10, output: 0.50, cache_read: 0.01, cache_write: 0.125 });
-        let long = haiku.rates(100_001);
-        assert_eq!((long.input, long.output), (0.50, 2.50));
-        assert!((long.cache_write - 0.625).abs() < 1e-12 && (long.cache_read - 0.05).abs() < 1e-12, "{long:?}");
     }
 
     #[test]

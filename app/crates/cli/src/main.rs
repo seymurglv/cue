@@ -45,7 +45,7 @@ fn check_line(name: KeyName, probed: &Result<Option<Result<(), EngineError>>, En
 ///
 /// "Per dictation" is the month's whole cost (failed attempts and cache warm-ups included) divided by the dictations
 /// that produced text: what a user really costs. "Per hour of audio" is for comparing with providers' prices.
-/// Web search is named only when there was some: until "Ask" it is always 0. So are the pages "Ask" read.
+/// Web search is named only when there was some: until "Ask" it is always 0.
 fn usage_report(month: &str, s: &Summary) -> String {
     let ms = |v: u64| if v == 0 { "—".to_owned() } else { format!("{v} ms") };
     let total = s.stt_usd + s.refine_usd + s.search_usd;
@@ -65,9 +65,6 @@ fn usage_report(month: &str, s: &Summary) -> String {
         cue_core::usage::SHORT_AUDIO_MS / 1_000,
         ms(s.avg_latency_short_ms)
     );
-    if s.web_fetches > 0 {
-        report.push_str(&format!("Pages read by Ask: {} (no fee: their tokens are in the cost above)\n", s.web_fetches));
-    }
     if !s.modes.is_empty() {
         report.push_str("By mode:\n");
         for m in &s.modes {
@@ -268,7 +265,6 @@ mod tests {
             avg_latency_ms: 1_200,
             avg_latency_short_ms: 1_100,
             modes: vec![mode("dictate", 120, 0.0412), mode("translate", 14, 0.0051), mode("warmup", 9, 0.0013)],
-            web_fetches: 0,
         };
         // Per dictation: 0.0579 / 3; per hour of audio: 0.0579 / (1.5 / 60).
         assert_eq!(
@@ -291,13 +287,6 @@ mod tests {
         let report = usage_report("2026-11", &s);
         assert!(report.contains("Transcription $0.0100, refine $0.0200, web search $0.0300, total $0.0600\n"), "{report}");
         assert!(report.contains("Per dictation $0.03000,"), "{report}");
-    }
-
-    #[test]
-    fn usage_report_names_page_reads_only_when_there_were_some() {
-        let s = Summary { dictations: 1, web_fetches: 3, ..Summary::default() };
-        assert!(usage_report("2026-11", &s).contains("Pages read by Ask: 3 (no fee: their tokens are in the cost above)\n"));
-        assert!(!usage_report("2026-11", &Summary::default()).contains("Pages read"));
     }
 
     #[test]

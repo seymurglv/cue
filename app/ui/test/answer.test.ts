@@ -114,8 +114,6 @@ describe('The "Ask" answer', () => {
     expect(tl().dataset.t).toBe('Searching the web');
     view.update(answer({ turns: [turn({ step: 'reading' })] }));
     expect(tl().dataset.t).toBe('Reading sources');
-    view.update(answer({ turns: [turn({ step: 'fetching' })] }));
-    expect(tl().dataset.t).toBe('Reading the page');
     view.update(answer({ turns: [turn({ state: 'streaming', segments: [{ text: 'An April', cites: [] }] })] }));
     expect(root.querySelector('.think')).toBeNull();
     expect(words().map((w) => w.textContent)).toEqual(['An', 'April']);

@@ -210,14 +210,12 @@ pub fn one_line(text: &str) -> String {
 }
 
 /// The text as it is pasted: its edges trimmed (`trim_edges`) and the join space added by the text before the caret
-/// (`join_for_insert`); over a selection (`replaced`: "Ask"'s Replace, or a dictation that sent the selection), the
-/// selection's own edges instead (`ask::replace_edges`), since the text takes its place exactly. Never in a terminal: it
-/// pastes at its prompt, so the text is joined there as usual, on one line.
+/// (`join_for_insert`); over a selection (`replaced`, "Ask"'s Replace), the selection's own edges instead
+/// (`ask::replace_edges`), since the text takes its place exactly; on one line in a terminal.
 pub fn pasted_text(text: &str, before_cursor: Option<&str>, terminal: bool, replaced: Option<&str>) -> String {
     let text = match replaced {
-        // A terminal pastes at its prompt, never over a selection: the dictation's join there.
-        Some(selection) if !terminal => ask::replace_edges(selection, text),
-        _ => join_for_insert(before_cursor, trim_edges(text)),
+        Some(selection) => ask::replace_edges(selection, text),
+        None => join_for_insert(before_cursor, trim_edges(text)),
     };
     if terminal { one_line(&text) } else { text }
 }
@@ -327,16 +325,6 @@ mod tests {
         // A dictation and Insert keep their rules.
         assert_eq!(pasted_text(" мы решили. \n", Some("Итак,"), false, None), " мы решили.");
         assert_eq!(pasted_text("git status\ngit diff", None, true, None), "git status git diff");
-    }
-
-    /// A dictation that sent the selection takes its place exactly, as a Replace does; in a terminal, where a paste never
-    /// goes over a selection, it is the dictation's paste at the prompt, on one line.
-    #[test]
-    fn a_dictation_over_a_selection_takes_its_edges_but_not_in_a_terminal() {
-        let woven = "Посмотри: https://x.io/a";
-        assert_eq!(pasted_text(woven, Some("Итак,"), false, Some("https://x.io/a ")), "Посмотри: https://x.io/a ");
-        assert_eq!(pasted_text("git checkout feature/x", Some("PS C:\\> "), true, Some("feature/x")), "git checkout feature/x");
-        assert_eq!(pasted_text("git checkout feature/x\n", Some("PS C:\\>"), true, Some(" feature/x ")), " git checkout feature/x");
     }
 
     #[test]

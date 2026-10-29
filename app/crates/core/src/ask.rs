@@ -48,14 +48,7 @@ prices, versions, rules, schedules and anything \"latest\" or \"current\" may ha
 before you answer, even when you feel sure. Facts that cannot change, explanations, writing and work on the selection \
 need no search. When the answer depends on where the user is, put their country or region in the query. Say only what \
 the search results support, and never make up a source or a link. If the search fails, answer from what you know and \
-say that it may be out of date.
-
-Reading pages, when the tool is available: when the user points at a page, its link in <selection> or <question>, read \
-that one page with web_fetch and answer briefly. Search only when the page cannot be read or the question needs more than \
-the page. Never fetch a PDF or another document file (a link whose path ends in .pdf, or one the question or the \
-selection calls a PDF or a document): answer from a search instead. Open no other links. A page that cannot be read (one \
-built by JavaScript, a file of another kind, an error) is no failure: answer from the search or from what you know, and \
-say in a few words that the page could not be opened.";
+say that it may be out of date.";
 
 /// The client tool that puts text into the field (spec 2 §6.2).
 pub const WRITE_TOOL: &str = "write_to_field";
@@ -70,19 +63,13 @@ pub const WRITE_MODE_DESCRIPTION: &str = "\"replace\": the text replaces the sel
 pub const MAX_SELECTION_CHARS: usize = 8_000;
 /// The answer's budget (spec 2 §6.2: ~2 000).
 pub const MAX_TOKENS: u32 = 2_000;
-/// Deadlines (spec 2 §6.2): the first words without a search; the first words once the model has started a search or a
-/// page read; the whole answer, continuations included. The first words of a write are the start of its call.
+/// Deadlines (spec 2 §6.2): the first words without a search; the first words once the model has started a search; the
+/// whole answer, continuations included. The first words of a write are the start of its call.
 pub const FIRST_WORDS_MS: u64 = 8_000;
 pub const FIRST_WORDS_SEARCH_MS: u64 = 20_000;
 pub const ANSWER_MS: u64 = 30_000;
 /// A paused turn (`pause_turn`) is continued at most this many times.
 pub const MAX_CONTINUATIONS: usize = 3;
-/// Pages a question may read (spec 2 §12.12: two a question, a continuation of a paused turn included — it goes with the
-/// reads left).
-pub const FETCH_MAX_USES: u32 = 2;
-/// A read page's text is cut to this many tokens (spec 2 §12.12: about $0.001 a page at Haiku 5.5's prices). A PDF is not
-/// cut: it comes whole (on 2026-10-29 RFC 9110's, about 524 thousand tokens), so the instruction asks never to fetch one.
-pub const FETCH_MAX_CONTENT_TOKENS: u32 = 10_000;
 /// Where a long selection leaves out its middle.
 pub const ELISION: &str = "\n[… part of the selection is left out …]\n";
 /// The selection quoted under the question in the card: this many characters at most.
@@ -394,8 +381,7 @@ pub fn openable(url: &str) -> bool {
         && !url.chars().any(|c| c.is_whitespace() || c.is_control() || c == '"')
 }
 
-/// The sources an answer cites and the pages it read, numbered in the order a URL is first read or cited, across the
-/// whole conversation (spec 2 §6.2, §12.12).
+/// The sources an answer cites, numbered in the order a URL is first cited, across the whole conversation (spec 2 §6.2).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Sources {
     items: Vec<(String, String)>,
@@ -502,8 +488,6 @@ pub enum AnswerPlace {
 pub enum ThinkStep {
     Searching,
     Reading,
-    /// A page the user pointed at is being read (spec 2 §12.12).
-    Fetching,
     Writing,
 }
 
@@ -588,23 +572,6 @@ mod tests {
         for tag in ["<question>", "<selection>", "<before_cursor>", "<app>", "<today>", "write_to_field"] {
             assert!(ASK_PROMPT.contains(tag), "the instruction names {tag}");
         }
-    }
-
-    /// The page the user points at, read and answered briefly; a search only when it is not enough; never a PDF, which
-    /// comes whole, past the page limit.
-    #[test]
-    fn the_instruction_reads_the_pages_the_user_points_at() {
-        for phrase in [
-            "read that one page with web_fetch and answer briefly",
-            "Search only when the page cannot be read or the question needs more than the page.",
-            "Never fetch a PDF or another document file",
-            "ends in .pdf",
-            "Open no other links.",
-            "is no failure: answer from the search or from what you know",
-        ] {
-            assert!(ASK_PROMPT.contains(phrase), "{phrase}");
-        }
-        assert!(ASK_PROMPT.ends_with("say in a few words that the page could not be opened."));
     }
 
     #[test]
@@ -862,12 +829,7 @@ mod tests {
             serde_json::to_string(&v).unwrap(),
             r#"{"place":"card","quote":"Нужно выбрать…","turns":[{"question":"Объясни","step":"searching","segments":[{"text":"Оркестратор","cites":[1]}],"state":"streaming"}],"sources":[{"n":1,"site":"kubernetes.io","title":"Overview"}],"listening":false,"missed":false,"actions":["below","replace","copy"]}"#
         );
-        for (step, name) in [
-            (ThinkStep::Searching, "searching"),
-            (ThinkStep::Reading, "reading"),
-            (ThinkStep::Fetching, "fetching"),
-            (ThinkStep::Writing, "writing"),
-        ] {
+        for (step, name) in [(ThinkStep::Searching, "searching"), (ThinkStep::Reading, "reading"), (ThinkStep::Writing, "writing")] {
             assert_eq!(serde_json::to_string(&step).unwrap(), format!("\"{name}\""));
         }
         for (state, name) in [

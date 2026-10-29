@@ -6,7 +6,7 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use cue_core::ask::{first_message, follow_up_message, AskContext};
-use cue_engines::ask::{self, AskEnd, AskResult, SearchTool, Thinking, WebTools};
+use cue_engines::ask::{self, AskEnd, AskResult, SearchTool, Thinking};
 use cue_engines::claude::{API_URL, API_VERSION};
 use cue_engines::keys::{self, KeyName};
 use serde_json::{json, Value};
@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
                 .post(API_URL)
                 .header("x-api-key", &key)
                 .header("anthropic-version", API_VERSION)
-                .json(&ask::warm_body(&model, WebTools::from(Some(search))))
+                .json(&ask::warm_body(&model, Some(search)))
                 .send()
                 .await?;
             let status = resp.status().as_u16();
@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
         let mut last = None;
         for run in 1..=3 {
             let messages = vec![ask::user_turn(&first_message("какая сейчас последняя версия Rust", &ctx(None)), None)];
-            let (r, first) = timed(&http, &key, &model, WebTools::from(Some(search)), &messages, None).await;
+            let (r, first) = timed(&http, &key, &model, Some(search), &messages, None).await;
             println!(
                 "search {run}: {} · first words {first:?} ms · searches {} · cache read {} · container {}",
                 kind(&r.end), r.usage.web_searches, r.usage.cache_read_tokens, r.container.is_some()
@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
         {
             messages.push(ask::assistant_turn(&r.content));
             messages.push(ask::user_turn(&follow_up_message("а когда выйдет следующая"), None));
-            let (f, first) = timed(&http, &key, &model, WebTools::from(Some(search)), &messages, r.container.clone()).await;
+            let (f, first) = timed(&http, &key, &model, Some(search), &messages, r.container.clone()).await;
             println!(
                 "follow-up: {} · first words {first:?} ms · cache read {} · write {}",
                 kind(&f.end), f.usage.cache_read_tokens, f.usage.cache_write_tokens
@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let selection = Some("Can you send the report by Friday?");
     let messages = vec![ask::user_turn(&first_message("ответь что пришлю в четверг", &ctx(selection)), None)];
-    let (r, first) = timed(&http, &key, &model, WebTools::from(ask::search_tool(2)), &messages, None).await;
+    let (r, first) = timed(&http, &key, &model, ask::search_tool(2), &messages, None).await;
     println!("write: {} · first words {first:?} ms", kind(&r.end));
     // Decision 24 live: a follow-up after a write shown instead of written answers the call first.
     let call = json!({ "type": "tool_use", "id": "toolu_probe", "name": "write_to_field", "input": { "text": "x", "mode": "replace" } });
@@ -94,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
         ask::assistant_turn(std::slice::from_ref(&call)),
         ask::user_turn(&follow_up_message("а по-другому"), Some(std::slice::from_ref(&call))),
     ];
-    let (r, _) = timed(&http, &key, &model, WebTools::NONE, &messages, None).await;
+    let (r, _) = timed(&http, &key, &model, None, &messages, None).await;
     println!("follow-up after a shown write: {}", kind(&r.end));
     Ok(())
 }
@@ -103,13 +103,13 @@ async fn timed(
     http: &reqwest::Client,
     key: &str,
     model: &str,
-    web: WebTools,
+    search: Option<SearchTool>,
     messages: &[Value],
     container: Option<String>,
 ) -> (AskResult, Option<u128>) {
     let t0 = Instant::now();
     let mut first = None;
-    let r = ask::run(http, Some(key), model, web, Thinking::DEFAULT, messages, container, |s| {
+    let r = ask::run(http, Some(key), model, search, Thinking::DEFAULT, messages, container, |s| {
         let words = s.is_first_words();
         if words && first.is_none() {
             first = Some(t0.elapsed().as_millis());

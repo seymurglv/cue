@@ -1,11 +1,8 @@
 //! Refine through Claude. Never "fails": on any problem it returns the raw text and the reason.
 use cue_core::flow::RefineOutcome;
-use cue_core::refine::{
-    max_tokens, sanity_ok, sanity_ok_with_selection, strip_markup, terms_prompt, tidy_list_items, timeout_ms, user_message, RefineContext,
-    SELECTION_PROMPT, SYSTEM_PROMPT,
-};
+use cue_core::refine::{max_tokens, sanity_ok, strip_markup, terms_prompt, tidy_list_items, timeout_ms, user_message, RefineContext, SYSTEM_PROMPT};
 use cue_core::settings::RefineSettings;
-use cue_core::translate::{self, translation_ok, translation_ok_with_selection};
+use cue_core::translate::{self, translation_ok};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -46,11 +43,9 @@ pub fn request_body(model: &str, raw: &str, ctx: &RefineContext, terms: &[String
     request_body_for(model, raw, ctx, terms, Job::Clean)
 }
 
-/// [`request_body`] for a job. A translation adds one system block after the cache mark, the last one: the cached prefix
-/// is the one plain dictation uses, so translating never writes a second cache. The answer may be longer in tokens than
-/// the speech (another alphabet), so the budget doubles. A selection that goes with the dictation
-/// ([`RefineContext::sent_selection`]) adds its block after the cache mark too, before a translation's, and the message
-/// carries the selection itself; without one the body is the same, byte for byte, as before selections could go.
+/// [`request_body`] for a job. A translation adds one system block after the cache mark: the cached prefix is the one
+/// plain dictation uses, so translating never writes a second cache. The answer may be longer in tokens than the speech
+/// (another alphabet), so the budget doubles.
 pub fn request_body_for(model: &str, raw: &str, ctx: &RefineContext, terms: &[String], job: Job) -> Value {
     let thinking = thinking_for(model);
     let budget = max_tokens(raw) + if thinking.is_none() { THINKING_HEADROOM } else { 0 };
@@ -82,12 +77,6 @@ pub fn request_body_for(model: &str, raw: &str, ctx: &RefineContext, terms: &[St
     if let Some(t) = thinking {
         v["thinking"] = t;
     }
-    // The selection's block goes after the cache mark too (spec 2 §12.13): the cached prefix stays the one every dictation
-    // reads, and the message carries the selection itself. It comes before a translation's block: with the selection's
-    // rules last, the model kept a woven result in the spoken language (bench of 2026-10-29).
-    if ctx.sent_selection().is_some() {
-        v["system"].as_array_mut().expect("system is an array").push(json!({ "type": "text", "text": SELECTION_PROMPT }));
-    }
     if let Job::Translate(to) = job {
         v["system"].as_array_mut().expect("system is an array").push(json!({ "type": "text", "text": translate::instruction(to) }));
         v["max_tokens"] = json!(v["max_tokens"].as_u64().unwrap_or(0).saturating_mul(2).min(16_000));
@@ -105,7 +94,8 @@ pub fn can_warm(model: &str) -> bool {
 /// `max_tokens: 0` is refused together with `output_config.format`, and the format has to stay: the warm-up must build
 /// the exact prefix real refine reads.
 pub fn warm_body(model: &str, terms: &[String]) -> Value {
-    let mut v = request_body(model, ".", &RefineContext::default(), terms);
+    let ctx = RefineContext { app: String::new(), before_cursor: None };
+    let mut v = request_body(model, ".", &ctx, terms);
     v["max_tokens"] = json!(1);
     v
 }
@@ -196,37 +186,6 @@ pub fn decide_translation(raw: &str, parsed: Parsed, terms: &[String], to: &str)
         Parsed::Text(t) => {
             let t = tidy_list_items(&strip_markup(raw, &t));
             if translation_ok(raw, &t, terms, to) {
-                (t.trim().to_string(), RefineOutcome::Refined)
-            } else {
-                (raw.to_string(), RefineOutcome::RawFallback)
-            }
-        }
-        _ => (raw.to_string(), RefineOutcome::RawFallback),
-    }
-}
-
-/// [`decide`] for a request that carried the field's selection (spec 2 §12.13): the selection counts as said for the
-/// markup rules (a woven link or code keeps its signs), and the check knows where it is ([`sanity_ok_with_selection`]).
-pub fn decide_with_selection(raw: &str, selection: &str, parsed: Parsed, terms: &[String], s: &RefineSettings) -> (String, RefineOutcome) {
-    match parsed {
-        Parsed::Text(t) => {
-            let t = tidy_list_items(&strip_markup(&format!("{raw}\n{selection}"), &t));
-            if sanity_ok_with_selection(raw, &t, selection, terms, s) {
-                (t.trim().to_string(), RefineOutcome::Refined)
-            } else {
-                (raw.to_string(), RefineOutcome::RawFallback)
-            }
-        }
-        _ => (raw.to_string(), RefineOutcome::RawFallback),
-    }
-}
-
-/// [`decide_translation`] for a request that carried the field's selection ([`translation_ok_with_selection`]).
-pub fn decide_translation_with_selection(raw: &str, selection: &str, parsed: Parsed, terms: &[String], to: &str) -> (String, RefineOutcome) {
-    match parsed {
-        Parsed::Text(t) => {
-            let t = tidy_list_items(&strip_markup(&format!("{raw}\n{selection}"), &t));
-            if translation_ok_with_selection(raw, &t, selection, terms, to) {
                 (t.trim().to_string(), RefineOutcome::Refined)
             } else {
                 (raw.to_string(), RefineOutcome::RawFallback)
@@ -335,12 +294,9 @@ async fn refine_at(
         (Parsed::Truncated, _) => "response truncated at max_tokens",
         (Parsed::Malformed, _) => "response does not match the schema",
     };
-    // The check goes by the selection the request carried ([`RefineContext::sent_selection`]), as the body does.
-    let decided = match (job, ctx.sent_selection()) {
-        (Job::Clean, None) => decide(raw, parsed, terms, s),
-        (Job::Clean, Some(sel)) => decide_with_selection(raw, sel, parsed, terms, s),
-        (Job::Translate(to), None) => decide_translation(raw, parsed, terms, to),
-        (Job::Translate(to), Some(sel)) => decide_translation_with_selection(raw, sel, parsed, terms, to),
+    let decided = match job {
+        Job::Clean => decide(raw, parsed, terms, s),
+        Job::Translate(to) => decide_translation(raw, parsed, terms, to),
     };
     match decided {
         (text, RefineOutcome::Refined) => RefineResult { text, outcome: RefineOutcome::Refined, usage: m.usage },
@@ -403,7 +359,7 @@ mod tests {
     use crate::testing::{capture_logs, fake_api, reply, FakeApi, Reply};
 
     fn ctx() -> RefineContext {
-        RefineContext { app: "Telegram Desktop".into(), before_cursor: None, selection: None }
+        RefineContext { app: "Telegram Desktop".into(), before_cursor: None }
     }
 
     #[test]
@@ -432,29 +388,6 @@ mod tests {
             ),
             prompt = serde_json::to_string(SYSTEM_PROMPT).unwrap()
         )
-    }
-
-    /// The translation body as sent before a selection could go with a dictation, byte for byte.
-    fn golden_translation_body() -> String {
-        format!(
-            concat!(
-                r#"{{"max_tokens":1042,"messages":[{{"content":"<app>Telegram Desktop</app>\n<transcript>ну привет</transcript>","role":"user"}}],"#,
-                r#""model":"claude-haiku-5-5","output_config":{{"effort":"low","format":{{"schema":{{"additionalProperties":false,"#,
-                r#""properties":{{"text":{{"type":"string"}}}},"required":["text"],"type":"object"}},"type":"json_schema"}}}},"#,
-                r#""system":[{{"cache_control":{{"type":"ephemeral"}},"text":{prompt},"type":"text"}},{{"text":{instruction},"type":"text"}}],"#,
-                r#""thinking":{{"type":"disabled"}}}}"#
-            ),
-            prompt = serde_json::to_string(SYSTEM_PROMPT).unwrap(),
-            instruction = serde_json::to_string(&translate::instruction("en")).unwrap()
-        )
-    }
-
-    /// Without a selection the translation body is the one sent before, byte for byte (the cached prefix and the block
-    /// after it).
-    #[test]
-    fn a_translation_without_a_selection_is_unchanged() {
-        let body = serde_json::to_string(&request_body_for("claude-haiku-5-5", "ну привет", &ctx(), &[], Job::Translate("en"))).unwrap();
-        assert_eq!(body, golden_translation_body());
     }
 
     /// With no usable term the body is the one sent before the dictionary existed, byte for byte: the cached prefix
@@ -649,72 +582,6 @@ mod tests {
         assert_eq!(decide_translation(raw, Parsed::Text("**Hello.**".into()), &[], "en"), ("Hello.".into(), RefineOutcome::Refined));
         assert_eq!(decide_translation(raw, Parsed::Text("Ну привет.".into()), &[], "en"), (raw.into(), RefineOutcome::RawFallback));
         assert_eq!(decide_translation(raw, Parsed::Truncated, &[], "en"), (raw.into(), RefineOutcome::RawFallback));
-    }
-
-    // ---- A dictation over a selection (spec 2 §12.13) ----
-
-    /// A link the tests select.
-    const LINK: &str = "https://github.com/seymurglv/cue";
-
-    fn selected(text: &str) -> RefineContext {
-        ctx().with_selection(Some(text))
-    }
-
-    /// No selection — or one that does not go — leaves both bodies as they were, byte for byte.
-    #[test]
-    fn no_selection_leaves_both_bodies_as_they_were() {
-        for c in [ctx(), selected(""), selected("  \n"), selected("две\nстроки"), selected(&"я".repeat(81))] {
-            assert_eq!(serde_json::to_string(&request_body("claude-haiku-5-5", "ну привет", &c, &[])).unwrap(), golden_body());
-            let tr = request_body_for("claude-haiku-5-5", "ну привет", &c, &[], Job::Translate("en"));
-            assert_eq!(serde_json::to_string(&tr).unwrap(), golden_translation_body());
-        }
-    }
-
-    #[test]
-    fn a_selection_adds_a_block_after_the_cache_mark() {
-        let raw = "посмотри на этот проект";
-        let plain = request_body("claude-haiku-5-5", raw, &ctx(), &[]);
-        let v = request_body("claude-haiku-5-5", raw, &selected(&format!(" {LINK}\n")), &[]);
-        let system = v["system"].as_array().unwrap();
-        assert_eq!(system.len(), 2);
-        assert_eq!(system[0], plain["system"][0], "the cached prompt block is the same, mark included");
-        assert_eq!(system[1], json!({ "type": "text", "text": SELECTION_PROMPT }), "not cached");
-        assert_eq!(
-            v["messages"][0]["content"],
-            format!("<app>Telegram Desktop</app>\n<selection>{LINK}</selection>\n<transcript>{raw}</transcript>")
-        );
-        for k in ["model", "max_tokens", "output_config", "thinking"] {
-            assert_eq!(v[k], plain[k], "{k}");
-        }
-    }
-
-    #[test]
-    fn a_selection_with_terms_and_translation_keeps_the_cached_prefix() {
-        let terms = vec!["Soniox".to_owned()];
-        let v = request_body_for("claude-haiku-5-5", "x", &selected("Kubernetes"), &terms, Job::Translate("en"));
-        let system = v["system"].as_array().unwrap();
-        assert_eq!(system.len(), 4);
-        assert_eq!(&system[..2], warm_body("claude-haiku-5-5", &terms)["system"].as_array().unwrap().as_slice(), "the warm-up's prefix");
-        assert_eq!(system[2]["text"], SELECTION_PROMPT);
-        assert_eq!(system[3]["text"], translate::instruction("en"), "the translation's block comes last: it wins");
-        let alone = request_body_for("claude-haiku-5-5", "x", &selected("Kubernetes"), &terms, Job::Clean);
-        assert_eq!(alone["system"][2]["text"], SELECTION_PROMPT, "without a translation the selection's block is last");
-        assert_eq!(v["max_tokens"], json!(alone["max_tokens"].as_u64().unwrap() * 2), "a translation's budget");
-    }
-
-    /// The selection counts as said for the markup rules: a woven `cargo test` keeps its backticks, and the check knows
-    /// where the selection is.
-    #[test]
-    fn decide_with_a_selection_keeps_its_signs_and_its_check() {
-        let s = RefineSettings::default();
-        let (raw, sel) = ("запусти вот это перед коммитом", "`cargo test`");
-        let out = "Запусти `cargo test` перед коммитом.";
-        assert_eq!(decide_with_selection(raw, sel, Parsed::Text(out.into()), &[], &s), (out.into(), RefineOutcome::Refined));
-        assert_eq!(decide(raw, Parsed::Text(out.into()), &[], &s).1, RefineOutcome::RawFallback, "without it: words nobody said");
-        let changed = format!("Слушай, посмотри на этот проект: {LINK}/");
-        let raw = "слушай посмотри на этот проект";
-        assert_eq!(decide_with_selection(raw, LINK, Parsed::Text(changed), &[], &s), (raw.into(), RefineOutcome::RawFallback));
-        assert_eq!(decide_translation_with_selection("посмотри на этот проект", LINK, Parsed::Truncated, &[], "en").1, RefineOutcome::RawFallback);
     }
 
     // ---- The whole refine against a fake Messages API. ----
@@ -912,69 +779,6 @@ mod tests {
         assert_one_warning(&lines, "HTTP 401");
     }
 
-    /// [`run_with`] with the key and a context of the test's own.
-    async fn run_in<F>(raw: &str, job: Job, c: RefineContext, route: F) -> (RefineResult, Vec<String>, FakeApi)
-    where
-        F: Fn(&str, &str, usize) -> Reply + Send + Sync + 'static,
-    {
-        let api = fake_api(route).await;
-        let http = reqwest::Client::builder().no_proxy().build().unwrap();
-        let (logs, _guard) = capture_logs();
-        let url = format!("{}/v1/messages", api.base);
-        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", raw, &c, &[], &RefineSettings::default(), job).await;
-        let lines = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::claude")).cloned().collect();
-        (r, lines, api)
-    }
-
-    #[tokio::test]
-    async fn refine_with_a_selection_sends_it_and_keeps_the_woven_text() {
-        let raw = "слушай посмотри на этот проект";
-        let woven = format!("Слушай, посмотри на этот проект: {LINK}");
-        let answer = message(&woven, "end_turn");
-        let (r, lines, api) = run_in(raw, Job::Clean, selected(LINK), move |_, _, _| reply(200, &answer)).await;
-        assert_eq!((r.text.as_str(), r.outcome), (woven.as_str(), RefineOutcome::Refined));
-        assert!(lines.is_empty(), "{lines:?}");
-        assert_eq!(api.body(0), serde_json::to_vec(&request_body("claude-haiku-5-5", raw, &selected(LINK), &[])).unwrap());
-    }
-
-    #[tokio::test]
-    async fn a_changed_link_comes_back_as_the_raw_text() {
-        let raw = "слушай посмотри на этот проект";
-        let answer = message(&format!("Слушай, посмотри на этот проект: {LINK}/"), "end_turn");
-        let (r, lines, _) = run_in(raw, Job::Clean, selected(LINK), move |_, _, _| reply(200, &answer)).await;
-        assert_eq!((r.text.as_str(), r.outcome), (raw, RefineOutcome::RawFallback));
-        assert_one_warning(&lines, "sanity check");
-        for leak in ["github", "seymurglv"] {
-            assert!(!lines[0].contains(leak), "{lines:?}");
-        }
-    }
-
-    /// A selection set on the field directly goes only when it is one to send: a blank or two-line one is neither sent
-    /// nor checked as sent.
-    #[tokio::test]
-    async fn a_selection_set_on_the_field_goes_only_when_it_is_one_to_send() {
-        for sel in ["  ", "`cargo test`\nx"] {
-            let c = RefineContext { selection: Some(sel.into()), ..ctx() };
-            assert_eq!(serde_json::to_string(&request_body("claude-haiku-5-5", "ну привет", &c, &[])).unwrap(), golden_body(), "{sel:?}");
-            let tr = request_body_for("claude-haiku-5-5", "ну привет", &c, &[], Job::Translate("en"));
-            assert_eq!(serde_json::to_string(&tr).unwrap(), golden_translation_body(), "{sel:?}");
-            // Checked as plain: the backticks nobody said are stripped, and the words nobody said fail the check.
-            let raw = "запусти вот это перед коммитом";
-            let answer = message("Запусти `cargo test` перед коммитом.", "end_turn");
-            let (r, _, api) = run_in(raw, Job::Clean, c, move |_, _, _| reply(200, &answer)).await;
-            assert_eq!((r.text.as_str(), r.outcome), (raw, RefineOutcome::RawFallback), "{sel:?}");
-            assert_eq!(api.body(0), serde_json::to_vec(&request_body("claude-haiku-5-5", raw, &ctx(), &[])).unwrap(), "{sel:?}");
-        }
-    }
-
-    #[tokio::test]
-    async fn a_translation_with_a_selection_keeps_it_as_it_is() {
-        let out = format!("Take a look at this project: {LINK}");
-        let answer = message(&out, "end_turn");
-        let (r, _, _) = run_in("посмотри на этот проект", Job::Translate("en"), selected(LINK), move |_, _, _| reply(200, &answer)).await;
-        assert_eq!((r.text.as_str(), r.outcome), (out.as_str(), RefineOutcome::Refined));
-    }
-
     // ---- Cache warm-up (spec 2 §6.3) ----
 
     /// The warm-up writes the prefix real refine reads: the same model, system blocks with the cache mark, thinking and
@@ -993,8 +797,6 @@ mod tests {
                 let tr = request_body_for(model, "ну привет", &ctx(), t, Job::Translate("en"));
                 let prefix = warm["system"].as_array().unwrap();
                 assert_eq!(&tr["system"].as_array().unwrap()[..prefix.len()], &prefix[..], "{model}: translation reads it too");
-                let sel = request_body_for(model, "ну привет", &ctx().with_selection(Some("Kubernetes")), t, Job::Clean);
-                assert_eq!(&sel["system"].as_array().unwrap()[..prefix.len()], &prefix[..], "{model}: a dictation with a selection reads it too");
             }
         }
     }

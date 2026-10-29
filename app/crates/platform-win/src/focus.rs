@@ -38,18 +38,18 @@ pub struct FocusFacts {
     pub has_caret: bool,
 }
 
-/// What the focused field says about its selection (spec 2 §6.1); asked for "Ask", and for a dictation's short read.
+/// What the focused field says about its selection (spec 2 §6.1); asked only for "Ask".
 #[derive(Clone, Default, PartialEq)]
 pub enum SelectionRead {
-    /// Not asked (a query without the selection), or the answer came late.
+    /// Not asked (every dictation query), or the answer came late.
     #[default]
     NotAsked,
     /// Nothing is selected: a caret only.
     Empty,
-    /// The selected text, already limited (`cue_core::ask::MAX_SELECTION_CHARS`, start and end; a dictation's short read
-    /// keeps less and has no end); its rectangles on screen in physical px when the app gives them (none from a classic
-    /// field, none for a dictation); whether the text there can be changed; whether it was longer than the limit, so that
-    /// only its start and its end are here (a replace would erase the rest).
+    /// The selected text, already limited (`cue_core::ask::MAX_SELECTION_CHARS`, start and end); its rectangles on
+    /// screen in physical px when the app gives them (none from a classic field); whether the text there can be changed;
+    /// whether it was longer than the limit, so that only its start and its end are here (a replace would erase the
+    /// rest).
     Text { text: String, rects: Vec<PxRect>, read_only: bool, clipped: bool },
     /// A password field, or one that would not say whether it is one, or could not be checked at all: never read, never
     /// copied.
@@ -245,33 +245,11 @@ impl Deadline {
     }
 }
 
-/// What a query reads of the selection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SelectionAsk {
-    /// "Ask" (spec 2 §6.1): up to this many characters — a longer one keeps its start and its end — and its rectangles.
-    Whole(usize),
-    /// A dictation (spec 2 §12.13): whether it is one short line, from one read of its start; no end, no rectangles.
-    Short(usize),
-}
-
-impl SelectionAsk {
-    fn max(self) -> usize {
-        match self {
-            SelectionAsk::Whole(m) | SelectionAsk::Short(m) => m,
-        }
-    }
-
-    /// The end of a longer selection and its rectangles are read too: "Ask" only.
-    fn whole(self) -> bool {
-        matches!(self, SelectionAsk::Whole(_))
-    }
-}
-
-/// A request to the `cue-focus` thread: how many characters before the caret to read, how the selection is read (`None`
-/// — it is not), until when the answer is still awaited, and where to reply.
+/// A request to the `cue-focus` thread: how many characters before the caret to read, how many of the selection (`None`
+/// — the selection is not read), until when the answer is still awaited, and where to reply.
 struct Request {
     chars: usize,
-    selection: Option<SelectionAsk>,
+    selection: Option<usize>,
     deadline: Deadline,
     reply: Sender<FocusInfo>,
 }
@@ -290,9 +268,7 @@ impl FocusWorker {
 
     /// `setup` runs on the new `cue-focus` thread and prepares the field query there; `None` — there will be no query,
     /// the thread ends, and `query` answers "don't know" at once.
-    fn start<F: FnMut(usize, Option<SelectionAsk>, Deadline) -> FocusInfo>(
-        setup: impl FnOnce() -> Option<F> + Send + 'static,
-    ) -> Self {
+    fn start<F: FnMut(usize, Option<usize>, Deadline) -> FocusInfo>(setup: impl FnOnce() -> Option<F> + Send + 'static) -> Self {
         let (tx, rx) = channel::<Request>();
         std::thread::Builder::new()
             .name("cue-focus".into())
@@ -312,17 +288,10 @@ impl FocusWorker {
 
     /// Like `query`, and the selection too, up to `selection_chars` characters (spec 2 §6.1, "Ask").
     pub fn query_with_selection(&self, context_chars: usize, selection_chars: usize, timeout: Duration) -> FocusInfo {
-        self.ask(context_chars, Some(SelectionAsk::Whole(selection_chars)), timeout)
+        self.ask(context_chars, Some(selection_chars), timeout)
     }
 
-    /// Like `query`, and the selection a dictation may weave in (spec 2 §12.13): up to `selection_chars` characters from its
-    /// start, without its end or its rectangles — a dictation needs only whether it is one short line, and a longer one
-    /// comes back `clipped`. UI Automation and classic fields only: never a Ctrl+C.
-    pub fn query_for_dictation(&self, context_chars: usize, selection_chars: usize, timeout: Duration) -> FocusInfo {
-        self.ask(context_chars, Some(SelectionAsk::Short(selection_chars)), timeout)
-    }
-
-    fn ask(&self, context_chars: usize, selection: Option<SelectionAsk>, timeout: Duration) -> FocusInfo {
+    fn ask(&self, context_chars: usize, selection: Option<usize>, timeout: Duration) -> FocusInfo {
         let (reply, answer) = channel();
         let deadline = Deadline::after(timeout);
         if self.tx.send(Request { chars: context_chars, selection, deadline, reply }).is_err() {
@@ -335,7 +304,7 @@ impl FocusWorker {
 /// Requests one by one until `FocusWorker` is closed. One whose deadline passed while the thread was busy with a hung app
 /// is skipped without touching UI Automation: nobody waits for the answer any more, and the queue does not pile up behind
 /// the hung app. A query that finished after the deadline (and may have been cut short halfway) is not sent.
-fn serve(rx: Receiver<Request>, mut inspect: impl FnMut(usize, Option<SelectionAsk>, Deadline) -> FocusInfo) {
+fn serve(rx: Receiver<Request>, mut inspect: impl FnMut(usize, Option<usize>, Deadline) -> FocusInfo) {
     for req in rx {
         if req.deadline.passed() {
             continue;
@@ -382,7 +351,7 @@ mod win {
 
     use super::{
         classify, context_tail, file_and_stem, line_break_may_be_missing, mark_line_start, selection_head_units,
-        selection_text, unknown, Deadline, FocusFacts, FocusInfo, SelectionAsk, SelectionRead, WindowRef,
+        selection_text, unknown, Deadline, FocusFacts, FocusInfo, SelectionRead, WindowRef,
     };
     use crate::placement::PxRect;
     use crate::selection::px_rect;
@@ -422,7 +391,7 @@ mod win {
 
     /// Runs on the `cue-focus` thread: COM and UI Automation of that thread. If it fails — one log entry
     /// and no queries.
-    pub(super) fn setup() -> Option<impl FnMut(usize, Option<SelectionAsk>, Deadline) -> FocusInfo> {
+    pub(super) fn setup() -> Option<impl FnMut(usize, Option<usize>, Deadline) -> FocusInfo> {
         // SAFETY: the first COM call on a new thread; the paired `CoUninitialize` is in `Com::drop`.
         let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         if hr.is_err() {
@@ -453,12 +422,12 @@ mod win {
 
     impl Uia {
         /// After the deadline the app is not asked anything new: the result will not be sent anyway (`serve`).
-        fn inspect(&mut self, context_chars: usize, selection: Option<SelectionAsk>, deadline: Deadline) -> FocusInfo {
+        fn inspect(&mut self, context_chars: usize, selection_chars: Option<usize>, deadline: Deadline) -> FocusInfo {
             let mut facts = FocusFacts::default();
             let mut info = FocusInfo::default();
             // Asked, so answered (never `NotAsked`): "cannot tell" until the field says more. A field that cannot be
             // checked at all is taken for a password below.
-            if selection.is_some() {
+            if selection_chars.is_some() {
                 info.selection = SelectionRead::Unknown;
             }
             // SAFETY: no arguments. The window may close at any moment — further calls with it return an error or 0.
@@ -482,7 +451,7 @@ mod win {
             match unsafe { self.uia.GetFocusedElement() } {
                 Ok(el) => {
                     facts.has_element = true;
-                    let readable = read_element(&el, context_chars, selection, deadline, &mut facts, &mut info);
+                    let readable = read_element(&el, context_chars, selection_chars, deadline, &mut facts, &mut info);
                     // "Not a password" was said about the UIA element — read the window only if it is that element's own window
                     // (a classic field's selection checks `ES_PASSWORD` itself).
                     // SAFETY: as above.
@@ -496,12 +465,12 @@ mod win {
                     {
                         info.before_cursor = edit_text_before_caret(gti.hwndFocus, context_chars, deadline);
                     }
-                    if let Some(ask) = selection
+                    if let Some(max) = selection_chars
                         && info.selection == SelectionRead::Unknown
                         && !deadline.passed()
                         && same()
                         && !deadline.passed()
-                        && let Some(read) = edit_selection(gti.hwndFocus, ask.max(), deadline)
+                        && let Some(read) = edit_selection(gti.hwndFocus, max, deadline)
                     {
                         info.selection = read;
                     }
@@ -516,7 +485,7 @@ mod win {
                     facts.has_element = !fg.is_invalid();
                     // The field cannot be checked (a hung app, as a rule), so neither can whether it is a password: it is
                     // treated as one that must not be read — no Ctrl+C.
-                    if selection.is_some() {
+                    if selection_chars.is_some() {
                         info.selection = SelectionRead::Password;
                     }
                 }
@@ -574,7 +543,7 @@ mod win {
     fn read_element(
         el: &IUIAutomationElement,
         context_chars: usize,
-        selection: Option<SelectionAsk>,
+        selection_chars: Option<usize>,
         deadline: Deadline,
         facts: &mut FocusFacts,
         info: &mut FocusInfo,
@@ -589,7 +558,7 @@ mod win {
             info.is_password = matches!(password, Ok(true));
             // A field that would not say whether it is a password is taken for one: no Ctrl+C there, whatever the app does
             // with a copy from a password field.
-            if selection.is_some() && !matches!(password, Ok(false)) {
+            if selection_chars.is_some() && !matches!(password, Ok(false)) {
                 info.selection = SelectionRead::Password;
             }
             let readable = matches!(password, Ok(false)) && context_chars > 0;
@@ -608,12 +577,12 @@ mod win {
                     let chromium = el.CurrentFrameworkId().is_ok_and(|f| f == CHROMIUM);
                     info.before_cursor = text_before_caret(&tp, context_chars, chromium, deadline);
                 }
-                if let Some(ask) = selection
+                if let Some(max) = selection_chars
                     && matches!(password, Ok(false))
                     && !deadline.passed()
                 {
                     let chromium = el.CurrentFrameworkId().is_ok_and(|f| f == CHROMIUM);
-                    info.selection = selection_of(&tp, ask, chromium, deadline);
+                    info.selection = selection_of(&tp, max, chromium, deadline);
                 }
             }
             readable
@@ -685,12 +654,10 @@ mod win {
     }
 
     /// The first selected range: its text (two short reads, from its start and from its end, so a whole document selected
-    /// costs no more; a dictation's short read only the first), its rectangles ("Ask" only) and whether its text is
-    /// read-only. A degenerate range is a caret: nothing selected.
-    unsafe fn selection_of(tp: &IUIAutomationTextPattern, ask: SelectionAsk, chromium: bool, deadline: Deadline) -> SelectionRead {
+    /// costs no more), its rectangles and whether its text is read-only. A degenerate range is a caret: nothing selected.
+    unsafe fn selection_of(tp: &IUIAutomationTextPattern, max: usize, chromium: bool, deadline: Deadline) -> SelectionRead {
         // SAFETY: calls on the pattern of a live element and its ranges on the UI Automation thread; errors — `Err`.
         unsafe {
-            let max = ask.max();
             let Ok(ranges) = tp.GetSelection() else { return SelectionRead::Unknown };
             if ranges.Length().unwrap_or(0) < 1 {
                 return SelectionRead::Empty;
@@ -701,11 +668,11 @@ mod win {
             if head.trim().is_empty() {
                 return SelectionRead::Empty;
             }
-            let (text, clipped) = selection_text(head, max, |n| if ask.whole() { tail_text(&range, n) } else { None });
+            let (text, clipped) = selection_text(head, max, |n| tail_text(&range, n));
             if deadline.passed() {
                 return SelectionRead::Unknown;
             }
-            let rects = if !ask.whole() || (chromium && !CHROMIUM_RECTS) { Vec::new() } else { bounding_rects(&range) };
+            let rects = if chromium && !CHROMIUM_RECTS { Vec::new() } else { bounding_rects(&range) };
             SelectionRead::Text { text, rects, read_only: read_only(&range), clipped }
         }
     }
@@ -946,10 +913,8 @@ mod win {
         #[test]
         fn a_selection_query_answers_with_some_selection_kind() {
             let mut inspect = setup().expect("UI Automation");
-            let info = inspect(0, Some(SelectionAsk::Whole(8_000)), Deadline::after(Duration::from_secs(5)));
+            let info = inspect(0, Some(8_000), Deadline::after(Duration::from_secs(5)));
             assert_ne!(info.selection, SelectionRead::NotAsked, "asked, so answered: {:?}", info.selection);
-            let short = inspect(0, Some(SelectionAsk::Short(250)), Deadline::after(Duration::from_secs(5)));
-            assert_ne!(short.selection, SelectionRead::NotAsked, "a dictation's short read answers too: {:?}", short.selection);
             assert_eq!(inspect(0, None, Deadline::after(Duration::from_secs(5))).selection, SelectionRead::NotAsked);
         }
 
@@ -1207,7 +1172,7 @@ mod tests {
 
     #[test]
     fn worker_without_ui_automation_answers_unknown_at_once() {
-        let w = FocusWorker::start(|| None::<fn(usize, Option<SelectionAsk>, Deadline) -> FocusInfo>);
+        let w = FocusWorker::start(|| None::<fn(usize, Option<usize>, Deadline) -> FocusInfo>);
         let t = Instant::now();
         assert_eq!(w.query(500, Duration::from_secs(5)), unknown());
         assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
@@ -1216,12 +1181,10 @@ mod tests {
     #[test]
     fn a_selection_query_asks_for_the_selection_and_a_plain_one_does_not() {
         let w = FocusWorker::start(|| {
-            Some(|chars: usize, sel: Option<SelectionAsk>, _d: Deadline| FocusInfo {
+            Some(|chars: usize, sel: Option<usize>, _d: Deadline| FocusInfo {
                 before_cursor: Some(chars.to_string()),
                 selection: match sel {
-                    Some(ask) => {
-                        SelectionRead::Text { text: "x".repeat(ask.max().min(3)), rects: vec![], read_only: false, clipped: false }
-                    }
+                    Some(max) => SelectionRead::Text { text: "x".repeat(max.min(3)), rects: vec![], read_only: false, clipped: false },
                     None => SelectionRead::NotAsked,
                 },
                 ..notepad()
@@ -1231,40 +1194,6 @@ mod tests {
         let asked = w.query_with_selection(500, 8_000, Duration::from_secs(2));
         assert_eq!(asked.selection, SelectionRead::Text { text: "xxx".into(), rects: vec![], read_only: false, clipped: false });
         assert_eq!(asked.before_cursor.as_deref(), Some("500"));
-    }
-
-    #[test]
-    fn a_dictation_asks_for_a_short_read_of_the_selection() {
-        let w = FocusWorker::start(|| {
-            Some(|_chars: usize, sel: Option<SelectionAsk>, _d: Deadline| FocusInfo {
-                selection: match sel {
-                    Some(ask) => SelectionRead::Text {
-                        text: format!("{} {}", if ask.whole() { "whole" } else { "short" }, ask.max()),
-                        rects: vec![],
-                        read_only: false,
-                        clipped: false,
-                    },
-                    None => SelectionRead::NotAsked,
-                },
-                ..notepad()
-            })
-        });
-        let text = |i: FocusInfo| match i.selection {
-            SelectionRead::Text { text, .. } => text,
-            other => format!("{other:?}"),
-        };
-        assert_eq!(text(w.query_for_dictation(500, 250, Duration::from_secs(2))), "short 250");
-        assert_eq!(text(w.query_with_selection(500, 8_000, Duration::from_secs(2))), "whole 8000");
-        assert_eq!(text(w.query(16, Duration::from_secs(2))), "NotAsked");
-    }
-
-    /// A dictation needs only whether the selection is one short line: no end of a longer one, no rectangles; a longer
-    /// one read once from its start comes back clipped, and a dictation does not send it.
-    #[test]
-    fn only_ask_reads_the_end_and_the_rectangles() {
-        assert_eq!((SelectionAsk::Whole(8_000).max(), SelectionAsk::Whole(8_000).whole()), (8_000, true));
-        assert_eq!((SelectionAsk::Short(250).max(), SelectionAsk::Short(250).whole()), (250, false));
-        assert!(selection_text("я".repeat(300), 250, |_| None).1);
     }
 
     #[test]

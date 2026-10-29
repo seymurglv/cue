@@ -1,6 +1,6 @@
-//! "Ask" through Claude (spec 2 §6.2): the streaming request with the write_to_field tool, web search and page reading,
-//! the turns of the conversation, the parser of the event stream and what the model decided; the network part is `run`
-//! and `warm`. No text of the question, the answer, the selection or the sources reaches the log here.
+//! "Ask" through Claude (spec 2 §6.2): the streaming request with the write_to_field tool and web search, the turns of the
+//! conversation, the parser of the event stream and what the model decided; the network part is `run` and `warm`. No
+//! text of the question, the answer, the selection or the sources reaches the log here.
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -50,87 +50,6 @@ pub fn search_tool(max_uses: u32) -> Option<SearchTool> {
     Some(SearchTool::Filtered { max_uses })
 }
 
-/// Reading a page the user pointed at (spec 2 §12.12): Claude's server tool, up to `max_uses` pages a request, the text of
-/// each cut to `FETCH_MAX_CONTENT_TOKENS` tokens, with citations (off by default in the API). A PDF is not cut — it comes
-/// whole, hundreds of thousands of tokens for a long one — so the instruction asks never to fetch one. A question reads
-/// `FETCH_MAX_USES` pages at most, its continuations included: a continuation goes with what is left (`run`). Which
-/// version — the first probe's choice (`examples/fetch_probe.rs`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FetchTool {
-    /// `web_fetch_20250910`, called by the model directly: the filtered search's code may not call it.
-    Basic { max_uses: u32 },
-    /// `web_fetch_20260318`: the model filters the page in code before it reads it.
-    Filtered { max_uses: u32 },
-}
-
-impl FetchTool {
-    /// Pages this request may read.
-    pub fn max_uses(self) -> u32 {
-        match self {
-            FetchTool::Basic { max_uses } | FetchTool::Filtered { max_uses } => max_uses,
-        }
-    }
-
-    /// The same version, for `n` pages.
-    pub fn with_max_uses(self, n: u32) -> Self {
-        match self {
-            FetchTool::Basic { .. } => FetchTool::Basic { max_uses: n },
-            FetchTool::Filtered { .. } => FetchTool::Filtered { max_uses: n },
-        }
-    }
-
-    pub fn json(self) -> Value {
-        let kind = match self {
-            FetchTool::Basic { .. } => "web_fetch_20250910",
-            FetchTool::Filtered { .. } => "web_fetch_20260318",
-        };
-        let mut v = json!({
-            "type": kind,
-            "name": "web_fetch",
-            "max_uses": self.max_uses(),
-            "max_content_tokens": core_ask::FETCH_MAX_CONTENT_TOKENS,
-            "citations": { "enabled": true }
-        });
-        if matches!(self, FetchTool::Basic { .. }) {
-            v["allowed_callers"] = json!(["direct"]);
-        }
-        v
-    }
-}
-
-/// The page reader the app sends, for `FETCH_MAX_USES` pages; `None` when the model takes none. The basic version: one page
-/// the user pointed at gains little from filtering in code, which adds code runs before the first words. On 2026-10-29
-/// (`examples/fetch_probe.rs`) Haiku 5.5 took both versions next to the filtered search, warm-ups included; the basic one
-/// read the selected page in one call and cited it (first words in 2.1 s), the filtered one's first read failed on its
-/// input and its answer cited nothing.
-pub fn fetch_tool() -> Option<FetchTool> {
-    Some(FetchTool::Basic { max_uses: core_ask::FETCH_MAX_USES })
-}
-
-/// The server tools of a question (spec 2 §12.12): web search and page reading, on and off together (`ask.web_search`);
-/// a key that refuses one of them is asked again without that one.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct WebTools {
-    pub search: Option<SearchTool>,
-    pub fetch: Option<FetchTool>,
-}
-
-impl WebTools {
-    pub const NONE: WebTools = WebTools { search: None, fetch: None };
-
-    /// Both, with `max_searches` searches a question.
-    pub fn on(max_searches: u32) -> Self {
-        Self { search: search_tool(max_searches), fetch: fetch_tool() }
-    }
-}
-
-/// The search alone (the bench and the tests of the search).
-impl From<Option<SearchTool>> for WebTools {
-    fn from(search: Option<SearchTool>) -> Self {
-        Self { search, fetch: None }
-    }
-}
-
 /// write_to_field (spec 2 §6.2): strict, so its input always matches the schema; buffered (no eager streaming), so the
 /// input arrives checked and whole — the app acts on it only then.
 pub fn write_tool() -> Value {
@@ -150,12 +69,10 @@ pub fn write_tool() -> Value {
     })
 }
 
-/// The tools in a fixed order (they render first in the cached prefix): write_to_field, web search, page reading — each
-/// server tool if on.
-pub fn tools(web: WebTools) -> Value {
+/// The tools in a fixed order (they render first in the cached prefix): write_to_field, then web search if on.
+pub fn tools(search: Option<SearchTool>) -> Value {
     let mut list = vec![write_tool()];
-    list.extend(web.search.map(SearchTool::json));
-    list.extend(web.fetch.map(FetchTool::json));
+    list.extend(search.map(SearchTool::json));
     Value::Array(list)
 }
 
@@ -177,14 +94,20 @@ impl Thinking {
 /// thinking as `thinking` says (adaptive gets room for it on top of the answer's budget), `tool_choice: auto`, and the
 /// conversation with a second mark on the last user message, so a follow-up reads what came before from the cache.
 /// `container` — the code execution container the API gave the conversation (filtered search), sent back.
-pub fn request_body(model: &str, web: WebTools, thinking: Thinking, messages: &[Value], container: Option<&str>) -> Value {
+pub fn request_body(
+    model: &str,
+    search: Option<SearchTool>,
+    thinking: Thinking,
+    messages: &[Value],
+    container: Option<&str>,
+) -> Value {
     let budget = core_ask::MAX_TOKENS + if thinking == Thinking::Adaptive { THINKING_HEADROOM } else { 0 };
     let mut v = json!({
         "model": model,
         "max_tokens": budget,
         "stream": true,
         "system": [{ "type": "text", "text": core_ask::ASK_PROMPT, "cache_control": { "type": "ephemeral" } }],
-        "tools": tools(web),
+        "tools": tools(search),
         "tool_choice": { "type": "auto" },
         "messages": marked(messages),
         "output_config": { "effort": "low" }
@@ -217,8 +140,8 @@ pub const WARM_MAX_TOKENS: u32 = 0;
 /// The cache warm-up (spec 2 §6.3): the request's prefix — the same tools, instruction, thinking, effort and tool choice —
 /// with a one-character placeholder, no stream, no output. The mark stays only on the instruction: on the placeholder it
 /// would key the cache to it.
-pub fn warm_body(model: &str, web: WebTools) -> Value {
-    let mut v = request_body(model, web, Thinking::DEFAULT, &[user_turn(".", None)], None);
+pub fn warm_body(model: &str, search: Option<SearchTool>) -> Value {
+    let mut v = request_body(model, search, Thinking::DEFAULT, &[user_turn(".", None)], None);
     if let Some(o) = v.as_object_mut() {
         o.remove("stream");
     }
@@ -267,10 +190,6 @@ pub enum Step {
     Searching,
     /// Search results came in.
     Reading,
-    /// The model started to read a page.
-    Fetching,
-    /// A page came in (not an error): its address and the title its chip shows.
-    Fetched { url: String, title: String },
     /// A text block started.
     TextStart,
     /// More text of the current text block.
@@ -299,8 +218,6 @@ pub struct AskUsage {
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
     pub web_searches: u32,
-    /// Pages read; no fee, their tokens are in the counts above.
-    pub web_fetches: u32,
 }
 
 impl AskUsage {
@@ -310,7 +227,6 @@ impl AskUsage {
         self.cache_read_tokens += o.cache_read_tokens;
         self.cache_write_tokens += o.cache_write_tokens;
         self.web_searches += o.web_searches;
-        self.web_fetches += o.web_fetches;
     }
 }
 
@@ -322,57 +238,9 @@ pub enum StreamError {
     Malformed,
 }
 
-/// A page the conversation has read: its address and its document's title, if it has one.
-#[derive(Clone, Debug, PartialEq)]
-struct Page {
-    url: String,
-    title: Option<String>,
-}
-
-impl Page {
-    /// What its chip shows: the document's title, or the site.
-    fn shown_title(&self) -> String {
-        self.title.clone().unwrap_or_else(|| core_ask::site_of(&self.url))
-    }
-}
-
-/// A `web_fetch_tool_result` that brought a page (not an error). One without an address is still a page — a document
-/// the citations count — with an empty `url`: it gets no chip and no citation number, and the pages after it keep theirs.
-fn read_page(block: &Value) -> Option<Page> {
-    let c = &block["content"];
-    if c["type"] != "web_fetch_result" {
-        return None;
-    }
-    let url = c["url"].as_str().unwrap_or("").to_owned();
-    let title = c["content"]["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned);
-    Some(Page { url, title })
-}
-
-/// The pages read in these messages, in order: a page citation (`char_location`, `page_location`,
-/// `content_block_location`) names its page by its index among them.
-fn pages_in(messages: &[Value]) -> Vec<Page> {
-    messages
-        .iter()
-        .filter_map(|m| m["content"].as_array())
-        .flatten()
-        .filter(|b| b["type"] == "web_fetch_tool_result")
-        .filter_map(read_page)
-        .collect()
-}
-
-/// The page a page citation names (spec 2 §12.12): the one at its `document_index`, when that page has the citation's title
-/// (or either has none); otherwise the last page with that title. `None` — no page of the conversation: the words stay,
-/// without a number. The caller numbers only a page with an address.
-fn page_for<'a>(pages: &'a [Page], index: Option<u64>, title: Option<&str>) -> Option<&'a Page> {
-    let title = title.map(str::trim).filter(|t| !t.is_empty());
-    let fits = |p: &Page| title.is_none() || p.title.is_none() || p.title.as_deref() == title;
-    let by_index = index.and_then(|i| usize::try_from(i).ok()).and_then(|i| pages.get(i)).filter(|p| fits(p));
-    by_index.or_else(|| title.and_then(|t| pages.iter().rev().find(|p| p.title.as_deref() == Some(t))))
-}
-
 /// One response's event stream → its content blocks as the API would return them whole: text with its citations, tool
-/// calls with their input parsed, search results and read pages as they came (encrypted content included), thinking with
-/// its signature. Events and deltas it does not know are skipped: the API may add some.
+/// calls with their input parsed, search results as they came (encrypted content included), thinking with its signature.
+/// Events and deltas it does not know are skipped: the API may add some.
 #[derive(Debug, Default)]
 pub struct StreamState {
     blocks: Vec<Value>,
@@ -383,10 +251,6 @@ pub struct StreamState {
     /// Web searches the stream started (`server_tool_use` blocks): what the response has searched before its end reports
     /// the count (`ended`), which only `message_delta` does.
     searches_seen: u32,
-    /// Page reads the stream started, counted the same way.
-    fetches_seen: u32,
-    /// The pages read so far: the conversation's, then this response's.
-    pages: Vec<Page>,
     ended: bool,
     container: Option<String>,
     stopped: bool,
@@ -402,12 +266,6 @@ pub struct StreamTurn {
 }
 
 impl StreamState {
-    /// The parser of the response that follows `messages`: it knows the pages they read, so a citation of one gets its
-    /// number.
-    pub fn after(messages: &[Value]) -> Self {
-        Self { pages: pages_in(messages), ..Self::default() }
-    }
-
     /// The data of one event; what it shows on screen.
     pub fn feed(&mut self, data: &str) -> Result<Vec<Step>, StreamError> {
         let v: Value = serde_json::from_str(data).map_err(|_| StreamError::Malformed)?;
@@ -427,18 +285,6 @@ impl StreamState {
                         steps.push(Step::Searching);
                     }
                     "web_search_tool_result" => steps.push(Step::Reading),
-                    "server_tool_use" if name == "web_fetch" => {
-                        self.fetches_seen = self.fetches_seen.saturating_add(1);
-                        steps.push(Step::Fetching);
-                    }
-                    "web_fetch_tool_result" => {
-                        if let Some(page) = read_page(&block) {
-                            if !page.url.is_empty() {
-                                steps.push(Step::Fetched { url: page.url.clone(), title: page.shown_title() });
-                            }
-                            self.pages.push(page);
-                        }
-                    }
                     "tool_use" if name == core_ask::WRITE_TOOL => steps.push(Step::WriteStart),
                     "text" => {
                         steps.push(Step::TextStart);
@@ -464,23 +310,12 @@ impl StreamState {
                     }
                     "citations_delta" => {
                         let c = d["citation"].clone();
-                        match c["type"].as_str() {
-                            // The title is optional in the API: without one the source goes under its site.
-                            Some("web_search_result_location") => {
-                                if let Some(url) = c["url"].as_str() {
-                                    let title = c["title"].as_str().map_or_else(|| core_ask::site_of(url), str::to_owned);
-                                    steps.push(Step::Cite { url: url.to_owned(), title });
-                                }
-                            }
-                            // A read page's text (spec 2 §12.12) — by characters, by page (a PDF) or by block: its page by
-                            // index among the conversation's.
-                            Some("char_location" | "page_location" | "content_block_location") => {
-                                let page = page_for(&self.pages, c["document_index"].as_u64(), c["document_title"].as_str());
-                                if let Some(p) = page.filter(|p| !p.url.is_empty()) {
-                                    steps.push(Step::Cite { url: p.url.clone(), title: p.shown_title() });
-                                }
-                            }
-                            _ => {}
+                        // The title is optional in the API: without one the source goes under its site.
+                        if c["type"] == "web_search_result_location"
+                            && let Some(url) = c["url"].as_str()
+                        {
+                            let title = c["title"].as_str().map_or_else(|| core_ask::site_of(url), str::to_owned);
+                            steps.push(Step::Cite { url: url.to_owned(), title });
                         }
                         match block["citations"].as_array_mut() {
                             Some(list) => list.push(c),
@@ -531,16 +366,12 @@ impl StreamState {
 
     /// The counts of this response so far. The searches are the ones the stream started until the response's end reports
     /// them (spec 2 §10: a question closed or cut after it searched still pays for the search); then the reported count,
-    /// which leaves out a search the API deferred and never ran. The page reads are the ones the stream began or the end's
-    /// count, whichever is more. The tokens are the ones reported so far.
+    /// which leaves out a search the API deferred and never ran. The tokens are the ones reported so far.
     pub fn usage(&self) -> AskUsage {
         let mut usage = self.usage;
         if !self.ended {
             usage.web_searches = usage.web_searches.max(self.searches_seen);
         }
-        // Page reads: an end that leaves its count out must not lose a read the stream began. A read the API deferred and
-        // never ran is counted too; it has no fee.
-        usage.web_fetches = usage.web_fetches.max(self.fetches_seen);
         usage
     }
 
@@ -580,9 +411,6 @@ impl StreamState {
         }
         if let Some(x) = u["server_tool_use"]["web_search_requests"].as_u64() {
             self.usage.web_searches = u32::try_from(x).unwrap_or(u32::MAX);
-        }
-        if let Some(x) = u["server_tool_use"]["web_fetch_requests"].as_u64() {
-            self.usage.web_fetches = u32::try_from(x).unwrap_or(u32::MAX);
         }
     }
 
@@ -716,25 +544,23 @@ impl Limits {
 
 /// One question, streamed (spec 2 §6.2): the steps go to `on_step` as they come, and with them what the question has cost
 /// so far (`Step::Spent`); a paused turn is continued with its blocks and the same tools, at most `MAX_CONTINUATIONS` times
-/// and only while its searches and its page reads are not spent (decision 9); a question reads two pages at most, so a
-/// continuation, and the widened retry of a cut write, go with the reads left (none left: no widened retry); a key without
-/// web search or without page reading is asked again without it (§8); a write cut at `max_tokens` is asked again once
-/// with more room, under deadlines of its own that start when the retry is sent (the cut call has usually used most of
-/// the whole answer's time); the deadlines are `Limits::SPEC`. Never "fails" by panicking or hanging: every problem ends
-/// as `AskEnd::Failed`, with one log line of its reason, and with what the question spent up to it, the response that
-/// failed part-way included.
+/// and only while its searches are not spent (decision 9); a key without web search is asked again without it (§8); a
+/// write cut at `max_tokens` is asked again once with more room, under deadlines of its own that start when the retry is
+/// sent (the cut call has usually used most of the whole answer's time); the deadlines are `Limits::SPEC`. Never "fails"
+/// by panicking or hanging: every problem ends as `AskEnd::Failed`, with one log line of its reason, and with what the
+/// question spent up to it, the response that failed part-way included.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     http: &reqwest::Client,
     key: Option<&str>,
     model: &str,
-    web: WebTools,
+    search: Option<SearchTool>,
     thinking: Thinking,
     messages: &[Value],
     container: Option<String>,
     on_step: impl FnMut(Step) + Send,
 ) -> AskResult {
-    run_at(claude::API_URL, http, key, model, web, thinking, messages, container, Limits::SPEC, on_step).await
+    run_at(claude::API_URL, http, key, model, search, thinking, messages, container, Limits::SPEC, on_step).await
 }
 
 fn failed(why: AskFailure, content: Vec<Value>, usage: AskUsage, container: Option<String>) -> AskResult {
@@ -759,12 +585,6 @@ fn search_refused(body: &str) -> bool {
     b.contains("web search") || b.contains("web_search")
 }
 
-/// A 400 that says page reading is not available to this key or organization, or not with these tools.
-fn fetch_refused(body: &str) -> bool {
-    let b = body.to_lowercase();
-    b.contains("web fetch") || b.contains("web_fetch")
-}
-
 /// Room added once for a write cut at `max_tokens` (a long email): the same question again; the cut call never runs.
 const LONG_WRITE_TOKENS: u32 = 2 * core_ask::MAX_TOKENS;
 
@@ -775,7 +595,7 @@ async fn run_at(
     http: &reqwest::Client,
     key: Option<&str>,
     model: &str,
-    mut web: WebTools,
+    mut search: Option<SearchTool>,
     thinking: Thinking,
     messages: &[Value],
     mut container: Option<String>,
@@ -793,14 +613,13 @@ async fn run_at(
     let mut widened = false;
     let mut last_spent = AskUsage::default();
     loop {
-        // Until the first words: the first-words deadline (longer once a search or a page read began); then the whole
-        // answer's.
+        // Until the first words: the first-words deadline (longer once a search began); then the whole answer's.
         let by = |seen: bool, first_by: Instant| if seen { total } else { first_by.min(total) };
         let mut msgs = messages.to_vec();
         if !content.is_empty() {
             msgs.push(json!({ "role": "assistant", "content": content }));
         }
-        let mut body = request_body(model, web, thinking, &msgs, container.as_deref());
+        let mut body = request_body(model, search, thinking, &msgs, container.as_deref());
         if widened {
             body["max_tokens"] = json!(body["max_tokens"].as_u64().unwrap_or(0) + u64::from(LONG_WRITE_TOKENS));
         }
@@ -815,22 +634,14 @@ async fn run_at(
             // The refusal's body is read under the same deadline: a service that stalls after its status must not hang
             // the question.
             let text = timeout_at(by(first_seen, first_by), resp.text()).await.ok().and_then(Result::ok).unwrap_or_default();
-            if status == 400 && content.is_empty() {
-                // Page reading first: a refusal of the page reader may name the search too.
-                if web.fetch.is_some() && fetch_refused(&text) {
-                    tracing::warn!("ask: page reading is not available to this key: asked without it");
-                    web.fetch = None;
-                    continue;
-                }
-                if web.search.is_some() && search_refused(&text) {
-                    tracing::warn!("ask: web search is not available to this key: asked without it");
-                    web.search = None;
-                    continue;
-                }
+            if status == 400 && search.is_some() && content.is_empty() && search_refused(&text) {
+                tracing::warn!("ask: web search is not available to this key: asked without it");
+                search = None;
+                continue;
             }
             return failed(classify(status, &text), content, usage, container);
         }
-        let (mut sse, mut st) = (Sse::default(), StreamState::after(&msgs));
+        let (mut sse, mut st) = (Sse::default(), StreamState::default());
         let broke = loop {
             let chunk = match timeout_at(by(first_seen, first_by), resp.chunk()).await {
                 Err(_) => break Some(AskFailure::Timeout),
@@ -856,7 +667,7 @@ async fn run_at(
                 };
                 for step in steps {
                     match &step {
-                        Step::Searching | Step::Fetching if !first_seen => first_by = t0 + limits.first_words_search,
+                        Step::Searching if !first_seen => first_by = t0 + limits.first_words_search,
                         s if s.is_first_words() => first_seen = true,
                         _ => {}
                     }
@@ -890,23 +701,16 @@ async fn run_at(
         }
         content.extend(turn.content);
         let reason = turn.stop_reason.as_deref();
-        let searches_left = web.search.is_none_or(|s| usage.web_searches < s.max_uses());
-        // Two pages a question (spec 2 §12.12): `max_uses` counts per request, so the next one may read only what is left.
-        let reads_left = core_ask::FETCH_MAX_USES.saturating_sub(usage.web_fetches);
-        let may_read = web.fetch.is_none() || reads_left > 0;
-        if reason == Some("pause_turn") && round < core_ask::MAX_CONTINUATIONS && searches_left && may_read {
+        let searches_left = search.is_none_or(|s| usage.web_searches < s.max_uses());
+        if reason == Some("pause_turn") && round < core_ask::MAX_CONTINUATIONS && searches_left {
             round += 1;
-            web.fetch = web.fetch.map(|f| f.with_max_uses(reads_left));
             // The next request follows at once: with the rest of this body read, it goes over the same connection.
             let _ = timeout_at(by(first_seen, first_by), rest(&mut resp)).await;
             continue;
         }
         let cut_write = content.iter().any(|b| b["type"] == "tool_use" && b["name"] == core_ask::WRITE_TOOL);
-        // After two page reads there is no second try that could read a third: the cut write is never carried out, and
-        // Retry is the user's.
-        if reason == Some("max_tokens") && cut_write && !widened && may_read {
+        if reason == Some("max_tokens") && cut_write && !widened {
             widened = true;
-            web.fetch = web.fetch.map(|f| f.with_max_uses(reads_left));
             content.clear();
             let _ = timeout_at(by(first_seen, first_by), rest(&mut resp)).await;
             // The retry has deadlines of its own, from when it is sent: the cut call has usually used most of the whole
@@ -946,16 +750,16 @@ const WARM_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One cache warm-up for "Ask" ([`warm_body`], spec 2 §6.3): the tokens paid for on HTTP 200; on any problem one log line
 /// with the reason and `None` — the question's own request then writes the cache.
-pub async fn warm(http: &reqwest::Client, key: &str, model: &str, web: WebTools) -> Option<claude::Usage> {
-    warm_at(claude::API_URL, http, key, model, web).await
+pub async fn warm(http: &reqwest::Client, key: &str, model: &str, search: Option<SearchTool>) -> Option<claude::Usage> {
+    warm_at(claude::API_URL, http, key, model, search).await
 }
 
-async fn warm_at(url: &str, http: &reqwest::Client, key: &str, model: &str, web: WebTools) -> Option<claude::Usage> {
+async fn warm_at(url: &str, http: &reqwest::Client, key: &str, model: &str, search: Option<SearchTool>) -> Option<claude::Usage> {
     #[derive(Deserialize)]
     struct WarmResp {
         usage: claude::Usage,
     }
-    let send = messages_post(http, url, key).timeout(WARM_TIMEOUT).json(&warm_body(model, web)).send().await;
+    let send = messages_post(http, url, key).timeout(WARM_TIMEOUT).json(&warm_body(model, search)).send().await;
     let why = match send {
         Err(e) if e.is_timeout() => "timeout".to_owned(),
         Err(_) => "network".to_owned(),
@@ -980,7 +784,7 @@ mod tests {
 
     #[test]
     fn the_request_streams_with_both_tools_and_two_cache_marks() {
-        let v = request_body("claude-haiku-5-5", Some(SearchTool::Basic { max_uses: 2 }).into(), Thinking::DEFAULT, &[question()], None);
+        let v = request_body("claude-haiku-5-5", Some(SearchTool::Basic { max_uses: 2 }), Thinking::DEFAULT, &[question()], None);
         assert_eq!(v["model"], "claude-haiku-5-5");
         assert_eq!(v["stream"], true);
         assert_eq!(v["max_tokens"], 2_000, "the answer's budget: no room kept for thinking");
@@ -1006,7 +810,7 @@ mod tests {
 
     #[test]
     fn without_search_only_the_write_tool() {
-        let v = request_body("claude-haiku-5-5", WebTools::NONE, Thinking::DEFAULT, &[question()], None);
+        let v = request_body("claude-haiku-5-5", None, Thinking::DEFAULT, &[question()], None);
         assert_eq!(v["tools"].as_array().map(Vec::len), Some(1));
     }
 
@@ -1026,13 +830,13 @@ mod tests {
         let answer = json!({ "role": "assistant", "content": [{ "type": "text", "text": "Ответ." }] });
         let follow = user_turn("<question>а подробнее</question>", None);
         let msgs = vec![question(), answer.clone(), follow];
-        let v = request_body("claude-haiku-5-5", WebTools::NONE, Thinking::DEFAULT, &msgs, None);
+        let v = request_body("claude-haiku-5-5", None, Thinking::DEFAULT, &msgs, None);
         assert!(v["messages"][0]["content"][0].get("cache_control").is_none());
         assert!(v["messages"][1]["content"][0].get("cache_control").is_none());
         assert_eq!(v["messages"][2]["content"][0]["cache_control"], json!({ "type": "ephemeral" }));
         assert!(msgs[2]["content"][0].get("cache_control").is_none(), "the conversation itself is untouched");
         let paused = vec![question(), answer];
-        let v = request_body("claude-haiku-5-5", WebTools::NONE, Thinking::DEFAULT, &paused, None);
+        let v = request_body("claude-haiku-5-5", None, Thinking::DEFAULT, &paused, None);
         assert_eq!(v["messages"][0]["content"][0]["cache_control"], json!({ "type": "ephemeral" }));
         assert!(v["messages"][1]["content"][0].get("cache_control").is_none());
     }
@@ -1041,14 +845,14 @@ mod tests {
     /// for it on top of the answer's budget.
     #[test]
     fn adaptive_thinking_is_left_out_with_headroom() {
-        let v = request_body("claude-haiku-5-5", WebTools::NONE, Thinking::Adaptive, &[question()], None);
+        let v = request_body("claude-haiku-5-5", None, Thinking::Adaptive, &[question()], None);
         assert_eq!(v["max_tokens"], 4_048);
         assert!(v.get("thinking").is_none());
     }
 
     #[test]
     fn the_container_goes_back_when_there_is_one() {
-        let v = request_body("claude-haiku-5-5", WebTools::NONE, Thinking::DEFAULT, &[question()], Some("container_011"));
+        let v = request_body("claude-haiku-5-5", None, Thinking::DEFAULT, &[question()], Some("container_011"));
         assert_eq!(v["container"], "container_011");
     }
 
@@ -1057,8 +861,9 @@ mod tests {
     /// cache to it).
     #[test]
     fn the_warm_up_has_the_prefix_and_nothing_else() {
-        let warm = warm_body("claude-haiku-5-5", BOTH);
-        let real = request_body("claude-haiku-5-5", BOTH, Thinking::DEFAULT, &[question()], None);
+        let search = Some(SearchTool::Basic { max_uses: 2 });
+        let warm = warm_body("claude-haiku-5-5", search);
+        let real = request_body("claude-haiku-5-5", search, Thinking::DEFAULT, &[question()], None);
         for k in ["model", "system", "tools", "tool_choice", "thinking", "output_config"] {
             assert_eq!(warm[k], real[k], "{k}");
         }
@@ -1199,7 +1004,7 @@ mod tests {
         assert_eq!(turn.stop_reason.as_deref(), Some("end_turn"));
         assert_eq!(
             turn.usage,
-            AskUsage { input_tokens: 40, output_tokens: 12, cache_read_tokens: 900, cache_write_tokens: 0, web_searches: 0, web_fetches: 0 }
+            AskUsage { input_tokens: 40, output_tokens: 12, cache_read_tokens: 900, cache_write_tokens: 0, web_searches: 0 }
         );
         assert_eq!(decide(&turn.content, turn.stop_reason.as_deref()), Decision::Answer);
     }
@@ -1376,210 +1181,9 @@ mod tests {
 
     #[test]
     fn usage_adds_up_over_continuations() {
-        let mut u = AskUsage { input_tokens: 1, output_tokens: 2, cache_read_tokens: 3, cache_write_tokens: 4, web_searches: 1, web_fetches: 1 };
-        u.add(AskUsage { input_tokens: 10, output_tokens: 20, cache_read_tokens: 30, cache_write_tokens: 40, web_searches: 1, web_fetches: 1 });
-        assert_eq!(
-            u,
-            AskUsage { input_tokens: 11, output_tokens: 22, cache_read_tokens: 33, cache_write_tokens: 44, web_searches: 2, web_fetches: 2 }
-        );
-    }
-
-    const PAGE: &str = "https://en.wikipedia.org/wiki/Hyper_Text_Coffee_Pot_Control_Protocol";
-    const PAGE_TITLE: &str = "Hyper Text Coffee Pot Control Protocol";
-    const BOTH: WebTools =
-        WebTools { search: Some(SearchTool::Basic { max_uses: 2 }), fetch: Some(FetchTool::Basic { max_uses: 2 }) };
-
-    fn page_result(id: &str, url: &str, title: Option<&str>) -> Value {
-        json!({ "type": "web_fetch_tool_result", "tool_use_id": id, "content": {
-            "type": "web_fetch_result", "url": url, "retrieved_at": "2026-10-29T10:00:00Z",
-            "content": {
-                "type": "document", "title": title, "citations": { "enabled": true },
-                "source": { "type": "text", "media_type": "text/plain", "data": "HTCPCP is a joke protocol." }
-            }
-        } })
-    }
-
-    fn page_cite(index: u64, title: &str) -> Value {
-        json!({ "type": "char_location", "document_index": index, "document_title": title, "start_char_index": 0,
-                "end_char_index": 26, "cited_text": "HTCPCP is a joke protocol." })
-    }
-
-    /// A question about a selected page: the read, the page, the words citing it.
-    fn fetch_answer() -> Vec<Value> {
-        let mut v = vec![
-            start(json!({ "input_tokens": 40, "cache_read_input_tokens": 7_000 })),
-            block_start(0, json!({ "type": "server_tool_use", "id": "srvtoolu_f1", "name": "web_fetch", "input": {} })),
-            delta(0, json!({ "type": "input_json_delta", "partial_json": format!("{{\"url\":\"{PAGE}\"}}") })),
-            stop(0),
-            block_start(1, page_result("srvtoolu_f1", PAGE, Some(PAGE_TITLE))),
-            stop(1),
-            block_start(2, json!({ "type": "text", "text": "" })),
-            delta(2, json!({ "type": "text_delta", "text": "Шуточный протокол." })),
-            delta(2, json!({ "type": "citations_delta", "citation": page_cite(0, PAGE_TITLE) })),
-            stop(2),
-        ];
-        v.extend(end("end_turn", json!({ "input_tokens": 3_000, "output_tokens": 20, "server_tool_use": { "web_fetch_requests": 1 } })));
-        v
-    }
-
-    #[test]
-    fn the_page_reader_goes_after_the_search_with_its_limits() {
-        let v = request_body("claude-haiku-5-5", BOTH, Thinking::DEFAULT, &[question()], None);
-        assert_eq!(v["tools"].as_array().map(Vec::len), Some(3));
-        assert_eq!((v["tools"][0]["name"].as_str(), v["tools"][1]["name"].as_str()), (Some("write_to_field"), Some("web_search")));
-        assert_eq!(
-            v["tools"][2],
-            json!({ "type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 2, "max_content_tokens": 10_000,
-                    "citations": { "enabled": true }, "allowed_callers": ["direct"] })
-        );
-        assert_eq!(
-            FetchTool::Filtered { max_uses: 1 }.json(),
-            json!({ "type": "web_fetch_20260318", "name": "web_fetch", "max_uses": 1, "max_content_tokens": 10_000,
-                    "citations": { "enabled": true } })
-        );
-        assert_eq!(fetch_tool(), Some(FetchTool::Basic { max_uses: 2 }), "two pages a question");
-        assert_eq!(FetchTool::Basic { max_uses: 2 }.with_max_uses(1), FetchTool::Basic { max_uses: 1 });
-        assert_eq!(FetchTool::Filtered { max_uses: 2 }.with_max_uses(1).max_uses(), 1);
-        assert_eq!(WebTools::on(3), WebTools { search: search_tool(3), fetch: fetch_tool() });
-        assert_eq!(tools(WebTools::NONE).as_array().map(Vec::len), Some(1));
-    }
-
-    #[test]
-    fn a_read_page_streams_its_steps_and_keeps_its_blocks() {
-        let (steps, turn) = feed_all(&fetch_answer());
-        assert_eq!(
-            steps,
-            [
-                Step::Fetching,
-                Step::Fetched { url: PAGE.into(), title: PAGE_TITLE.into() },
-                Step::TextStart,
-                Step::Text("Шуточный протокол.".into()),
-                Step::Cite { url: PAGE.into(), title: PAGE_TITLE.into() },
-            ]
-        );
-        assert_eq!(turn.content[0]["input"]["url"], PAGE);
-        assert_eq!(turn.content[1], page_result("srvtoolu_f1", PAGE, Some(PAGE_TITLE)), "the page goes back as it came");
-        assert_eq!(turn.content[2]["citations"][0], page_cite(0, PAGE_TITLE));
-        assert_eq!((turn.usage.web_fetches, turn.usage.web_searches), (1, 0));
-        assert_eq!(decide(&turn.content, turn.stop_reason.as_deref()), Decision::Answer);
-    }
-
-    /// A page without a title goes under its site, in its chip and in its citations.
-    #[test]
-    fn a_page_without_a_title_goes_under_its_site() {
-        let mut st = StreamState::default();
-        let pdf = "https://www.rfc-editor.org/rfc/rfc2324.pdf";
-        let steps = st.feed(&block_start(0, page_result("srvtoolu_f1", pdf, None)).to_string()).unwrap();
-        assert_eq!(steps, [Step::Fetched { url: pdf.into(), title: "rfc-editor.org".into() }]);
-    }
-
-    /// A PDF's text is cited by page (`page_location`), and a page's text may be cited as a block
-    /// (`content_block_location`): both name their page by its document index, as `char_location` does.
-    #[test]
-    fn a_pdf_page_citation_gets_its_pages_number() {
-        let pdf = "https://www.rfc-editor.org/rfc/rfc2324.pdf";
-        let mut st = StreamState::default();
-        st.feed(&block_start(0, page_result("srvtoolu_f1", pdf, Some("RFC 2324"))).to_string()).unwrap();
-        st.feed(&block_start(1, json!({ "type": "text", "text": "" })).to_string()).unwrap();
-        for citation in [
-            json!({ "type": "page_location", "document_index": 0, "document_title": "RFC 2324", "start_page_number": 1,
-                    "end_page_number": 2, "cited_text": "HTCPCP" }),
-            json!({ "type": "content_block_location", "document_index": 0, "document_title": "RFC 2324",
-                    "start_block_index": 0, "end_block_index": 1, "cited_text": "HTCPCP" }),
-        ] {
-            let steps = st.feed(&delta(1, json!({ "type": "citations_delta", "citation": citation })).to_string()).unwrap();
-            assert_eq!(steps, [Step::Cite { url: pdf.into(), title: "RFC 2324".into() }]);
-        }
-    }
-
-    /// A read page without an address still holds its place among the documents: the pages after it keep their numbers;
-    /// it has no chip, and a citation of it no number.
-    #[test]
-    fn a_page_without_an_address_keeps_its_place() {
-        let mut st = StreamState::default();
-        let nowhere = st.feed(&block_start(0, page_result("srvtoolu_f1", "", Some("A"))).to_string()).unwrap();
-        assert!(nowhere.is_empty(), "no chip: {nowhere:?}");
-        st.feed(&block_start(1, page_result("srvtoolu_f2", PAGE, Some(PAGE_TITLE))).to_string()).unwrap();
-        st.feed(&block_start(2, json!({ "type": "text", "text": "" })).to_string()).unwrap();
-        let cited = st.feed(&delta(2, json!({ "type": "citations_delta", "citation": page_cite(1, PAGE_TITLE) })).to_string()).unwrap();
-        assert_eq!(cited, [Step::Cite { url: PAGE.into(), title: PAGE_TITLE.into() }]);
-        let none = st.feed(&delta(2, json!({ "type": "citations_delta", "citation": page_cite(0, "A") })).to_string()).unwrap();
-        assert!(none.is_empty(), "{none:?}");
-    }
-
-    #[test]
-    fn a_citation_names_its_page_by_index_and_title() {
-        let page = |url: &str, title: Option<&str>| Page { url: url.into(), title: title.map(str::to_owned) };
-        let pages = [page("https://a.io", Some("A")), page("https://b.io", Some("B")), page("https://c.io", None)];
-        let url = |p: Option<&Page>| p.map(|p| p.url.clone());
-        assert_eq!(url(page_for(&pages, Some(1), Some("B"))), Some("https://b.io".into()));
-        assert_eq!(url(page_for(&pages, Some(0), Some("B"))), Some("https://b.io".into()), "another title there: by title");
-        assert_eq!(url(page_for(&pages, Some(9), Some("A"))), Some("https://a.io".into()), "out of range: by title");
-        assert_eq!(url(page_for(&pages, Some(2), Some("C"))), Some("https://c.io".into()), "a page without a title takes any");
-        assert_eq!(url(page_for(&pages, Some(1), None)), Some("https://b.io".into()));
-        assert_eq!(url(page_for(&pages, Some(9), Some("Z"))), None, "not a page of the conversation: no number");
-        assert_eq!(url(page_for(&[], Some(0), None)), None);
-    }
-
-    /// A follow-up's answer cites the pages read before it: they are counted from the conversation.
-    #[test]
-    fn a_follow_up_cites_the_pages_read_before() {
-        let history = vec![
-            question(),
-            json!({ "role": "assistant", "content": [page_result("srvtoolu_f1", PAGE, Some(PAGE_TITLE)), { "type": "text", "text": "Ответ." }] }),
-            user_turn("<question>а кто его придумал</question>", None),
-        ];
-        let mut st = StreamState::after(&history);
-        st.feed(&block_start(0, json!({ "type": "text", "text": "" })).to_string()).unwrap();
-        let steps = st.feed(&delta(0, json!({ "type": "citations_delta", "citation": page_cite(0, PAGE_TITLE) })).to_string()).unwrap();
-        assert_eq!(steps, [Step::Cite { url: PAGE.into(), title: PAGE_TITLE.into() }]);
-    }
-
-    /// Spec 2 §12.12: a page that cannot be read is no failure; it has no chip.
-    #[test]
-    fn a_failed_page_read_is_not_an_error() {
-        let mut events = vec![
-            start(json!({ "input_tokens": 40 })),
-            block_start(0, json!({ "type": "server_tool_use", "id": "srvtoolu_f1", "name": "web_fetch", "input": {} })),
-            stop(0),
-            block_start(1, json!({ "type": "web_fetch_tool_result", "tool_use_id": "srvtoolu_f1",
-                                   "content": { "type": "web_fetch_tool_result_error", "error_code": "url_not_accessible" } })),
-            stop(1),
-        ];
-        events.extend(shifted(&text_answer("Страницу открыть не удалось.")[1..], 2));
-        let (steps, turn) = feed_all(&events);
-        assert!(!steps.iter().any(|s| matches!(s, Step::Fetched { .. })), "{steps:?}");
-        assert_eq!(decide(&turn.content, turn.stop_reason.as_deref()), Decision::Answer);
-    }
-
-    /// Page reads are the ones the stream began, or the end's count when it is higher: an end that leaves them out does
-    /// not lose them (unlike searches, whose count is the end's).
-    #[test]
-    fn page_reads_are_what_the_stream_began_or_the_end_reports_whichever_is_more() {
-        let read = || block_start(0, json!({ "type": "server_tool_use", "id": "srvtoolu_f1", "name": "web_fetch", "input": {} })).to_string();
-        let mut st = StreamState::default();
-        st.feed(&start(json!({ "input_tokens": 5 })).to_string()).unwrap();
-        st.feed(&read()).unwrap();
-        assert_eq!(st.usage().web_fetches, 1, "the read began");
-        st.feed(&end("end_turn", json!({ "output_tokens": 1 }))[0].to_string()).unwrap();
-        assert_eq!(st.usage().web_fetches, 1, "an end without the count keeps the read");
-        let mut more = StreamState::default();
-        more.feed(&read()).unwrap();
-        more.feed(&end("end_turn", json!({ "output_tokens": 1, "server_tool_use": { "web_fetch_requests": 2 } }))[0].to_string()).unwrap();
-        assert_eq!(more.usage().web_fetches, 2, "the end's higher count");
-    }
-
-    /// The history keeps a read page as it came and drops a read the API never ran (deferred next to a write).
-    #[test]
-    fn the_history_keeps_a_read_page_but_drops_a_read_that_never_ran() {
-        let content = vec![
-            json!({ "type": "server_tool_use", "id": "srvtoolu_f1", "name": "web_fetch", "input": { "url": PAGE } }),
-            page_result("srvtoolu_f1", PAGE, Some(PAGE_TITLE)),
-            json!({ "type": "server_tool_use", "id": "srvtoolu_f2", "name": "web_fetch", "input": { "url": "https://b.io" } }),
-            json!({ "type": "tool_use", "id": "toolu_1", "name": "write_to_field", "input": { "text": "x", "mode": "insert" } }),
-        ];
-        let kept = assistant_turn(&content)["content"].as_array().unwrap().clone();
-        assert_eq!(kept, [content[0].clone(), content[1].clone(), content[3].clone()]);
+        let mut u = AskUsage { input_tokens: 1, output_tokens: 2, cache_read_tokens: 3, cache_write_tokens: 4, web_searches: 1 };
+        u.add(AskUsage { input_tokens: 10, output_tokens: 20, cache_read_tokens: 30, cache_write_tokens: 40, web_searches: 1 });
+        assert_eq!(u, AskUsage { input_tokens: 11, output_tokens: 22, cache_read_tokens: 33, cache_write_tokens: 44, web_searches: 2 });
     }
 
     use crate::testing::{capture_logs, fake_api, reply, FakeApi, Reply};
@@ -1611,20 +1215,13 @@ mod tests {
     where
         F: Fn(&str, &str, usize) -> Reply + Send + Sync + 'static,
     {
-        ask_full(key, limits, Some(SearchTool::Basic { max_uses: 2 }).into(), route).await
-    }
-
-    /// [`ask_with`] with the server tools `web`.
-    async fn ask_full<F>(key: Option<&str>, limits: Limits, web: WebTools, route: F) -> (AskResult, Vec<Step>, Vec<String>, FakeApi)
-    where
-        F: Fn(&str, &str, usize) -> Reply + Send + Sync + 'static,
-    {
         let api = fake_api(route).await;
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let (logs, _guard) = capture_logs();
         let url = format!("{}/v1/messages", api.base);
         let (mut steps, mut spent) = (Vec::new(), AskUsage::default());
-        let r = run_at(&url, &http, key, "claude-haiku-5-5", web, Thinking::DEFAULT, &[question()], None, limits, |s| match s {
+        let search = Some(SearchTool::Basic { max_uses: 2 });
+        let r = run_at(&url, &http, key, "claude-haiku-5-5", search, Thinking::DEFAULT, &[question()], None, limits, |s| match s {
             Step::Spent(u) => spent = u,
             s => steps.push(s),
         })
@@ -1656,7 +1253,7 @@ mod tests {
         assert_eq!(req.header("anthropic-version"), ["2026-10-21"]);
         let body: Value = serde_json::from_slice(&req.body).unwrap();
         let search = Some(SearchTool::Basic { max_uses: 2 });
-        assert_eq!(body, request_body("claude-haiku-5-5", search.into(), Thinking::DEFAULT, &[question()], None));
+        assert_eq!(body, request_body("claude-haiku-5-5", search, Thinking::DEFAULT, &[question()], None));
     }
 
     #[tokio::test]
@@ -1677,7 +1274,7 @@ mod tests {
         let second: Value = serde_json::from_slice(&api.body(1)).unwrap();
         assert_eq!(second["messages"][1]["role"], "assistant", "the paused turn goes back as it came");
         assert_eq!(second["messages"][1]["content"][0]["id"], "srvtoolu_1");
-        assert_eq!(second["tools"], tools(Some(SearchTool::Basic { max_uses: 2 }).into()), "the same tools");
+        assert_eq!(second["tools"], tools(Some(SearchTool::Basic { max_uses: 2 })), "the same tools");
         assert_eq!(r.content.len(), 2, "both responses' blocks: one turn");
         assert_eq!((r.usage.input_tokens, r.usage.output_tokens, r.usage.web_searches), (90, 17, 1));
         assert_eq!(steps[0], Step::Searching);
@@ -1718,7 +1315,7 @@ mod tests {
         assert_eq!(r.end, AskEnd::Answer);
         assert_eq!(api.calls().len(), 2);
         let second: Value = serde_json::from_slice(&api.body(1)).unwrap();
-        assert_eq!(second["tools"], tools(WebTools::NONE), "the second request has no search");
+        assert_eq!(second["tools"], tools(None), "the second request has no search");
         assert_eq!(lines.len(), 1, "one line says why: {lines:?}");
         assert_clean(&lines);
     }
@@ -1747,7 +1344,7 @@ mod tests {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let url = format!("{}/v1/messages", api.base);
         let mut spent = Vec::new();
-        let r = run_at(&url, &http, Some(KEY), "claude-haiku-5-5", WebTools::NONE, Thinking::DEFAULT, &[question()], None, FAST, |s| {
+        let r = run_at(&url, &http, Some(KEY), "claude-haiku-5-5", None, Thinking::DEFAULT, &[question()], None, FAST, |s| {
             if let Step::Spent(u) = s {
                 spent.push(u);
             }
@@ -1902,107 +1499,17 @@ mod tests {
         let api = fake_api(move |_, _, _| reply(200, ok)).await;
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let url = format!("{}/v1/messages", api.base);
-        let usage = warm_at(&url, &http, KEY, "claude-haiku-5-5", WebTools::NONE).await.expect("warmed");
+        let usage = warm_at(&url, &http, KEY, "claude-haiku-5-5", None).await.expect("warmed");
         assert_eq!(usage.cache_creation_input_tokens, 1_300);
         let body: Value = serde_json::from_slice(&api.body(0)).unwrap();
-        assert_eq!(body, warm_body("claude-haiku-5-5", WebTools::NONE));
+        assert_eq!(body, warm_body("claude-haiku-5-5", None));
 
         let api = fake_api(|_, _, _| reply(400, r#"{"error":{"type":"invalid_request_error"}}"#)).await;
         let url = format!("{}/v1/messages", api.base);
         let (logs, _guard) = capture_logs();
-        assert_eq!(warm_at(&url, &http, KEY, "claude-haiku-5-5", WebTools::NONE).await, None);
+        assert_eq!(warm_at(&url, &http, KEY, "claude-haiku-5-5", None).await, None);
         let lines: Vec<String> = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::ask")).cloned().collect();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("ask cache warm-up: HTTP 400"), "{lines:?}");
-    }
-
-    /// Spec 2 §12.12: a key or organization without page reading is refused with HTTP 400: the question goes again
-    /// without the page reader, once, and keeps the search.
-    #[tokio::test]
-    async fn a_key_without_page_reading_asks_again_without_it() {
-        let refused = r#"{"type":"error","error":{"type":"invalid_request_error","message":"The web_fetch tool is not enabled for this organization"}}"#;
-        let (r, _, lines, api) = ask_full(Some(KEY), FAST, BOTH, move |_, _, nth| {
-            if nth == 0 { reply(400, refused) } else { stream(&text_answer("Ответ.")) }
-        })
-        .await;
-        assert_eq!(r.end, AskEnd::Answer);
-        let second: Value = serde_json::from_slice(&api.body(1)).unwrap();
-        assert_eq!(second["tools"], tools(WebTools { fetch: None, ..BOTH }), "the search stays");
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert_clean(&lines);
-    }
-
-    #[tokio::test]
-    async fn a_page_read_gives_the_first_words_more_time() {
-        let reading = vec![
-            start(json!({ "input_tokens": 50 })),
-            block_start(0, json!({ "type": "server_tool_use", "id": "srvtoolu_f1", "name": "web_fetch", "input": {} })),
-            stop(0),
-        ];
-        let rest = shifted(&text_answer("Ответ.")[1..], 1);
-        let web = WebTools { search: None, fetch: Some(FetchTool::Basic { max_uses: 2 }) };
-        let (r, _, _, _) = ask_full(Some(KEY), FAST, web, move |_, _, _| {
-            Reply::Stream(200, vec![sse(&reading), sse(&rest)], Duration::from_millis(700))
-        })
-        .await;
-        assert_eq!(r.end, AskEnd::Answer, "a page read began: 1.2 s for the first words");
-    }
-
-    /// Two pages a question (spec 2 §12.12): a paused turn is not continued once its page reads are spent.
-    #[tokio::test]
-    async fn no_continuation_once_the_page_reads_are_spent() {
-        let mut paused = text_answer("По странице ");
-        let n = paused.len();
-        paused[n - 2] = json!({ "type": "message_delta", "delta": { "stop_reason": "pause_turn" },
-            "usage": { "output_tokens": 3, "server_tool_use": { "web_fetch_requests": 2 } } });
-        let (r, _, _, api) = ask_full(Some(KEY), FAST, BOTH, move |_, _, _| stream(&paused)).await;
-        assert_eq!(api.calls().len(), 1);
-        assert_eq!((r.end, r.usage.web_fetches), (AskEnd::Answer, 2));
-    }
-
-    /// A continuation of a paused turn knows the page its first response read — its citation gets the page's number — and
-    /// may read only what is left of the question's two pages.
-    #[tokio::test]
-    async fn a_continuation_cites_the_page_read_before_the_pause() {
-        let mut first = fetch_answer()[..6].to_vec();
-        first.extend(end("pause_turn", json!({ "output_tokens": 5, "server_tool_use": { "web_fetch_requests": 1 } })));
-        let mut then = vec![start(json!({ "input_tokens": 10 })), block_start(0, json!({ "type": "text", "text": "" }))];
-        then.push(delta(0, json!({ "type": "text_delta", "text": "Протокол." })));
-        then.push(delta(0, json!({ "type": "citations_delta", "citation": page_cite(0, PAGE_TITLE) })));
-        then.push(stop(0));
-        then.extend(end("end_turn", json!({ "output_tokens": 4 })));
-        let (r, steps, _, api) = ask_full(Some(KEY), FAST, BOTH, move |_, _, nth| {
-            if nth == 0 { stream(&first) } else { stream(&then) }
-        })
-        .await;
-        assert_eq!((r.end, api.calls().len()), (AskEnd::Answer, 2));
-        assert!(steps.contains(&Step::Cite { url: PAGE.into(), title: PAGE_TITLE.into() }), "{steps:?}");
-        let first: Value = serde_json::from_slice(&api.body(0)).unwrap();
-        let second: Value = serde_json::from_slice(&api.body(1)).unwrap();
-        assert_eq!(first["tools"][2]["max_uses"], 2);
-        assert_eq!(second["tools"][2]["max_uses"], 1, "one page of two is left");
-        assert_eq!(second["tools"][1], first["tools"][1], "the search goes as it was");
-    }
-
-    /// A write cut at `max_tokens` is asked again with room (2b) — with the page reads the question has left; after two
-    /// it is not asked again (spec 2 §12.12: two pages a question), and the cut write is never carried out.
-    #[tokio::test]
-    async fn a_cut_write_is_asked_again_only_with_page_reads_left() {
-        let cut = |reads: u64| {
-            let mut v = write_answer("Длинное письмо", "insert");
-            let n = v.len();
-            v[n - 2] = json!({ "type": "message_delta", "delta": { "stop_reason": "max_tokens" },
-                "usage": { "output_tokens": 4_048, "server_tool_use": { "web_fetch_requests": reads } } });
-            v
-        };
-        let (one, whole) = (cut(1), write_answer("Длинное письмо целиком.", "insert"));
-        let (r, _, _, api) = ask_full(Some(KEY), FAST, BOTH, move |_, _, nth| if nth == 0 { stream(&one) } else { stream(&whole) }).await;
-        assert_eq!(r.end, AskEnd::Write { text: "Длинное письмо целиком.".into(), replace: false });
-        let second: Value = serde_json::from_slice(&api.body(1)).unwrap();
-        assert_eq!(second["tools"][2]["max_uses"], 1);
-        let two = cut(2);
-        let (r, _, _, api) = ask_full(Some(KEY), FAST, BOTH, move |_, _, _| stream(&two)).await;
-        assert_eq!(api.calls().len(), 1, "no second try that could read a third page");
-        assert_eq!(r.end, AskEnd::Failed(AskFailure::Malformed), "the cut write never runs: Retry is the user's");
     }
 }

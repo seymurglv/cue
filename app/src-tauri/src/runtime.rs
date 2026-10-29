@@ -19,8 +19,6 @@
 //! - the last-dictation files (`last\`) change only on success (`files`); the last text is also kept in memory;
 //! - a prompt cache warm-up (refine's `warm_cache`, "Ask"'s `warm_ask_cache`) is paid for and gets a usage.csv row of
 //!   its own (`warmup`);
-//! - a dictation over a short selection sends it with its cleanup and pastes over it with its edges (spec 2 §12.13); it
-//!   reads the selection only through the focus query — never a Ctrl+C;
 //! - "Ask" (spec 2 §6–7): the context is taken at the chord, on the focus thread; the request streams in a task of its
 //!   own (`ask_task`, with a generation like the others); the answer view goes to the windows at once for a new turn,
 //!   an end or an opening, and at most every 50 ms while words stream (`state::ViewGate`); the flow hears once per
@@ -43,7 +41,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use cue_core::ask::{AnswerPlace, AskContext, MAX_SELECTION_CHARS, SelectionKind};
 use cue_core::audio::{Silence, SilenceDetector};
 use cue_core::flow::{DictationId, Effect, Flow, InsertOutcome, Input, Outcome, PasteHow, SttError, TimerKind};
-use cue_core::refine::{self, RefineContext};
+use cue_core::refine::RefineContext;
 use cue_core::settings::{self, DropPosition, Settings};
 use cue_core::translate;
 use cue_core::ui::{Mode, TrayKind, UiAction, UiPhase, UiState};
@@ -80,9 +78,6 @@ use tasks::{ask_panicked, guarded, refine_panicked, stt_panicked};
 
 /// Timeout for each UI Automation query.
 const FOCUS_TIMEOUT: Duration = Duration::from_millis(150);
-/// The focus query of a dictation at the second press, with the start of the selection (spec 2 §12.13): a few more UI
-/// Automation calls than the text before the caret alone. It runs while the speech is transcribed.
-const DICTATION_FOCUS_TIMEOUT: Duration = Duration::from_millis(250);
 /// The focus query of an "Ask" question (spec 2 §6.1): the selection of a long document and its rectangles take longer
 /// than the text before the caret.
 const ASK_FOCUS_TIMEOUT: Duration = Duration::from_millis(500);
@@ -189,8 +184,6 @@ pub struct Runtime {
     refine_task: TaskSlot<JoinHandle<()>>,
     /// The focused field, queried right after the second press, for the refine context.
     refine_focus: Option<(DictationId, std::sync::mpsc::Receiver<FocusInfo>)>,
-    /// The selection the cleanup of dictation `id` carried, as the field reported it: the paste goes over it with its edges.
-    woven: Option<(DictationId, String)>,
     insert_watch: InsertWatch,
     /// The bare final text of the dictation (no join, line breaks not replaced), for `last\result.txt`.
     final_text: Option<(DictationId, String)>,
@@ -281,7 +274,6 @@ impl Runtime {
             stt_task: TaskSlot::default(),
             refine_task: TaskSlot::default(),
             refine_focus: None,
-            woven: None,
             insert_watch: InsertWatch::default(),
             final_text: None,
             last_text: None,
@@ -396,13 +388,13 @@ impl Runtime {
             // The flow does not change: the runtime copies the answer.
             CoreEvent::UiAction(UiAction::AnswerCopy) => self.copy_answer(),
             CoreEvent::UiAction(a) => {
+                // "Restore" (the flow accepts it only in "Cancelled"): the dictation latency is counted from it.
                 let now = self.now();
-                if is_restore(&a, self.flow.ui_state().phase) {
-                    // The read queued at Esc saw the field as it was then: the cleanup after "restore" reads it anew.
-                    self.refine_focus = None;
-                    if self.attempt.id == self.flow.current_id() {
-                        self.attempt.undo(now);
-                    }
+                if a == UiAction::Undo
+                    && self.flow.ui_state().phase == UiPhase::Cancel
+                    && self.attempt.id == self.flow.current_id()
+                {
+                    self.attempt.undo(now);
                 }
                 self.feed(Input::Ui(a));
             }
@@ -642,8 +634,6 @@ impl Runtime {
         if self.ask_task.is_for(old.id) {
             self.answering = Some(old);
         }
-        // A new recording forgets the selection the last one's cleanup carried.
-        self.woven = None;
         // A new recording ends any "restore" or retry of an earlier question: what it was asked with is not kept.
         self.clear_ask_context();
         self.silence = SilenceDetector::new();
@@ -849,10 +839,10 @@ impl Runtime {
         }
         let Ok(Some(key)) = keys::lookup(KeyName::Anthropic) else { return };
         let model = self.settings.ask.model().to_owned();
-        let web = self.ask_web();
+        let search = self.ask_search();
         let (http, tx) = (self.http.clone(), self.tx.clone());
         tokio::spawn(async move {
-            if let Some(usage) = engine_ask::warm(&http, &key, &model, web).await {
+            if let Some(usage) = engine_ask::warm(&http, &key, &model, search).await {
                 let _ = tx.send(CoreEvent::Warmed { usage, model });
             }
         });
@@ -871,44 +861,32 @@ impl Runtime {
         self.append_usage(rec);
     }
 
-    /// The focused field (with the text before the caret and the start of the selection, spec 2 §12.13), right after the
-    /// second press, in parallel with transcription: by the time the text arrives the refine context is ready.
+    /// The focused field (with the text before the caret), right after the second press, in parallel with
+    /// transcription: by the time the text arrives the refine context is ready.
     fn prefetch_focus(&mut self, id: DictationId) {
         let (tx, rx) = std::sync::mpsc::channel();
         let focus = Arc::clone(&self.focus);
         let chars = self.settings.refine.context_chars;
-        let mode = self.flow.mode();
-        let timeout = if mode == Mode::Ask { FOCUS_TIMEOUT } else { DICTATION_FOCUS_TIMEOUT };
         tokio::task::spawn_blocking(move || {
-            let _ = tx.send(dictation_focus(&focus, chars, mode, timeout));
+            let _ = tx.send(focus.query(chars, FOCUS_TIMEOUT));
         });
         self.refine_focus = Some((id, rx));
     }
 
-    fn focus_for_refine(&mut self, id: DictationId, mode: Mode) -> FocusInfo {
+    fn focus_for_refine(&mut self, id: DictationId) -> FocusInfo {
         match self.refine_focus.take() {
-            // The query is limited to 250 ms (150 ms in "Ask"); if it did not come, "unknown" (refine without context).
+            // The query is limited to 150 ms; if it did not come, "unknown" (refine without context).
             Some((f, rx)) if f == id => rx.recv_timeout(FOCUS_TIMEOUT * 2).unwrap_or_default(),
-            // A retried translation and "restore" read the field, and so the selection, anew.
-            _ => dictation_focus(&self.focus, self.settings.refine.context_chars, mode, FOCUS_TIMEOUT),
+            _ => self.focus.query(self.settings.refine.context_chars, FOCUS_TIMEOUT),
         }
     }
 
     fn refine(&mut self, id: DictationId, raw: String, mode: Mode) {
-        let info = self.focus_for_refine(id, mode);
+        let info = self.focus_for_refine(id);
         self.note_app(&info.app);
         // The query was late ("unknown"): use the app at the start of recording.
         let app = first_known_app(&[&info.app, &self.attempt.app]).to_owned();
-        // A short selection goes with the cleanup (spec 2 §12.13). The context's one value decides what goes and so whether
-        // the paste goes over it: the tag, the block, the check and the paste never disagree.
-        let chars = self.settings.refine.context_chars;
-        let offered = offered_selection(&info.selection, chars);
-        let ctx = RefineContext::new(app, info.before_cursor.as_deref(), chars).with_selection(offered);
-        if let Some(sent) = ctx.sent_selection() {
-            // Its length only.
-            tracing::info!(selection_chars = sent.chars().count(), "refine: the selection goes with it");
-        }
-        self.woven = ctx.sent_selection().and(offered).map(|read| (id, read.to_owned()));
+        let ctx = RefineContext::new(app, info.before_cursor.as_deref(), self.settings.refine.context_chars);
         // No key: `claude::refine` writes the log line itself and returns the raw text.
         let key = keys::lookup(KeyName::Anthropic).unwrap_or_else(|e| {
             tracing::warn!("Anthropic key: {e}");
@@ -960,8 +938,7 @@ impl Runtime {
         }
         self.final_text = Some((id, text.clone()));
         self.watch_insert(id);
-        let replaced = self.woven.take_if(|(i, _)| *i == id).map(|(_, s)| s);
-        self.dispatch_insert(text, Some(id), None, replaced.as_deref());
+        self.dispatch_insert(text, Some(id), None, None);
     }
 
     /// The flow waits for the insert of `id`: its result is awaited, and a watchdog stands in for one that never comes.
@@ -1001,8 +978,7 @@ impl Runtime {
     /// late ("unknown"), the terminal safeguard looks at the last known app, then at the app at the start of recording
     /// (`insert_app`). Within one dictation the last known app is never older than the app at the start of recording
     /// (`note_app` runs both at the start of recording and on every later query). `target` — an "Ask" paste: only into
-    /// that window (`InsertJob::Paste`); `replaced` — the selection the text goes over: "Ask"'s Replace, or a dictation
-    /// that sent it.
+    /// that window (`InsertJob::Paste`); `replaced` — the selection a Replace goes over.
     fn dispatch_insert(&mut self, text: String, id: Option<DictationId>, target: Option<WindowRef>, replaced: Option<&str>) {
         let info = self.focus.query(INSERT_CONTEXT_CHARS, FOCUS_TIMEOUT);
         let started = if id.is_some_and(|i| i == self.attempt.id) { self.attempt.app.as_str() } else { "" };
@@ -1136,10 +1112,10 @@ impl Runtime {
         self.spawn_ask(id);
     }
 
-    /// The server tools of "Ask": web search and page reading, on together (`ask.web_search`, spec 2 §12.12).
-    fn ask_web(&self) -> engine_ask::WebTools {
+    /// The web search of "Ask", if on and if the model takes one.
+    fn ask_search(&self) -> Option<engine_ask::SearchTool> {
         let a = &self.settings.ask;
-        if a.web_search() { engine_ask::WebTools::on(a.max_searches()) } else { engine_ask::WebTools::NONE }
+        if a.web_search() { engine_ask::search_tool(a.max_searches()) } else { None }
     }
 
     /// The request of the conversation's last question, in a task of its own. The steps and the end come back as events
@@ -1154,7 +1130,7 @@ impl Runtime {
         };
         let core = self.tx.clone();
         let model = self.settings.ask.model().to_owned();
-        let web = self.ask_web();
+        let search = self.ask_search();
         let key = keys::lookup(KeyName::Anthropic).unwrap_or_else(|e| {
             tracing::warn!("Anthropic key: {e}");
             None
@@ -1165,13 +1141,7 @@ impl Runtime {
             self.attempt.ask_started(now);
         }
         // Counts only: no text.
-        tracing::info!(
-            turns = messages.len(),
-            search = web.search.is_some(),
-            fetch = web.fetch.is_some(),
-            copy = copy.is_some(),
-            "ask: asking"
-        );
+        tracing::info!(turns = messages.len(), search = search.is_some(), copy = copy.is_some(), "ask: asking");
         let (http, tx) = (self.http.clone(), self.tx.clone());
         let old = self.ask_task.start(id, |task| {
             // The wait for the copy is not this request's: should Esc drop the request, the copy still reaches the core.
@@ -1186,7 +1156,7 @@ impl Runtime {
                 let steps = tx.clone();
                 let body = async {
                     let thinking = engine_ask::Thinking::DEFAULT;
-                    engine_ask::run(&http, key.as_deref(), &model, web, thinking, &messages, container, move |step| {
+                    engine_ask::run(&http, key.as_deref(), &model, search, thinking, &messages, container, move |step| {
                         let _ = steps.send(CoreEvent::AskStep { id, task, step });
                     })
                     .await
@@ -1254,7 +1224,7 @@ impl Runtime {
         let heard = c.end(&result, show_write, |how, text| write_may_paste(window, terminal, how, text));
         let opened = c.opened;
         // Kinds and counts only.
-        tracing::info!(heard = ?heard, searches = result.usage.web_searches, fetches = result.usage.web_fetches, "ask: done");
+        tracing::info!(heard = ?heard, searches = result.usage.web_searches, "ask: done");
         if heard.shows() {
             if !opened {
                 self.open_answer();
@@ -1578,33 +1548,6 @@ fn job_for(
     }
 }
 
-/// The field for a dictation's cleanup: the text before the caret and, outside "Ask", the start of the selection it may
-/// weave in (spec 2 §12.13). With field context off (`refine.context_chars = 0`) nothing of the field goes to Anthropic,
-/// so the selection is not even read.
-fn dictation_focus(focus: &FocusWorker, chars: usize, mode: Mode, timeout: Duration) -> FocusInfo {
-    if mode == Mode::Ask || chars == 0 {
-        focus.query(chars, timeout)
-    } else {
-        focus.query_for_dictation(chars, refine::WOVEN_READ_CHARS, timeout)
-    }
-}
-
-/// The selection the field offers a dictation's cleanup (spec 2 §12.13), as the field reported it — the paste goes over it
-/// with its edges. None while field context is off (`refine.context_chars = 0`). Whether it goes is the context's call
-/// (`RefineContext::sent_selection`), and so is the paste over it.
-fn offered_selection(read: &SelectionRead, context_chars: usize) -> Option<&str> {
-    if context_chars == 0 {
-        return None;
-    }
-    selection::dictation_selection(read)
-}
-
-/// "Restore" of a cancelled dictation (the flow accepts it only in "Cancelled"): its latency is counted from here, and the
-/// field is read anew — the read queued at Esc saw the field as it was then.
-fn is_restore(a: &UiAction, phase: UiPhase) -> bool {
-    *a == UiAction::Undo && phase == UiPhase::Cancel
-}
-
 /// Soniox language hints: a fixed speech language for translation goes to Soniox as the only hint (spec 2 §5);
 /// otherwise the hints from the settings. Language identification stays on either way (`soniox::start_message`).
 fn soniox_hints(mode: Mode, s: &Settings) -> Vec<String> {
@@ -1781,29 +1724,6 @@ mod tests {
         assert_eq!(follow_up_rows(true, false, UiPhase::Answer), (false, false));
         assert_eq!(follow_up_rows(false, true, UiPhase::Listen), (false, false), "a dictation records");
         assert_eq!(follow_up_rows(false, false, UiPhase::Error), (false, false), "the Drop's own error");
-    }
-
-    /// Spec 2 §12.13: the field offers its selection only while field context is on (`refine.context_chars = 0` sends nothing
-    /// of the field); what goes, and so what the paste goes over, is the context's one value.
-    #[test]
-    fn a_dictation_offers_the_selection_only_with_field_context_on() {
-        let read = |text: &str| SelectionRead::Text { text: text.into(), rects: vec![], read_only: false, clipped: false };
-        let link = " https://github.com/seymurglv/cue\n";
-        assert_eq!(offered_selection(&read(link), 500), Some(link));
-        assert_eq!(offered_selection(&read(link), 0), None, "context off: nothing of the field goes");
-        assert_eq!(offered_selection(&SelectionRead::Unknown, 500), None, "no Ctrl+C in a dictation");
-        let sent = RefineContext::new("Slack", None, 500).with_selection(offered_selection(&read(link), 500));
-        assert_eq!(sent.sent_selection(), Some("https://github.com/seymurglv/cue"));
-        let not_sent = RefineContext::new("Slack", None, 500).with_selection(offered_selection(&read("две\nстроки"), 500));
-        assert_eq!(not_sent.sent_selection(), None, "offered but not one that goes: no paste over it either");
-    }
-
-    /// "Restore" of a cancelled dictation reads the field anew: the read queued at Esc saw the field as it was then.
-    #[test]
-    fn only_a_restore_of_a_cancelled_dictation_reads_the_field_anew() {
-        assert!(is_restore(&UiAction::Undo, UiPhase::Cancel));
-        assert!(!is_restore(&UiAction::Undo, UiPhase::Think), "the flow takes a restore only when cancelled");
-        assert!(!is_restore(&UiAction::Retry, UiPhase::Cancel));
     }
 
     #[test]

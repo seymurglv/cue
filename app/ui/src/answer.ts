@@ -7,7 +7,7 @@ import { CITE_CLOSE, CITE_OPEN, parseMarkdown, renderBlocks } from './markdown';
 import { KEY_NAME, type Dict } from './strings';
 
 export type AnswerPlace = 'tray' | 'card';
-export type ThinkStep = 'searching' | 'reading' | 'fetching' | 'writing';
+export type ThinkStep = 'searching' | 'reading' | 'writing';
 export type TurnState = 'pending' | 'streaming' | 'done' | 'refused' | 'failed';
 export type AnswerAction = 'insert' | 'below' | 'replace' | 'copy';
 /** The core's answer (cue_core::ask::AnswerView: the same names). */

@@ -27,9 +27,9 @@ is built for personal use with your own Soniox and Anthropic API keys.
   - With nothing selected it opens in a panel that grows out of the Drop, toward the middle of the screen. With text
     selected it opens in a card next to the selection, its arrow pointing at the text; when CUE cannot tell where the
     selection is on screen, or there is no room for the card, it opens in the panel instead.
-  - The answer opens with its first real step: a web search starting, its sources coming in, a page being read, or the
-    first words. Until then the Drop shows that it is thinking. Answers from a web search or a page number their
-    sources, and a chip under the answer opens each one in your browser.
+  - The answer opens with its first real step: a web search starting, its sources coming in, or the first words. Until
+    then the Drop shows that it is thinking. Answers from a web search number their sources, and a chip under the
+    answer opens each one in your browser.
   - The buttons depend on what was selected: **Insert below**, **Replace** and **Copy** for text you can edit (no
     **Replace** for a selection of more than 8,000 characters, which reaches the model as its start and its end); only
     **Copy** for text you cannot (a received message, a web page); **Insert** and **Copy** with nothing selected. They
@@ -48,11 +48,6 @@ is built for personal use with your own Soniox and Anthropic API keys.
     buttons (only **Copy** for text you cannot edit).
   - A question about the present ("the latest version of…", "the exchange rate today") makes the model search the web
     first (`ask.web_search`); facts that do not change, explanations and writing need no search.
-  - A link in the selection or in the question ("what is on this page", with the link selected): the model reads that
-    one page and answers briefly. The answer opens with "Reading the page", and a chip under it shows the page (its
-    site and title), with numbered citations when the model cites it. It searches only when the page cannot be read or
-    is not enough, opens no other links, and never opens a PDF or another document file: for those it answers from a
-    search. A question reads 2 pages at most.
 - **Translation** (`Ctrl + Win + Shift`). Speech that is not in your target language (`translate.target`, English
   by default) is translated into it; speech in the target language goes to your home language (`translate.home`, by
   default the Windows display language). The speech language is the one most of your words were in, so
@@ -61,14 +56,6 @@ is built for personal use with your own Soniox and Anthropic API keys.
   though, can come back turned around (see Known limitations). If the translation fails (no network, a timeout, or an
   answer that does not look like a translation), nothing is pasted: the Drop shows "Couldn't translate", and **Retry**
   translates the saved text again.
-- **Dictation over a selection.** Select one line of up to 80 characters (a link alone, up to 250) and dictate: the
-  selection goes with the cleanup. When your speech points at it ("this project", "this link", "вот это", "эту
-  ссылку", this or that in any language), it is woven in as it is: "посмотри на этот проект" with a GitHub link
-  selected becomes "Посмотри на этот проект: https://github.com/…". Otherwise the text replaces it, as before, so
-  selecting a word and saying it again still works. Either way the paste goes over the selection and keeps its edges
-  (a space or a line break selected with it stays). A translation keeps the selection as it is and translates the
-  rest. In a terminal the text goes at the prompt, on one line. CUE reads the selection when the recording ends, and
-  only what the app reports itself (UI Automation, classic fields), never with `Ctrl + C`.
 - **Text at the caret in any app**, pasted through the clipboard. Your previous clipboard content comes back about
   half a second later, and dictated text is kept out of Windows clipboard history and the cloud clipboard.
 - **Russian, English, and both mixed** in one sentence.
@@ -96,8 +83,7 @@ is built for personal use with your own Soniox and Anthropic API keys.
   summary.
 - **Comparison bench** (a developer tool): runs your saved recordings through Soniox stream and batch and through
   several Claude models, and builds a blind A/B report. A second one (`ask_compare`) asks a set of questions the way
-  "Ask" does and measures its decisions, page reads, speed and cost; `refine_compare` runs phrases through the cleanup,
-  over a selection too.
+  "Ask" does and measures its decisions, speed and cost.
 
 Not in this version: a settings window, history, a vocabulary for speech recognition itself (`dictionary.terms` guides
 only the cleanup, see Settings), an installer, macOS.
@@ -186,9 +172,8 @@ session and does not overwrite it. The defaults:
 - `stt.soniox_model` / `soniox_async_model`: the real-time model and the batch model used for fallback and Retry.
   `language_hints` are hints, not limits. `engine` has a single value today, `soniox`.
 - `refine.model`: the Claude model for cleanup. `context_chars`: how much text before the caret is sent as context,
-  for cleanup and for "Ask" alike. 0 turns it off, and the selection of a dictation with it: nothing from the field
-  goes to Anthropic with a cleanup, the selection is not even read, and the paste replaces it as before. `min_ratio`,
-  `max_ratio`, `min_overlap`: the sanity check (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
+  for cleanup and for "Ask" alike (0 turns it off). `min_ratio`, `max_ratio`, `min_overlap`: the sanity check (see
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
 - `hold_hints_left`: how many more times the "Press and release" card appears after a held chord.
 - `bench.save_recordings`: copy each successful dictation's audio and app name for the bench.
 - `ui.language`: the language of the tray menu and the Drop. `"auto"` (the default) follows the Windows display
@@ -222,8 +207,7 @@ session and does not overwrite it. The defaults:
   in German, German speech in Russian.
 - `ask`: the "Ask" mode.
   - `enabled` (default `true`): `false` turns "Ask" off, and `Ctrl + Win + Alt` then goes to Windows as is.
-  - `web_search` (default `true`): `false` answers without searching the web and without reading pages. It is one
-    switch for both.
+  - `web_search` (default `true`): `false` answers without searching the web.
   - `model` (default `claude-haiku-5-5`): the Claude model that answers; keep it in the `pricing.claude` list, or its
     cost is counted as 0. A model name that does not exist makes every question fail (the log says to check
     `settings.json`).
@@ -237,11 +221,7 @@ session and does not overwrite it. The defaults:
 - `pricing` (not written unless you change it): `soniox_rt_per_hour`, `soniox_async_per_hour`, and a `claude` list
   of `{model, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok}` in USD. Defaults:
   Soniox $0.12 / hour (stream) and $0.10 / hour (batch); Haiku 5.5 $0.10 / $0.50, Sonnet 5.5 $2 / $10,
-  Opus 5.5 $4 / $20 per million input / output tokens. `web_search_usd` ($0.01) prices one web search of "Ask". A
-  model's optional `long_context`, `{above_tokens, input_per_mtok, output_per_mtok}`, prices a request whose prompt
-  (input, cache reads and cache writes together) is over `above_tokens` at those rates, with a cache write at 1.25 times
-  and a cache read at 0.1 times the input rate. Without it Haiku 5.5 is priced as Anthropic bills it: over 100,000
-  tokens, $0.50 / $2.50. A wrong `long_context` reads as absent.
+  Opus 5.5 $4 / $20 per million input / output tokens. `web_search_usd` ($0.01) prices one web search of "Ask".
 
 Start at sign-in is not a setting: it is the Windows `Run` registry entry, toggled from the tray menu.
 
@@ -253,8 +233,8 @@ Everything else lives in `%LOCALAPPDATA%\CUE`:
 |---|---|
 | `last\audio.wav`, `last\result.txt` | The last successful dictation (16 kHz mono WAV and the final text), for `Ctrl + Win + V` and Copy. Replaced by the next one, and by an "Ask" result: a text written into a field keeps its question's recording as `audio.wav`; an answer pasted with its button has no audio, so the old `audio.wav` is deleted. |
 | `last\current.wav` | Audio of the dictation in progress; after a failure it waits there for Retry. Deleted when a dictation is cancelled or comes out empty, and when a question has been answered. |
-| `logs\cue.log.YYYY-MM-DD` | Daily log: events, per-stage timings, error kinds. No dictation text, no questions, answers or selected text, no addresses or titles of sources and pages, no audio, no keys. Kept 7 days and 10 MB at most. **Open log** in the tray menu opens this folder. |
-| `usage.csv` | One row per attempt: time (UTC), audio length, transcription path, cost, model, tokens, latency, outcome, mode, web searches, pages read. A cache warm-up gets a row of its own. No text. |
+| `logs\cue.log.YYYY-MM-DD` | Daily log: events, per-stage timings, error kinds. No dictation text, no questions, answers or selected text, no audio, no keys. Kept 7 days and 10 MB at most. **Open log** in the tray menu opens this folder. |
+| `usage.csv` | One row per attempt: time (UTC), audio length, transcription path, cost, model, tokens, latency, outcome, mode, web searches. A cache warm-up gets a row of its own. No text. |
 | `bench\recordings\` | Recordings for the bench, only when `bench.save_recordings` is `true`. |
 | `bench\runs\<timestamp>\` | Bench runs: `results.json` and `report.html`. |
 
@@ -270,35 +250,23 @@ cargo run -p cue-cli -- usage 2026-10
 
 The summary shows the number of dictations, minutes of audio, transcription and refine cost, the cost per dictation
 and per hour of audio, the average latency from the second key press to the paste (overall and for recordings of
-20 s or less), web search when there was some, the pages "Ask" read when it read some (`Pages read by Ask`), and the
-rows and dollars of each mode. Prices come from `settings.json`. A Retry is a second paid attempt and gets its own row;
-the Retry of a failed translation translates the saved text again, so its row has no audio.
+20 s or less), web search when there was some, and the rows and dollars of each mode. Prices come from
+`settings.json`. A Retry is a second paid attempt and gets its own row; the Retry of a failed translation translates
+the saved text again, so its row has no audio.
 
-The last four columns of `usage.csv` are `mode`, `web_searches`, `search_usd` and `web_fetches`. `mode` is `dictate`,
-`translate`, `ask` or `warmup`.
-- An `ask` row is one question: its audio, the tokens of `ask.model` (in the `refine_model` and token columns), its
-  web searches at $0.01 each (`web_searches`, `search_usd`) and the pages it read (`web_fetches`). An answer you close
-  while it is still printing is paid for as far as it came, its web searches included, and so is a question cancelled
-  with `Esc`. Each follow-up gets a row of its own, and so does the Retry of a failed question (without audio). Pasting
-  an answer with its button adds no row: the answer was counted when it was complete. A shown answer has the outcome
-  `answered`, and its latency runs from the second key press to the first words; a text written into the field is
-  `inserted` (or `no_field`), with the latency to the paste.
-- Reading a page has no fee of its own: its tokens are in the row's tokens and cost. A page's text is cut at 10,000
-  tokens, about $0.001 with Haiku 5.5 (a little more, since the API writes the page into the prompt cache, and a
-  follow-up reads it again from there). A question reads at most 2 pages, the continuations of a paused answer
-  included. A PDF is not cut: it comes whole, and a long one is hundreds of thousands of tokens (a 250-page RFC cost
-  about $0.33 in one question). The instruction asks the model never to open a PDF, but that is the model's rule, not
-  the code's: now and then a PDF may still be read whole and cost more.
-- A request whose prompt (input, cache reads and cache writes together) is over 100,000 tokens is priced at the model's
-  long rates (Haiku 5.5: $0.50 / $2.50 per million), as Anthropic bills it. An `ask` row sums the tokens of all its
-  question's requests before that line is applied, so a question of several requests can be priced long while each
-  request was short; the cost then errs high.
+The last three columns of `usage.csv` are `mode`, `web_searches` and `search_usd`. `mode` is `dictate`, `translate`,
+`ask` or `warmup`.
+- An `ask` row is one question: its audio, the tokens of `ask.model` (in the `refine_model` and token columns) and its
+  web searches at $0.01 each (`web_searches`, `search_usd`). An answer you close while it is still printing is paid
+  for as far as it came, its web searches included, and so is a question cancelled with `Esc`. Each follow-up gets a row of its own, and so does
+  the Retry of a failed question (without audio). Pasting an answer with its button adds no row: the answer was counted
+  when it was complete. A shown answer has the outcome `answered`, and its latency runs from the second key press to
+  the first words; a text written into the field is `inserted` (or `no_field`), with the latency to the paste.
 - A `warmup` row is a cache warm-up (see Privacy), of the cleanup or of "Ask" (then with `ask.model`): paid tokens, no
   audio, outcome `discarded`; it counts in the cost, not as a dictation.
 
-Rows written before `mode` existed (13 fields) read as dictation, rows written before `web_fetches` (13 or 16 fields)
-as no pages read, and the header of an existing file is not rewritten: it keeps its 13 or 16 old names while new rows
-have 17 fields.
+Rows written before these columns existed read as dictation, and the header of an existing file is not rewritten: it
+keeps the 13 old names while new rows have 16 fields.
 
 `usage.csv` is comma-separated. In Excel with a locale whose list separator is not a comma (Russian, for example), do not
 open the file directly; use **Data → From Text/CSV** and choose the comma delimiter.
@@ -328,8 +296,8 @@ it. It does not tune the thresholds.
 ### The "Ask" bench
 
 `ask_compare` (an example in `cue-engines`; needs the Anthropic key, and it is paid) asks a file of questions the way
-the app asks them: the same instruction, tools, web search (2 searches a request) and page reading (2 pages a
-question), deadlines and continuations, with today's date. It writes every call and a summary to `out.json`, before the first call and again after every call, so a
+the app asks them: the same instruction, tools, web search (2 searches a request), deadlines and continuations, with
+today's date. It writes every call and a summary to `out.json`, before the first call and again after every call, so a
 run cut short keeps what it paid for; the console gets only ids and numbers.
 
 ```powershell
@@ -352,24 +320,11 @@ cargo run -p cue-engines --example ask_compare -- phrases.json out.json [--runs 
 follow-up is what is scored; `expect` is `answer` or `write`, and `mode` (`replace` or `insert`, for a write only) is
 the mode the write should take. Each run asks every question once, one at a time; the very first call (an empty prompt
 cache) is left out of the medians. The summary counts the right decisions and modes, the median time to the first
-words without a search, with one, and with a page read (a call that read a page counts only there), and the cost; the
-run stops once more than `--max-usd` is spent. `--model` asks another model (`claude-haiku-5-5` by default; one
-without a default price is refused, since the budget could not count it), `--no-search` asks without web search and
-page reading, and `--thinking adaptive` sends the request with the model's adaptive thinking, to compare with the
-app's default (`--thinking off`). Each call in `out.json` also says whether the model wrote text before its first web
-search (`text_before_search`), how many pages it read (`fetches`) and their sites (`pages`), and whether its turn
-ended on a search or a read with no words after it (`ends_on_a_tool`: a paused turn that was not continued).
-
-### Dictation over a selection
-
-`refine_compare` (an example in `cue-engines`, paid; see its header) runs a phrase file through the cleanup with the
-app's prompt and checks. A phrase may carry the field's selection (`"selection": "https://github.com/…"`): it goes the
-way the app sends it (one short line, `RefineContext::with_selection`), on the direct Anthropic path only, like a
-translation (`"to": "en"`); the OpenRouter models skip such a phrase and never get a selection.
-
-```powershell
-cargo run -p cue-engines --example refine_compare -- weave-phrases.json out.json --models claude-haiku-5-5 --runs 5 --max-usd 0.30
-```
+words with and without a search, and the cost; the run stops once more than `--max-usd` is spent. `--model` asks
+another model (`claude-haiku-5-5` by default; one without a default price is refused, since the budget could not count
+it), `--no-search` asks without web search, and `--thinking adaptive` sends the request with the model's adaptive
+thinking, to compare with the app's default (`--thinking off`). Each call in `out.json` also says whether the model
+wrote text before its first web search (`text_before_search`).
 
 ## Privacy
 
@@ -378,13 +333,7 @@ cargo run -p cue-engines --example refine_compare -- weave-phrases.json out.json
   transcription right after use and retries the deletion in the background for about 15 minutes if it fails.
 - **Anthropic** receives the transcript, the app name, up to `refine.context_chars` (500) characters of text
   before the caret, and your `dictionary.terms`. Nothing is read from password fields, and the window title is never
-  sent. A translation goes in the same cleanup request, with the target language added.
-- **A selection in a dictation.** When you dictate over a short selection (one line of up to 80 characters, a link up
-  to 250), it goes to Anthropic too, in the same cleanup or translation request as the text before the caret, and
-  only while `refine.context_chars` is above 0. A selection the app marks read-only (the text of a web page) or one
-  in a password field never goes. CUE reads it only through UI Automation and classic fields: for a dictation it
-  never presses `Ctrl + C`, and the clipboard and Win+V are not touched. A terminal is no exception: a short selected
-  piece of a terminal's output goes the same way, unless the terminal reports it as read-only. While you record, CUE also
+  sent. A translation goes in the same cleanup request, with the target language added. While you record, CUE also
   sends an empty `HEAD` request without a key to open the connection early, so cleanup starts faster. When a
   dictation starts four minutes or more after the last cleanup, CUE sends a cache warm-up: the cleanup request with
   your `dictionary.terms` and a one-character placeholder instead of a transcript, without the app name or any text
@@ -392,9 +341,7 @@ cargo run -p cue-engines --example refine_compare -- weave-phrases.json out.json
 - **"Ask"** sends Anthropic the question (as Soniox transcribed it), the selected text (up to 8,000 characters: a
   longer selection goes as its start and its end), up to `refine.context_chars` (500) characters before the caret, the
   app name and today's local date; a follow-up sends only its question, with the conversation so far. With web search
-  on, Anthropic searches the web for what the model asks it to, and its servers open the pages the model reads (an
-  address from the selection, the question or the search results): the page's address and text pass through Anthropic,
-  and its copy there may be cached and out of date. Nothing is read from password fields. When the "Ask"
+  on, Anthropic searches the web for what the model asks it to. Nothing is read from password fields. When the "Ask"
   chord starts, and on a follow-up, four minutes or more after the last "Ask" request or warm-up, CUE sends a cache
   warm-up of the "Ask" instruction with a one-character placeholder, nothing of yours. The conversation lives only while
   the answer is open.
@@ -411,13 +358,12 @@ cargo run -p cue-engines --example refine_compare -- weave-phrases.json out.json
   history and the cloud clipboard, but the app's copy carries none: with clipboard sync set to manual, it can be sent
   to your other devices from Win+V by hand for as long as it stays there.
 - **Inside CUE:** the Drop and the card windows get the text of the question and the answer, the card's short quote of
-  the selection (40 characters at most), and the titles and sites of the sources and of the pages read, to draw them;
-  never the addresses, which only the core keeps. A click on a source asks the core to open it, and the core opens only
-  `http` and `https` pages, in the default browser.
+  the selection (40 characters at most), and the titles and sites of the sources, to draw them; never the addresses. A
+  click on a source asks the core to open it, and the core opens only `http` and `https` pages, in the default browser.
 - The microphone is open only while CUE is recording.
 - **Stays on this computer:** the last dictation's audio and text, recordings saved for the bench, settings, logs and
-  usage rows. Logs and `usage.csv` never contain dictation text, questions, answers, selected text, sources or the pages
-  read (only how many); a crash records only the thread and code location, not the panic message.
+  usage rows. Logs and `usage.csv` never contain dictation text, questions, answers, selected text or sources; a crash
+  records only the thread and code location, not the panic message.
 - Check each provider's own data-retention policy for the audio and text they receive.
 
 ## Known limitations
@@ -466,34 +412,7 @@ cargo run -p cue-engines --example refine_compare -- weave-phrases.json out.json
   Right behaves differently with a selection, the text lands at the caret instead. When the Right arrow cannot be sent,
   the text stays in the clipboard and the "Nowhere to paste" card offers Copy.
 - When web search fails or is not available to your key, the model answers from what it knows, which may be out of
-  date. A key without web search is asked again without it, at once. When page reading is turned off for your key's
-  organization, every question first gets one refused request (a few hundred milliseconds, not billed) and is then
-  asked again without it.
-- "Ask" cannot read pages that are built by JavaScript, nor files other than text, HTML and PDF: the model then answers
-  from a search or from what it knows and says the page could not be opened. A site named without `https://` in the
-  question ("what is on example.com") is opened too. Many answers do not cite the page they read: it then has its chip
-  but no numbers in the text.
-- "Ask" never opening a PDF is the model's rule (its instruction), not the code's: a PDF comes whole, not cut at
-  10,000 tokens, so a PDF it reads now and then costs more (see Costs).
-- A long text for the field that is cut after two pages were read is not sent again with more room (that could read a
-  third page): the question ends with "Couldn't get an answer", and **Retry** is yours.
-- Dictation over a selection weaves nothing in when the app does not report its selection (UI Automation or a classic
-  field), when the selection spans lines or is longer than the limit (80 characters, a link 250), or when it is
-  read-only (selected text of a web page): the paste then replaces the selection, as before. Windows Terminal may
-  report its selection as read-only; then there is no weaving there either.
-- A selected link that the model changed (a character dropped, its path "corrected") is never pasted over the
-  original: the transcript is pasted as it was recognized, and a translation shows "Couldn't translate". A plain
-  dictation that names the selected link's site without pointing at the link ("залей на github.com" with a GitHub
-  link selected) looks like such a change and falls back to the recognized text too. A copy in which the model changed
-  the host itself is not recognized as changed.
-- A translation whose speech points at the selection usually comes back untranslated: the model weaves the selection
-  in as it is but leaves the words around it in the language you spoke. On the bench of 2026-10-29, new phrases with a
-  selected link were translated in 0 of 10 calls into English and 1 of 5 into Russian. The check refuses such a
-  result, so nothing is pasted, the selection stays, and the Drop shows "Couldn't translate". A translation over a
-  selection the speech does not point at is translated and replaces it.
-- A selection with a zero-width joiner or non-joiner (some emoji, Persian, Indic scripts) is not woven in: the paste
-  replaces it, as before. A selected name glued into Chinese or Japanese text with no space is not found whole, so a
-  translation into Chinese or Japanese that keeps it may fail as "Couldn't translate".
+  date. A key without web search is asked again without it, at once.
 - The `Ctrl + C` fallback stays out of the terminals listed above, by app name, executable or window class. In a
   terminal outside that list that does not report its selection, a question asked there would press `Ctrl + C`, which
   stops the program running in it.
@@ -524,10 +443,9 @@ hook, microphone, focus, paste, sleep events, the Drop's z-order (`zorder_probe`
 and refine on a real machine
 (`cargo run -p <crate> --example <name>`). `refine_compare` (in `cue-engines`) runs a phrase file of your own through
 cleanup models with the app's prompt and checks; a phrase with `"to": "en"` is translated on the app's own path
-instead, and one with a `"selection"` goes over that selection (see the example's header). `ask_compare` is the "Ask"
-bench (see above); `ask_probe` checks web search and the cache warm-up of "Ask", `fetch_probe` checks its page reading,
-and `selection_probe` (in `cue-platform-win`) prints what CUE reads of the selection in an app and what the `Ctrl + C`
-fallback does there, never the text.
+instead (see the example's header). `ask_compare` is the "Ask" bench (see above); `ask_probe` checks web search and the
+cache warm-up of "Ask", and `selection_probe` (in `cue-platform-win`) prints what CUE reads of the selection in an app
+and what the `Ctrl + C` fallback does there, never the text.
 
 ## License
 
