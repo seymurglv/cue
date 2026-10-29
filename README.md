@@ -353,10 +353,10 @@ wrote text before its first web search (`text_before_search`).
   none. CUE reads that setting from the registry at each "Ask" chord and logs only whether it is on. Only a copy made by that app counts (or one
   with no owner, as some apps copy), and a copy that is the same text as your clipboard already held counts as nothing
   selected. The app's copy reaches the Windows clipboard history (Win+V) before CUE can mark it, so CUE then tries to
-  remove it from there; whether Windows allows that has not been confirmed for every app (see Known limitations). CUE's
-  own writes (each paste, and your clipboard put back) carry the marks that keep them out of the history and the cloud
-  clipboard, but the app's copy carries none: with clipboard sync set to manual, it can be sent to your other devices
-  from Win+V by hand until CUE removes it there.
+  remove it from there; in the live check on 2026-10-29 Windows refused, so the copy may stay in Win+V (see Known
+  limitations). CUE's own writes (each paste, and your clipboard put back) carry the marks that keep them out of the
+  history and the cloud clipboard, but the app's copy carries none: with clipboard sync set to manual, it can be sent
+  to your other devices from Win+V by hand for as long as it stays there.
 - **Inside CUE:** the Drop and the card windows get the text of the question and the answer, the card's short quote of
   the selection (40 characters at most), and the titles and sites of the sources, to draw them; never the addresses. A
   click on a source asks the core to open it, and the core opens only `http` and `https` pages, in the default browser.
@@ -388,8 +388,8 @@ wrote text before its first web search (`text_before_search`).
   answer then opens in the panel by the Drop. Chromium apps report it: checked in a Brave address bar, not yet in page
   text or in Electron apps, where a misplaced card would be the sign to switch it off (`CHROMIUM_RECTS` in
   `focus.rs`).
-- The `Ctrl + C` fallback's copy may stay in the Win+V history when Windows does not let CUE remove it. Its removal has
-  not been seen working live yet: in the one app checked, nothing was selected, so nothing was copied.
+- The `Ctrl + C` fallback's copy may stay in the Win+V history. CUE tries to remove it, but in the live check on
+  2026-10-29 Windows refused, so the copy can stay there.
 - While Windows syncs copied text to your other devices automatically, there is no `Ctrl + C` fallback, so "Ask" sees
   no selection in apps that do not report it themselves. Setting clipboard sync to manual (Settings → System →
   Clipboard) brings the fallback back; its copy carries none of CUE's marks, so until CUE removes it from Win+V it can
@@ -400,7 +400,9 @@ wrote text before its first web search (`text_before_search`).
   **Replace** button, and a change of it is shown with **Copy**), and an answer about it sees only those parts.
 - Thinking is off for "Ask" (chosen after the bench: 98 % right decisions, 93 % format and checks, the first words in
   1.2 s without a web search and 1.3 s with one, no timeouts). Before a web search the model may write a short
-  sentence, such as "let me check", which stays at the top of the answer.
+  sentence, such as "let me check", which stays at the top of the answer. Now and then it answers a question about
+  something current (the latest version of a program, say) from what it knows, without searching: 1 run in 10 on the
+  bench, and once in the live check. Such an answer can be out of date.
 - Editors that copy the current line on `Ctrl + C` with nothing selected (VS Code does by default) could hand that line
   to "Ask" as the selection when they do not report the selection themselves. None is listed yet (`COPIES_LINE` in
   `selection.rs`): VS Code was not available to check.
@@ -414,6 +416,7 @@ wrote text before its first web search (`text_before_search`).
 - The `Ctrl + C` fallback stays out of the terminals listed above, by app name, executable or window class. In a
   terminal outside that list that does not report its selection, a question asked there would press `Ctrl + C`, which
   stops the program running in it.
+- Reading a selection through the `Ctrl + C` fallback in a Store (UWP) app was not checked live.
 
 ## Repository layout
 
