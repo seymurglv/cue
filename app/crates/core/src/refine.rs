@@ -408,13 +408,26 @@ fn names_site(text: &str, site: &str) -> bool {
     })
 }
 
-/// The links of a selection: each of its words that is a link once the signs around it ([`BEFORE_LINK`],
-/// [`AFTER_LINK`]) are off, so a selection that is a link gives itself and "see (https://a.b/c)." gives "https://a.b/c".
+/// The links of a selection. A selection that is a link gives itself, as it is: a sign it ends with may be the link's,
+/// as the `)` of "…/Rust_(programming_language)" is, and a copy without it is a changed one. Otherwise each of its words
+/// that is a link once the signs around it are off ([`link_word`]): "see (https://a.b/c)." gives "https://a.b/c".
 fn links_of(selection: &str) -> impl Iterator<Item = &str> {
-    selection
-        .split_whitespace()
-        .map(|w| w.trim_start_matches(|c: char| BEFORE_LINK.contains(c)).trim_end_matches(|c: char| AFTER_LINK.contains(c)))
-        .filter(|w| is_link(w))
+    let own = is_link(selection).then_some(selection);
+    let inside = own.is_none().then(|| selection.split_whitespace().map(link_word).filter(|w| is_link(w)));
+    own.into_iter().chain(inside.into_iter().flatten())
+}
+
+/// A word of text with the signs around a link off ([`BEFORE_LINK`] before it, [`AFTER_LINK`] after it, one at a
+/// time), except a `)` that closes a `(` inside the link: that one is the link's ("…/Rust_(lang))." gives "…/Rust_(lang)").
+fn link_word(word: &str) -> &str {
+    let mut w = word.trim_start_matches(|c: char| BEFORE_LINK.contains(c));
+    while let Some(c) = w.chars().next_back().filter(|c| AFTER_LINK.contains(*c)) {
+        if c == ')' && w.matches('(').count() >= w.matches(')').count() {
+            break;
+        }
+        w = &w[..w.len() - c.len_utf8()];
+    }
+    w
 }
 
 /// How `result` holds `selection` ([`Woven`]). A result that is the selection and nothing else (no letter or digit
@@ -1683,6 +1696,28 @@ mod tests {
         assert_eq!(plain.sent_selection(), None);
         let link = "https://github.com/seymurglv/cue";
         assert_eq!(woven(&format!("Посмотри: {link}/"), &format!(" {link} ")), Woven::ChangedLink, "an untrimmed link is still a link");
+    }
+
+    /// A link that ends in a closing parenthesis is not a link plus a sign: a copy without that parenthesis is changed.
+    #[test]
+    fn a_link_ending_in_a_parenthesis_keeps_it() {
+        let wiki = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        let raw = "почитай вот это";
+        let cut = format!("Почитай: {}", &wiki[..wiki.len() - 1]);
+        assert_eq!(woven(&cut, wiki), Woven::ChangedLink);
+        assert!(!sanity_ok_with_selection(raw, &cut, wiki, &[], &s()));
+        assert_eq!(woven(&format!("Почитай: {wiki}."), wiki), Woven::AsIs { rest: "Почитай:  .".into() });
+        let docs = "https://learn.microsoft.com/en-us/previous-versions/windows/desktop/ms123456(v=vs.85)";
+        assert_eq!(woven(&format!("Смотри {}", &docs[..docs.len() - 1]), docs), Woven::ChangedLink);
+        // Inside text the signs around a link are off, but a parenthesis that closes one inside the link is the link's.
+        let text = "see (https://en.wikipedia.org/wiki/Rust_(lang)).";
+        assert_eq!(woven("Смотри: https://en.wikipedia.org/wiki/Rust_(lang", text), Woven::ChangedLink);
+        assert_eq!(woven("Смотри: https://en.wikipedia.org/wiki/Rust_(lang).", text), Woven::No, "kept whole");
+        assert_eq!(links_of(wiki).collect::<Vec<_>>(), [wiki]);
+        assert_eq!(links_of(text).collect::<Vec<_>>(), ["https://en.wikipedia.org/wiki/Rust_(lang)"]);
+        assert_eq!(links_of("see (https://example.com/a)").collect::<Vec<_>>(), ["https://example.com/a"]);
+        assert_eq!(links_of("docs: https://example.com/a").collect::<Vec<_>>(), ["https://example.com/a"]);
+        assert_eq!(links_of("see https://ms.com/a(v=vs.85), here").collect::<Vec<_>>(), ["https://ms.com/a(v=vs.85)"]);
     }
 
     /// The result around a woven selection is dictation text: it shows only its length in `Debug`.
