@@ -2,11 +2,15 @@
 //! conversation, the parser of the event stream and what the model decided; the network part is `run` and `warm`. No
 //! text of the question, the answer, the selection or the sources reaches the log here.
 use std::collections::HashSet;
+use std::time::Duration;
 
 use cue_core::ask as core_ask;
+use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::time::{timeout_at, Instant};
 
-use crate::claude::THINKING_HEADROOM;
+use crate::claude::{self, messages_post, THINKING_HEADROOM};
+use crate::openrouter::Sse;
 
 /// The web search tool (spec 2 §6.2); which version — the first probe's choice (§13.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,9 +42,12 @@ impl SearchTool {
 }
 
 /// The web search the app sends for `max_uses` searches a question; `None` when the model takes none. The version is the
-/// first probe's choice (spec 2 §13.1, `examples/ask_probe.rs`).
+/// first probe's choice (spec 2 §13.1, `examples/ask_probe.rs`). On 2026-10-29 Haiku 5.5 took both versions; filtered
+/// search brought the first words of a searched question in 4.6 / 5.1 / 10.9 s (median 5.1 s, within the probe's 8 s
+/// bar; basic: 4.2 / 3.5 / 3.8 s) and answered the follow-up after a search, so the probe's rule picks it. Its cached
+/// prefix is longer: 7 263 tokens against basic's 3 981.
 pub fn search_tool(max_uses: u32) -> Option<SearchTool> {
-    Some(SearchTool::Basic { max_uses })
+    Some(SearchTool::Filtered { max_uses })
 }
 
 /// write_to_field (spec 2 §6.2): strict, so its input always matches the schema; buffered (no eager streaming), so the
@@ -443,6 +450,277 @@ pub fn decide(content: &[Value], stop_reason: Option<&str>) -> Decision {
     }
 }
 
+/// Why an "Ask" request failed. Never any text of the request or the response.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AskFailure {
+    NoKey,
+    /// 401 / 402 / 403, or a 400 about the credit balance.
+    Key(u16),
+    /// HTTP 404: the model in `ask.model` does not exist (a typo in settings.json).
+    NoModel,
+    Timeout,
+    Network,
+    /// Another refusal before the stream: 429, 5xx, a 400 of another kind.
+    Http(u16),
+    /// An `error` event in the stream (its type, e.g. `overloaded_error`).
+    Stream(String),
+    /// A stream against the protocol, or one that ended with nothing to show.
+    Malformed,
+}
+
+impl AskFailure {
+    /// A key, balance or limit problem: the user has to act, and Retry would fail the same way (spec 2 §8). A 429 is not
+    /// one here: §8 counts it with the network.
+    pub fn is_key(&self) -> bool {
+        matches!(self, AskFailure::NoKey | AskFailure::Key(_))
+    }
+
+    /// The reason for the log: kinds and codes only.
+    fn reason(&self) -> String {
+        match self {
+            AskFailure::NoKey => "no Anthropic key".into(),
+            AskFailure::Key(code) => format!("key, balance or limit (HTTP {code})"),
+            AskFailure::NoModel => "the model in ask.model was not found (HTTP 404): check settings.json".into(),
+            AskFailure::Timeout => "timeout".into(),
+            AskFailure::Network => "network".into(),
+            AskFailure::Http(code) => format!("HTTP {code}"),
+            AskFailure::Stream(kind) => format!("stream error {kind}"),
+            AskFailure::Malformed => "no usable response".into(),
+        }
+    }
+}
+
+/// How a question ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AskEnd {
+    Answer,
+    Write { text: String, replace: bool },
+    Refused,
+    Failed(AskFailure),
+}
+
+/// The end of a question, the assistant's blocks for the conversation (all continuations, one turn), the tokens and
+/// searches paid for, and the code execution container to send back when the API gave one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AskResult {
+    pub end: AskEnd,
+    pub content: Vec<Value>,
+    pub usage: AskUsage,
+    pub container: Option<String>,
+}
+
+/// The deadlines of one question (spec 2 §6.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    pub first_words: Duration,
+    pub first_words_search: Duration,
+    pub total: Duration,
+}
+
+impl Limits {
+    pub const SPEC: Limits = Limits {
+        first_words: Duration::from_millis(core_ask::FIRST_WORDS_MS),
+        first_words_search: Duration::from_millis(core_ask::FIRST_WORDS_SEARCH_MS),
+        total: Duration::from_millis(core_ask::ANSWER_MS),
+    };
+}
+
+/// One question, streamed (spec 2 §6.2): the steps go to `on_step` as they come, and with them what the question has cost
+/// so far (`Step::Spent`); a paused turn is continued with its blocks and the same tools, at most `MAX_CONTINUATIONS` times
+/// and only while its searches are not spent (decision 9); a key without web search is asked again without it (§8); a
+/// write cut at `max_tokens` is asked again once with more room; the deadlines are `Limits::SPEC`. Never "fails" by
+/// panicking or hanging: every problem ends as `AskEnd::Failed`, with one log line of its reason.
+#[allow(clippy::too_many_arguments)]
+pub async fn run(
+    http: &reqwest::Client,
+    key: Option<&str>,
+    model: &str,
+    search: Option<SearchTool>,
+    thinking: Thinking,
+    messages: &[Value],
+    container: Option<String>,
+    on_step: impl FnMut(Step) + Send,
+) -> AskResult {
+    run_at(claude::API_URL, http, key, model, search, thinking, messages, container, Limits::SPEC, on_step).await
+}
+
+fn failed(why: AskFailure, content: Vec<Value>, usage: AskUsage, container: Option<String>) -> AskResult {
+    tracing::warn!("ask: {}", why.reason());
+    AskResult { end: AskEnd::Failed(why), content, usage, container }
+}
+
+/// A refusal before the stream → its kind (spec 2 §8). The body is read only for the balance reason; it never reaches
+/// the log.
+fn classify(status: u16, body: &str) -> AskFailure {
+    match status {
+        401..=403 => AskFailure::Key(status),
+        400 if body.to_lowercase().contains("credit balance") => AskFailure::Key(status),
+        404 => AskFailure::NoModel,
+        _ => AskFailure::Http(status),
+    }
+}
+
+/// A 400 that says web search is not available to this key or organization.
+fn search_refused(body: &str) -> bool {
+    let b = body.to_lowercase();
+    b.contains("web search") || b.contains("web_search")
+}
+
+/// Room added once for a write cut at `max_tokens` (a long email): the same question again; the cut call never runs.
+const LONG_WRITE_TOKENS: u32 = 2 * core_ask::MAX_TOKENS;
+
+/// [`run`] against the URL `url` with the deadlines `limits`; tests substitute their own.
+#[allow(clippy::too_many_arguments)]
+async fn run_at(
+    url: &str,
+    http: &reqwest::Client,
+    key: Option<&str>,
+    model: &str,
+    mut search: Option<SearchTool>,
+    thinking: Thinking,
+    messages: &[Value],
+    mut container: Option<String>,
+    limits: Limits,
+    mut on_step: impl FnMut(Step) + Send,
+) -> AskResult {
+    let mut content: Vec<Value> = Vec::new();
+    let mut usage = AskUsage::default();
+    let Some(key) = key else { return failed(AskFailure::NoKey, content, usage, container) };
+    let t0 = Instant::now();
+    let total = t0 + limits.total;
+    let mut first_by = t0 + limits.first_words;
+    let mut first_seen = false;
+    let mut round = 0;
+    let mut widened = false;
+    let mut last_spent = AskUsage::default();
+    loop {
+        // Until the first words: the first-words deadline (longer once a search began); then the whole answer's.
+        let by = |seen: bool, first_by: Instant| if seen { total } else { first_by.min(total) };
+        let mut msgs = messages.to_vec();
+        if !content.is_empty() {
+            msgs.push(json!({ "role": "assistant", "content": content }));
+        }
+        let mut body = request_body(model, search, thinking, &msgs, container.as_deref());
+        if widened {
+            body["max_tokens"] = json!(body["max_tokens"].as_u64().unwrap_or(0) + u64::from(LONG_WRITE_TOKENS));
+        }
+        let mut resp = match timeout_at(by(first_seen, first_by), messages_post(http, url, key).json(&body).send()).await {
+            Err(_) => return failed(AskFailure::Timeout, content, usage, container),
+            Ok(Err(e)) if e.is_timeout() => return failed(AskFailure::Timeout, content, usage, container),
+            Ok(Err(_)) => return failed(AskFailure::Network, content, usage, container),
+            Ok(Ok(r)) => r,
+        };
+        let status = resp.status().as_u16();
+        if status != 200 {
+            // The refusal's body is read under the same deadline: a service that stalls after its status must not hang
+            // the question.
+            let text = timeout_at(by(first_seen, first_by), resp.text()).await.ok().and_then(Result::ok).unwrap_or_default();
+            if status == 400 && search.is_some() && content.is_empty() && search_refused(&text) {
+                tracing::warn!("ask: web search is not available to this key: asked without it");
+                search = None;
+                continue;
+            }
+            return failed(classify(status, &text), content, usage, container);
+        }
+        let (mut sse, mut st) = (Sse::default(), StreamState::default());
+        loop {
+            let chunk = match timeout_at(by(first_seen, first_by), resp.chunk()).await {
+                Err(_) => return failed(AskFailure::Timeout, content, usage, container),
+                Ok(Err(_)) => return failed(AskFailure::Network, content, usage, container),
+                Ok(Ok(c)) => c,
+            };
+            let (events, end) = match chunk {
+                Some(bytes) => (sse.push(&bytes), false),
+                None => (sse.finish(), true),
+            };
+            for data in events {
+                let steps = match st.feed(&data) {
+                    Ok(steps) => steps,
+                    Err(StreamError::Api(kind)) => return failed(AskFailure::Stream(kind), content, usage, container),
+                    Err(StreamError::Malformed) => return failed(AskFailure::Malformed, content, usage, container),
+                };
+                for step in steps {
+                    match &step {
+                        Step::Searching if !first_seen => first_by = t0 + limits.first_words_search,
+                        s if s.is_first_words() => first_seen = true,
+                        _ => {}
+                    }
+                    on_step(step);
+                }
+            }
+            let mut spent = usage;
+            spent.add(st.usage());
+            if spent != last_spent {
+                last_spent = spent;
+                on_step(Step::Spent(spent));
+            }
+            if st.done() || end {
+                break;
+            }
+        }
+        if !st.done() && st.stop_reason().is_none() {
+            // The body ended before the response did: the connection dropped.
+            return failed(AskFailure::Network, content, usage, container);
+        }
+        let turn = st.finish();
+        usage.add(turn.usage);
+        if turn.container.is_some() {
+            container = turn.container;
+        }
+        content.extend(turn.content);
+        let reason = turn.stop_reason.as_deref();
+        let searches_left = search.is_none_or(|s| usage.web_searches < s.max_uses());
+        if reason == Some("pause_turn") && round < core_ask::MAX_CONTINUATIONS && searches_left {
+            round += 1;
+            continue;
+        }
+        let cut_write = content.iter().any(|b| b["type"] == "tool_use" && b["name"] == core_ask::WRITE_TOOL);
+        if reason == Some("max_tokens") && cut_write && !widened {
+            widened = true;
+            content.clear();
+            continue;
+        }
+        let end = match decide(&content, reason) {
+            Decision::Answer => AskEnd::Answer,
+            Decision::Write { text, replace } => AskEnd::Write { text, replace },
+            Decision::Refused => AskEnd::Refused,
+            Decision::Empty => return failed(AskFailure::Malformed, content, usage, container),
+        };
+        // A response dropped unread closes the connection, and the next request pays for a new TLS handshake: the rest of
+        // the body (the final empty chunk) is read in the background.
+        tokio::spawn(async move { while let Ok(Some(_)) = resp.chunk().await {} });
+        return AskResult { end, content, usage, container };
+    }
+}
+
+/// A warm-up that has not answered in 5 s is of no use to this question.
+const WARM_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// One cache warm-up for "Ask" ([`warm_body`], spec 2 §6.3): the tokens paid for on HTTP 200; on any problem one log line
+/// with the reason and `None` — the question's own request then writes the cache.
+pub async fn warm(http: &reqwest::Client, key: &str, model: &str, search: Option<SearchTool>) -> Option<claude::Usage> {
+    warm_at(claude::API_URL, http, key, model, search).await
+}
+
+async fn warm_at(url: &str, http: &reqwest::Client, key: &str, model: &str, search: Option<SearchTool>) -> Option<claude::Usage> {
+    #[derive(Deserialize)]
+    struct WarmResp {
+        usage: claude::Usage,
+    }
+    let send = messages_post(http, url, key).timeout(WARM_TIMEOUT).json(&warm_body(model, search)).send().await;
+    let why = match send {
+        Err(e) if e.is_timeout() => "timeout".to_owned(),
+        Err(_) => "network".to_owned(),
+        Ok(r) if r.status().as_u16() != 200 => format!("HTTP {}", r.status().as_u16()),
+        Ok(r) => match r.json::<WarmResp>().await {
+            Ok(w) => return Some(w.usage),
+            Err(_) => "HTTP 200 response not parsed".to_owned(),
+        },
+    };
+    tracing::warn!("ask cache warm-up: {why}");
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,5 +1106,297 @@ mod tests {
         let mut u = AskUsage { input_tokens: 1, output_tokens: 2, cache_read_tokens: 3, cache_write_tokens: 4, web_searches: 1 };
         u.add(AskUsage { input_tokens: 10, output_tokens: 20, cache_read_tokens: 30, cache_write_tokens: 40, web_searches: 1 });
         assert_eq!(u, AskUsage { input_tokens: 11, output_tokens: 22, cache_read_tokens: 33, cache_write_tokens: 44, web_searches: 2 });
+    }
+
+    use crate::testing::{capture_logs, fake_api, reply, FakeApi, Reply};
+    use std::time::Duration;
+
+    const KEY: &str = "sk-ant-TEST-KEY";
+    const FAST: Limits = Limits {
+        first_words: Duration::from_millis(400),
+        first_words_search: Duration::from_millis(1_200),
+        total: Duration::from_millis(2_500),
+    };
+
+    /// Events as the service sends them: an `event:` and a `data:` line, an empty line after each.
+    fn sse(events: &[Value]) -> Vec<u8> {
+        events
+            .iter()
+            .map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap_or("message")))
+            .collect::<String>()
+            .into_bytes()
+    }
+
+    fn stream(events: &[Value]) -> Reply {
+        Reply::Stream(200, vec![sse(events)], Duration::ZERO)
+    }
+
+    /// `run_at` with Haiku and basic search against a fake API: the result, the steps (without the cost reports), the ask
+    /// log lines, the service.
+    async fn ask_with<F>(key: Option<&str>, limits: Limits, route: F) -> (AskResult, Vec<Step>, Vec<String>, FakeApi)
+    where
+        F: Fn(&str, &str, usize) -> Reply + Send + Sync + 'static,
+    {
+        let api = fake_api(route).await;
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let (logs, _guard) = capture_logs();
+        let url = format!("{}/v1/messages", api.base);
+        let mut steps = Vec::new();
+        let search = Some(SearchTool::Basic { max_uses: 2 });
+        let r = run_at(&url, &http, key, "claude-haiku-5-5", search, Thinking::DEFAULT, &[question()], None, limits, |s| {
+            if !matches!(s, Step::Spent(_)) {
+                steps.push(s)
+            }
+        })
+        .await;
+        let lines = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::ask")).cloned().collect();
+        (r, steps, lines, api)
+    }
+
+    /// No text of the question, the answer or the key in a log line.
+    fn assert_clean(lines: &[String]) {
+        for line in lines {
+            for leak in ["HTTP 418", "teapot", "1.95", "rust", "Аня", "TEST-KEY"] {
+                assert!(!line.contains(leak), "\"{leak}\" in the log: {line}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_streams_its_steps_and_returns_its_blocks() {
+        let (r, steps, lines, api) = ask_with(Some(KEY), FAST, |_, _, _| stream(&text_answer("I'm a teapot."))).await;
+        assert_eq!(r.end, AskEnd::Answer);
+        assert_eq!(steps, [Step::TextStart, Step::Text("I'm a teapot.".into())]);
+        assert_eq!(r.content, [json!({ "type": "text", "text": "I'm a teapot." })]);
+        assert_eq!((r.usage.input_tokens, r.usage.cache_read_tokens, r.usage.output_tokens), (40, 900, 12));
+        assert!(lines.is_empty(), "an answer leaves the log alone: {lines:?}");
+        let req = &api.seen()[0];
+        assert_eq!(req.header("x-api-key"), [KEY]);
+        assert_eq!(req.header("anthropic-version"), ["2026-10-21"]);
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        let search = Some(SearchTool::Basic { max_uses: 2 });
+        assert_eq!(body, request_body("claude-haiku-5-5", search, Thinking::DEFAULT, &[question()], None));
+    }
+
+    #[tokio::test]
+    async fn a_paused_turn_is_continued_with_its_blocks() {
+        let mut paused = vec![
+            start(json!({ "input_tokens": 50 })),
+            block_start(0, json!({ "type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {} })),
+            delta(0, json!({ "type": "input_json_delta", "partial_json": "{\"query\":\"q\"}" })),
+            stop(0),
+        ];
+        paused.extend(end("pause_turn", json!({ "output_tokens": 5, "server_tool_use": { "web_search_requests": 1 } })));
+        let (r, steps, _, api) = ask_with(Some(KEY), FAST, move |_, _, nth| {
+            if nth == 0 { stream(&paused) } else { stream(&text_answer("Готово.")) }
+        })
+        .await;
+        assert_eq!(r.end, AskEnd::Answer);
+        assert_eq!(api.calls().len(), 2);
+        let second: Value = serde_json::from_slice(&api.body(1)).unwrap();
+        assert_eq!(second["messages"][1]["role"], "assistant", "the paused turn goes back as it came");
+        assert_eq!(second["messages"][1]["content"][0]["id"], "srvtoolu_1");
+        assert_eq!(second["tools"], tools(Some(SearchTool::Basic { max_uses: 2 })), "the same tools");
+        assert_eq!(r.content.len(), 2, "both responses' blocks: one turn");
+        assert_eq!((r.usage.input_tokens, r.usage.output_tokens, r.usage.web_searches), (90, 17, 1));
+        assert_eq!(steps[0], Step::Searching);
+    }
+
+    #[tokio::test]
+    async fn continuations_stop_after_three() {
+        let mut paused = text_answer("часть ");
+        let n = paused.len();
+        paused[n - 2] = json!({ "type": "message_delta", "delta": { "stop_reason": "pause_turn" }, "usage": { "output_tokens": 3 } });
+        let (r, _, _, api) = ask_with(Some(KEY), FAST, move |_, _, _| stream(&paused)).await;
+        assert_eq!(api.calls().len(), 4, "the question and three continuations");
+        assert_eq!(r.end, AskEnd::Answer, "the text so far is the answer");
+    }
+
+    /// `max_uses` counts per request: a paused turn is not continued once the question's searches are spent, or every
+    /// continuation could search as much again (decision 9).
+    #[tokio::test]
+    async fn no_continuation_once_the_searches_are_spent() {
+        let mut paused = text_answer("По данным поиска ");
+        let n = paused.len();
+        paused[n - 2] = json!({ "type": "message_delta", "delta": { "stop_reason": "pause_turn" },
+            "usage": { "output_tokens": 3, "server_tool_use": { "web_search_requests": 2 } } });
+        let (r, _, _, api) = ask_with(Some(KEY), FAST, move |_, _, _| stream(&paused)).await;
+        assert_eq!(api.calls().len(), 1, "two searches of two: the answer is what came");
+        assert_eq!((r.end, r.usage.web_searches), (AskEnd::Answer, 2));
+    }
+
+    /// Spec 2 §8: a failed search is no error. A key or organization without web search is refused with HTTP 400 on every
+    /// question: the question goes again without the tool, once.
+    #[tokio::test]
+    async fn a_key_without_web_search_asks_again_without_it() {
+        let refused = r#"{"type":"error","error":{"type":"invalid_request_error","message":"Web search is not enabled for this organization"}}"#;
+        let (r, _, lines, api) = ask_with(Some(KEY), FAST, move |_, _, nth| {
+            if nth == 0 { reply(400, refused) } else { stream(&text_answer("Ответ.")) }
+        })
+        .await;
+        assert_eq!(r.end, AskEnd::Answer);
+        assert_eq!(api.calls().len(), 2);
+        let second: Value = serde_json::from_slice(&api.body(1)).unwrap();
+        assert_eq!(second["tools"], tools(None), "the second request has no search");
+        assert_eq!(lines.len(), 1, "one line says why: {lines:?}");
+        assert_clean(&lines);
+    }
+
+    /// A write cut at `max_tokens` never runs; once, the same question goes again with room for a long text.
+    #[tokio::test]
+    async fn a_write_cut_at_max_tokens_is_asked_once_more_with_room() {
+        let mut cut = write_answer("Длинное письмо", "insert");
+        let n = cut.len();
+        cut[n - 2] = json!({ "type": "message_delta", "delta": { "stop_reason": "max_tokens" }, "usage": { "output_tokens": 4_048 } });
+        let whole = write_answer("Длинное письмо целиком.", "insert");
+        let (r, _, _, api) = ask_with(Some(KEY), FAST, move |_, _, nth| if nth == 0 { stream(&cut) } else { stream(&whole) }).await;
+        assert_eq!(r.end, AskEnd::Write { text: "Длинное письмо целиком.".into(), replace: false });
+        let first: Value = serde_json::from_slice(&api.body(0)).unwrap();
+        let second: Value = serde_json::from_slice(&api.body(1)).unwrap();
+        assert_eq!(second["max_tokens"].as_u64(), first["max_tokens"].as_u64().map(|t| t + 4_000));
+        assert_eq!(second["messages"], first["messages"], "the same question; the cut call is left out");
+        assert_eq!(r.content.len(), 1, "only the whole call");
+        assert_eq!(r.usage.output_tokens, 4_068, "both responses are paid for");
+    }
+
+    /// Spec 2 §10: an answer closed mid-stream still writes what it spent, so `run` reports the cost as it grows.
+    #[tokio::test]
+    async fn the_cost_so_far_is_reported_as_it_grows() {
+        let api = fake_api(|_, _, _| stream(&text_answer("I'm a teapot."))).await;
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("{}/v1/messages", api.base);
+        let mut spent = Vec::new();
+        let r = run_at(&url, &http, Some(KEY), "claude-haiku-5-5", None, Thinking::DEFAULT, &[question()], None, FAST, |s| {
+            if let Step::Spent(u) = s {
+                spent.push(u);
+            }
+        })
+        .await;
+        assert_eq!(spent.first().map(|u| u.input_tokens), Some(40), "known from the first event");
+        assert_eq!(spent.last(), Some(&r.usage), "the last report is the whole cost");
+    }
+
+    #[tokio::test]
+    async fn refusals_before_the_stream_are_a_key_problem_or_worth_a_retry() {
+        for (code, body, want) in [
+            (401, "{}", AskFailure::Key(401)),
+            (403, "{}", AskFailure::Key(403)),
+            (400, r#"{"error":{"message":"Your credit balance is too low"}}"#, AskFailure::Key(400)),
+            (429, "{}", AskFailure::Http(429)),
+            (529, "{}", AskFailure::Http(529)),
+            (400, r#"{"error":{"message":"bad"}}"#, AskFailure::Http(400)),
+            (404, r#"{"error":{"type":"not_found_error"}}"#, AskFailure::NoModel),
+        ] {
+            let (r, _, lines, _) = ask_with(Some(KEY), FAST, move |_, _, _| reply(code, body)).await;
+            assert_eq!(r.end, AskEnd::Failed(want), "HTTP {code}");
+            assert_eq!(lines.len(), 1, "one line: {lines:?}");
+            assert!(lines[0].starts_with("WARN"), "{lines:?}");
+            assert_clean(&lines);
+        }
+        let (r, _, lines, api) = ask_with(None, FAST, |_, _, _| stream(&text_answer("x"))).await;
+        assert_eq!(r.end, AskEnd::Failed(AskFailure::NoKey));
+        assert!(AskFailure::NoKey.is_key() && AskFailure::Key(402).is_key());
+        assert!(!AskFailure::Http(429).is_key() && !AskFailure::Timeout.is_key(), "429 counts with the network (spec 2 §8)");
+        assert!(!AskFailure::NoModel.is_key());
+        assert!(api.calls().is_empty(), "no key, no request");
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_error_event_mid_stream_fails_with_its_type() {
+        let mut events = text_answer("част")[..3].to_vec();
+        events.push(json!({ "type": "error", "error": { "type": "overloaded_error", "message": "Overloaded" } }));
+        let (r, _, lines, _) = ask_with(Some(KEY), FAST, move |_, _, _| stream(&events)).await;
+        assert_eq!(r.end, AskEnd::Failed(AskFailure::Stream("overloaded_error".into())));
+        assert_clean(&lines);
+    }
+
+    #[tokio::test]
+    async fn no_first_words_in_time_is_a_timeout() {
+        let t0 = std::time::Instant::now();
+        let (r, _, _, _) = ask_with(Some(KEY), FAST, |_, _, _| Reply::Hang).await;
+        assert_eq!(r.end, AskEnd::Failed(AskFailure::Timeout));
+        assert!(t0.elapsed() < Duration::from_millis(1_500), "{:?}", t0.elapsed());
+    }
+
+    /// Spec 2 §6.2: the first words wait longer once the model searches.
+    #[tokio::test]
+    async fn a_search_gives_the_first_words_more_time() {
+        let searching = vec![
+            start(json!({ "input_tokens": 50 })),
+            block_start(0, json!({ "type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {} })),
+            stop(0),
+        ];
+        // The answer's text blocks after the search call: block indexes shifted by one.
+        let rest = shifted(&text_answer("Ответ.")[1..], 1);
+        let later = rest.clone();
+        let (r, _, _, _) = ask_with(Some(KEY), FAST, move |_, _, _| {
+            Reply::Stream(200, vec![sse(&searching), sse(&later)], Duration::from_millis(700))
+        })
+        .await;
+        assert_eq!(r.end, AskEnd::Answer, "a search began: 1.2 s for the first words");
+        let silent = vec![start(json!({ "input_tokens": 50 }))];
+        let (r, _, _, _) = ask_with(Some(KEY), FAST, move |_, _, _| {
+            Reply::Stream(200, vec![sse(&silent), sse(&rest)], Duration::from_millis(700))
+        })
+        .await;
+        assert_eq!(r.end, AskEnd::Failed(AskFailure::Timeout), "no search: 0.4 s");
+    }
+
+    #[tokio::test]
+    async fn the_whole_answer_has_a_deadline() {
+        let mut pieces = vec![sse(&text_answer("Начало")[..3])];
+        for _ in 0..5 {
+            pieces.push(sse(&[delta(0, json!({ "type": "text_delta", "text": " ещё" }))]));
+        }
+        let (r, steps, _, _) = ask_with(Some(KEY), FAST, move |_, _, _| Reply::Stream(200, pieces.clone(), Duration::from_millis(600))).await;
+        assert_eq!(r.end, AskEnd::Failed(AskFailure::Timeout));
+        assert!(steps.contains(&Step::Text("Начало".into())), "the words that came were shown");
+    }
+
+    #[tokio::test]
+    async fn a_dropped_connection_is_a_network_failure() {
+        let (r, _, lines, _) = ask_with(Some(KEY), FAST, |_, _, _| Reply::Cut).await;
+        assert_eq!(r.end, AskEnd::Failed(AskFailure::Network));
+        assert_eq!(lines.len(), 1);
+        let (r, _, _, _) = ask_with(Some(KEY), FAST, |_, _, _| Reply::Close).await;
+        assert_eq!(r.end, AskEnd::Failed(AskFailure::Network));
+    }
+
+    #[tokio::test]
+    async fn a_write_a_refusal_and_nothing() {
+        let (r, steps, _, _) = ask_with(Some(KEY), FAST, |_, _, _| stream(&write_answer("Пришлю в четверг.", "insert"))).await;
+        assert_eq!(r.end, AskEnd::Write { text: "Пришлю в четверг.".into(), replace: false });
+        assert_eq!(steps, [Step::WriteStart]);
+        let mut refused = text_answer("Я не");
+        let n = refused.len();
+        refused[n - 2] = json!({ "type": "message_delta", "delta": { "stop_reason": "refusal" }, "usage": { "output_tokens": 2 } });
+        let (r, _, lines, _) = ask_with(Some(KEY), FAST, move |_, _, _| stream(&refused)).await;
+        assert_eq!(r.end, AskEnd::Refused);
+        assert!(lines.is_empty(), "a refusal is an answer, not a failure");
+        let mut nothing = vec![start(json!({ "input_tokens": 5 }))];
+        nothing.extend(end("end_turn", json!({ "output_tokens": 0 })));
+        let (r, _, _, _) = ask_with(Some(KEY), FAST, move |_, _, _| stream(&nothing)).await;
+        assert_eq!(r.end, AskEnd::Failed(AskFailure::Malformed));
+    }
+
+    #[tokio::test]
+    async fn the_warm_up_sends_its_body_and_returns_the_tokens() {
+        let ok = r#"{"id":"msg_1","type":"message","role":"assistant","content":[],"stop_reason":"max_tokens","usage":{"input_tokens":5,"cache_creation_input_tokens":1300,"cache_read_input_tokens":0,"output_tokens":0}}"#;
+        let api = fake_api(move |_, _, _| reply(200, ok)).await;
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("{}/v1/messages", api.base);
+        let usage = warm_at(&url, &http, KEY, "claude-haiku-5-5", None).await.expect("warmed");
+        assert_eq!(usage.cache_creation_input_tokens, 1_300);
+        let body: Value = serde_json::from_slice(&api.body(0)).unwrap();
+        assert_eq!(body, warm_body("claude-haiku-5-5", None));
+
+        let api = fake_api(|_, _, _| reply(400, r#"{"error":{"type":"invalid_request_error"}}"#)).await;
+        let url = format!("{}/v1/messages", api.base);
+        let (logs, _guard) = capture_logs();
+        assert_eq!(warm_at(&url, &http, KEY, "claude-haiku-5-5", None).await, None);
+        let lines: Vec<String> = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::ask")).cloned().collect();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("ask cache warm-up: HTTP 400"), "{lines:?}");
     }
 }
