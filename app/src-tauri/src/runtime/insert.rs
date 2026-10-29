@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use cue_core::flow::{DictationId, InsertOutcome};
 use cue_platform_win::clipboard::{
-    ClipboardApi, PasteResult, WinClipboard, WinKeys, copy_selection, forget_in_history, paste_text, spawn_late_guard,
+    ClipboardApi, PasteResult, WinClipboard, WinKeys, copy_selection, forget_in_history, leave_text, paste_text,
+    spawn_late_guard,
 };
 use cue_platform_win::focus::{UNKNOWN_APP, WindowRef};
 use cue_platform_win::input::{press_right, wait_modifiers_released};
@@ -135,7 +136,7 @@ fn run(clip: &mut Option<WinClipboard>, job: InsertJob, core: &UnboundedSender<C
 
 /// The text in the clipboard the normal way (without markers), for the user to paste.
 fn leave(clip: &mut WinClipboard, text: &str) {
-    if let Err(e) = clip.write_text(text, false) {
+    if let Err(e) = leave_text(clip, text) {
         tracing::warn!("text not put in the clipboard: {e}");
     }
 }
@@ -229,7 +230,7 @@ mod tests {
     #[test]
     fn only_a_dictations_paste_or_leave_reports_to_the_flow() {
         let (reply, _rx) = channel();
-        let target = WindowRef { window: 0x10, process: 100 };
+        let target = WindowRef { window: 0x10, process: 100, app_process: None };
         assert_eq!(InsertJob::CopySelection { reply, target }.id(), None);
         let id = Some(DictationId(3));
         assert_eq!(InsertJob::Paste { id, text: "x".into(), collapse: true }.id(), id);

@@ -25,16 +25,17 @@ pub trait ClipboardApi {
     /// With the same marks: the restored content is not a new copy; if it was allowed into the history, it is already there.
     /// An empty snapshot is restored as an empty clipboard, without marks.
     fn restore(&mut self, s: &Snapshot) -> Result<(), String>;
-    /// CUE's clipboard operations in this process (one count and one lock for every `WinClipboard`): a paste and a
-    /// Ctrl+C copy each begin one, so that an older late-copy guard stands down (`guard_late_copy`).
+    /// CUE's clipboard operations in this process (one count and one lock for every `WinClipboard`): a paste, a text
+    /// left in the clipboard and a Ctrl+C copy each begin one, so that an older late-copy guard stands down
+    /// (`guard_late_copy`).
     fn operations(&self) -> &'static Operations;
 }
 
-/// CUE's clipboard operations in this process — pastes and Ctrl+C copies: how many have begun, and one lock. A late-copy
-/// guard acts under the lock, and only while its copy is still the newest operation; `begin` takes the same lock. So a
-/// newer operation begins either before the guard acts, and the guard stands down, or after it is done. The guard never
-/// waits for another app to let the clipboard go while it holds the lock (`ReadClipboard::take_back`: one try), but
-/// under it the copying app may be asked to render its text (`WM_RENDERFORMAT`) and to let its copy go
+/// CUE's clipboard operations in this process — pastes, texts left in it and Ctrl+C copies: how many have begun, and one
+/// lock. A late-copy guard acts under the lock, and only while its copy is still the newest operation; `begin` takes the
+/// same lock. So a newer operation begins either before the guard acts, and the guard stands down, or after it is done.
+/// The guard never waits for another app to let the clipboard go while it holds the lock (`ReadClipboard::take_back`:
+/// one try), but under it the copying app may be asked to render its text (`WM_RENDERFORMAT`) and to let its copy go
 /// (`WM_DESTROYCLIPBOARD`): a slow app keeps a newer `begin` waiting that long, with no timeout. It happens at most
 /// once per copy, 0.4–2.4 s after its Ctrl+C, so a paste would have to begin at that very moment.
 #[derive(Default)]
@@ -129,6 +130,14 @@ pub fn paste_text(
     }
 }
 
+/// The text left in the clipboard the ordinary way, without marks, for the user to paste themselves.
+pub fn leave_text(clip: &mut impl ClipboardApi, text: &str) -> Result<(), String> {
+    // A clipboard operation of its own: once CUE's owner window is gone this write has no owner, just like an app's
+    // copy with none, and a late-copy guard of an earlier Ctrl+C must not take it for one (`the_apps_copy`).
+    clip.operations().begin();
+    clip.write_text(text, false)
+}
+
 /// Windows line breaks: `\n` without a `\r` before it becomes `\r\n` (some text fields do not show a bare LF).
 fn crlf(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -148,9 +157,20 @@ pub trait ReadClipboard {
     /// The process of the window that owns the clipboard: the last one to write it. `None` — no owner, or not known.
     fn owner_process(&self) -> Option<u32>;
     /// The app's copy taken back, with one opening of the clipboard and no wait for it (the late-copy guard runs it
-    /// under the operations lock): if the clipboard is still `owner`'s — checked while it is open, so nobody can write
-    /// in between — its text is read and `snap` put back.
-    fn take_back(&mut self, owner: u32, snap: &Snapshot) -> TakeBack;
+    /// under the operations lock): if the clipboard may still be the copy of `target`'s app (`the_apps_copy`) — its
+    /// owner checked while it is open, so nobody can write in between — its text is read and `snap` put back.
+    fn take_back(&mut self, target: WindowRef, snap: &Snapshot) -> TakeBack;
+}
+
+/// Whether a clipboard owned by `owner` (`ReadClipboard::owner_process`) may hold the answer of `target`'s app to
+/// CUE's Ctrl+C: when the owner is that window's process, or the process of the app in it when the window is only a
+/// frame — a Store app's copy comes from one of the app's own windows, not the frame host's — or when there is no owner
+/// at all. An app may copy with no window (`OpenClipboard(NULL)`), and such a copy, appearing in the wait right after
+/// Ctrl+C into the window just checked, is that app's in practice; a clipboard listener re-rendering the user's own
+/// clipboard with no owner is caught by the identical-text rule (`caught`). Any other process's write is a copy the
+/// user may want, and stays.
+fn the_apps_copy(target: WindowRef, owner: Option<u32>) -> bool {
+    owner.is_none_or(|owner| owner == target.process || Some(owner) == target.app_process)
 }
 
 /// What `ReadClipboard::take_back` did.
@@ -159,7 +179,7 @@ pub enum TakeBack {
     Busy,
     /// CUE's own owner window could not be made: nothing was done, and another try would fail the same way.
     NoWindow(String),
-    /// The clipboard is not the expected process's — another app wrote it, or CUE did: nothing was done.
+    /// The clipboard is another process's (`the_apps_copy`): another app wrote it. Nothing was done.
     Other,
     /// The text that was in it, and whether the snapshot went back.
     Done { text: Option<String>, restored: Result<(), String> },
@@ -217,8 +237,8 @@ pub struct LateCopy {
     snap: Snapshot,
     /// The clipboard's number when Ctrl+C was pressed.
     before: u32,
-    /// The process Ctrl+C went to: that of the window the selection was read in.
-    target: u32,
+    /// The window Ctrl+C went to: the one the selection was read in.
+    target: WindowRef,
     since: SystemTime,
     /// The copy's clipboard operation (`Operations::begin`).
     operation: u64,
@@ -235,8 +255,9 @@ pub struct LateCopy {
 /// - the chord's keys stayed down, the clipboard could not be read first, or the window in front is no longer `target`
 ///   (or is a terminal): Ctrl+C is not pressed, it is not touched;
 /// - the app copied within `COPY_WAIT`: it is put back; if that fails, `restore_failed` says so, and the app's copy is
-///   left in it. A change by anyone else — another app's copy, a clipboard listener rendering a format of the user's
-///   own clipboard — is never taken for the selection, and stays;
+///   left in it. The app's copy is a write owned by its window's process, by the app in it when that window is a
+///   Store app's frame, or by no window (`the_apps_copy`). A change by any other process — another app's copy, a
+///   clipboard listener rendering a format of the user's own clipboard — is never taken for the selection, and stays;
 /// - nothing came within `COPY_WAIT` (no selection, or a slow app; `text: None`): `on_late` gets a `LateCopy`, and the
 ///   caller runs `guard_late_copy` with it on a thread of its own (`spawn_late_guard`): a copy that looks like the app's
 ///   answer to this Ctrl+C, 0.4 to 2.4 s after it, is put back all the same. One later still, or one that may be the
@@ -259,7 +280,7 @@ pub fn copy_selection(
     // Not read — not risked: an empty "previous" clipboard would wipe the real one.
     let Ok(snap) = clip.snapshot() else { return nothing(SystemTime::now()) };
     // The last moment before Ctrl+C: the user may have switched windows since the chord, to a terminal even.
-    if keys.foreground() != Some(target) || keys.terminal(target) {
+    if !keys.foreground().is_some_and(|front| front.same_window(target)) || keys.terminal(target) {
         tracing::info!("ask: the window in front is not the one read at the chord, or is a terminal: no Ctrl+C");
         return nothing(SystemTime::now());
     }
@@ -272,7 +293,7 @@ pub fn copy_selection(
     let mut waited = Duration::ZERO;
     while clip.sequence() == before {
         if waited >= COPY_WAIT {
-            on_late(LateCopy { snap, before, target: target.process, since, operation, input_mark });
+            on_late(LateCopy { snap, before, target, since, operation, input_mark });
             return nothing(since);
         }
         keys.sleep(COPY_POLL);
@@ -288,12 +309,12 @@ pub fn copy_selection(
         if attempt > 0 {
             keys.sleep(TAKE_BACK_RETRY);
         }
-        // Only the app's own write is its answer to Ctrl+C: the user's clipboard never becomes "the selection".
-        match clip.take_back(target.process, &snap) {
+        // Only a write that may be the app's is its answer to Ctrl+C: the user's clipboard never becomes "the selection".
+        match clip.take_back(target, &snap) {
             TakeBack::Busy => {}
             TakeBack::Done { text, restored } => return caught(text, restored, since, &snap),
             TakeBack::Other => {
-                tracing::info!("ask: the clipboard changed after Ctrl+C, but not by the app it went to; left alone");
+                tracing::info!("ask: the clipboard changed after Ctrl+C, but by another app; left alone");
                 return nothing(since);
             }
             TakeBack::NoWindow(e) => return not_put_back(&e, since),
@@ -312,18 +333,18 @@ fn not_put_back(why: &str, since: SystemTime) -> SelectionCopy {
 /// `COPY_WAIT` for `LATE_COPY_WAIT` — 0.4 to 2.4 s after CUE's Ctrl+C. The first write in that time is taken for the
 /// app's answer to that Ctrl+C — the user's clipboard put back, the copy returned, and `on_caught` run with it (the start
 /// of its removal from the Win+V history) — only when it looks like one:
-/// - its owner is the process Ctrl+C went to (another app's write, or one whose owner is not known, is a newer copy the
-///   user may want);
+/// - its owner may be the app's (`the_apps_copy`): the process of the window Ctrl+C went to, the app in it when that
+///   window is a frame, or none (another app's write is a newer copy the user may want);
 /// - there was no input at all since CUE's Ctrl+C went through — no key, click or mouse move: the user's own Ctrl+C,
 ///   Shift+Delete or a menu's Copy in the same app would look just the same otherwise;
 /// - the clipboard was not written again after it;
-/// - no newer clipboard operation of CUE's has begun (a paste, the next Ctrl+C copy): the clipboard is that one's. The
-///   last of these checks, the restore and `on_caught` happen under the operations lock (`Operations::while_newest`), so
-///   none begins in between.
+/// - no newer clipboard operation of CUE's has begun (a paste, a text left in the clipboard, the next Ctrl+C copy): the
+///   clipboard is that one's. The last of these checks, the restore and `on_caught` happen under the operations lock
+///   (`Operations::while_newest`), so none begins in between.
 ///
 /// Otherwise the clipboard is left alone and the watch ends. `None` — nothing was put back. The owner is checked again
 /// with the clipboard open, right before the take-back: the number may have moved since the poll without a new copy
-/// (a second write of the app's, a listener rendering a format), and a write of anyone else's in between stays.
+/// (a second write of the app's, a listener rendering a format), and another process's write in between stays.
 pub fn guard_late_copy<R>(
     clip: &mut (impl ClipboardApi + ReadClipboard),
     keys: &mut (impl KeysApi + CopyKeys),
@@ -352,7 +373,7 @@ pub fn guard_late_copy<R>(
         keys.sleep(COPY_POLL);
         waited += COPY_POLL;
     }
-    if clip.owner_process() != Some(target) {
+    if !the_apps_copy(target, clip.owner_process()) {
         tracing::info!("ask: another app wrote the clipboard after the copy wait; left alone");
         return None;
     }
@@ -747,7 +768,7 @@ mod win {
     }
 
     impl super::ReadClipboard for WinClipboard {
-        fn take_back(&mut self, owner: u32, snap: &Snapshot) -> TakeBack {
+        fn take_back(&mut self, target: WindowRef, snap: &Snapshot) -> TakeBack {
             let window = match Owner::new() {
                 Ok(window) => window,
                 Err(e) => return TakeBack::NoWindow(e),
@@ -756,7 +777,7 @@ mod win {
             let Some(_open) = open_with(window, 1) else { return TakeBack::Busy };
             // Open, the clipboard cannot be written by anyone else: the owner checked now holds until it is closed.
             // Opening it does not make CUE its owner; only a write would.
-            if self.owner_process() != Some(owner) {
+            if !super::the_apps_copy(target, self.owner_process()) {
                 return TakeBack::Other;
             }
             TakeBack::Done { text: text_now(), restored: self.put_back(snap) }
@@ -776,7 +797,7 @@ mod win {
         fn foreground(&self) -> Option<WindowRef> {
             // SAFETY: no arguments.
             let window = unsafe { GetForegroundWindow() };
-            window_process(window).map(|process| WindowRef { window: window.0 as isize, process })
+            window_process(window).map(|process| WindowRef { window: window.0 as isize, process, app_process: None })
         }
 
         fn terminal(&self, window: WindowRef) -> bool {
@@ -1174,21 +1195,25 @@ mod copy_tests {
     use std::cell::{OnceCell, RefCell};
     use std::rc::Rc;
 
-    /// The app Ctrl+C goes to, another one, and CUE.
+    /// The app Ctrl+C goes to, another one, and the frame host of Store apps.
     const APP: u32 = 100;
     const OTHER: u32 = 200;
-    const CUE: u32 = 300;
+    const FRAME_HOST: u32 = 400;
     /// The window the selection was read in at the chord, and another one.
-    const TARGET: WindowRef = WindowRef { window: 0x10, process: APP };
-    const ELSEWHERE: WindowRef = WindowRef { window: 0x20, process: OTHER };
+    const TARGET: WindowRef = WindowRef { window: 0x10, process: APP, app_process: None };
+    const ELSEWHERE: WindowRef = WindowRef { window: 0x20, process: OTHER, app_process: None };
+    /// A Store app's window as read at the chord: the frame, and the app in it, known by the focused element.
+    const FRAMED: WindowRef = WindowRef { window: 0x30, process: FRAME_HOST, app_process: Some(APP) };
 
     /// The clipboard, the app behind it and the user, counted in sleeps: on Ctrl+C the app copies `selection` (if any)
-    /// after `copy_after` sleeps; another app writes the clipboard at sleep `other_writes_at`; a clipboard listener
-    /// renders a format of what is there at `render_at` (the number moves, the owner stays); the user copies in the app
-    /// at `user_copies_at`, or just types or moves the mouse at `user_input_at`; a newer clipboard operation of CUE's
-    /// begins at `newer_begins_at`; the clipboard is held open by another app for the first `busy_takes` take-backs.
-    /// Another window is in front once `moved`, none once `gone`; the window is a `terminal`; the last input cannot be
-    /// read once `no_input_info`; CUE's own owner window cannot be made once `no_owner_window`.
+    /// after `copy_after` sleeps, owned by its own process or by `copy_owner` (`Some(None)`: by no window); another app
+    /// writes the clipboard at sleep `other_writes_at`; a clipboard listener renders a format of what is there at
+    /// `render_at` (the number moves, the owner stays); the user copies in the app at `user_copies_at`, or just types or
+    /// moves the mouse at `user_input_at`; a newer clipboard operation of CUE's begins at `newer_begins_at`; the
+    /// clipboard is held open by another app for the first `busy_takes` take-backs. The window read at the chord is a
+    /// Store app's frame once `framed` (`FRAMED`); another window is in front once `moved`, none once `gone`; the window
+    /// is a `terminal`; the last input cannot be read once `no_input_info`; CUE's own owner window cannot be made once
+    /// `no_owner_window`.
     #[derive(Default)]
     struct World {
         seq: u32,
@@ -1197,6 +1222,8 @@ mod copy_tests {
         owner: Option<u32>,
         selection: Option<String>,
         copy_after: u32,
+        copy_owner: Option<Option<u32>>,
+        framed: bool,
         other_writes_at: Option<u32>,
         render_at: Option<u32>,
         user_copies_at: Option<u32>,
@@ -1235,10 +1262,15 @@ mod copy_tests {
             }
         }
 
+        /// The window Ctrl+C is meant for, as read at the chord.
+        fn target(&self) -> WindowRef {
+            if self.framed { FRAMED } else { TARGET }
+        }
+
         fn app_copies_now(&mut self) {
             if let Some(s) = self.selection.clone() {
                 self.text = Some(s);
-                self.owner = Some(APP);
+                self.owner = self.copy_owner.unwrap_or(Some(APP));
                 self.seq += 1;
                 self.app_copied = true;
             }
@@ -1271,7 +1303,8 @@ mod copy_tests {
             let mut w = self.0.borrow_mut();
             w.writes.push(text.into());
             w.text = Some(text.into());
-            w.owner = Some(CUE);
+            // CUE's owner window is gone once the write is done: the clipboard is left with no owner.
+            w.owner = None;
             w.seq += 1;
             Ok(())
         }
@@ -1287,7 +1320,7 @@ mod copy_tests {
         fn owner_process(&self) -> Option<u32> {
             self.0.borrow().owner
         }
-        fn take_back(&mut self, owner: u32, snap: &Snapshot) -> TakeBack {
+        fn take_back(&mut self, target: WindowRef, snap: &Snapshot) -> TakeBack {
             let mut w = self.0.borrow_mut();
             w.take_backs += 1;
             if w.no_owner_window {
@@ -1297,7 +1330,7 @@ mod copy_tests {
                 w.busy_takes -= 1;
                 return TakeBack::Busy;
             }
-            if w.owner != Some(owner) {
+            if !the_apps_copy(target, w.owner) {
                 return TakeBack::Other;
             }
             let text = w.text.clone();
@@ -1354,6 +1387,9 @@ mod copy_tests {
                 None
             } else if w.moved {
                 Some(ELSEWHERE)
+            } else if w.framed {
+                // As the system tells it: the frame and its host's process, with nothing known of the app in it.
+                Some(WindowRef { app_process: None, ..FRAMED })
             } else {
                 Some(TARGET)
             }
@@ -1380,17 +1416,19 @@ mod copy_tests {
 
     /// `copy_selection` on `w`, and whether it handed a late copy over.
     fn copy(w: World) -> (SelectionCopy, bool, World) {
+        let target = w.target();
         let w = Rc::new(RefCell::new(w));
         let mut late = false;
-        let got = copy_selection(&mut Clip(w.clone()), &mut Keys(w.clone()), TARGET, |_| late = true);
+        let got = copy_selection(&mut Clip(w.clone()), &mut Keys(w.clone()), target, |_| late = true);
         (got, late, world(w))
     }
 
     /// The same, and the late copy it handed over watched right after (in the app: on a thread of its own).
     fn copy_and_watch(w: World) -> (SelectionCopy, Option<SelectionCopy>, World) {
+        let target = w.target();
         let w = Rc::new(RefCell::new(w));
         let mut late = None;
-        let got = copy_selection(&mut Clip(w.clone()), &mut Keys(w.clone()), TARGET, |l| late = Some(l));
+        let got = copy_selection(&mut Clip(w.clone()), &mut Keys(w.clone()), target, |l| late = Some(l));
         let watched = late.and_then(|l| guard_late_copy(&mut Clip(w.clone()), &mut Keys(w.clone()), l, |_| ()));
         (got, watched.map(|(copy, ())| copy), world(w))
     }
@@ -1628,22 +1666,90 @@ mod copy_tests {
         assert_eq!(w.restored, Some(user_clip()));
     }
 
-    /// The number moved with the target still the owner, but the text is the one the user had before Ctrl+C: a listener
-    /// re-rendering the user's own clipboard, not a copy. Never the selection — on the main path or a late one.
+    /// The number moved with the owner one a copy of the app's may have — the target, or none — but the text is the one
+    /// the user had before Ctrl+C: a listener re-rendering the user's own clipboard, not a copy. Never the selection —
+    /// on the main path or a late one.
     #[test]
     fn the_users_own_text_moved_again_is_never_the_selection() {
-        let own = World { content: user_clip(), text: Some("A".into()), owner: Some(APP), ..World::default() };
-        let (got, late, w) = copy(World { render_at: Some(3), ..own });
-        assert_eq!((got.text, late, got.restore_failed), (None, false, false));
-        assert_eq!(w.restored, Some(user_clip()), "the user's clipboard stays as it was");
+        for owner in [Some(APP), None] {
+            let own = || World { content: user_clip(), text: Some("A".into()), owner, ..World::default() };
+            let (got, late, w) = copy(World { render_at: Some(3), ..own() });
+            assert_eq!((got.text, late, got.restore_failed), (None, false, false), "owner {owner:?}");
+            assert_eq!(w.restored, Some(user_clip()), "the user's clipboard stays as it was, owner {owner:?}");
 
-        let own = World { content: user_clip(), text: Some("A".into()), owner: Some(APP), ..World::default() };
-        let (got, watched, _) = copy_and_watch(World { render_at: Some(30), ..own });
-        assert_eq!(got.text, None);
-        assert_eq!(watched.map(|c| c.text), Some(None), "a late move of the same text is no copy either");
+            let (got, watched, _) = copy_and_watch(World { render_at: Some(30), ..own() });
+            assert_eq!(got.text, None);
+            assert_eq!(watched.map(|c| c.text), Some(None), "a late move of the same text is no copy either, {owner:?}");
+        }
 
         assert_eq!(saved_text(&user_clip()).as_deref(), Some("A"), "the saved text, up to its null");
         assert_eq!(saved_text(&Snapshot::default()), None);
+    }
+
+    fn framed() -> World {
+        World { framed: true, ..selected() }
+    }
+
+    /// A Store app's window is a frame of another process (`ApplicationFrameHost`), and its copy is owned by a window of
+    /// the app's own process, or of the frame's: either is its answer to Ctrl+C — taken, and the user's clipboard put
+    /// back — on the main path and a late one. Ctrl+C still goes only to the frame read at the chord.
+    #[test]
+    fn a_store_apps_copy_is_taken_from_the_app_or_its_frame() {
+        for owner in [APP, FRAME_HOST] {
+            let (got, _, w) = copy(World { copy_owner: Some(Some(owner)), ..framed() });
+            assert_eq!(got.text.as_deref(), Some("выделенный текст"), "owned by {owner}");
+            assert_eq!(w.restored, Some(user_clip()), "the user's clipboard is back, owned by {owner}");
+
+            let (_, watched, w) = copy_and_watch(World { framed: true, copy_owner: Some(Some(owner)), ..late_app() });
+            assert_eq!(watched.and_then(|c| c.text).as_deref(), Some("поздно"), "late, owned by {owner}");
+            assert_eq!(w.restored, Some(user_clip()), "late, owned by {owner}");
+        }
+        let (got, late, w) = copy(World { moved: true, ..framed() });
+        assert_eq!((got.text, w.pressed_c, late), (None, false, false), "another window in front");
+    }
+
+    /// An app may copy with no window of its own (`OpenClipboard(NULL)`): the clipboard has no owner. Right after Ctrl+C
+    /// into the window just checked, that is the app's copy — taken, and the user's clipboard put back — on the main path
+    /// and a late one.
+    #[test]
+    fn a_copy_with_no_owner_is_the_apps() {
+        let (got, _, w) = copy(World { copy_owner: Some(None), ..selected() });
+        assert_eq!(got.text.as_deref(), Some("выделенный текст"));
+        assert_eq!(w.restored, Some(user_clip()));
+
+        let (_, watched, w) = copy_and_watch(World { copy_owner: Some(None), ..late_app() });
+        assert_eq!(watched.and_then(|c| c.text).as_deref(), Some("поздно"));
+        assert_eq!(w.restored, Some(user_clip()));
+    }
+
+    /// A copy owned by any other process — a helper of the app's, another app — is still not the answer to Ctrl+C, a
+    /// Store app's frame or not: never taken, and left in the clipboard, on the main path and a late one.
+    #[test]
+    fn a_copy_of_another_process_is_still_left_alone() {
+        for framed in [true, false] {
+            let (got, late, w) = copy(World { framed, copy_owner: Some(Some(OTHER)), ..selected() });
+            assert_eq!((got.text, late, w.restored), (None, false, None), "framed: {framed}");
+            assert_eq!(w.text.as_deref(), Some("выделенный текст"), "the copy stays, framed: {framed}");
+
+            let (_, watched, w) = copy_and_watch(World { framed, copy_owner: Some(Some(OTHER)), ..late_app() });
+            assert_eq!((watched, w.restored), (None, None), "late, framed: {framed}");
+            assert_eq!(w.text.as_deref(), Some("поздно"), "the late copy stays, framed: {framed}");
+        }
+    }
+
+    /// CUE leaves a text in the clipboard (no field) while a late-copy guard still watches: once CUE's window is gone
+    /// that write has no owner, like an app's copy with none, so it must stand the guard down — the text stays, and is
+    /// never taken for a late copy (nor removed from Win+V).
+    #[test]
+    fn a_text_left_in_the_clipboard_stands_a_late_guard_down() {
+        let w = Rc::new(RefCell::new(World { content: user_clip(), ..World::default() }));
+        let mut late = None;
+        copy_selection(&mut Clip(w.clone()), &mut Keys(w.clone()), TARGET, |l| late = Some(l));
+        leave_text(&mut Clip(w.clone()), "ответ").unwrap();
+        let watched = guard_late_copy(&mut Clip(w.clone()), &mut Keys(w.clone()), late.expect("watched for"), |_| ());
+        assert_eq!(watched, None);
+        let w = w.borrow();
+        assert_eq!((w.restores, w.text.as_deref(), w.writes.len()), (0, Some("ответ"), 1));
     }
 
     /// Another app holds the clipboard open when the app's copy is to be read: tried again; held for good, the copy is

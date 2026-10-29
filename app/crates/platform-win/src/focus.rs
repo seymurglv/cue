@@ -80,6 +80,18 @@ impl std::fmt::Debug for SelectionRead {
 pub struct WindowRef {
     pub window: isize,
     pub process: u32,
+    /// When the window is only a frame — a Store app's, whose window belongs to `ApplicationFrameHost` — the process of
+    /// the app in it, read from the focused element: the app's own windows are there, and its copy comes from one of
+    /// them. `None` for any other window.
+    pub app_process: Option<u32>,
+}
+
+impl WindowRef {
+    /// The same window: the same number in the same process. What is known of the app in a frame does not count — the
+    /// window in front is read without it.
+    pub fn same_window(self, other: WindowRef) -> bool {
+        (self.window, self.process) == (other.window, other.process)
+    }
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -470,10 +482,12 @@ mod win {
                 }
             }
             // The File Explorer rule goes by the window's process; the name — by the element's process if the window is just a frame.
-            let app_path = app_pid.filter(|&p| p != pid).and_then(exe_path).or(fg_path);
+            let app_process = app_pid.filter(|&p| p != pid);
+            let app_path = app_process.and_then(exe_path).or(fg_path);
             info.app = app_path.map(|p| self.app_name(&p)).filter(|a| !a.is_empty()).unwrap_or_else(|| unknown().app);
             info.editable = classify(&facts);
-            info.window = (!fg.is_invalid() && pid != 0).then_some(WindowRef { window: fg.0 as isize, process: pid });
+            info.window =
+                (!fg.is_invalid() && pid != 0).then_some(WindowRef { window: fg.0 as isize, process: pid, app_process });
             info
         }
 
@@ -1074,7 +1088,7 @@ mod tests {
             is_password: false,
             before_cursor,
             selection: SelectionRead::NotAsked,
-            window: Some(WindowRef { window: 0x10, process: 100 }),
+            window: Some(WindowRef { window: 0x10, process: 100, app_process: None }),
         }
     }
 
