@@ -49,7 +49,8 @@ pub enum SelectionRead {
     /// The selected text, already limited (`cue_core::ask::MAX_SELECTION_CHARS`, start and end); its rectangles on
     /// screen in physical px when the app gives them (none from a classic field); whether the text there can be changed.
     Text { text: String, rects: Vec<PxRect>, read_only: bool },
-    /// A password field, or one that would not say whether it is one: never read, never copied.
+    /// A password field, or one that would not say whether it is one, or could not be checked at all: never read, never
+    /// copied.
     Password,
     /// The field has no way to report a selection (no text pattern, not a classic field), and it is not a password: there
     /// may be one.
@@ -385,7 +386,8 @@ mod win {
         fn inspect(&mut self, context_chars: usize, selection_chars: Option<usize>, deadline: Deadline) -> FocusInfo {
             let mut facts = FocusFacts::default();
             let mut info = FocusInfo::default();
-            // Asked, so answered: every early way out (no focused element, an error, a late element) says "cannot tell".
+            // Asked, so answered (never `NotAsked`): "cannot tell" until the field says more. A field that cannot be
+            // checked at all is taken for a password below.
             if selection_chars.is_some() {
                 info.selection = SelectionRead::Unknown;
             }
@@ -440,7 +442,14 @@ mod win {
                 }
                 // A UI Automation error is not yet "no field": with a real foreground window it is "don't know" (or "yes"
                 // by the caret); "no" — only when there is no foreground window at all.
-                Err(_) => facts.has_element = !fg.is_invalid(),
+                Err(_) => {
+                    facts.has_element = !fg.is_invalid();
+                    // The field cannot be checked (a hung app, as a rule), so neither can whether it is a password: it is
+                    // treated as one that must not be read — no Ctrl+C.
+                    if selection_chars.is_some() {
+                        info.selection = SelectionRead::Password;
+                    }
+                }
             }
             // The File Explorer rule goes by the window's process; the name — by the element's process if the window is just a frame.
             let app_path = app_pid.filter(|&p| p != pid).and_then(exe_path).or(fg_path);
