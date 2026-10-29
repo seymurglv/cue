@@ -13,8 +13,10 @@
 //!   `ask.max_searches` = 2 and page reading (`--no-search`: no web search and no page reading), thinking as `--thinking`
 //!   says (the app's default when left out).
 //! - Runs 1..runs, each over all phrases, one call at a time. The very first call is cold (the prompt cache is empty) and
-//!   is left out of the medians; first words are split by whether the model searched. A call that wrote text before its
-//!   first web search is marked (`text_before_search`): those words, not the answer, were its first words.
+//!   is left out of the medians; first words are split three ways: no search and no page read, a search and no page
+//!   read, a page read. A call that wrote text before its first web search is marked (`text_before_search`): those words,
+//!   not the answer, were its first words. Each call keeps its page reads (`fetches`), the sites of the pages that came
+//!   in (`pages`), and whether its turn ended on a server tool's block (`ends_on_a_tool`: paused and not continued).
 //! - Stops as soon as more than `--max-usd` has been spent. A model without a default price is refused before any call:
 //!   its tokens would count as $0, and the budget would never stop the run.
 //! - `out.json` is written before the first call (a path that cannot be written stops the run before anything is paid)
@@ -27,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context};
-use cue_core::ask::{first_message, follow_up_message, AskContext};
+use cue_core::ask::{first_message, follow_up_message, site_of, AskContext};
 use cue_core::settings::Pricing;
 use cue_core::usage::{refine_cost, utc_timestamp};
 use cue_engines::ask::{self, AskEnd, AskResult, Thinking, WebTools};
@@ -144,8 +146,15 @@ struct Call {
     first_words_ms: Option<u64>,
     total_ms: u64,
     searches: u32,
+    /// Pages read (`AskUsage.web_fetches`).
+    fetches: u32,
+    /// The sites of the pages that came in (not the failed reads), in order.
+    pages: Vec<String>,
     /// The model wrote text before its first web search (a note that it is going to search): those words came first.
     text_before_search: bool,
+    /// The turn ends on a server tool's block (a search, a read or its result) with no words after it: it paused there and
+    /// was not continued, as when its two page reads are spent.
+    ends_on_a_tool: bool,
     /// The question and, for a follow-up phrase, the first answer too.
     cost_usd: f64,
 }
@@ -155,6 +164,25 @@ fn text_before_search(content: &[Value]) -> bool {
     let first_search = content.iter().position(|b| b["type"] == "server_tool_use" && b["name"] == "web_search");
     first_search.is_some_and(|i| {
         content[..i].iter().any(|b| b["type"] == "text" && b["text"].as_str().is_some_and(|t| !t.trim().is_empty()))
+    })
+}
+
+/// The sites of the pages read among a response's blocks (`web_fetch_result`, not the errors).
+fn pages_read(content: &[Value]) -> Vec<String> {
+    content
+        .iter()
+        .filter(|b| b["type"] == "web_fetch_tool_result" && b["content"]["type"] == "web_fetch_result")
+        .map(|b| site_of(b["content"]["url"].as_str().unwrap_or("")))
+        .collect()
+}
+
+/// Whether the last block with something in it is a server tool's: its call (`server_tool_use`) or its result
+/// (`web_search_tool_result`, `web_fetch_tool_result`, a code run's).
+fn ends_on_a_tool(content: &[Value]) -> bool {
+    let blank = |b: &&Value| b["type"] == "text" && b["text"].as_str().is_none_or(|t| t.trim().is_empty());
+    content.iter().rev().find(|b| !blank(b)).is_some_and(|b| {
+        let kind = b["type"].as_str().unwrap_or("");
+        kind == "server_tool_use" || (kind.ends_with("_tool_result") && kind != "tool_result")
     })
 }
 
@@ -217,7 +245,10 @@ fn scored(p: &Phrase, run: usize, cold: bool, asked: &Asked, cost_usd: f64) -> C
         first_words_ms: asked.first_words_ms,
         total_ms: asked.total_ms,
         searches: r.usage.web_searches,
+        fetches: r.usage.web_fetches,
+        pages: pages_read(&r.content),
         text_before_search: text_before_search(&r.content),
+        ends_on_a_tool: ends_on_a_tool(&r.content),
         cost_usd,
     }
 }
@@ -228,8 +259,11 @@ struct Summary {
     decisions_right: usize,
     modes_right: usize,
     modes_scored: usize,
+    /// Warm calls that read no page, without and with a search.
     first_words_ms_no_search: Option<u64>,
     first_words_ms_search: Option<u64>,
+    /// Warm calls that read a page, searched or not.
+    first_words_ms_fetch: Option<u64>,
     cost_usd: f64,
 }
 
@@ -243,16 +277,17 @@ fn summarize(calls: &[Call]) -> Summary {
         Expect::Answer => c.decision == "answer",
         Expect::Write => c.decision == "write",
     };
-    let warm = |searched: bool| {
-        median(calls.iter().filter(|c| !c.cold && (c.searches > 0) == searched).filter_map(|c| c.first_words_ms).collect())
+    let warm = |pick: &dyn Fn(&Call) -> bool| {
+        median(calls.iter().filter(|c| !c.cold && pick(c)).filter_map(|c| c.first_words_ms).collect())
     };
     Summary {
         calls: calls.len(),
         decisions_right: calls.iter().filter(right).count(),
         modes_right: calls.iter().filter(|c| c.expect_mode.is_some() && c.mode == c.expect_mode).count(),
         modes_scored: calls.iter().filter(|c| c.expect_mode.is_some()).count(),
-        first_words_ms_no_search: warm(false),
-        first_words_ms_search: warm(true),
+        first_words_ms_no_search: warm(&|c| c.fetches == 0 && c.searches == 0),
+        first_words_ms_search: warm(&|c| c.fetches == 0 && c.searches > 0),
+        first_words_ms_fetch: warm(&|c| c.fetches > 0),
         cost_usd: calls.iter().map(|c| c.cost_usd).sum(),
     }
 }
@@ -319,13 +354,15 @@ async fn main() -> anyhow::Result<()> {
             spent += usd;
             let c = scored(p, run, calls.is_empty(), &asked, usd);
             println!(
-                "{} run {run}: {}{} · first words {:?} ms · searches {}{} · ${usd:.4}",
+                "{} run {run}: {}{} · first words {:?} ms · searches {}{} · pages {}{} · ${usd:.4}",
                 c.id,
                 c.decision,
                 c.mode.map(|m| format!(" ({m:?})")).unwrap_or_default(),
                 c.first_words_ms,
                 c.searches,
-                if c.text_before_search { " (text before)" } else { "" }
+                if c.text_before_search { " (text before)" } else { "" },
+                c.fetches,
+                if c.ends_on_a_tool { " (ends on a tool)" } else { "" }
             );
             calls.push(c);
             // After every call: a run cut short keeps what it paid for.
@@ -407,7 +444,10 @@ mod tests {
             first_words_ms: first,
             total_ms: 0,
             searches,
+            fetches: 0,
+            pages: Vec::new(),
             text_before_search: false,
+            ends_on_a_tool: false,
             cost_usd: 0.25,
         }
     }
@@ -443,6 +483,42 @@ mod tests {
         assert_eq!(s.first_words_ms_no_search, Some(1_300), "the cold call is left out");
         assert_eq!(s.first_words_ms_search, Some(6_000));
         assert!((s.cost_usd - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn page_reads_have_their_own_first_words() {
+        let mut fetched = call(Expect::Answer, "answer", None, None, Some(4_000), 0, false);
+        fetched.fetches = 1;
+        let plain = call(Expect::Answer, "answer", None, None, Some(1_000), 0, false);
+        let searched = call(Expect::Answer, "answer", None, None, Some(5_000), 1, false);
+        let s = summarize(&[fetched, plain, searched]);
+        assert_eq!((s.first_words_ms_no_search, s.first_words_ms_search, s.first_words_ms_fetch), (Some(1_000), Some(5_000), Some(4_000)));
+    }
+
+    #[test]
+    fn the_sites_of_the_pages_read_are_kept() {
+        let content = vec![
+            json!({ "type": "web_fetch_tool_result", "tool_use_id": "s1", "content": { "type": "web_fetch_result", "url": "https://www.rfc-editor.org/rfc/rfc2324.txt", "content": {} } }),
+            json!({ "type": "web_fetch_tool_result", "tool_use_id": "s2", "content": { "type": "web_fetch_tool_result_error", "error_code": "url_not_accessible" } }),
+        ];
+        assert_eq!(pages_read(&content), ["rfc-editor.org"]);
+    }
+
+    /// A turn that paused after its last read or search and was not continued (the reads are spent) ends on that tool's
+    /// block, with no words after it.
+    #[test]
+    fn an_answer_that_ends_on_a_tool_is_seen() {
+        let fetch = json!({ "type": "server_tool_use", "id": "f1", "name": "web_fetch", "input": {} });
+        let page = json!({ "type": "web_fetch_tool_result", "tool_use_id": "f1", "content": { "type": "web_fetch_result" } });
+        let said = json!({ "type": "text", "text": "Сейчас прочитаю." });
+        let blank = json!({ "type": "text", "text": " " });
+        let write = json!({ "type": "tool_use", "id": "w1", "name": "write_to_field", "input": {} });
+        assert!(ends_on_a_tool(&[said.clone(), fetch.clone(), page.clone()]));
+        assert!(ends_on_a_tool(&[fetch.clone(), page.clone(), blank]), "blank text is no words");
+        assert!(ends_on_a_tool(&[said.clone(), fetch.clone()]));
+        assert!(!ends_on_a_tool(&[fetch.clone(), page.clone(), said]));
+        assert!(!ends_on_a_tool(&[fetch, page, write]), "a write ends the turn");
+        assert!(!ends_on_a_tool(&[]));
     }
 
     /// A model without a price would cost $0 a call, and `--max-usd` would never stop the run.

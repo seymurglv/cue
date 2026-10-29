@@ -5,7 +5,8 @@
 //! cargo run -p cue-engines --example refine_compare -- phrases.json out.json [--models a,b,…] [--runs 3] [--max-usd 1.00]
 //!   [--terms a,b,…] [--dry-run]
 //!
-//! - `phrases.json` is an array of `{id, app, raw, before_cursor?, to?}`; `out.json` gets all calls and the summary.
+//! - `phrases.json` is an array of `{id, app, raw, before_cursor?, selection?, to?}` (other fields, such as a check's
+//!   `expect`, are left alone); `out.json` gets all calls and the summary.
 //! - Models are OpenRouter ids (`openai/gpt-6-luna`) and `claude-haiku-5-5` — the app's current path (Anthropic direct,
 //!   `claude::refine`, total time only). By default, the built-in candidate set (`DEFAULT_MODELS`).
 //! - `to` translates the phrase into that language, as `Ctrl + Win + Shift` does in the app: a Soniox code
@@ -14,6 +15,9 @@
 //!   and `out.json` lists it under `skipped` ("translation is direct-only"). Each call in `out.json` carries `to`
 //!   (`null` for a cleanup). A translation that fails its check is `raw_fallback`, where the app says "Couldn't
 //!   translate".
+//! - `selection` is the field's selection a dictation goes over (spec 2 §12.13), sent as the app sends it
+//!   (`RefineContext::with_selection`: one short line); a selection runs on the direct path only, like a translation
+//!   (`skipped`: "a selection is direct-only"), and the OpenRouter models get the context without one.
 //! - Each phrase → run 1..runs → each model in turn; everything is sequential. A model's first call is the warm-up
 //!   (cold), reported separately in the summary; medians and p90 are over warm calls.
 //! - The prompt, the context and the response check are the same as in the app: `cue_core::refine`, then `strip_markup`,
@@ -121,6 +125,11 @@ struct Phrase {
     raw: String,
     #[serde(default)]
     before_cursor: Option<String>,
+    /// The field's selection, as the app sends it with a dictation (spec 2 §12.13): through
+    /// `RefineContext::with_selection`, so a selection the app would not send (`sent_selection` is `None`) does not go
+    /// here either.
+    #[serde(default)]
+    selection: Option<String>,
     /// `to` as written in the file; [`read_phrases`] checks it and fills [`Phrase::to`].
     #[serde(default, rename = "to")]
     to_code: Option<String>,
@@ -166,10 +175,15 @@ enum Engine {
     Router { info: Box<ModelInfo>, profile: Profile },
 }
 
-/// Why a model does not run a phrase, if it does not: a translation runs only on the direct path, the app's own
-/// (comparing models for translation is not this bench's job). `direct` — the model is [`DIRECT`].
+/// Why a model does not run a phrase, if it does not: a translation and a dictation over a selection run only on the
+/// direct path, the app's own (comparing models for them is not this bench's job, and the app never sends a selection
+/// through OpenRouter). `direct` — the model is [`DIRECT`].
 fn skip_reason(direct: bool, p: &Phrase) -> Option<&'static str> {
-    (p.to.is_some() && !direct).then_some("translation is direct-only")
+    if p.selection.is_some() && !direct {
+        Some("a selection is direct-only")
+    } else {
+        (p.to.is_some() && !direct).then_some("translation is direct-only")
+    }
 }
 
 /// A phrase a model does not run, once per phrase and model — for `out.json`.
@@ -681,7 +695,10 @@ async fn main() -> anyhow::Result<()> {
     // An empty report right away: the output path is checked before the first paid request.
     Report { args: &args, lanes: &lanes, calls: &calls, skipped: &skipped, planned, spent, stopped_by_budget }.write()?;
     'phrases: for p in &phrases {
-        let ctx = RefineContext::new(p.app.as_str(), p.before_cursor.as_deref(), s.context_chars);
+        let ctx = RefineContext::new(p.app.as_str(), p.before_cursor.as_deref(), s.context_chars).with_selection(p.selection.as_deref());
+        // OpenRouter gets no selection even if the skip rule let one through: its request has no selection block, and the
+        // tag alone would mean nothing to the model.
+        let router_ctx = RefineContext { selection: None, ..ctx.clone() };
         for lane in &lanes {
             if let Some(reason) = lane.skips(p) {
                 println!("          {} {:<30} skipped: {reason}", p.id, lane.id);
@@ -699,7 +716,7 @@ async fn main() -> anyhow::Result<()> {
                     Engine::Direct => direct_call(&http, direct_key.as_deref().unwrap_or_default(), p, &ctx, &args.terms, &s).await,
                     Engine::Router { info, profile } => {
                         let key = router_key.as_deref().unwrap_or_default();
-                        router_call(&http, key, &lane.id, info, profile, &mut lane.routing, p, &ctx, &args.terms, &s).await
+                        router_call(&http, key, &lane.id, info, profile, &mut lane.routing, p, &router_ctx, &args.terms, &s).await
                     }
                 };
                 call.seq = calls.len() + 1;
@@ -902,8 +919,24 @@ mod tests {
     }
 
     #[test]
+    fn a_phrase_may_carry_a_selection_and_runs_only_on_the_direct_path() {
+        let dir = std::env::temp_dir().join(format!("cue-refine-compare-sel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.json");
+        std::fs::write(&path, r#"[{"id":"w","app":"Slack","raw":"глянь вот это","selection":"https://x.io/a","expect":"woven"}]"#).unwrap();
+        let got = read_phrases(&path).unwrap();
+        assert_eq!(got[0].selection.as_deref(), Some("https://x.io/a"), "unknown fields such as expect are the check's");
+        assert_eq!(skip_reason(false, &got[0]), Some("a selection is direct-only"));
+        assert_eq!(skip_reason(true, &got[0]), None);
+        let ctx = RefineContext::new("Slack", None, 500).with_selection(got[0].selection.as_deref());
+        assert_eq!(ctx.sent_selection(), Some("https://x.io/a"));
+        assert_eq!(RefineContext { selection: None, ..ctx }.sent_selection(), None, "the OpenRouter lanes' context");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn translations_run_only_on_the_direct_path() {
-        let phrase = |to| Phrase { id: "a".into(), app: "X".into(), raw: "x".into(), before_cursor: None, to_code: None, to };
+        let phrase = |to| Phrase { id: "a".into(), app: "X".into(), raw: "x".into(), before_cursor: None, selection: None, to_code: None, to };
         assert_eq!(skip_reason(true, &phrase(Some("en"))), None);
         assert_eq!(skip_reason(false, &phrase(Some("en"))), Some("translation is direct-only"));
         assert_eq!((skip_reason(true, &phrase(None)), skip_reason(false, &phrase(None))), (None, None), "a cleanup runs everywhere");

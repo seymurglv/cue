@@ -101,7 +101,7 @@ shows the `translate` error (`claudeKey` for a key, balance or limit problem) wi
 **"Ask" in the flow.** A question is recorded and transcribed like a dictation; then, instead of `Refine`, the flow
 emits `Ask { id, question, follow_up }` and stays in Thinking (the Drop's three dots) until the answer has something to
 show. The runtime reports back with four inputs: `AskOpened` (the first real step: a search began, its results came,
-or the first words), `AskAnswered` (the answer is complete; a refusal, or a written text shown instead of written,
+a page read began or a page came in, or the first words), `AskAnswered` (the answer is complete; a refusal, or a written text shown instead of written,
 too), `AskWrite { how }` (the model wrote text for the field and the runtime holds it; `PasteHow` is `AtCaret`,
 `Replace` or `Below`) and `AskFailed { error }` (`AskError::Key` or `Failed`). An answer that opens or ends moves the
 flow to the `Answer` phase: the Drop rests (it looks idle), the answer shows in the tray or the card, `Esc` stays
@@ -225,6 +225,16 @@ recording in progress.
   (a key-less `HEAD`, at most every 20 s, at once after wake). Right after the second press it also asks `cue-focus`
   for the focused app and up to `refine.context_chars` characters before the caret, in parallel with transcription.
   Password fields are never read; the app name comes from the executable's file description, never the window title.
+- **The selection of a dictation** (spec 2 §12.13) is read in the same query, at the second press, when the user may
+  have selected a link while speaking and the mode is final: `query_for_dictation` asks for up to 250 characters from
+  the selection's start (`WOVEN_READ_CHARS`), without its end or its rectangles, within 250 ms
+  (`DICTATION_FOCUS_TIMEOUT`; "Ask" keeps its own read at the chord). Only what the field reports itself goes on:
+  UI Automation or a classic field, text that is not read-only and was read whole (`selection::dictation_selection`).
+  A dictation never presses `Ctrl + C`: the clipboard and Win+V are untouched, and an app that does not report its
+  selection gives none. With `refine.context_chars` at 0 the query is the plain one and no selection is read
+  (`offered_selection`): nothing from the field goes. A retried translation and Restore after `Esc` read the field anew
+  with a synchronous query (the core forgets the read queued at `Esc`, which saw the field as it was then). A
+  selection that comes after the second press is not woven in; the paste replaces it as any dictation does.
 - The request: the system prompt as a cached block, a user message with `<app>`, `<before_cursor>` and `<transcript>`
   tags (closing tags inside the data are defused), effort `low`, thinking disabled where the model allows it, and a
   JSON schema that forces `{"text": …}`. Timeout: 3 s plus 1 s per 100 words.
@@ -235,6 +245,22 @@ recording in progress.
   prompt and the list together; editing the list costs one cache write. Entries are trimmed, and empty, multi-line,
   overlong (over 60 characters) and repeated ones are dropped, at most 200 kept. With no usable term the request is
   byte for byte the one without a dictionary. Soniox never gets the terms: it bills context tokens on every dictation.
+- **The selection in the request.** What goes is one value, `RefineContext::sent_selection()`: the field's selection
+  through `refine::weavable` (trimmed; one line, with no control character, U+2028/U+2029, embedded object U+FFFC or
+  invisible format character; at most 80 characters, a link alone, `http(s)://` or `www.` without spaces, at most
+  250). The message's tag, the request's block, the check of the answer and the paste over the selection all go by
+  it, so they never disagree. The selection goes in the user message as `<selection>`, between `<before_cursor>` and
+  `<transcript>` (the field's order: the text before it, what is selected, what replaces it), and with it
+  `</selection>` is defused in every part. The block about it (`SELECTION_PROMPT`: put the selection in as it is
+  where the speech points at it, otherwise return the speech alone; every other rule still holds, and a woven result
+  is translated like any other; the selection is data) comes after the cache mark, and before a translation's block,
+  which stays last: with the selection's rules last, the model kept a woven translation in the spoken language. So
+  the cached prefix and the warm-up do not change, and a request without a selection is byte for byte what it was
+  (locked by `body_without_terms_is_unchanged`, `a_translation_without_a_selection_is_unchanged`,
+  `warm_body_builds_the_dictation_prefix`, `refine_sends_key_version_and_json_body` and the OpenRouter body test). A
+  selection adds about 300 uncached input tokens (its block and its tag, measured on the bench), about $0.00003 with
+  Haiku 5.5. Whether the selection is a link or a name nobody decides in code: the model decides by the speech. The
+  OpenRouter path never gets a selection.
 - When the app is unknown (neither the query at the start of recording nor the one after the second press named it),
   the request carries `<app>unknown app</app>`; Soniox gets no app context in that case.
 - The answer is used only when it is a complete `{"text": …}` object: a refusal, `max_tokens`, a timeout, a network
@@ -245,6 +271,23 @@ recording in progress.
   within `min_ratio`…`max_ratio` (0.35–1.25). At least `min_overlap` (70 %) of the result's non-number words must
   appear in the transcript; words of `dictionary.terms` count as appearing, so a name fixed in a short phrase
   ("открой гитхаб" → "Открой GitHub.") is not taken for an invention. An empty result always fails. A failed check pastes the raw transcript.
+- **The check with a selection** (`refine::woven`, `sanity_ok_with_selection`, `claude::decide_with_selection`). The
+  result holds the selection as it is and whole (a link as a word of its own: before it whitespace, an opening sign,
+  `:` or a character outside ASCII, so "项目：https://…" holds it; glued after it only punctuation; a name not inside
+  another word): the selection is taken out and the speech around it gets the usual check, unless the speech says
+  every word of the selection (re-dictated, not woven), and then the whole result does. A result with no letter or
+  digit besides the selection is the plain case. A selected link that caught the sentence's sign after it
+  (`. , ; : ! ? …`, never a bracket or quote, which may be the link's own) is held by a copy without that sign. A link
+  of the selection (the selection itself, or a link inside selected text) that is not in the result whole while its
+  site is, as a host of its own ("x.com" is neither in "box.com" nor in "x.com.evil.org"), is a changed copy, and it
+  never passes: the raw transcript is pasted over the selection (the app's own Ctrl+Z brings the link back). A copy
+  with a character dropped or a path "corrected" would otherwise replace the working link the user selected, and
+  nothing on screen would show it. Otherwise it is the plain dictation, where the selection's words count as said (a
+  name woven in another case). The Markdown rules count the selection as said too (`strip_markup` over the speech and
+  the selection), so a woven link or `code` keeps its signs. Known limits: a plain dictation that names the selected
+  link's host ("залей на github.com") looks like a changed copy and falls back to the raw text; a copy whose host the
+  model changed is not seen as changed; an echo of the selection ("Привет." over a selected "Привет" when "здравствуйте"
+  was said) passes; a name glued into Chinese or Japanese text is never whole.
 - A key, balance or limit problem at Anthropic pastes the raw transcript and then shows "Claude key problem" without
   Retry.
 
@@ -262,10 +305,15 @@ recording in progress.
   result in the target language (its English name), which replaces the rules to keep the spoken language and never
   translate; keep the meaning, the tone and the formatting rules (plain text, the list rules, one line in terminals);
   dictionary terms, product names and code stay as written. The cached prefix is the one plain dictation uses, so a
-  translation never writes a cache of its own, and a request without a translation is byte for byte what it was.
+  translation never writes a cache of its own, and a request without a translation is byte for byte what it was. A
+  selection's block, when one goes, comes before this one, so the translation is the last word: only the selection
+  stays untranslated.
   `max_tokens` doubles (another alphabet may take more tokens), up to 16 000. Timeout: 4 s plus 1 s per 100 words,
   a second more than a cleanup.
 - **Check** (`translation_ok`), instead of the sanity check, on the text after Markdown stripping and list tidying.
+  With a selection in the request (`translation_ok_with_selection`, `decide_translation_with_selection`), the
+  selection stays as it is: when the result holds it whole, the speech around it gets the check below; a changed copy
+  of a selected link fails ("Couldn't translate"); without the selection as it is, the plain check.
   The result has letters or digits. From 20 letters of speech, its length is 0.35–2.8 times the speech's, counted in
   letters, each weighted by its script (a Han character counts as 3 Latin letters, a Hangul one as 2, a kana as 1.5),
   and in digits, 2.5 letters each on both sides: a translation often writes the speech's number words as digits
@@ -332,6 +380,14 @@ The same path serves dictation and `Ctrl + Win + V`:
    layout works), and report "pasted". After 0.5 s the snapshot is restored, unless the clipboard sequence number
    shows someone else changed it.
 
+**Over a selection.** A dictation whose cleanup carried the field's selection pastes over it: the core keeps which
+selection went with which dictation (`woven`, set from `sent_selection()` when the request starts and taken by that
+dictation's paste), and `pasted_text` puts the selection's own leading and trailing whitespace in place of the text's
+(`ask::replace_edges`, as "Ask"'s Replace does): no join space, a space or line break selected with it stays, and a
+selection inside a word gets no space. This holds whether the selection was woven in or not, and for a raw fallback too.
+A terminal is the exception: it pastes at its prompt and never over a selection, so there the text gets the
+dictation's join, on one line. A dictation that sent no selection pastes as before.
+
 **No field.** CUE says "nowhere to paste" only when it is sure: the focus is on the desktop, in File Explorer's file
 list or folder tree, or nowhere at all. Apps that expose nothing to UI Automation still get the paste. The text is
 then put in the clipboard normally, without markers, and the "Nowhere to paste" card offers Copy. The same happens
@@ -397,11 +453,28 @@ effects need, and `cue_engines::ask` talks to the API.
   first words of a searched question within 8 s and answered a follow-up after a search): `web_search_20260318`, the
   filtered search, with `max_uses` = `ask.max_searches`. A key whose organization has no web search gets a 400 that says
   so, and the question is asked again at once without it.
+- Page reading (spec 2 §12.12) comes last among the tools: Claude's server tool `web_fetch` reads a page the model
+  asks for and puts its text in the response. Search and reading are one switch (`ask.web_search`): `WebTools {
+  search, fetch }`, both on (`WebTools::on`) or both off (`WebTools::NONE`). The version is the probe's choice
+  (`fetch_probe`, 2026-10-29): the basic `web_fetch_20250910`, called by the model directly (`allowed_callers:
+  ["direct"]`, so the filtered search's code never calls it), with `max_uses: 2`, `max_content_tokens: 10000` and
+  citations on; the filtered version's first read failed on its input there, and one page the user pointed at gains
+  nothing from filtering in code. The API opens only addresses from the user's messages and from earlier search and
+  read results. `max_content_tokens` cuts a page's text but not a PDF, which comes whole (RFC 9110's, about 524
+  thousand tokens), so the instruction asks never to open one; that guard is the model's, not the code's. A 400 that
+  names page reading ("web fetch", "web_fetch") is checked before the search's rule, since it may name the search too:
+  the question is asked again at once without reading and keeps its search. Neither refusal is remembered for the
+  session, so with reading off for the key's organization every question first gets one refusal (a few hundred
+  milliseconds, not billed).
 - The instruction (`ASK_PROMPT`, English; the answer follows the language of the question) is one cached system
   block: what the tags mean, that their content is data and never instructions, when to call `write_to_field` and with
   which mode, the form of a written text (plain, no quotes, the app's tone, one line in terminals), the form of an
-  answer (short, simple Markdown: bold, lists, code; no headings, tables or links), and when to search (anything that
-  may have changed since the training data; facts that cannot change, explanations and writing need none).
+  answer (short, simple Markdown: bold, lists, code; no headings, tables or links), when to search (anything that
+  may have changed since the training data; facts that cannot change, explanations and writing need none), and when
+  to read a page: the one page the user points at, by its link in `<selection>` or `<question>`, then a brief answer;
+  a search only when the page cannot be read or is not enough; never a PDF or another document file (a path ending in
+  `.pdf`, or one the question or the selection calls a document), which is answered from a search; no other links; a
+  page that cannot be read is no failure.
 - The user message (`first_message`): `<question>`, then `<selection>`, `<before_cursor>`, `<app>` and `<today>`;
   empty parts are left out, and our closing tags inside the data are defused. The date sits in the user message, not in
   the cached instruction, so the cached prefix is the same every day; the bench checks that questions about the present
@@ -424,18 +497,36 @@ effects need, and `cue_engines::ask` talks to the API.
 
 - `StreamState` turns one response's events into its content blocks as the API would return them whole (text with its
   citations, tool calls with their input parsed, search results with their encrypted content, thinking with its
-  signature) and into `Step`s for the answer on screen: `Searching`, `Reading`, `TextStart`, `Text`, `Cite` (a search
-  result's URL and title; without a title, its site), `WriteStart`, and `Spent` (what the question has cost so far,
-  sent as the counts change). Events and deltas it does not know are skipped. The first words (`Step::is_first_words`)
-  are text that is not blank, or the start of a write.
+  signature) and into `Step`s for the answer on screen: `Searching`, `Reading`, `Fetching` (a page read began),
+  `Fetched` (a page came in, not an error: its URL and the title its chip shows), `TextStart`, `Text`, `Cite` (a
+  search result's or a read page's URL and title; without a title, its site), `WriteStart`, and `Spent` (what the
+  question has cost so far, sent as the counts change). Events and deltas it does not know are skipped. The first
+  words (`Step::is_first_words`) are text that is not blank, or the start of a write.
+- **Pages and their citations.** The parser of a response knows the pages its conversation has read
+  (`StreamState::after`: the history's `web_fetch_result`s in order, then this response's). A page's citation
+  (`char_location`; a PDF's `page_location`; `content_block_location`) names it by `document_index`, which the probe
+  found counted over the whole conversation: the page at that index when its title matches (or either has none), else
+  the last page with the citation's title, else no page, and the words stay without a number. A `web_fetch_result`
+  without an address keeps its place in that count but gets no chip and no number, so the pages after it keep theirs;
+  a failed read (`web_fetch_tool_result_error`) is no page and takes no place. Many answers cite nothing of the page
+  they read; the chip shows anyway.
 - The decision (`decide`): a refusal (`stop_reason: refusal`) wins over anything the stream already had; a
   `write_to_field` call counts only complete and valid (not cut at `max_tokens`, a mode from the schema, some text);
   otherwise any text is an answer; nothing to show is a `Malformed` failure.
 - `run`: a paused turn (`pause_turn`) is continued with its blocks and the same tools, at most 3 times and only while
   the question's searches are fewer than `max_uses`, so a question runs at most `2 × max_searches − 1` searches. A
   write cut at `max_tokens` (a long email) is asked again once with 4,000 more tokens of room, under deadlines of its
-  own from when the retry is sent. The deadlines: the first words within 8 s, or within 20 s once a search began; the
-  whole answer, continuations included, within 30 s. The rest of an answered response's body is read in the background
+  own from when the retry is sent. A question reads 2 pages at most (`FETCH_MAX_USES`), its continuations included:
+  `max_uses` counts per request, so a continuation after `n` reads, and the widened retry of a cut write, send the
+  reader with `max_uses = 2 − n`; with both read there is neither (a pause then ends the answer where it paused, and a
+  cut write is not carried out: "Couldn't get an answer" with Retry). A continuation with a smaller `max_uses` has
+  other tools than the cached prefix, so it reads nothing from the cache (one uncached prefix, about $0.001, on a rare
+  continuation after a read). The pages read are the ones the stream began or the end's `web_fetch_requests`,
+  whichever is more (an end that leaves the count out loses no read; one the API deferred and never ran counts, with
+  no fee). A read that fails inside an answer (`web_fetch_tool_result_error`) is no failure of the question: the model
+  answers from a search or from what it knows. The deadlines: the first words
+  within 8 s, or within 20 s once a search or a page read began; the whole answer, continuations included, within
+  30 s. The rest of an answered response's body is read in the background
   (5 s at most), so the connection can be reused.
 - Failures (`AskFailure`, one log line with the kind): no key; 401, 402 or 403, or a 400 about the credit balance (a
   key problem: `AskError::Key`, the Drop's "Claude key problem" without Retry); 404, the model in `ask.model` does not
@@ -450,8 +541,10 @@ effects need, and `cue_engines::ask` talks to the API.
 ### Conversation and the answer
 
 - `runtime::ask::Conversation` lives from the first question until `CloseAnswer`, and is then forgotten. It keeps the
-  answered exchanges, the question in flight, the container, the sources (numbered in the order a URL is first cited,
-  across the conversation) and `AnswerView`, the answer as the windows draw it. A first question is asked with its
+  answered exchanges, the question in flight, the container, the sources (numbered in the order a URL is first read or
+  cited, across the conversation: a page gets its number and chip as soon as it comes in, `Step::Fetched`, cited or
+  not; the windows get its site and title, the URL stays in the core) and `AnswerView`, the answer as the windows draw
+  it. A first question is asked with its
   context; once an exchange has succeeded, a follow-up goes alone. The model's blocks go back as they came, except
   a search the API never ran (it defers a search when the model also calls a client tool, and a follow-up that leaves
   it unanswered is refused). A follow-up after a written text that was shown answers that call first, with a
@@ -645,7 +738,8 @@ and the card always match.
 words at a time, its source chips), the row of a follow-up being recorded ("Listening for a follow-up…") or one that
 could not be made out (with Retry), and the buttons. A request that fails after its first words keeps them, shown
 whole, with the error and Retry under them. The thinking line names only real steps ("Searching the web",
-"Reading sources", "Writing the answer"); before the first one it is shimmering placeholder lines, and the answer opens
+"Reading sources", "Reading the page" for the `fetching` step, from the start of a page read to the first words,
+"Writing the answer"); before the first one it is shimmering placeholder lines, and the answer opens
 only with a real step. The buttons are disabled while the answer is still coming or still being revealed (Retry
 excepted), and all of them and the cross are disabled outside the `answer` phase. While any tray is open the Drop steps
 aside. `answer.ts` is one view for the tray and the card: the core sends the whole answer every time, and the view keeps
@@ -720,15 +814,16 @@ code change.
 An attempt is a recording and its transcription; Retry starts a second attempt of the same dictation, and each gets
 its own row in `%LOCALAPPDATA%\CUE\usage.csv`:
 `ts, audio_ms, stt_engine, stt_path, stt_usd, refine_model, input_tokens, cache_read_tokens, cache_write_tokens,
-output_tokens, refine_usd, latency_ms, outcome, mode, web_searches, search_usd`. `stt_path` is `stream`,
+output_tokens, refine_usd, latency_ms, outcome, mode, web_searches, search_usd, web_fetches`. `stt_path` is `stream`,
 `stream+batch` or `batch`; outcomes are `inserted`, `no_field`, `cancelled`, `empty`, `failed`, `discarded` (written
 only when audio ran past 380 ms) and `answered` (an "Ask" answer shown in full, a refusal too: paid for, nothing
 pasted). `mode` is `dictate`, `translate` or `ask` as the dictation's refine or question started (for an attempt that
 ends before that, the mode it was recording in: the attempt follows a `ModeToggle` or `ModeChange` the flow accepts),
 or `warmup`. The Retry of a failed translation re-translates the saved text: a new row with no audio. A cache warm-up
 is a row of its own: its tokens and cost, no audio, latency 0, outcome `discarded`, mode `warmup`, and the model it
-warmed (`refine.model`, or `ask.model` for "Ask"). Rows written before the last three columns existed read as
-dictation, and the header of an existing file is never rewritten (new files get the 16-column header). Latency runs
+warmed (`refine.model`, or `ask.model` for "Ask"). Rows of 13 fields (before `mode`, `web_searches` and
+`search_usd`) read as dictation, rows of 13 and 16 fields as no pages read, and the header of an existing file is never
+rewritten, so an older file keeps its 13 or 16 names over rows of 17 fields (new files get the 17-column header). Latency runs
 from the second press to Ctrl+V (from Retry or Restore when used); the target for a ~30-word phrase is 1.5 s or less.
 Rows that fail to write, for example while the file is open in Excel, wait in memory and go out before the next one.
 `cue-cli usage` sums a UTC month: dictations are `inserted` plus `no_field` rows (an `answered` row is not one),
@@ -738,7 +833,13 @@ value follow, in the order they first appear.
 
 An `ask` row carries `ask.model` in `refine_model`, the tokens of all the question's requests (continuations, a widened
 write, and a request aborted by `Esc` before Restore asked again), and its searches in `web_searches`, priced in
-`search_usd` (searches × `pricing.web_search_usd`). What a question has spent reaches the attempt as the stream goes
+`search_usd` (searches × `pricing.web_search_usd`), and its page reads in `web_fetches`, with no price of their own:
+a page's tokens are in the row's tokens and in `refine_usd`. `cue-cli usage` adds "Pages read by Ask: N" when N is
+above 0. Every priced request goes through `usage::refine_cost`, which takes the model's long rates
+(`ModelPrice::rates`, `long_context` or the model's default: Haiku 5.5 over 100,000 tokens of input, cache reads and
+cache writes together, $0.50 / $2.50 per million, a cache write 1.25 times and a cache read 0.1 times that input rate)
+once the prompt is over the line; an `ask` row sums its requests before the line is applied, so a question of several
+short requests may be priced long (an overestimate). What a question has spent reaches the attempt as the stream goes
 (`Step::Spent`), so an answer closed or aborted mid-stream, a failed one and one cut by a deadline still write their
 cost: the tokens reported so far, and every search the stream started. Its latency runs from the second press to the first words for an `answered` row (the target for the first words of
 an answer without a search is 2.5 s), and to Ctrl+V for a written text. A follow-up is an attempt of its own, and so is
@@ -753,13 +854,16 @@ and gets its own row when it ends. Pasting a complete answer with its button add
   at startup, how many dictionary terms are used and skipped, and the translation pair (two language codes); the
   target code of each translation; the token counts of each cache warm-up; for "Ask", the kind and length of the
   selection read, whether the `Ctrl + C` fallback ran and what became of its Win+V copy (a kind), the number of turns
-  of a request, where the answer opened (tray or card), how a request ended and its number of web searches. Never
-  logged: dictation text, text before the caret, translations, dictionary terms, questions, answers, selected text,
-  written texts, the addresses and titles of sources, where the selection is on screen, audio, API keys, response
-  bodies. `Effect` and `Input` are never logged with `{:?}`, since their `Debug` prints text.
+  of a request, whether it went with search and page reading, where the answer opened (tray or card), how a request
+  ended and its numbers of web searches and pages read; for a dictation, the length of a selection that went with its
+  cleanup. Never logged: dictation text, text before the caret, translations, dictionary terms, questions, answers,
+  selected text (of a dictation too), written texts, the addresses and titles of sources and of the pages read, where
+  the selection is on screen, audio, API keys, response bodies. `Effect` and `Input` are never logged with `{:?}`,
+  since their `Debug` prints text.
 - WebSocket handshake tracing is switched off by a fixed filter, since it would include the `Authorization` header.
 - The panic hook is installed first and records only the thread and code location, never the message, which could
-  contain dictated text. Debug output of focus results, of the selection read and copied, of the "Ask" context and of
+  contain dictated text. Debug output of focus results, of the selection read and copied, of the refine context
+  (`RefineContext`: the text before the caret and the selection), of the check's `Woven`, of the "Ask" context and of
   microphone frames shows only lengths.
 - Keys are read from Credential Manager on use, appear in the CLI only masked, and are cut out of engine error texts.
 - Soniox uploads are deleted after use. The last dictation (`last\`) and bench recordings stay on this computer only.
@@ -777,10 +881,12 @@ single HTML page with blind A/B pairs for transcription and for refine, scores, 
 saves the answers as `choices.json`.
 
 `refine_compare` (an example in `cue-engines`) works on text instead of recordings: a phrase file
-(`{id, app, raw, before_cursor?, to?}`) goes through OpenRouter models and the direct Haiku path with the app's prompt,
-context and checks, sequentially, under a `--max-usd` budget. A phrase with `to` is translated, on the direct path
-only (`claude::translate`, the translation check, the 4 s timeout); OpenRouter models skip it, and the skip is listed
-in `out.json`. `out.json` holds every call (the outcome, `to`, and the text that would be pasted, or the raw transcript
+(`{id, app, raw, before_cursor?, selection?, to?}`) goes through OpenRouter models and the direct Haiku path with the
+app's prompt, context and checks, sequentially, under a `--max-usd` budget. A phrase with `to` is translated, on the
+direct path only (`claude::translate`, the translation check, the 4 s timeout); OpenRouter models skip it, and the skip
+is listed in `out.json`. A phrase with `selection` is dictated over that selection, sent as the app sends it
+(`RefineContext::with_selection`), on the direct path only too; the OpenRouter lanes get the context without a
+selection even if the skip rule let one through, since their request has no selection block. `out.json` holds every call (the outcome, `to`, and the text that would be pasted, or the raw transcript
 when the outcome is not `refined`) and per-model medians, p90 and cost; the console gets only ids and numbers. A
 translation that fails its check counts as `raw_fallback`, where the app pastes nothing and says "Couldn't translate";
 on the direct path the model's own answer is not kept.
@@ -788,14 +894,32 @@ on the direct path the model's own answer is not kept.
 `ask_compare` (an example in `cue-engines`) is the bench of "Ask": a phrase file
 (`{id, question, app, selection?, before_cursor?, then?, expect, mode?}`) is asked the way the app asks it
 (`first_message` with today's date, `ask::run` with its deadlines and continuations, web search of 2 searches a request
-unless `--no-search`, thinking as `--thinking adaptive|off` says, the app's default otherwise), one call at a time over
-`--runs` rounds, under a `--max-usd` budget. A phrase's `then` is a follow-up asked after the first answer, and the
-follow-up is what is scored. `out.json` holds every call (the decision, the mode of a write, its text or the answer's
-Markdown, the first words, the total time, the searches, whether text came before the first search, the cost) and a
-summary: right decisions and modes, the median
-first words of warm calls with and without a search (the very first call, with an empty cache, is left out), and the
+and page reading unless `--no-search`, thinking as `--thinking adaptive|off` says, the app's default otherwise), one
+call at a time over `--runs` rounds, under a `--max-usd` budget. A phrase's `then` is a follow-up asked after the first
+answer, and the follow-up is what is scored. `out.json` holds every call (the decision, the mode of a write, its text
+or the answer's Markdown, the first words, the total time, the searches, the pages read and their sites, whether text
+came before the first search, whether the turn ended on a server tool's block with no words after it, the cost) and a
+summary: right decisions and modes, the median first words of warm calls without a search, with one, and with a page
+read (calls that read a page count only in the last; the very first call, with an empty cache, is left out), and the
 cost. `out.json` is written before the first call, so a path that cannot be written stops the run before anything is
 paid, and again after every call, so a run cut short keeps its results; a `--model` without a default price is refused,
 since the budget would count its tokens as $0. The console gets only ids, kinds and numbers. The phrase set and the
 scoring script (format and content checks) live outside the repository. The run of 2026-10-29 (Haiku 5.5, 30 phrases, 5
 runs) decided 99 % right, with the first words of warm calls in 1.7 s without a search and 5.8 s with one, for $0.19.
+
+The benches of selections and pages (2026-10-29, Haiku 5.5, phrase sets outside the repository):
+- **Dictation over a selection** (`refine_compare`, 32 phrases × 5, the selection's block before the translation's):
+  118 of 125 decisions right (94 %); the cleanup 95 of 95, a terminal 10 of 10, "replaced when it should be" (a word
+  selected and said again) 49 of 50; 7 of 155 results refused by the check; a selection did not slow the cleanup (warm
+  medians 0.95 s against 1.34 s for the same speech without one). A translation whose speech points at the selection
+  mostly stays untranslated: the model weaves the selection in as it is and leaves the words around it in the spoken
+  language, and the check refuses the result. Russian into English was right in 9 of 15 calls on the set, but its one
+  link phrase is the instruction's own example; two new link phrases were right in 0 of 10, and English into Russian
+  in 1 of 5 in that run. A translation over a selection the speech does not point at was right. A terminal phrase
+  with "git checkout" said in Cyrillic ("гит чекаут") fails the word overlap of the sanity check with or without a
+  selection, so the set writes it as the recognizer does, in Latin.
+- **Page reading** (`ask_compare`, 7 questions × 5): 35 of 35 decisions right; every question that pointed at a page
+  read it, the link to a PDF was never opened (each time answered from a search), a page built by JavaScript gave an
+  answer, no turn ended on a read, and the first words of a warm call that read a page came in 1.2 s; $0.10.
+- **"Ask" again with page reading on** (the 30 phrases × 2): 97 % right decisions, 91 % format and checks, every
+  question about the present searched, first words in 1.1 s without a search and 1.2 s with one; $0.06.
