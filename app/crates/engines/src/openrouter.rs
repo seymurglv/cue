@@ -312,14 +312,14 @@ fn unfence(text: &str) -> &str {
 /// is parsed whole. An event's `data:` fields are joined with `\n`, and an event ends with an empty line;
 /// comments (`:` at the start of a line, OpenRouter's `: OPENROUTER PROCESSING`) and other fields are skipped.
 #[derive(Debug, Default)]
-struct Sse {
+pub(crate) struct Sse {
     line: Vec<u8>,
     data: Option<String>,
 }
 
 impl Sse {
     /// Data of the events this chunk completed.
-    fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+    pub(crate) fn push(&mut self, bytes: &[u8]) -> Vec<String> {
         let mut out = Vec::new();
         for &b in bytes {
             if b == b'\n' {
@@ -333,7 +333,7 @@ impl Sse {
     }
 
     /// End of stream: an unfinished line and an event with no empty line after it.
-    fn finish(&mut self) -> Vec<String> {
+    pub(crate) fn finish(&mut self) -> Vec<String> {
         let mut out = Vec::new();
         let line = std::mem::take(&mut self.line);
         if !line.is_empty() {

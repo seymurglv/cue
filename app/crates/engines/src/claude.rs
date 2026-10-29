@@ -11,7 +11,7 @@ pub const API_VERSION: &str = "2026-10-21";
 
 /// `max_tokens` headroom for a model whose thinking cannot be turned off (Opus 5.5): otherwise thinking
 /// eats the response budget, the response is cut at `max_tokens`, and the raw text gets pasted.
-const THINKING_HEADROOM: u32 = 2_048;
+pub(crate) const THINKING_HEADROOM: u32 = 2_048;
 
 /// How to turn thinking off: Haiku — `disabled`, Sonnet 5.5 — `between_tools`, Opus 5.5 — not possible (the field is omitted).
 fn thinking_for(model: &str) -> Option<Value> {
@@ -311,7 +311,7 @@ fn raw_fallback(raw: &str, outcome: RefineOutcome, usage: Usage, why: &str) -> R
 }
 
 /// A Messages API POST with the key and the API version.
-fn messages_post(http: &reqwest::Client, url: &str, key: &str) -> reqwest::RequestBuilder {
+pub(crate) fn messages_post(http: &reqwest::Client, url: &str, key: &str) -> reqwest::RequestBuilder {
     http.post(url)
         .header("x-api-key", key)
         .header("anthropic-version", API_VERSION)

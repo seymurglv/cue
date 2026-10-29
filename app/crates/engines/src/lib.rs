@@ -1,3 +1,4 @@
+pub mod ask;
 pub mod check;
 pub mod claude;
 pub mod error;
