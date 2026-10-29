@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DRAG_THRESHOLD, DropController, PLACES, pickPlace, type UiState, type UiAction, type Rect } from '../src/controller';
 import { trayHtml } from '../src/trays';
+import type { Answer } from '../src/answer';
 import { DICTS, KEY_NAME, TRAYS, en, pickLang, ru, type TrayKind } from '../src/strings';
 
 const base: UiState = { phase: 'idle', error: null, retry: false, paused: false, mode: 'dictate' };
@@ -95,6 +96,13 @@ describe('Dictionaries and language', () => {
     expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('No connection');
     expect(document.querySelector('.drop .ib.soft')!.getAttribute('title')).toBe('Cancel · Esc');
     expect(document.querySelector('.drop .ib.soft')!.getAttribute('aria-label')).toBe('Cancel');
+  });
+
+  it('answer texts are the approved ones', () => {
+    expect([ru.answer.searching, ru.answer.reading, ru.answer.writing]).toEqual(['Ищу в интернете', 'Читаю источники', 'Пишу ответ']);
+    expect([ru.answer.below, ru.answer.replace, ru.answer.listening]).toEqual(['Вставить ниже', 'Заменить', 'Слушаю уточнение…']);
+    expect([ru.answer.refused, ru.answer.missed]).toEqual(['Не могу ответить на это', 'Не расслышал уточнение']);
+    for (const lang of ['en', 'ru'] as const) expect(DICTS[lang].answer.about).toContain('{Q}');
   });
 });
 
@@ -601,6 +609,16 @@ describe('Places', () => {
       }
       const zero = (v: string) => (v === '0' ? '0px' : v);
       for (const [prop, v] of Object.entries(want.in)) expect(zero(inner().getPropertyValue(prop)), `${place} .in ${prop}`).toBe(v);
+    }
+  });
+
+  it('the answer tray is pinned like the tray cards at every place', () => {
+    ctl.answer({ place: 'tray', quote: null, turns: [], sources: [], listening: false, missed: false, actions: ['insert', 'copy'] });
+    const ans = () => getComputedStyle(document.querySelector('.tray.ansA')!);
+    const card = () => getComputedStyle(document.querySelector('.tray:not(.ansA)')!);
+    for (const place of PLACES) {
+      ctl.place(place);
+      expect([flat(ans().left), flat(ans().top), flat(ans().transform)], place).toEqual([flat(card().left), flat(card().top), flat(card().transform)]);
     }
   });
 });
@@ -1269,5 +1287,151 @@ describe('Quiet mode: frames stop when nothing on screen can change', () => {
     } finally {
       delete (window as any).matchMedia;
     }
+  });
+});
+
+describe('"Ask" answer in the tray', () => {
+  const done = (over: Partial<Answer> = {}): Answer => ({
+    place: 'tray',
+    quote: null,
+    turns: [{ question: 'What is HTTP 418?', step: null, segments: [{ text: "I'm a teapot.", cites: [] }], state: 'done' }],
+    sources: [],
+    listening: false,
+    missed: false,
+    actions: ['insert', 'copy'],
+    ...over,
+  });
+  const box = () => document.querySelector('.tray.ansA') as HTMLElement;
+
+  it('grows out of the Drop, 420 wide; the Drop steps aside; closing folds it back and empties it', () => {
+    vi.useFakeTimers();
+    ctl.answer(done());
+    expect(box().hidden).toBe(false);
+    expect((box().querySelector('.in') as HTMLElement).style.width).toBe('420px');
+    expect(document.querySelector('.drop')!.classList.contains('away')).toBe(true);
+    expect(box().querySelector('.aq')!.textContent).toBe('What is HTTP 418?');
+    ctl.answer(null);
+    vi.advanceTimersByTime(1_000);
+    expect(box().hidden).toBe(true);
+    expect(document.querySelector('.drop')!.classList.contains('away')).toBe(false);
+    expect(box().querySelector('.in')!.children).toHaveLength(0);
+    vi.useRealTimers();
+  });
+
+  it('a card answer belongs to the card window, not the Drop', () => {
+    ctl.answer(done({ place: 'card' }));
+    expect(box().hidden).toBe(true);
+  });
+
+  it('its buttons and source chips reach the core', () => {
+    const opened: number[] = [];
+    document.body.innerHTML = '<div id="stage"></div>';
+    sent = [];
+    ctl = new DropController(document.getElementById('stage')!, {
+      send: (a) => sent.push(a),
+      rects: () => {},
+      source: (n) => opened.push(n),
+    });
+    ctl.apply({ ...base, phase: 'answer', mode: 'ask' });
+    ctl.answer(done({ sources: [{ n: 1, site: 'httpwg.org', title: 'RFC 2324' }], turns: [{ question: 'q', step: null, segments: [{ text: 'Teapot', cites: [1] }], state: 'done' }] }));
+    for (let t = 0; t < 1_000; t += 60) ctl.frame(t);
+    box().querySelector<HTMLButtonElement>('[data-cmd="answerInsert"]')!.click();
+    box().querySelector<HTMLButtonElement>('.sc')!.click();
+    box().querySelector<HTMLButtonElement>('[data-x]')!.click();
+    expect(sent).toEqual(['answerInsert', 'answerClose']);
+    expect(opened).toEqual([1]);
+  });
+
+  it('while a follow-up is recorded, thought over or missed, its buttons and cross wait: the core takes them only in its answer phase', () => {
+    ctl.apply({ ...base, phase: 'answer', mode: 'ask' });
+    ctl.answer(done());
+    for (let t = 0; t < 1_000; t += 60) ctl.frame(t);
+    const all = () => [...box().querySelectorAll<HTMLButtonElement>('[data-x], .aft button')];
+    expect(all().map((b) => b.disabled)).toEqual([false, false, false]);
+    for (const phase of ['start', 'listen', 'think', 'error'] as const) {
+      ctl.apply({ ...base, phase, mode: 'ask' });
+      ctl.frame(2_000);
+      expect(all().map((b) => b.disabled), phase).toEqual([true, true, true]);
+      for (const b of all()) b.click();
+      expect(sent, phase).toEqual([]);
+    }
+    // The missed follow-up's Retry is the Drop's own retry, which the core takes in its error phase.
+    ctl.answer(done({ missed: true }));
+    box().querySelector<HTMLButtonElement>('.lsn.miss button')!.click();
+    expect(sent).toEqual(['retry']);
+    ctl.apply({ ...base, phase: 'answer', mode: 'ask' });
+    expect(all().map((b) => b.disabled)).toEqual([false, false, false]);
+    box().querySelector<HTMLButtonElement>('[data-cmd="answerInsert"]')!.click();
+    expect(sent).toEqual(['retry', 'answerInsert']);
+  });
+
+  it('the resting Drop of an open answer looks idle; it is not draggable then', () => {
+    ctl.answer(done({ place: 'card' }));
+    ctl.apply({ ...base, phase: 'answer', mode: 'ask' });
+    expect(document.querySelector('.drop')!.getAttribute('data-s')).toBe('idle');
+  });
+
+  it('while the answer is open its rectangle catches the mouse; a chord that only shakes moves its header', () => {
+    ctl.answer(done());
+    const stub = (el: Element, x: number, y: number, w: number, h: number) => {
+      (el as any).getBoundingClientRect = () => ({ x, y, width: w, height: h, left: x, top: y, right: x + w, bottom: y + h, toJSON() {} });
+    };
+    stub(box(), 270, 40, 420, 300);
+    ctl.frame(0);
+    expect(rectsSent.at(-1)).toEqual([{ x: 270, y: 40, w: 420, h: 300 }]);
+    ctl.shake();
+    expect(box().querySelector('.ah')!.classList.contains('shake')).toBe(true);
+  });
+
+  it('the Drop stays aside while either tray is open', () => {
+    vi.useFakeTimers();
+    ctl.answer(done());
+    ctl.tray('noField');
+    ctl.tray(null);
+    vi.advanceTimersByTime(500);
+    ctl.frame(1_000);
+    expect(document.querySelector('.drop')!.classList.contains('away')).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it('a tray still folding keeps the Drop aside until it has folded into it', () => {
+    vi.useFakeTimers();
+    try {
+      const away = () => document.querySelector('.drop')!.classList.contains('away');
+      for (const [open, close] of [[() => ctl.tray('noField'), () => ctl.tray(null)], [() => ctl.answer(done()), () => ctl.answer(null)]]) {
+        open();
+        ctl.frame(0);
+        close();
+        ctl.frame(16);
+        expect(away()).toBe(true);
+        vi.advanceTimersByTime(500);
+        ctl.frame(600);
+        expect(away()).toBe(false);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('an answer over a full-screen app sends no rectangle for the hidden Drop', () => {
+    const d = document.querySelector('.drop') as HTMLElement;
+    (d as any).getBoundingClientRect = () => ({ x: 302, y: 182, width: 110, height: 36, left: 302, top: 182, right: 412, bottom: 218, toJSON() {} });
+    ctl.frame(0);
+    expect(rectsSent.at(-1)).toEqual([{ x: 302, y: 182, w: 110, h: 36 }]);
+    ctl.apply({ ...base, phase: 'answer', mode: 'ask' });
+    ctl.idleHidden(true);
+    ctl.frame(16);
+    expect(rectsSent.at(-1)).toEqual([]);
+  });
+
+  it('the frame loop sleeps once the answer is shown whole, and wakes for a new one', () => {
+    ctl.answer(done());
+    let t = 0;
+    while (ctl.frame(t) && t < 10_000) t += 16;
+    expect(t).toBeLessThan(10_000);
+    const before = wakes;
+    ctl.answer(done({ listening: true }));
+    expect(wakes).toBeGreaterThan(before);
+    expect(ctl.frame(t + 16)).toBe(true);
   });
 });

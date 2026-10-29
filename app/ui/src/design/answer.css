@@ -1,0 +1,74 @@
+/* The "Ask" answer (spec 2 §7), ported from the approved design (design/04-answer): the tray from the Drop (.ansA, the
+   Drop's dark material) and the card at the selection (.ansC, the system material, light or dark with Windows). */
+.ansA{--a-text:#fff;--a-muted:rgba(255,255,255,.62);--a-code:rgba(255,255,255,.1);--a-shine:rgba(255,255,255,.22);--a-pri:#fff;--a-pri-t:#111;--ask:#5C8DFF}
+.card-m{--a-text:#1b1b1b;--a-muted:#6e6e73;--a-code:rgba(0,0,0,.06);--a-shine:rgba(0,0,0,.12);--a-pri:#1b1b1b;--a-pri-t:#fff;--ask:#2F6BFF}
+@media (prefers-color-scheme: dark){.card-m{--a-text:#f2f2f2;--a-muted:#9a9aa0;--a-code:rgba(255,255,255,.08);--a-shine:rgba(255,255,255,.16);--a-pri:#f2f2f2;--a-pri-t:#111;--ask:#5C8DFF}}
+.ansA .in{display:flex;flex-direction:column;gap:12px;max-height:410px;padding:12px 12px 12px 14px}
+.ah{display:flex;align-items:flex-start;gap:10px;flex:none}
+.ah.shake{animation:dropShake .46s}
+.am{flex:none;width:24px;height:24px;margin-top:1px}
+.am svg{display:block;overflow:visible}
+.aq{flex:1;min-width:0;font-size:13.5px;font-weight:600;line-height:1.4;padding-top:3px;color:var(--a-text);overflow-wrap:anywhere}
+.aq small{display:block;font-size:12.5px;font-weight:400;color:var(--a-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.scr{flex:1;min-height:0;overflow:auto;scrollbar-width:thin;margin-right:-6px;padding-right:6px}
+.th{display:flex;flex-direction:column;gap:16px}
+.it .uq{display:inline-block;font-size:13px;line-height:1.4;color:var(--a-text);background:var(--a-code);padding:5px 10px;border-radius:10px;margin-bottom:8px}
+.aa{font-size:14px;line-height:1.55;color:var(--a-text);overflow-wrap:anywhere}
+.aa p{margin:0 0 8px}
+.aa ul,.aa ol{margin:0 0 8px;padding-left:18px}
+.aa li{margin:3px 0}
+.aa b{font-weight:600}
+.aa code{font:12.5px ui-monospace,"Cascadia Mono",Consolas,monospace;padding:1px 5px;border-radius:5px;background:var(--a-code)}
+.aa pre{margin:0 0 8px;padding:8px 10px;border-radius:8px;background:var(--a-code);white-space:pre-wrap;font:12.5px/1.45 ui-monospace,"Cascadia Mono",Consolas,monospace}
+.aa pre code{padding:0;background:none}
+.cite{display:inline-grid;place-items:center;min-width:16px;height:16px;padding:0 4px;margin-left:3px;border-radius:5px;font-size:10px;font-weight:600;line-height:1;vertical-align:2px;background:var(--a-code);color:var(--a-muted);cursor:default;transition:background .2s,color .2s}
+.cite.hl,.cite:hover{background:var(--ask);color:#fff}
+/* Words are revealed one by one (spec 2 §7): hidden until .on, faded in from a light blur; a block shows with its first word. */
+.aa .w{display:none}
+.aa .w.on{display:inline;animation:wIn .4s var(--e-out)}
+.aa .cite.w.on{display:inline-grid}
+.aa .w.on.seen{animation:none}
+.aa :is(p,li,pre):not(:has(.w.on)){display:none}
+@keyframes wIn{from{opacity:0;filter:blur(2px)}}
+.think{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--a-muted);min-height:18px}
+.think svg{display:block}
+.think .tl{display:inline-flex}
+.sk{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+.sk i{height:9px;border-radius:5px;background:linear-gradient(90deg,var(--a-code) 0%,var(--a-shine) 50%,var(--a-code) 100%);background-size:200% 100%;animation:shimmer 1.2s linear infinite}
+.sk i:last-child{width:62%}
+@keyframes shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
+.note{font-size:13.5px;color:var(--a-muted)}
+.src{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.sc{display:inline-flex;align-items:center;gap:6px;height:26px;max-width:100%;padding:0 10px 0 4px;border-radius:999px;background:var(--a-code);font-size:12px;color:var(--a-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;animation:scIn .45s var(--e-spring) both;animation-delay:calc(var(--i)*80ms);transition:box-shadow .2s}
+.sc i{flex:none;width:18px;height:18px;border-radius:50%;display:grid;place-items:center;font-style:normal;font-size:10px;font-weight:700;color:#fff;background:var(--ask)}
+.sc b{font-weight:600;color:var(--a-text)}
+.sc.hl{box-shadow:0 0 0 1.5px var(--ask)}
+@keyframes scIn{from{opacity:0;transform:translateY(6px) scale(.9)}}
+.aft{display:flex;align-items:center;gap:6px;flex:none}
+.aft .sp{flex:1}
+.hint{font-size:12px;color:var(--a-muted);display:flex;align-items:center;gap:5px;white-space:nowrap}
+.hint kbd{white-space:nowrap;font-family:"Bebas Neue",sans-serif;font-size:14px;letter-spacing:.05em;line-height:1;padding:2px 6px 1px;border-radius:5px;background:var(--a-code)}
+.btnA{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px 0 10px;border-radius:999px;font-size:13px;font-weight:600;white-space:nowrap;transition:opacity .2s}
+.btnA svg,.ibb svg,.ai svg{display:block}
+.btnA .lbl{display:inline-flex}
+.btnA.pri{background:var(--a-pri);color:var(--a-pri-t)}
+.btnA.sec{background:var(--a-code);color:var(--a-text)}
+.btnA:disabled,.ibb:disabled,.ah .xb:disabled{opacity:.4}
+.ibb{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:var(--a-muted)}
+.ibb:hover{background:var(--a-code);color:var(--a-text)}
+.lsn{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--a-muted);animation:wIn .3s var(--e-out)}
+.lsn svg{display:block;overflow:visible}
+.lsn.miss .btnA{margin-left:auto}
+/* The card at the selection (Task 7): in its own window, 24 px of shadow room around it; the arrow points at the selection's
+   start — up from under it, or down from above it when there is no room below. */
+.ansC{position:absolute;left:24px;top:30px;width:390px;border-radius:8px;color:var(--a-text);background:rgba(249,249,249,.96);backdrop-filter:blur(30px) saturate(1.8);box-shadow:0 18px 44px -14px rgba(0,0,0,.4),0 0 0 .5px rgba(0,0,0,.16),inset 0 0 0 .5px rgba(255,255,255,.7);transform-origin:var(--ax,40px) 0;animation:popIn .45s var(--e-spring) both}
+@media (prefers-color-scheme: dark){.ansC{background:rgba(44,44,44,.96);box-shadow:0 18px 44px -14px rgba(0,0,0,.7),0 0 0 .5px rgba(0,0,0,.6),inset 0 0 0 .5px rgba(255,255,255,.1)}}
+.ansC[hidden]{display:none}
+.ansC::before{content:"";position:absolute;left:var(--ax,40px);top:-6px;width:12px;height:12px;margin-left:-6px;transform:rotate(45deg);background:inherit;box-shadow:-.5px -.5px 0 rgba(0,0,0,.12);border-radius:2px 0 0 0}
+.ansC.above{top:auto;bottom:30px;transform-origin:var(--ax,40px) 100%}
+.ansC.above::before{top:auto;bottom:-6px;box-shadow:.5px .5px 0 rgba(0,0,0,.12);border-radius:0 0 2px 0}
+.ansC .in{display:flex;flex-direction:column;gap:10px;max-height:var(--max-h,300px);padding:12px 12px 12px 14px}
+.ansC.out{animation:popOut .25s var(--e-out) forwards}
+@keyframes popIn{from{opacity:0;transform:translateY(-6px) scale(.95)}}
+@keyframes popOut{to{opacity:0;transform:translateY(-4px) scale(.97)}}
+@media (prefers-reduced-motion: reduce){.aa .w.on,.sc,.ansC,.ansC.out,.lsn{animation:none!important}}

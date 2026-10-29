@@ -44,12 +44,33 @@ export interface DropText {
   ask: string;
 }
 
+/** Texts of an "Ask" answer (spec 2 §7). `about` puts in the selection's start at {Q}. */
+export interface AnswerText {
+  insert: string;
+  below: string;
+  replace: string;
+  copy: string;
+  copied: string;
+  retry: string;
+  followUp: string;
+  about: string;
+  searching: string;
+  reading: string;
+  writing: string;
+  listening: string;
+  /** The follow-up could not be transcribed (decision 7). */
+  missed: string;
+  refused: string;
+  failed: string;
+}
+
 export interface Dict {
   tray: Record<TrayKind, TrayText>;
   error: Record<ErrorCause, string>;
   /** Close button of a tray card: tooltip and accessible name. */
   close: string;
   drop: DropText;
+  answer: AnswerText;
 }
 
 export const en: Dict = {
@@ -90,6 +111,23 @@ export const en: Dict = {
     cancelled: 'Cancelled',
     ask: 'Ask',
   },
+  answer: {
+    insert: 'Insert',
+    below: 'Insert below',
+    replace: 'Replace',
+    copy: 'Copy',
+    copied: 'Copied',
+    retry: 'Retry',
+    followUp: 'follow up',
+    about: 'about the selection: “{Q}”',
+    searching: 'Searching the web',
+    reading: 'Reading sources',
+    writing: 'Writing the answer',
+    listening: 'Listening for a follow-up…',
+    missed: "Couldn't make out the follow-up",
+    refused: "Can't answer that",
+    failed: "Couldn't get an answer",
+  },
 };
 
 export const ru: Dict = {
@@ -129,6 +167,23 @@ export const ru: Dict = {
     done: 'Готово',
     cancelled: 'Отменено',
     ask: 'Спросить',
+  },
+  answer: {
+    insert: 'Вставить',
+    below: 'Вставить ниже',
+    replace: 'Заменить',
+    copy: 'Копировать',
+    copied: 'Скопировано',
+    retry: 'Повторить',
+    followUp: 'уточнить',
+    about: 'по выделенному: «{Q}»',
+    searching: 'Ищу в интернете',
+    reading: 'Читаю источники',
+    writing: 'Пишу ответ',
+    listening: 'Слушаю уточнение…',
+    missed: 'Не расслышал уточнение',
+    refused: 'Не могу ответить на это',
+    failed: 'Не удалось получить ответ',
   },
 };
 

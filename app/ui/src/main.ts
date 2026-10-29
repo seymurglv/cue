@@ -2,11 +2,13 @@
 import './design/cue.css';
 import './design/drop.css';
 import './design/tray.css';
+import './design/answer.css';
 import './app.css';
 import './design/cue.js';
 import './design/drop.js';
 import { invoke, type InvokeArgs } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import type { Answer } from './answer';
 import { DropController, type DragPhase, type UiState, type UiAction } from './controller';
 import { pickLang, type TrayKind } from './strings';
 
@@ -45,6 +47,7 @@ const ctl = new DropController(document.getElementById('stage')!, {
   rects: (rects) => void call('drop_hit_rects', { rects }),
   wake,
   drag: (phase: DragPhase) => void call('drop_drag', { phase }),
+  source: (n: number) => void call('answer_source', { n }),
 }, lang, (window as any).__CUE_PLACE__);
 wake();
 
@@ -57,6 +60,7 @@ async function start() {
     listen('cue://shake', () => ctl.shake()),
     listen<boolean>('cue://idle-hidden', (e) => ctl.idleHidden(e.payload)),
     listen<string>('cue://place', (e) => ctl.place(e.payload)),
+    listen<Answer | null>('cue://answer', (e) => ctl.answer(e.payload)),
   ]);
   for (const s of subs) if (s.status === 'rejected') console.error('CUE: subscribing to a core event failed:', s.reason);
   await call('drop_ready');

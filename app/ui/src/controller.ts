@@ -1,13 +1,14 @@
+import { AnswerView, type Answer, type AnswerCommand } from './answer';
 import { CUE } from './designParts';
 import { DICTS, TRAYS, type Dict, type ErrorCause, type Lang, type TrayKind } from './strings';
 import { trayHtml } from './trays';
 
-export type Phase = 'idle' | 'start' | 'listen' | 'think' | 'done' | 'empty' | 'cancel' | 'error';
+export type Phase = 'idle' | 'start' | 'listen' | 'think' | 'done' | 'empty' | 'cancel' | 'error' | 'answer';
 /** What the dictation does with the speech. The core keeps it: the chord picks it (Shift — translate, Alt — ask),
  *  and Shift switches dictation and translation while recording; the Drop only shows it. */
 export type Mode = 'dictate' | 'translate' | 'ask';
 export interface UiState { phase: Phase; error: ErrorCause | null; retry: boolean; paused: boolean; mode: Mode }
-export type UiAction = 'cancel' | 'finish' | 'undo' | 'retry' | 'dismiss' | 'trayAction' | 'trayClose';
+export type UiAction = 'cancel' | 'finish' | 'undo' | 'retry' | 'dismiss' | 'trayAction' | 'trayClose' | AnswerCommand;
 export interface Rect { x: number; y: number; w: number; h: number }
 /** Where the Drop sits on the screen; the layout follows it (drop.css, [data-place]). */
 export type Place = 'bottom' | 'top' | 'left' | 'right';
@@ -27,10 +28,14 @@ export interface DropIo {
   /** The Drop is dragged ('start': the core moves the window after the cursor) or let go ('end': the core snaps it to
    *  the nearest place). The core answers every drag, ended or refused, with the place (see place()). */
   drag?(phase: DragPhase): void;
+  /** A source chip of the answer was clicked: the core opens its page. */
+  source?(n: number): void;
 }
 
 /** How long "Copied" stays before the tray card folds back (as in the original design). */
 const DONE_HOLD_MS = 1100;
+/** The answer tray folds back into the Drop in 430 ms (drop.js): its words stay until then. */
+const ANSWER_FOLD_MS = 450;
 /** Quiet longer than every transition in drop.css/tray.css (≤ 550 ms plus delays), the mark's shake (460 ms), hiding the
  *  tray card (430 ms) and labels fading in (420 ms + 16 ms per letter). */
 const QUIET_AFTER_MS = 1000;
@@ -46,6 +51,11 @@ export class DropController {
   private trayBox: any;
   private dropEl: HTMLElement;
   private trayEl: HTMLElement;
+  private answerBox: any;
+  private answerEl: HTMLElement;
+  private view: AnswerView;
+  /** Answer tray generation: changes when it opens and when it closes, so an old fold timer leaves a newer answer alone. */
+  private answerGen = 0;
   private lastRects = '';
   private fullscreen = false;
   private t: Dict;
@@ -91,6 +101,22 @@ export class DropController {
     this.trayBox = new (CUE().Tray)(host, this.drop, { width: 300 });
     this.dropEl = this.drop.p;
     this.trayEl = this.trayBox.box;
+    this.answerBox = new (CUE().Tray)(host, this.drop, { width: 420, cls: 'ansA' });
+    this.answerEl = this.answerBox.box;
+    this.view = new AnswerView(
+      this.answerBox.in,
+      {
+        act: (a) => this.io.send(a),
+        source: (n) => this.io.source?.(n),
+        resized: () => {
+          if (this.answerBox.isOpen) this.answerBox.fit();
+        },
+        wake: () => this.wake(),
+      },
+      this.t,
+      () => !!window.matchMedia?.(REDUCED_MOTION)?.matches,
+    );
+    this.view.ready(this.state.phase === 'answer');
     const wake = () => this.wake();
     this.dropEl.addEventListener('mouseenter', wake);
     this.dropEl.addEventListener('mouseleave', wake);
@@ -127,8 +153,11 @@ export class DropController {
     // A new recording does not drift to the last level of the previous one, and the level does not linger after recording.
     if (s.phase !== prev && (s.phase === 'listen' || prev === 'listen')) this.resetVoice();
     // A new mode during start-up or recording re-enters the phase: drop.js picks the mark's shape and icon by mode there.
-    if (s.phase !== prev || s.phase === 'error' || (s.mode ?? 'dictate') !== prevMode) this.drop.enter(s.phase);
+    // An open answer rests the Drop: it looks idle (and steps aside while the answer is in the tray).
+    if (s.phase !== prev || s.phase === 'error' || (s.mode ?? 'dictate') !== prevMode) this.drop.enter(s.phase === 'answer' ? 'idle' : s.phase);
     else this.drop.layout();
+    // The core takes the answer's buttons only in its answer phase; during a follow-up they wait.
+    this.view.ready(s.phase === 'answer');
     this.syncIdle();
     this.wake();
   }
@@ -155,7 +184,7 @@ export class DropController {
   /** The Drop can be picked up: idle, shown (not paused, not over a full-screen app), open under the mouse, no tray card. */
   private draggable(): boolean {
     return this.state.phase === 'idle' && !this.state.paused && !this.fullscreen && this.drop.hov
-      && this.trayEl.hidden && !this.trayBox.isOpen;
+      && this.trayEl.hidden && !this.trayBox.isOpen && !this.answerBox.isOpen;
   }
 
   private onPointerDown(e: PointerEvent) {
@@ -214,6 +243,7 @@ export class DropController {
 
   level(v: number) {
     this.voice.ext = Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0;
+    this.view.level(this.voice.ext);
     this.wake();
   }
 
@@ -228,6 +258,7 @@ export class DropController {
     this.wake();
     if (kind == null || html == null) {
       this.trayBox.close();
+      setTimeout(() => this.wake(), ANSWER_FOLD_MS);
       return;
     }
     // A hidden card cannot be under the mouse; an open one keeps its hover (the new ring stands still too).
@@ -259,6 +290,7 @@ export class DropController {
     this.stopTtl();
     this.trayGen++;
     this.trayBox.close();
+    setTimeout(() => this.wake(), ANSWER_FOLD_MS);
     this.wake();
     return true;
   }
@@ -287,8 +319,32 @@ export class DropController {
     this.ttlLeft = 0;
   }
 
+  /** The "Ask" answer from the core (spec 2 §7). A tray answer grows out of the Drop toward the screen center, pinned like
+   *  the tray cards (drop.css, [data-place]); a card answer is the card window's; null — the answer closed. */
+  answer(a: Answer | null) {
+    if (a?.place === 'tray') {
+      if (!this.answerBox.isOpen) {
+        this.endDrag(true);
+        this.answerGen++;
+        this.answerBox.open(null);
+      }
+      this.view.update(a);
+    } else if (this.answerBox.isOpen) {
+      const gen = ++this.answerGen;
+      this.answerBox.close();
+      setTimeout(() => {
+        if (gen === this.answerGen) this.view.update(null);
+      }, ANSWER_FOLD_MS);
+      setTimeout(() => this.wake(), ANSWER_FOLD_MS);
+    }
+    this.wake();
+  }
+
+  /** A chord that only shakes: the answer's header while the answer tray is open (the tray's own transform holds its
+   *  place), the Drop otherwise. */
   shake() {
-    const d = this.dropEl;
+    const head = this.answerBox.isOpen ? (this.answerBox.in.querySelector('.ah') as HTMLElement | null) : null;
+    const d = head ?? this.dropEl;
     d.classList.remove('shake');
     void d.offsetWidth;
     d.classList.add('shake');
@@ -305,22 +361,28 @@ export class DropController {
   /** Every frame: voice and mark; on a change — the rectangles for click-through.
    *  false — nothing on screen can change any more (quiet mode): the loop may sleep until wake. */
   frame(now: number): boolean {
+    const answering = this.view.frame(now);
     this.voice.step(now, this.state.phase === 'listen');
     this.drop.frame(now);
+    // Both trays step the Drop aside, and each one's close timer (drop.js, 430 ms) brings it back even while the other is
+    // still open: the frame puts it right. A tray still folding counts too, so the Drop comes back only once it is folded.
+    this.drop.away(!this.trayEl.hidden || !this.answerEl.hidden);
     const rects: Rect[] = [];
-    const idleHidden = this.state.phase === 'idle' && (this.fullscreen || this.state.paused);
+    // In the answer phase the Drop is drawn at rest and hides the same way: its rectangle does not go out.
+    const idleHidden = (this.state.phase === 'idle' || this.state.phase === 'answer') && (this.fullscreen || this.state.paused);
     // While dragged the whole window takes the mouse: the window follows the cursor a frame late and must not let a
     // click through to the app below in that frame.
     if (this.dragging) rects.push({ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight });
     else if (!idleHidden && !this.dropEl.classList.contains('away')) pushRect(rects, this.dropEl);
     if (!this.trayEl.hidden) pushRect(rects, this.trayEl);
+    if (!this.answerEl.hidden) pushRect(rects, this.answerEl);
     const key = JSON.stringify(rects);
     if (key !== this.lastRects) {
       this.lastRects = key;
       this.io.rects(rects);
     }
     // The latest rectangles were sent above — click-through stays correct while asleep.
-    const calm = (this.state.phase === 'idle' || this.state.phase === 'error')
+    const calm = (this.state.phase === 'idle' || this.state.phase === 'error' || this.state.phase === 'answer') && !answering
       && !this.drop.hov && !this.trayBox.isOpen && this.trayEl.hidden && !this.dragging && this.press == null;
     if (!calm) {
       this.calmSince = null;
@@ -334,7 +396,7 @@ export class DropController {
 }
 
 /** Element rectangle, rounded outwards to whole px: fractional jitter during transitions sends no new messages. */
-function pushRect(out: Rect[], el: HTMLElement) {
+export function pushRect(out: Rect[], el: HTMLElement) {
   const r = el.getBoundingClientRect();
   if (!(r.width > 0 && r.height > 0)) return;
   const x = Math.floor(r.x), y = Math.floor(r.y);
