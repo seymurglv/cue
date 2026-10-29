@@ -24,11 +24,11 @@ without windows, a microphone, a network or a real clock.
   and responses, the cache warm-up), `ask` (the streaming "Ask" request, its event parser and decision, `run` and its
   cache warm-up `warm`), `keys` (Windows Credential Manager), `check` (free key probes), `error`. `openrouter` holds
   the server-sent-events reader "Ask" uses too, and otherwise serves only the `refine_compare` example.
-- **`cue-platform-win`** (`app/crates/platform-win`): `hook` and `chord` (keyboard), `input` (`SendInput`, modifier
-  state), `clipboard` (paste, and the `Ctrl + C` fallback of "Ask"), `focus` (UI Automation: the field, the text
-  before the caret, the selection), `selection` (when to copy the selection, where it is on screen), `cardplace` (where
-  the "Ask" card goes), `mic` (cpal), `wav`, `dropwin` (window styles, moves, the z-order guard), `placement` (the four
-  places, the nearest place, monitors), `power`.
+- **`cue-platform-win`** (`app/crates/platform-win`): `hook` and `chord` (keyboard, and the mouse while a Shift that
+  switched the mode is held), `input` (`SendInput`, modifier state), `clipboard` (paste, and the `Ctrl + C` fallback
+  of "Ask"), `focus` (UI Automation: the field, the text before the caret, the selection), `selection` (when to copy
+  the selection, where it is on screen), `cardplace` (where the "Ask" card goes), `mic` (cpal), `wav`, `dropwin`
+  (window styles, moves, the z-order guard), `placement` (the four places, the nearest place, monitors), `power`.
 - **`cue`** (`app/src-tauri`): startup, the `runtime` actor (with `runtime::ask`, the conversation of an open answer),
   `ipc`, `drop_window`, `card_window`, `tray` and `trayicon`, `logging`.
 - **`app/ui`**: `main.ts` (events, commands, frame loop), `controller.ts` (`DropController`), `trays.ts`,
@@ -91,7 +91,9 @@ offered), refine as the raw text, a question as a failure with Retry, paste as "
 dictation in the mode the chord picked. `ModeToggle` (a fresh Shift press) swaps dictation and translation ("Ask"
 becomes a translation) while starting or recording, whether the chord is still held or was tapped (then only a Shift on
 its own, see below): people often tap the chord and decide on a translation only while speaking, and a second Shift
-takes a slip back. `ModeChange(mode)` (Alt, for "Ask") counts only while the starting chord is still held (in hold mode
+takes a slip back. A translation goes back to the mode it was switched from (`toggled_from`: "Ask" too; a recording
+that started as a translation becomes a dictation; Alt picking "Ask" forgets it), so every toggle is undone by the next
+one, and a toggle the hook takes back restores a question as well. `ModeChange(mode)` (Alt, for "Ask") counts only while the starting chord is still held (in hold mode
 too). Once the finishing press has moved the flow to thinking, neither
 changes the mode, and neither does anything outside a recording. The mode reaches the Drop in `UiState` and the
 runtime in `Refine { mode }` and `RefineAgain { mode }`; every path into Idle resets it to `Dictate`. A translation
@@ -161,8 +163,8 @@ keeps the answer open with the error and Retry, and the question is kept.
   own event, so the flow is back in its mode before the finishing `ChordDown` or the cancel. A mouse button pressed
   while that Shift is held (Shift + click extends a selection) takes it back the same way (`Chord::on_mouse_down`).
   A `WH_MOUSE_LL` hook on the same thread sees the click; it is installed only while such a Shift is held, since a
-  low-level mouse hook routes every mouse event of the system through CUE's thread. The keyboard hook procedure posts
-  `WM_MOUSE_WATCH` to its own loop, which installs or removes it (a hook procedure installs no hook). The mouse hook
+  low-level mouse hook routes every mouse event of the system through CUE's thread. The hook procedures post
+  `WM_MOUSE_WATCH` to their own loop, which installs or removes it (a hook procedure installs no hook). The mouse hook
   counts button presses only, lets injected ones pass and never swallows a click; it is removed after the click, the
   Shift's release or the next key, set again after a reinstall if still needed, and removed when the thread ends. Each
   Shift press is taken back at most once (both Shifts held: two toggles cancel out); a released Shift's toggle stands,

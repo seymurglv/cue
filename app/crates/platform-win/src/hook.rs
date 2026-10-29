@@ -195,8 +195,14 @@ enum MouseChange {
     Keep,
 }
 
-/// The mouse hook is needed exactly while a click would take a Shift toggle back (`Chord::watches_mouse`): a low-level
-/// mouse hook routes every mouse event of the system through this thread, so it lives only for that second or so.
+/// Whether the mouse hook is wanted: a click would take a Shift toggle back (`Chord::watches_mouse`), and CUE is not
+/// paused.
+fn mouse_wanted(chord: &Chord, paused: bool) -> bool {
+    chord.watches_mouse() && !paused
+}
+
+/// The mouse hook is needed exactly while a click would take a Shift toggle back (`mouse_wanted`): a low-level mouse
+/// hook routes every mouse event of the system through this thread, so it lives only for that second or so.
 fn mouse_change(wanted: bool, installed: bool) -> MouseChange {
     match (wanted, installed) {
         (true, false) => MouseChange::Install,
@@ -353,10 +359,12 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 if let Some(event) = feed_mouse(chord, paused, key_held) {
                     let _ = tx.send(event);
                 }
-                Some(chord.watches_mouse() && !paused)
+                Some(mouse_wanted(chord, paused))
             });
             // After a click nothing is left to take back: the hook goes.
-            want_mouse(watch.unwrap_or(false));
+            if let Some(watch) = watch {
+                want_mouse(watch);
+            }
         }
     }
     // SAFETY: the arguments are the ones Windows called the procedure with.
@@ -380,7 +388,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 for event in out.events.into_iter().flatten() {
                     let _ = tx.send(event);
                 }
-                Some((out, chord.active(), chord_down, chord.watches_mouse() && !paused))
+                Some((out, chord.active(), chord_down, mouse_wanted(chord, paused)))
             });
             if let Some((out, active, chord_down, watch)) = outcome {
                 follow_chord(active, chord_down);
@@ -521,21 +529,23 @@ fn install_again(old: Option<HHOOK>) -> Option<HHOOK> {
         if let Some(event) = after_gap(chord, paused, key_held) {
             let _ = tx.send(event);
         }
-        Some((chord.active(), chord.watches_mouse() && !paused))
+        Some((chord.active(), mouse_wanted(chord, paused)))
     });
     let (active, watch) = state.unwrap_or((false, false));
     follow_chord(active, false);
-    MOUSE_WANTED.set(watch);
-    follow_mouse();
     match install() {
         Ok(hook) => {
             INSTALLED.store(true, Ordering::SeqCst);
             tracing::info!("keyboard hook reinstalled");
+            // Only with the keyboard hook in: it is what sees the Shift's release and removes the mouse hook again.
+            MOUSE_WANTED.set(watch);
+            follow_mouse();
             Some(hook)
         }
         Err(e) => {
             INSTALLED.store(false, Ordering::SeqCst);
             tracing::error!("keyboard hook not reinstalled, CUE does not hear the keys: {e}");
+            MOUSE_WANTED.set(false);
             None
         }
     }
@@ -819,6 +829,22 @@ mod tests {
             }
         }
 
+        /// A question recorded by a tap of `Ctrl + Win + Alt`, with "Ask" on.
+        fn asking() -> Self {
+            let mut live = Self { chord: Chord::default(), flow: Flow::new(0, false), now: 0, held: vec![] };
+            live.chord.set_ask(true);
+            live.keys(&[VK_LCONTROL, VK_LMENU, VK_LWIN]);
+            live.now += 2_000;
+            live
+        }
+
+        /// Whether the recording is asked as a question once the finishing chord has been pressed.
+        fn asks(&mut self) -> bool {
+            let id = self.flow.current_id();
+            let fx = self.flow.handle(Input::SttFinal { id, text: "какая погода".into() }, self.now + 200);
+            fx.iter().any(|e| matches!(e, Effect::Ask { .. }))
+        }
+
         /// A mouse button press, through `feed_mouse` as in the mouse hook procedure.
         fn click(&mut self) {
             self.now += 40;
@@ -911,6 +937,34 @@ mod tests {
         assert_eq!(live.refined_in(), Some(Mode::Translate));
     }
 
+    /// A Shift toggle taken back in a question goes back to "Ask", not on to a dictation: the question is asked, never
+    /// pasted.
+    #[test]
+    fn shift_click_in_an_ask_recording_keeps_it_asking() {
+        let mut live = Live::asking();
+        assert_eq!(live.flow.mode(), Mode::Ask);
+        live.key(VK_LSHIFT, true);
+        assert_eq!(live.flow.mode(), Mode::Translate, "the Shift press switches at once");
+        live.click();
+        live.key(VK_LSHIFT, false);
+        assert_eq!(live.flow.mode(), Mode::Ask, "Shift + click");
+        live.keys(&[VK_LCONTROL, VK_LWIN]);
+        assert!(live.asks());
+    }
+
+    #[test]
+    fn a_capital_letter_in_an_ask_recording_keeps_it_asking() {
+        let mut live = Live::asking();
+        live.keys(&[VK_LSHIFT, VK_A]);
+        assert_eq!(live.flow.mode(), Mode::Ask, "Shift + A");
+        live.keys(&[VK_LSHIFT]);
+        assert_eq!(live.flow.mode(), Mode::Translate, "a lone Shift still switches");
+        live.keys(&[VK_RSHIFT]);
+        assert_eq!(live.flow.mode(), Mode::Ask, "and a second one takes it back");
+        live.keys(&[VK_LSHIFT, VK_LCONTROL, VK_LWIN]);
+        assert!(live.asks(), "the finishing chord started with Shift");
+    }
+
     #[test]
     fn only_a_real_button_press_is_a_click() {
         for msg in [WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN, WM_XBUTTONDOWN] {
@@ -929,22 +983,39 @@ mod tests {
         assert_eq!(mouse_change(false, true), MouseChange::Remove);
         assert_eq!(mouse_change(true, true), MouseChange::Keep);
         assert_eq!(mouse_change(false, false), MouseChange::Keep);
+        let shift = [VK_LSHIFT];
         let mut c = Chord::default();
+        hook(&mut c, key(VK_LSHIFT, true), held_set(&[]));
+        assert!(!mouse_wanted(&c, false), "not recording");
+        hook(&mut c, key(VK_LSHIFT, false), held_set(&shift));
         c.set_recording(true);
-        assert!(!c.watches_mouse(), "recording, no Shift");
+        assert!(!mouse_wanted(&c, false), "recording, no Shift");
         hook(&mut c, key(VK_LSHIFT, true), held_set(&[]));
-        assert!(c.watches_mouse(), "the Shift toggled");
-        hook(&mut c, key(VK_LSHIFT, false), held_set(&[VK_LSHIFT]));
-        assert!(!c.watches_mouse(), "released: its toggle stands");
+        assert!(mouse_wanted(&c, false), "the Shift toggled");
+        assert!(!mouse_wanted(&c, true), "not while paused");
+        hook(&mut c, key(VK_LSHIFT, true), held_set(&shift));
+        assert!(mouse_wanted(&c, false), "its auto-repeat keeps it");
+        assert_eq!(feed_mouse(&mut c, false, held_set(&shift)), Some(ModeToggle));
+        assert!(!mouse_wanted(&c, false), "the click took the toggle back: the hook goes");
+        hook(&mut c, key(VK_LSHIFT, false), held_set(&shift));
         hook(&mut c, key(VK_LSHIFT, true), held_set(&[]));
-        assert_eq!(hook(&mut c, key(VK_A, true), held_set(&[VK_LSHIFT])), Some(undo(None)));
-        assert!(!c.watches_mouse(), "a key took the toggle back");
+        hook(&mut c, key(VK_LSHIFT, false), held_set(&shift));
+        assert!(!mouse_wanted(&c, false), "released: its toggle stands");
+        hook(&mut c, key(VK_LSHIFT, true), held_set(&[]));
+        assert_eq!(hook(&mut c, key(VK_A, true), held_set(&shift)), Some(undo(None)));
+        assert!(!mouse_wanted(&c, false), "a key took the toggle back");
+        hook(&mut c, key(VK_A, false), held_set(&[VK_A, VK_LSHIFT]));
+        hook(&mut c, key(VK_LSHIFT, false), held_set(&shift));
+        hook(&mut c, key(VK_LSHIFT, true), held_set(&[]));
+        // Sleep or lock: the Shift's release never came.
+        assert_eq!(after_gap(&mut c, false, held_set(&[])), None);
+        assert!(!mouse_wanted(&c, false), "a gap with Shift up drops it");
         let mut c = Chord::default();
         c.set_recording(true);
         hook(&mut c, key(VK_LCONTROL, true), held_set(&[]));
         hook(&mut c, key(VK_LWIN, true), held_set(&[VK_LCONTROL]));
         hook(&mut c, key(VK_LSHIFT, true), held_set(&[VK_LCONTROL, VK_LWIN]));
-        assert!(!c.watches_mouse(), "inside a held chord a click takes nothing back");
+        assert!(!mouse_wanted(&c, false), "inside a held chord a click takes nothing back");
     }
 
     #[test]

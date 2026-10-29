@@ -898,6 +898,12 @@ mod tests {
         press(&mut c, VK_RSHIFT);
         release(&mut c, VK_RSHIFT);
         assert!(c.on_mouse_down(|vk| vk == VK_LSHIFT));
+        // Both Shifts toggled and held: the click takes back two, which is no toggle at all, as with a key.
+        let mut c = tapped();
+        press(&mut c, VK_LSHIFT);
+        press(&mut c, VK_RSHIFT);
+        assert!(!c.on_mouse_down(|vk| vk == VK_LSHIFT || vk == VK_RSHIFT), "both Shifts");
+        assert!(!c.watches_mouse());
     }
 
     #[test]
@@ -924,12 +930,6 @@ mod tests {
         assert!(!c.on_mouse_down(|_| false), "a lost Shift release");
         assert!(!c.watches_mouse());
         assert_eq!(sent(press(&mut c, VK_D)), NOTHING);
-        // Both Shifts toggled: two toggles cancel out, as with a key.
-        let mut c = tapped();
-        press(&mut c, VK_LSHIFT);
-        press(&mut c, VK_RSHIFT);
-        assert!(!c.on_mouse_down(|vk| vk == VK_LSHIFT || vk == VK_RSHIFT), "both Shifts");
-        assert!(!c.watches_mouse());
     }
 
     #[test]

@@ -17,10 +17,10 @@ is built for personal use with your own Soniox and Anthropic API keys.
   starts a translated one; `Ctrl + Win + Alt` asks a question (see "Ask" below). Tap and release: CUE records until you
   press the chord again (with or without `Shift`; the finishing chord does not change the mode). Hold for 0.6 s or
   longer: recording ends when you let go. While CUE records, a press of `Shift` (left or right; on its own after a tap,
-  or added while the starting chord is still held) switches between dictation and translation, and the Drop changes its
-  icon at once: a second press takes it back. A `Shift` pressed together with other keys (a capital letter, a shortcut)
-  or with a mouse click (`Shift` + click extends a selection) does not switch the mode; letting go of `Shift` changes
-  nothing, and outside a recording `Shift` does nothing.
+  or added while the starting chord is still held) switches between dictation and translation (a question, to a
+  translation and back), and the Drop changes its icon at once: a second press takes it back. A `Shift` pressed
+  together with other keys (a capital letter, a shortcut) or with a mouse click (`Shift` + click extends a selection)
+  does not switch the mode; letting go of `Shift` changes nothing, and outside a recording `Shift` does nothing.
   `Alt` picks "Ask" only together with `Ctrl + Win` held, pressed before them or while they are still down; after a
   tap it changes nothing. `Ctrl + Win` with `Shift` and `Alt` together is the Office key: CUE leaves it to Windows, and
   `Ctrl + Win + Alt` too when "Ask" is off (`ask.enabled`).
@@ -429,9 +429,9 @@ app/
                           helpers, usage
   crates/engines/         cue-engines: Soniox stream and batch, Claude refine, translation and "Ask", API keys and
                           checks
-  crates/platform-win/    cue-platform-win: keyboard hook, clipboard paste and copy, focus and selection via UI
-                          Automation, microphone, Drop window styles and placement, card placement, sleep and lock
-                          events
+  crates/platform-win/    cue-platform-win: keyboard hook (and a mouse hook while a Shift that switched the mode is
+                          held), clipboard paste and copy, focus and selection via UI Automation, microphone, Drop
+                          window styles and placement, card placement, sleep and lock events
   crates/cli/             cue-cli: API keys and monthly usage
   src-tauri/              the cue app: runtime, Drop and card windows, tray icon, logging
   ui/                     the Drop, its tray cards and the "Ask" answer and card: TypeScript + Vite, no framework

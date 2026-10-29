@@ -85,7 +85,8 @@ pub enum Input {
     /// Alt was pressed while the chord is held: the mode it picks ("Ask", when `ask.enabled` is on).
     ModeChange(Mode),
     /// A fresh Shift press, with the chord held or on its own after a tap: dictation and translation swap while
-    /// recording. The hook sends one more to take it back when that Shift turns out to be part of other keys.
+    /// recording, and a translation goes back to the mode it was switched from. The hook sends one more to take it back
+    /// when that Shift turns out to be part of other keys or of a click.
     ModeToggle,
     ChordUp,
     ChordAborted,
@@ -187,6 +188,9 @@ pub struct Flow {
     /// Alt asks while the starting chord is held), and back to `Dictate` on every way into idle (`set_idle`): the idle
     /// Drop shows no mode.
     mode: Mode,
+    /// The mode a Shift toggle turned into the translation (`on_mode_toggle`): the next toggle goes back to it. `None`
+    /// when the dictation started as a translation, or Alt picked the mode since.
+    toggled_from: Option<Mode>,
     hold_hints_left: u8,
     has_last: bool,
     /// The dictation whose "Ask" request is in flight (its answer may already be on screen). It can be an earlier one than
@@ -227,6 +231,7 @@ impl Flow {
             retry_text: false,
             paused: false,
             mode: Mode::Dictate,
+            toggled_from: None,
             hold_hints_left,
             has_last,
             asking: None,
@@ -654,6 +659,7 @@ impl Flow {
         }
         self.id = DictationId(self.id.0.wrapping_add(1));
         self.mode = mode;
+        self.toggled_from = None;
         self.phase = Phase::Starting;
         self.chord_held = true;
         self.hold_mode = false;
@@ -684,22 +690,28 @@ impl Flow {
     fn on_mode_change(&mut self, mode: Mode, fx: &mut Vec<Effect>) {
         if self.chord_held && self.recording_now() && self.mode != mode && !self.answer_open {
             self.mode = mode;
+            self.toggled_from = None;
             self.push_ui(fx);
         }
     }
 
     /// A fresh Shift press while starting or recording, with the chord still held or after a tap: dictation and
-    /// translation swap ("Ask" becomes a translation), and the Drop changes its icon at once. After a tap the hook
-    /// sends it only for a Shift pressed on its own, and sends one more to take it back when another key goes down
-    /// while that Shift is held (`chord::Decision::undo_toggle`): a capital letter or the finishing chord never
-    /// switches the mode. The user often taps the chord and decides on the translation only while speaking, and a
-    /// second Shift takes a slip back. The finishing press has already moved the flow to "thinking", so a later Shift
-    /// changes nothing. A follow-up stays "Ask".
+    /// translation swap ("Ask" becomes a translation), and the Drop changes its icon at once. A translation goes back
+    /// to the mode it was switched from ("Ask" included; a dictation that started as a translation becomes a
+    /// dictation), so every toggle is undone by the next one. After a tap the hook sends it only for a Shift pressed on
+    /// its own, and sends one more to take it back when another key or a mouse button goes down while that Shift is
+    /// held (`chord::Decision::undo_toggle`, `chord::Chord::on_mouse_down`): a capital letter, Shift + click or the
+    /// finishing chord never switches the mode. The user often taps the chord and decides on the translation only while
+    /// speaking, and a second Shift takes a slip back. The finishing press has already moved the flow to "thinking", so
+    /// a later Shift changes nothing. A follow-up stays "Ask".
     fn on_mode_toggle(&mut self, fx: &mut Vec<Effect>) {
         if self.recording_now() && !self.answer_open {
             self.mode = match self.mode {
-                Mode::Translate => Mode::Dictate,
-                Mode::Dictate | Mode::Ask => Mode::Translate,
+                Mode::Translate => self.toggled_from.take().unwrap_or(Mode::Dictate),
+                from @ (Mode::Dictate | Mode::Ask) => {
+                    self.toggled_from = Some(from);
+                    Mode::Translate
+                }
             };
             self.push_ui(fx);
         }
@@ -2003,6 +2015,36 @@ mod tests {
         f.handle(I::ChordUp, 400);
         assert!(f.handle(I::ModeChange(Mode::Ask), 1_000).is_empty(), "the chord was released: Alt changes nothing");
         assert_eq!(f.mode(), Mode::Translate);
+    }
+
+    /// A toggle is undone by the next one: a translation goes back to the mode it was switched from, "Ask" included, so
+    /// a second Shift, or the hook taking a toggle back, never turns a question into a dictation.
+    #[test]
+    fn a_translation_toggles_back_to_the_mode_it_came_from() {
+        let mut f = Flow::new(2, false);
+        let id = recording_in(&mut f, 0, Mode::Ask);
+        assert_eq!(toggle(&mut f, 1_000), Some(Mode::Translate));
+        assert_eq!(toggle(&mut f, 1_100), Some(Mode::Ask), "back to \"Ask\", not to dictation");
+        assert_eq!(toggle(&mut f, 1_200), Some(Mode::Translate));
+        assert_eq!(toggle(&mut f, 1_300), Some(Mode::Ask));
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
+        f.handle(I::ChordUp, 5_100);
+        let fx = f.handle(I::SttFinal { id, text: "какая погода".into() }, 5_300);
+        assert!(fx.iter().any(|e| matches!(e, E::Ask { .. })), "the question is asked");
+        // A new recording forgets where the last translation came from.
+        let mut f = Flow::new(2, false);
+        recording_in(&mut f, 0, Mode::Ask);
+        toggle(&mut f, 1_000);
+        f.handle(I::Esc, 2_000);
+        recording_in(&mut f, 10_000, Mode::Translate);
+        assert_eq!(toggle(&mut f, 11_000), Some(Mode::Dictate), "a translation chord toggles to dictation");
+        // Alt inside the held chord picks the mode anew: a translation toggled before it does not go back to dictation.
+        let mut f = Flow::new(2, false);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
+        assert_eq!(toggle(&mut f, 100), Some(Mode::Translate));
+        f.handle(I::ModeChange(Mode::Ask), 200);
+        assert_eq!(toggle(&mut f, 300), Some(Mode::Translate));
+        assert_eq!(toggle(&mut f, 400), Some(Mode::Ask));
     }
 
     #[test]
