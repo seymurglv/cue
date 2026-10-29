@@ -310,7 +310,8 @@ pub const MAX_PENDING: usize = 1_000;
 #[derive(Default)]
 pub struct UsageLog {
     pending: VecDeque<UsageRecord>,
-    warned_no_price: bool,
+    /// The models already named for having no price: each once a session (refine's, and the one "Ask" answers with).
+    warned_no_price: Vec<String>,
     dropped: u64,
 }
 
@@ -347,12 +348,13 @@ impl UsageLog {
         self.dropped
     }
 
-    /// `true` if the model has no price in the settings and no warning has been given yet (once per session).
+    /// `true` if the model has no price in the settings and no warning about it has been given yet (once per model and
+    /// session).
     pub fn warn_no_price(&mut self, pricing: &Pricing, model: &str) -> bool {
-        if self.warned_no_price || pricing.claude_price(model).is_some() {
+        if self.warned_no_price.iter().any(|m| m == model) || pricing.claude_price(model).is_some() {
             return false;
         }
-        self.warned_no_price = true;
+        self.warned_no_price.push(model.to_owned());
         true
     }
 }
@@ -781,12 +783,14 @@ mod tests {
         assert_eq!(first.as_deref(), Some("5"), "the oldest were dropped");
     }
 
+    /// Rows carry refine's model or the one "Ask" answered with: each model without a price is named once.
     #[test]
-    fn missing_price_is_warned_once() {
+    fn a_missing_price_is_warned_once_per_model() {
         let p = Pricing::default();
         let mut log = UsageLog::default();
         assert!(!log.warn_no_price(&p, "claude-haiku-5-5"), "the price is there");
         assert!(log.warn_no_price(&p, "claude-no-such-model"));
         assert!(!log.warn_no_price(&p, "claude-no-such-model"), "no second warning in a session");
+        assert!(log.warn_no_price(&p, "claude-other-model"), "another model without a price is named too");
     }
 }

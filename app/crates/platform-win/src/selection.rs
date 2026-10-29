@@ -15,6 +15,41 @@ pub fn copies_line(app: &str) -> bool {
     COPIES_LINE.iter().any(|a| app.eq_ignore_ascii_case(a))
 }
 
+/// Window classes of terminals: the console host (cmd, PowerShell), Windows Terminal and its pseudo-console, mintty
+/// (Git Bash, Cygwin), ConEmu, PuTTY.
+const TERMINAL_CLASSES: &[&str] = &[
+    "ConsoleWindowClass",
+    "CASCADIA_HOSTING_WINDOW_CLASS",
+    "PseudoConsoleWindow",
+    "mintty",
+    "VirtualConsoleClass",
+    "PuTTY",
+];
+/// Executables of terminals and shells, without `.exe`.
+const TERMINAL_EXES: &[&str] = &[
+    "windowsterminal",
+    "openconsole",
+    "conhost",
+    "cmd",
+    "powershell",
+    "pwsh",
+    "mintty",
+    "wsl",
+    "wezterm-gui",
+    "alacritty",
+    "conemu",
+    "conemu64",
+    "putty",
+];
+
+/// A terminal, by its window class or its executable (`focus::window_kind`): the check right before the fallback's
+/// Ctrl+C, on the window it would go to — Ctrl+C there stops the running program, whatever the app was called at the
+/// chord.
+pub fn terminal_window(class: &str, exe: &str) -> bool {
+    let known = |names: &[&str], name: &str| names.iter().any(|n| name.eq_ignore_ascii_case(n));
+    known(TERMINAL_CLASSES, class) || known(TERMINAL_EXES, exe)
+}
+
 /// Ctrl+C fallback (spec 2 §6.1): only when the field could not say whether anything is selected (no text pattern, not a
 /// classic field), there may be a field at all (never in File Explorer's list or on the desktop, where Ctrl+C copies files),
 /// and the app is not a terminal (Ctrl+C there stops the running program).
@@ -71,6 +106,27 @@ mod tests {
             (&text, Yes, false, false),
         ] {
             assert_eq!(needs_copy_fallback(read, editable, terminal), want && COPY_FALLBACK, "{read:?} {editable:?} terminal={terminal}");
+        }
+    }
+
+    /// The window Ctrl+C would go to, looked at right before it: a console of any shell, Windows Terminal, mintty and
+    /// the like by their class or executable, whatever the app was called at the chord.
+    #[test]
+    fn terminal_windows_are_known_by_class_or_executable() {
+        for (class, exe) in [
+            ("ConsoleWindowClass", "conhost"),
+            ("CASCADIA_HOSTING_WINDOW_CLASS", "windowsterminal"),
+            ("mintty", "mintty"),
+            ("SomethingNew", "pwsh"),
+            ("SomethingNew", "PowerShell"),
+            ("VirtualConsoleClass", "conemu64"),
+            ("Chrome_WidgetWin_1", "wezterm-gui"),
+        ] {
+            assert!(terminal_window(class, exe), "{class} {exe}");
+        }
+        let others = [("Chrome_WidgetWin_1", "telegram"), ("Notepad", "notepad"), ("", ""), ("Console", "code")];
+        for (class, exe) in others {
+            assert!(!terminal_window(class, exe), "{class} {exe}");
         }
     }
 

@@ -21,6 +21,14 @@ pub struct Taken {
     pub terminal: bool,
 }
 
+impl Taken {
+    /// The Ctrl+C copy came: it is the selection, one that can be changed (spec 2 §6.1).
+    pub fn copied(&mut self, text: &str) {
+        self.ctx = with_copied(&self.ctx, text);
+        self.sel = SelectionKind::Writable;
+    }
+}
+
 /// The context once the Ctrl+C copy came (spec 2 §6.1): the copied text is the selection. The request task and the
 /// conversation build the first message from it alike.
 pub fn with_copied(ctx: &AskContext, text: &str) -> AskContext {
@@ -48,6 +56,20 @@ impl KeptTaken {
 
     pub fn clear(&mut self) {
         self.0 = None;
+    }
+
+    /// The Ctrl+C copy of dictation `id` came after Esc dropped the request waiting for it: "restore" asks with it.
+    pub fn copied(&mut self, id: DictationId, text: &str) {
+        if let Some((i, taken)) = self.0.as_mut()
+            && *i == id
+        {
+            taken.copied(text);
+        }
+    }
+
+    /// The question of dictation `id` has ended for good: what it was asked with is not kept any more.
+    pub fn forget(&mut self, id: DictationId) {
+        self.0.take_if(|(i, _)| *i == id);
     }
 }
 
@@ -142,8 +164,7 @@ impl Conversation {
     /// The Ctrl+C copy of the first question came: it is the selection, one that can be changed (spec 2 §6.1), and the
     /// question waiting to go is asked with it.
     pub fn copied(&mut self, text: &str) {
-        self.taken.ctx = with_copied(&self.taken.ctx, text);
-        self.taken.sel = SelectionKind::Writable;
+        self.taken.copied(text);
         if self.messages.is_empty()
             && let Some(question) = self.question().map(str::to_owned)
         {
@@ -674,6 +695,23 @@ mod tests {
         assert_eq!(o.view.actions, [AnswerAction::Insert, AnswerAction::Copy]);
         o.copied("Спасибо");
         assert_eq!(o.view.actions, [AnswerAction::Below, AnswerAction::Replace, AnswerAction::Copy], "the open answer's buttons follow");
+    }
+
+    /// A Ctrl+C copy that comes after Esc dropped the request waiting for it: what "restore" asks with gets it all the
+    /// same; once the question has ended for good, its context is forgotten.
+    #[test]
+    fn a_copy_that_comes_after_esc_still_reaches_restore() {
+        let mut kept = KeptTaken::default();
+        kept.keep(DictationId(4), &taken(SelectionKind::None, false));
+        kept.copied(DictationId(5), "чужое");
+        assert_eq!(kept.get(DictationId(4)).unwrap().ctx.selection, None, "another dictation's copy");
+        kept.copied(DictationId(4), "Спасибо, посмотрю вечером");
+        let t = kept.get(DictationId(4)).unwrap();
+        assert_eq!((t.ctx.selection.as_deref(), t.sel), (Some("Спасибо, посмотрю вечером"), SelectionKind::Writable));
+        kept.forget(DictationId(5));
+        assert!(kept.get(DictationId(4)).is_some(), "only its own dictation's is forgotten");
+        kept.forget(DictationId(4));
+        assert!(kept.get(DictationId(4)).is_none());
     }
 
     /// "Restore" after Esc asks with the context taken for its dictation: the first ask used up the focus query.

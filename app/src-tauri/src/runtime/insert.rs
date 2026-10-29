@@ -1,13 +1,14 @@
 //! Inserting text at the caret: the insert thread (it owns the clipboard operations) and the terminal safeguard.
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::{Sender, channel};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cue_core::flow::{DictationId, InsertOutcome};
 use cue_platform_win::clipboard::{
     ClipboardApi, PasteResult, WinClipboard, WinKeys, copy_selection, forget_in_history, paste_text, spawn_late_guard,
 };
-use cue_platform_win::focus::UNKNOWN_APP;
+use cue_platform_win::focus::{UNKNOWN_APP, WindowRef};
+use cue_platform_win::input::{press_right, wait_modifiers_released};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::CoreEvent;
@@ -15,14 +16,16 @@ use super::CoreEvent;
 /// A job for the insert thread. `id` is the dictation waiting for the result; `None` is Ctrl+Win+V, "Copy" on the
 /// tray card and the answer's Copy: the flow does not wait for their result.
 pub enum InsertJob {
-    /// There is a field (or it is unknown): paste through the clipboard. `collapse` — first the Right arrow, which
-    /// collapses the selection to its end ("Insert below", spec 2 §7).
+    /// There is a field (or it is unknown): paste through the clipboard. `collapse` — "Insert below" (spec 2 §7): first
+    /// the Right arrow, which collapses the selection to its end, then the text on a line of its own after it. A
+    /// selection that cannot be collapsed is never pasted over: the text stays in the clipboard ("no field").
     Paste { id: Option<DictationId>, text: String, collapse: bool },
     /// No field: leave the text in the clipboard the normal way (without markers).
     Leave { id: Option<DictationId>, text: String },
     /// The Ctrl+C fallback of "Ask" (spec 2 §6.1): the selection, read through the clipboard, which is put back; the
-    /// copy then leaves the Win+V history if Windows allows (decision 27).
-    CopySelection { reply: Sender<Option<String>> },
+    /// copy then leaves the Win+V history if Windows allows (decision 27). Only into `target`, the window the selection
+    /// was read in at the chord.
+    CopySelection { reply: Sender<Option<String>>, target: WindowRef },
 }
 
 impl InsertJob {
@@ -38,8 +41,9 @@ impl InsertJob {
 ///
 /// Each job ends within a bounded time: waiting for Ctrl and Win to be released takes up to 5 s, each clipboard open
 /// up to 10 attempts of 50 ms (snapshot, write, restore: ≤ ~1.5 s), the pause before restoring the clipboard
-/// is 0.5 s; ≤ ~7 s in total. On top of that the core keeps its own watchdog (`INSERT_WATCHDOG`, 10 s). The Ctrl+C copy
-/// of "Ask" takes less: the keys up within 1.5 s, the app's copy within 0.4 s, the clipboard read and put back.
+/// is 0.5 s; ≤ ~7 s in total, and "Insert below" waits up to `COLLAPSE_WAIT` more for its Right arrow (≤ ~9 s). On top
+/// of that the core keeps its own watchdog (`INSERT_WATCHDOG`, 10 s). The Ctrl+C copy of "Ask" takes less: the keys up
+/// within 1.5 s, the app's copy within 0.4 s, the clipboard read and put back.
 /// `Pasted` is sent from `on_pasted` right after Ctrl+V, before the pause and the clipboard restore
 /// (that is the "done" moment).
 pub fn spawn_inserter(core: UnboundedSender<CoreEvent>) -> std::io::Result<Sender<InsertJob>> {
@@ -56,6 +60,10 @@ pub fn spawn_inserter(core: UnboundedSender<CoreEvent>) -> std::io::Result<Sende
     })?;
     Ok(tx)
 }
+
+/// How long "Insert below" waits for the modifiers before its Right arrow (Shift held would extend the selection
+/// instead): with the paste's own bounds the job still ends within the core's watchdog.
+const COLLAPSE_WAIT: Duration = Duration::from_secs(2);
 
 fn report(core: &UnboundedSender<CoreEvent>, id: Option<DictationId>, outcome: InsertOutcome) {
     if let Some(id) = id {
@@ -77,10 +85,18 @@ fn run(clip: &mut Option<WinClipboard>, job: InsertJob, core: &UnboundedSender<C
     let Some(clip) = clip.as_mut() else { return };
     match job {
         InsertJob::Paste { id, text, collapse } => {
-            // Shift must be up first, or Right would extend the selection instead of collapsing it.
-            if collapse && cue_platform_win::input::wait_modifiers_released(std::time::Duration::from_secs(5)) {
-                let _ = cue_platform_win::input::press_right();
-            }
+            let text = if collapse {
+                // Shift must be up first, or Right would extend the selection instead of collapsing it.
+                if !(wait_modifiers_released(COLLAPSE_WAIT) && press_right()) {
+                    tracing::info!("insert below: the selection was not collapsed; text left in the clipboard");
+                    leave(clip, &text);
+                    report(core, id, InsertOutcome::NoField);
+                    return;
+                }
+                format!("\n{text}")
+            } else {
+                text
+            };
             let pasted = paste_text(clip, &mut WinKeys, &text, || report(core, id, InsertOutcome::Pasted));
             match pasted {
                 Ok(PasteResult::Pasted { restored: true }) => {}
@@ -100,14 +116,12 @@ fn run(clip: &mut Option<WinClipboard>, job: InsertJob, core: &UnboundedSender<C
             }
         }
         InsertJob::Leave { id, text } => {
-            if let Err(e) = clip.write_text(&text, false) {
-                tracing::warn!("text not put in the clipboard: {e}");
-            }
+            leave(clip, &text);
             report(core, id, InsertOutcome::NoField);
         }
-        InsertJob::CopySelection { reply } => {
+        InsertJob::CopySelection { reply, target } => {
             // A copy too late for this read is still caught, on a thread of its own: the user's clipboard comes back.
-            let copy = copy_selection(clip, &mut WinKeys, |late| {
+            let copy = copy_selection(clip, &mut WinKeys, target, |late| {
                 let _ = spawn_late_guard(late);
             });
             if let Some(text) = &copy.text {
@@ -116,6 +130,13 @@ fn run(clip: &mut Option<WinClipboard>, job: InsertJob, core: &UnboundedSender<C
             }
             let _ = reply.send(copy.text);
         }
+    }
+}
+
+/// The text in the clipboard the normal way (without markers), for the user to paste.
+fn leave(clip: &mut WinClipboard, text: &str) {
+    if let Err(e) = clip.write_text(text, false) {
+        tracing::warn!("text not put in the clipboard: {e}");
     }
 }
 
@@ -208,7 +229,8 @@ mod tests {
     #[test]
     fn only_a_dictations_paste_or_leave_reports_to_the_flow() {
         let (reply, _rx) = channel();
-        assert_eq!(InsertJob::CopySelection { reply }.id(), None);
+        let target = WindowRef { window: 0x10, process: 100 };
+        assert_eq!(InsertJob::CopySelection { reply, target }.id(), None);
         let id = Some(DictationId(3));
         assert_eq!(InsertJob::Paste { id, text: "x".into(), collapse: true }.id(), id);
         assert_eq!(InsertJob::Leave { id, text: "x".into() }.id(), id);

@@ -401,16 +401,8 @@ impl Flow {
                 self.answer_shows(id, false);
                 self.open_answer(&mut fx);
             }
-            Input::AskAnswered { id } if self.ask_for(id) => {
-                self.asking = None;
-                fx.push(Effect::Finished { id, outcome: Outcome::Answered });
-                self.answer_shows(id, false);
-                if id == self.id && self.phase == Phase::Thinking {
-                    self.open_answer(&mut fx);
-                }
-                self.send_held(&mut fx);
-            }
-            Input::AskWrite { id, how } if self.ask_for(id) && self.asking_now() && !self.follow_up_under_way(id) => {
+            Input::AskAnswered { id } if self.ask_for(id) => self.answered(id, &mut fx),
+            Input::AskWrite { id, how } if self.ask_for(id) && self.asking_now() && !self.shows_write(id) => {
                 self.asking = None;
                 self.pasting = Some(id);
                 self.paste_counted = false;
@@ -420,14 +412,9 @@ impl Flow {
                 self.end_conversation(&mut fx);
                 self.push_ui(&mut fx);
             }
-            // A write that ended the answer a follow-up follows: the runtime shows it instead (decision 12) and says
-            // `AskAnswered`; if a write comes all the same, it counts as answered.
-            Input::AskWrite { id, .. } if self.ask_for(id) && self.follow_up_under_way(id) => {
-                self.asking = None;
-                fx.push(Effect::Finished { id, outcome: Outcome::Answered });
-                self.answer_shows(id, false);
-                self.send_held(&mut fx);
-            }
+            // A write that is shown instead (`shows_write`): the runtime says `AskAnswered` then; if a write comes all
+            // the same, it counts as answered.
+            Input::AskWrite { id, .. } if self.ask_for(id) && self.shows_write(id) => self.answered(id, &mut fx),
             Input::AskFailed { id, error } if self.ask_for(id) => {
                 self.asking = None;
                 fx.push(Effect::Finished { id, outcome: Outcome::Failed });
@@ -494,9 +481,27 @@ impl Flow {
 
     /// A follow-up recorded after the request `id` is still under way: recording, being transcribed, waiting for the
     /// answer it follows, or showing that it could not be transcribed. One dropped since has left the flow at the answer.
-    /// The runtime asks it too, when that request ends: a write is then shown, not pasted under the user's hands.
-    pub fn follow_up_under_way(&self, id: DictationId) -> bool {
+    fn follow_up_under_way(&self, id: DictationId) -> bool {
         id != self.id && self.phase != Phase::Answer
+    }
+
+    /// A write that ends the request `id` now is shown in the answer, with Copy, not pasted: a follow-up is under way
+    /// (not under the user's hands, decision 12), or CUE is paused (it never injects input then). The runtime asks this
+    /// when the request ends.
+    pub fn shows_write(&self, id: DictationId) -> bool {
+        self.follow_up_under_way(id) || self.paused
+    }
+
+    /// The request `id` ended with an answer to show (a refusal, or a write shown instead, too): counted, and the
+    /// answer opens if it is the current question's and nothing showed yet; a follow-up waiting for it goes now.
+    fn answered(&mut self, id: DictationId, fx: &mut Vec<Effect>) {
+        self.asking = None;
+        fx.push(Effect::Finished { id, outcome: Outcome::Answered });
+        self.answer_shows(id, false);
+        if id == self.id && self.phase == Phase::Thinking {
+            self.open_answer(fx);
+        }
+        self.send_held(fx);
     }
 
     /// The answer of request `id` is what the open answer shows now, complete or failed: Retry and the paste buttons
@@ -2230,8 +2235,8 @@ mod tests {
         assert_eq!(phase(&f.handle(I::AskOpened { id }, 11_000)), Some(UiPhase::Answer), "a follow-up's first step");
     }
 
-    /// The runtime asks this when an answer ends, to show a write rather than paste it under the user's hands
-    /// (decision 12): from the follow-up's recording through its transcription, its wait and its miss, to its drop.
+    /// A write that ends an answer is shown rather than pasted under the user's hands (decision 12): from the
+    /// follow-up's recording through its transcription, its wait and its miss, to its drop.
     #[test]
     fn a_follow_up_is_under_way_until_it_is_dropped() {
         let mut f = Flow::new(2, false);
@@ -2370,6 +2375,26 @@ mod tests {
         let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 6_300);
         assert!(has(&fx, &E::Finished { id, outcome: Outcome::Inserted }));
         assert_eq!(phase(&fx), Some(UiPhase::Done));
+    }
+
+    /// CUE never injects input while paused: a write that ends during a pause — a first question still in flight when
+    /// the pause began — is shown in the answer, with Copy, and counted as answered.
+    #[test]
+    fn a_write_that_ends_during_a_pause_is_shown_not_pasted() {
+        let mut f = Flow::new(2, false);
+        let id = asking(&mut f, 0, "напиши письмо Ане");
+        assert!(!f.shows_write(id), "not paused: pasted");
+        f.handle(I::TogglePause, 5_500);
+        assert!(f.shows_write(id), "paused: the runtime shows it");
+        let fx = f.handle(I::AskWrite { id, how: PasteHow::AtCaret }, 6_000);
+        let pasted = fx.iter().any(|e| matches!(e, E::AskPaste { .. } | E::CloseAnswer));
+        assert!(!pasted, "nothing pasted, the answer stays");
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::Answered }));
+        assert_eq!(phase(&fx), Some(UiPhase::Answer));
+        assert!(f.answer_open());
+        // Still paused, the answer's Copy works and its cross closes it.
+        let fx = f.handle(I::Ui(UiAction::AnswerClose), 7_000);
+        assert!(has(&fx, &E::CloseAnswer));
     }
 
     #[test]

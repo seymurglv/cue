@@ -107,7 +107,8 @@ pub enum CoreEvent {
     TimerFired { kind: TimerKind, generation: u64 },
     /// A step of the "Ask" request `task` of dictation `id`.
     AskStep { id: DictationId, task: u64, step: engine_ask::Step },
-    /// The Ctrl+C copy the request `task` waited for came: it is the first question's selection.
+    /// The Ctrl+C copy of the first question of dictation `id` came: it is its selection. `task` is the request that
+    /// waited for it, which may have been dropped since (Esc): "restore" asks with the copy all the same.
     AskCopied { id: DictationId, task: u64, text: String },
     /// The "Ask" request `task` ended.
     AskDone { id: DictationId, task: u64, result: engine_ask::AskResult },
@@ -422,15 +423,15 @@ impl Runtime {
                 }
             }
             CoreEvent::AskStep { id, task, step } => self.on_ask_step(id, task, step),
-            CoreEvent::AskCopied { id, task, text } => {
-                if self.ask_task.running(task)
-                    && let Some(c) = self.conversation.as_mut()
-                {
+            CoreEvent::AskCopied { id, task, text } => match self.conversation.as_mut() {
+                // In flight, the request that waited for it was sent with the copy; "restore" asks with it too.
+                Some(c) if self.ask_task.running(task) => {
                     c.copied(&text);
-                    // "Restore" after Esc asks with the copied selection too.
                     self.ask_taken.keep(id, &c.taken);
                 }
-            }
+                // Esc dropped that request first: "restore" asks with the copy all the same.
+                _ => self.ask_taken.copied(id, &text),
+            },
             CoreEvent::AskDone { id, task, result } => self.on_ask_done(id, task, result),
             CoreEvent::AnswerFlush => {
                 let now = self.now();
@@ -605,11 +606,13 @@ impl Runtime {
             stop_mic_soon(old);
         }
         let old = std::mem::replace(&mut self.attempt, Attempt::new(id));
-        // A follow-up starts while the answer it follows still prints (decision 12): that attempt waits aside for its
-        // end.
+        // A follow-up starts while the answer it follows still prints (decision 12): that answer's attempt waits
+        // aside until it ends.
         if self.ask_task.is_for(old.id) {
             self.answering = Some(old);
         }
+        // A new recording ends any "restore" or retry of an earlier question: what it was asked with is not kept.
+        self.clear_ask_context();
         self.silence = SilenceDetector::new();
         self.heard = false;
         // The attempt's audio goes to current.wav; a file left from the previous attempt is replaced.
@@ -1007,15 +1010,34 @@ impl Runtime {
         };
         let app = first_known_app(&[&info.app, &self.attempt.app]).to_owned();
         let copy = needs_copy_fallback(&info.selection, info.editable, is_terminal(&app) || copies_line(&app));
-        if copy {
+        // Only into the window the field was read in: the insert thread looks again right before Ctrl+C.
+        let target = info.window.filter(|_| copy);
+        if let Some(target) = target {
             let (reply, rx) = std::sync::mpsc::channel();
-            if self.insert.as_ref().is_some_and(|tx| tx.send(InsertJob::CopySelection { reply }).is_ok()) {
+            if self.insert.as_ref().is_some_and(|tx| tx.send(InsertJob::CopySelection { reply, target }).is_ok()) {
                 self.ask_copy = Some((id, rx));
             }
         }
         // The kind and the length only (`SelectionRead`'s `Debug`).
-        tracing::info!(selection = ?info.selection, copy, "ask: context");
+        tracing::info!(selection = ?info.selection, copy = target.is_some(), "ask: context");
         self.ask_info = Some((id, info));
+    }
+
+    /// The first question of dictation `id` has ended for good: its selection and the rest of what it was asked with
+    /// are not kept for a "restore" or a retry any more.
+    fn forget_ask_context(&mut self, id: DictationId) {
+        self.ask_query.take_if(|(i, _)| *i == id);
+        self.ask_info.take_if(|(i, _)| *i == id);
+        self.ask_copy.take_if(|(i, _)| *i == id);
+        self.ask_taken.forget(id);
+    }
+
+    /// No question's context is kept: a new recording has begun.
+    fn clear_ask_context(&mut self) {
+        self.ask_query = None;
+        self.ask_info = None;
+        self.ask_copy = None;
+        self.ask_taken.clear();
     }
 
     /// What the question is asked with (spec 2 §6.1): the selection read at the chord (a Ctrl+C copy joins later, in
@@ -1080,6 +1102,7 @@ impl Runtime {
             Some((i, rx)) if i == id => c.question().map(|q| (rx, q.to_owned(), c.taken.ctx.clone())),
             _ => None,
         };
+        let core = self.tx.clone();
         let model = self.settings.ask.model().to_owned();
         let search = self.ask_search();
         let key = keys::lookup(KeyName::Anthropic).unwrap_or_else(|e| {
@@ -1095,16 +1118,14 @@ impl Runtime {
         tracing::info!(turns = messages.len(), search = search.is_some(), copy = copy.is_some(), "ask: asking");
         let (http, tx) = (self.http.clone(), self.tx.clone());
         let old = self.ask_task.start(id, |task| {
+            // The wait for the copy is not this request's: should Esc drop the request, the copy still reaches the core.
+            let copy = copy.map(|(rx, question, ctx)| (wait_for_copy(rx, id, task, core), question, ctx));
             tokio::spawn(async move {
                 let mut messages = messages;
-                if let Some((rx, question, ctx)) = copy {
-                    let wait = tokio::task::spawn_blocking(move || rx.recv_timeout(COPY_WAIT).ok().flatten());
-                    let copied = wait.await.ok().flatten();
-                    if let Some(text) = copied {
-                        let ctx = ask::with_copied(&ctx, &text);
-                        messages = vec![ask::first_turn(&question, &ctx)];
-                        let _ = tx.send(CoreEvent::AskCopied { id, task, text });
-                    }
+                if let Some((copied, question, ctx)) = copy
+                    && let Ok(Some(text)) = copied.await
+                {
+                    messages = vec![ask::first_turn(&question, &ask::with_copied(&ctx, &text))];
                 }
                 let steps = tx.clone();
                 let body = async {
@@ -1168,9 +1189,9 @@ impl Runtime {
         if let Some(a) = self.attempt_for(id) {
             a.ask_done(result.usage, now);
         }
-        // Decision 12: the request ended while a follow-up is under way (recording, being transcribed, waiting for this
-        // answer, or missed) — a write is shown, never pasted under the user's hands.
-        let show_write = self.flow.follow_up_under_way(id);
+        // A write is shown, not pasted, while a follow-up is under way (decision 12: not under the user's hands) or CUE
+        // is paused (no input is injected then).
+        let show_write = self.flow.shows_write(id);
         let Some(c) = self.conversation.as_mut() else { return };
         let heard = c.end(&result, show_write);
         let opened = c.opened;
@@ -1264,7 +1285,7 @@ impl Runtime {
     }
 
     /// "Insert below" (spec 2 §7): the caret goes to the end of the selection (Right), then a line break and the text
-    /// in one paste — an Enter would send a chat message. Never offered in a terminal.
+    /// in one paste — an Enter would send a chat message. The insert thread adds the line break. Never in a terminal.
     fn dispatch_below(&mut self, text: String, id: DictationId) {
         let info = self.focus.query(0, FOCUS_TIMEOUT);
         self.note_app(&info.app);
@@ -1272,7 +1293,7 @@ impl Runtime {
         let job = if info.editable == Editability::No {
             InsertJob::Leave { id: Some(id), text }
         } else {
-            InsertJob::Paste { id: Some(id), text: format!("\n{text}"), collapse: true }
+            InsertJob::Paste { id: Some(id), text, collapse: true }
         };
         self.send_job(job, Some(id));
     }
@@ -1367,6 +1388,10 @@ impl Runtime {
                 self.append_usage(rec);
             }
             return;
+        }
+        // A failed question may still be retried — its transcription from the saved audio needs what it was asked with.
+        if outcome != Outcome::Failed {
+            self.forget_ask_context(id);
         }
         // The attempt files (current.wav) and accounting belong to `self.attempt`: a result of another attempt is
         // a flow bug, and then we touch nothing.
@@ -1481,6 +1506,26 @@ fn soniox_hints(mode: Mode, s: &Settings) -> Vec<String> {
 /// The usage.csv time: UTC, like the providers' invoices.
 fn utc_now() -> String {
     usage::utc_timestamp(SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()))
+}
+
+/// Waits off the core for the Ctrl+C copy of the first question of dictation `id` (`COPY_WAIT`), tells the core
+/// (`AskCopied`, before the request `task` can send a step), then hands it to that request if it still waits.
+fn wait_for_copy(
+    rx: std::sync::mpsc::Receiver<Option<String>>,
+    id: DictationId,
+    task: u64,
+    core: UnboundedSender<CoreEvent>,
+) -> tokio::sync::oneshot::Receiver<Option<String>> {
+    let (to_request, copied) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let wait = tokio::task::spawn_blocking(move || rx.recv_timeout(COPY_WAIT).ok().flatten());
+        let text = wait.await.ok().flatten();
+        if let Some(text) = &text {
+            let _ = core.send(CoreEvent::AskCopied { id, task, text: text.clone() });
+        }
+        let _ = to_request.send(text);
+    });
+    copied
 }
 
 /// Today's local date, `YYYY-MM-DD` (spec 2 §6.1): it grounds searches, so a user east of UTC must not get yesterday.

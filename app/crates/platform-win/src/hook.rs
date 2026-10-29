@@ -25,7 +25,8 @@ pub static ESC_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// core. Not `ESC_ACTIVE`: that one also covers thinking and errors, when the user may already be typing again, and
 /// every capital letter would then wake the core for nothing.
 pub static RECORDING: AtomicBool = AtomicBool::new(false);
-/// Ctrl + Win + Alt is the "Ask" chord. Off until "Ask" exists (spec 2, queue 2b): Alt keeps making a system shortcut.
+/// Ctrl + Win + Alt is the "Ask" chord while "Ask" is on (`ask.enabled` in settings.json; the core sets this at
+/// startup). Off, Alt keeps making a system shortcut.
 pub static ASK_ENABLED: AtomicBool = AtomicBool::new(false);
 /// "Pause for an hour": the hook swallows nothing, does not mask the Start menu and sends no events
 /// (the Windows Ctrl+Win+V works as usual), but `Chord` still sees every key. Set by the core.

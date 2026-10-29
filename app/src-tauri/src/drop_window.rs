@@ -225,11 +225,11 @@ pub fn spawn_placement(
                     motion.hidden(&mut desk);
                     next_tick = Instant::now() + TICK;
                 }
-                Seen::Shown { rect, .. } => {
+                Seen::Shown { rect, scale } => {
                     if motion.moving() {
                         motion.frame(&mut desk, Instant::now());
                     } else if Instant::now() >= next_tick {
-                        keeper.tick(motion.place, rect);
+                        keeper.tick(motion.place, rect, scale);
                         next_tick = Instant::now() + TICK;
                     }
                 }
@@ -461,7 +461,7 @@ impl Motion {
     }
 }
 
-/// The checks at rest, every 0.5 s: the window's place, the z-order guard, full screen.
+/// The checks at rest, every 0.5 s: the window's place and size, the z-order guard, full screen.
 struct Keeper {
     hwnd: HWND,
     ui: Ui,
@@ -477,19 +477,26 @@ impl Keeper {
         Self { hwnd, ui, guard: ZGuard::default(), move_failed: false, busy: false }
     }
 
-    fn tick(&mut self, place: DropPosition, rect: PxRect) {
+    fn tick(&mut self, place: DropPosition, rect: PxRect, scale: f64) {
         if let Some(mon) = placement::foreground_monitor() {
-            let origin = rest_origin(mon, place, rect);
-            if (rect.left, rect.top) != origin {
-                match dropwin::move_to(self.hwnd, origin.0, origin.1) {
-                    Ok(()) => self.move_failed = false,
-                    // Retry on the next tick; log it once, not twice a second.
-                    Err(e) if !self.move_failed => {
-                        self.move_failed = true;
-                        tracing::warn!("Drop not repositioned: {e}");
-                    }
-                    Err(_) => {}
+            let to = rest_rect(mon, place, rect, scale);
+            let done = if (to.width(), to.height()) != (rect.width(), rect.height()) {
+                // The size of another place: the resize after a drag failed or never landed.
+                Some(dropwin::set_rect(self.hwnd, to))
+            } else if (to.left, to.top) != (rect.left, rect.top) {
+                Some(dropwin::move_to(self.hwnd, to.left, to.top))
+            } else {
+                None
+            };
+            match done {
+                None => {}
+                Some(Ok(())) => self.move_failed = false,
+                // Retry on the next tick; log it once, not twice a second.
+                Some(Err(e)) if !self.move_failed => {
+                    self.move_failed = true;
+                    tracing::warn!("Drop not repositioned: {e}");
                 }
+                Some(Err(_)) => {}
             }
         }
         self.guard_z_order(rect);
@@ -534,6 +541,18 @@ impl Keeper {
 /// old monitor: then its scale never changes and it never arrives.
 fn rest_origin(mon: Monitor, place: DropPosition, rect: PxRect) -> (i32, i32) {
     placement::origin_for_center(placement::anchor(mon.work, mon.scale, place, METRICS), rect.width(), rect.height())
+}
+
+/// Where the window belongs at rest, with its size: the place's size at the window's own `scale` (as `rest_origin`,
+/// never the target monitor's), so a resize after a drag that failed or never landed is made here; the current size
+/// when it is that, give or take a pixel of rounding.
+fn rest_rect(mon: Monitor, place: DropPosition, rect: PxRect, scale: f64) -> PxRect {
+    let (lw, lh) = window_size(place);
+    let (w, h) = ((lw * scale).round() as i32, (lh * scale).round() as i32);
+    let off = (rect.width() - w).abs() > 1 || (rect.height() - h).abs() > 1;
+    let sized = if off { PxRect { right: rect.left + w, bottom: rect.top + h, ..rect } } else { rect };
+    let (x, y) = rest_origin(mon, place, sized);
+    PxRect { left: x, top: y, right: x + sized.width(), bottom: y + sized.height() }
 }
 
 #[tauri::command]
@@ -645,6 +664,20 @@ mod tests {
         let (x, y) = placement::origin_for_center(anchor, 960, 600);
         let stuck = PxRect { left: x, top: y, right: x + 640, bottom: y + 400 };
         assert_eq!(placement::largest_overlap(stuck, &[old_bounds, new_bounds]), Some(0));
+    }
+
+    /// A resize after a drag that failed or never landed: the next check at rest gives the window its place's size at
+    /// its own scale, centered on the place; a size a pixel off (rounding) is left as it is.
+    #[test]
+    fn at_rest_the_window_gets_its_places_size_back() {
+        let bottom = placement::anchor(FHD.work, 1.0, DropPosition::Bottom, METRICS);
+        let to = rest_rect(FHD, DropPosition::Bottom, window_at(bottom, 900, 540), 1.0);
+        assert_eq!((to.width(), to.height(), to.center()), (640, 860, bottom));
+        let close = window_at(bottom, 641, 859);
+        assert_eq!(rest_rect(FHD, DropPosition::Bottom, close, 1.0), close, "rounding: left as it is");
+        let left = placement::anchor(FHD.work, FHD.scale, DropPosition::Left, METRICS);
+        let to = rest_rect(FHD, DropPosition::Left, window_at((5, 5), 960, 1290), 1.5);
+        assert_eq!((to.width(), to.height(), to.center()), (1350, 810, left), "the window's own scale");
     }
 
     #[test]

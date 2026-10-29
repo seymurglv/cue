@@ -20,11 +20,13 @@ fn main() {
         println!("lines: {rects:?}");
         println!("first line and box: {:?}", bounds(rects));
     }
-    // The probe is not run in a terminal app: the terminal rule is the caller's.
-    if needs_copy_fallback(&info.selection, info.editable, false) {
+    // The probe is not run in a terminal app: the terminal rule is the caller's (and the copy's own check).
+    if needs_copy_fallback(&info.selection, info.editable, false)
+        && let Some(target) = info.window
+    {
         let mut clip = WinClipboard::new().expect("clipboard");
         let mut late_guard = None;
-        let copy = copy_selection(&mut clip, &mut WinKeys, |late| late_guard = spawn_late_guard(late));
+        let copy = copy_selection(&mut clip, &mut WinKeys, target, |late| late_guard = spawn_late_guard(late));
         println!(
             "Ctrl+C fallback: {:?} characters, restore failed: {}",
             copy.text.as_ref().map(|t| t.chars().count()),

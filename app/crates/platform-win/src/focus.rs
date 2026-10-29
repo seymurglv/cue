@@ -75,6 +75,13 @@ impl std::fmt::Debug for SelectionRead {
     }
 }
 
+/// A top-level window, as a number, and its process: the window that was in front when the field was read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowRef {
+    pub window: isize,
+    pub process: u32,
+}
+
 #[derive(Clone, Default, PartialEq)]
 pub struct FocusInfo {
     pub app: String,
@@ -82,6 +89,9 @@ pub struct FocusInfo {
     pub is_password: bool,
     pub before_cursor: Option<String>,
     pub selection: SelectionRead,
+    /// The foreground window the field is in: the only one the Ctrl+C fallback of "Ask" may go to. `None` — none, or
+    /// the answer is "don't know".
+    pub window: Option<WindowRef>,
 }
 
 /// Without the text before the caret itself — only its length: `{info:?}` in the log must not carry the document there.
@@ -93,6 +103,7 @@ impl std::fmt::Debug for FocusInfo {
             .field("is_password", &self.is_password)
             .field("before_cursor_chars", &self.before_cursor.as_ref().map(|s| s.chars().count()))
             .field("selection", &self.selection)
+            .field("window", &self.window)
             .finish()
     }
 }
@@ -128,6 +139,13 @@ pub fn classify(f: &FocusFacts) -> Editability {
         return Editability::No;
     }
     Editability::Unknown
+}
+
+/// The class of a window and its executable's name without `.exe`: what the check right before the Ctrl+C fallback
+/// looks at (`selection::terminal_window`). Empty strings for what cannot be read.
+#[cfg(windows)]
+pub(crate) fn window_kind(w: WindowRef) -> (String, String) {
+    win::window_kind(w)
 }
 
 /// The executable's file name from the full path, and the same without `.exe` (in any case) — the app name
@@ -312,7 +330,7 @@ mod win {
 
     use super::{
         classify, context_tail, file_and_stem, line_break_may_be_missing, mark_line_start, selection_head_units,
-        selection_text, unknown, Deadline, FocusFacts, FocusInfo, SelectionRead,
+        selection_text, unknown, Deadline, FocusFacts, FocusInfo, SelectionRead, WindowRef,
     };
     use crate::placement::PxRect;
     use crate::selection::px_rect;
@@ -455,6 +473,7 @@ mod win {
             let app_path = app_pid.filter(|&p| p != pid).and_then(exe_path).or(fg_path);
             info.app = app_path.map(|p| self.app_name(&p)).filter(|a| !a.is_empty()).unwrap_or_else(|| unknown().app);
             info.editable = classify(&facts);
+            info.window = (!fg.is_invalid() && pid != 0).then_some(WindowRef { window: fg.0 as isize, process: pid });
             info
         }
 
@@ -470,6 +489,12 @@ mod win {
             self.names.insert(path.to_vec(), name.clone());
             name
         }
+    }
+
+    pub(super) fn window_kind(w: WindowRef) -> (String, String) {
+        let class = class_name(HWND(w.window as *mut _));
+        let exe = exe_path(w.process).map(|p| file_and_stem(&String::from_utf16_lossy(&p)).1).unwrap_or_default();
+        (class, exe)
     }
 
     fn class_name(hwnd: HWND) -> String {
@@ -1049,6 +1074,7 @@ mod tests {
             is_password: false,
             before_cursor,
             selection: SelectionRead::NotAsked,
+            window: Some(WindowRef { window: 0x10, process: 100 }),
         }
     }
 
