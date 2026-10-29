@@ -45,8 +45,7 @@ headings, no tables, no links: the sources are shown under the answer.
 
 Web search, when the tool is available: your training data ends well before today's date. Records, office holders, \
 prices, versions, rules, schedules and anything \"latest\" or \"current\" may have changed since then, so search for those \
-before you answer, even when you feel sure. When a search is needed, search first and write nothing before it. Facts \
-that cannot change, explanations, writing and work on the selection \
+before you answer, even when you feel sure. Facts that cannot change, explanations, writing and work on the selection \
 need no search. When the answer depends on where the user is, put their country or region in the query. Say only what \
 the search results support, and never make up a source or a link. If the search fails, answer from what you know and \
 say that it may be out of date.";

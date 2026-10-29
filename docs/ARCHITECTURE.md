@@ -415,12 +415,10 @@ effects need, and `cue_engines::ask` talks to the API.
   (`thinking: disabled`, `Thinking::DEFAULT`), chosen after the bench of 2026-10-29. Adaptive thinking, the model's
   default (left out of the request, with 2,048 tokens of room added to the answer's 2,000), met the bar too (decisions
   of 97 %, first words in 1.8 s without a search and 5.0 s with one), but timed out on 3 of 210 calls: its thinking is
-  silence to the first-words deadline. Off gave 98 % decisions, first words in 1.2 s without a search and 1.3 s with
-  one, and no timeouts. Without thinking the model says, before a search, that it is going to check: the instruction
-  asks it to search first and write nothing before it, yet in the check that followed (30 questions, twice: decisions
-  of 97 % and 98 %, format 100 %, format and checks 91 % and 88 %, first words in about 1.0–1.2 s) every question that
-  started a search began with such a sentence, which stays in the answer. The code execution container of a filtered
-  search is sent back with the next request of the conversation.
+  silence to the first-words deadline. Off gave 98 % decisions, 93 % format and checks, first words in 1.2 s without a
+  search and 1.3 s with one, and no timeouts. Without thinking the model may write a short sentence before a search
+  ("let me check the current version"), which stays at the top of the answer and is its first words. The code
+  execution container of a filtered search is sent back with the next request of the conversation.
 
 ### Stream
 

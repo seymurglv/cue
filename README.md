@@ -398,8 +398,9 @@ wrote text before its first web search (`text_before_search`).
   whole computer is not read, and with the user setting still on, the fallback stays off.
 - A selection of more than 8,000 characters reaches "Ask" as its first and last 4,000: it is never replaced (no
   **Replace** button, and a change of it is shown with **Copy**), and an answer about it sees only those parts.
-- Thinking is off for "Ask", which keeps the first words within about a second and a half; before a web search, though,
-  the model usually writes a sentence saying it is going to check, and that sentence stays in the answer.
+- Thinking is off for "Ask" (chosen after the bench: 98 % right decisions, 93 % format and checks, the first words in
+  1.2 s without a web search and 1.3 s with one, no timeouts). Before a web search the model may write a short
+  sentence, such as "let me check", which stays at the top of the answer.
 - Editors that copy the current line on `Ctrl + C` with nothing selected (VS Code does by default) could hand that line
   to "Ask" as the selection when they do not report the selection themselves. None is listed yet (`COPIES_LINE` in
   `selection.rs`): VS Code was not available to check.
