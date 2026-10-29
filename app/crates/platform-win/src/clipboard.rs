@@ -1,6 +1,8 @@
 //! Paste through the clipboard: wait for the modifiers to be released → remember the clipboard → put the text
 //! marked "not for history" → Ctrl+V → after 0.5 s restore the clipboard if nobody changed it. And the opposite way for
 //! "Ask": the selection of an app that does not report it, copied with Ctrl+C and the clipboard put back.
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Clipboard contents: (format, bytes) pairs in the order they are put back.
@@ -18,11 +20,43 @@ pub trait ClipboardApi {
     /// With the same marks: the restored content is not a new copy; if it was allowed into the history, it is already there.
     /// An empty snapshot is restored as an empty clipboard, without marks.
     fn restore(&mut self, s: &Snapshot) -> Result<(), String>;
-    /// Starts one of CUE's clipboard operations (a paste, a Ctrl+C copy) and returns its number. One count per process:
-    /// the late-copy guard of an older operation stands down once a newer one has started (`guard_late_copy`).
-    fn begin_operation(&mut self) -> u64;
-    /// The number of CUE's newest clipboard operation.
-    fn last_operation(&self) -> u64;
+    /// CUE's clipboard operations in this process (one count and one lock for every `WinClipboard`): a paste and a
+    /// Ctrl+C copy each begin one, so that an older late-copy guard stands down (`guard_late_copy`).
+    fn operations(&self) -> &'static Operations;
+}
+
+/// CUE's clipboard operations in this process — pastes and Ctrl+C copies: how many have begun, and one lock. A late-copy
+/// guard acts under the lock, and only while its copy is still the newest operation; `begin` takes the same lock. So a
+/// newer operation begins either before the guard acts, and the guard stands down, or after it is done — a few ms at
+/// most: the guard never waits for the clipboard while it holds the lock (`ReadClipboard::take_back`).
+#[derive(Default)]
+pub struct Operations {
+    count: AtomicU64,
+    lock: Mutex<()>,
+}
+
+impl Operations {
+    pub const fn new() -> Self {
+        Self { count: AtomicU64::new(0), lock: Mutex::new(()) }
+    }
+
+    /// A newer operation begins (after a guard that is acting now is done); its number.
+    pub fn begin(&self) -> u64 {
+        let _acting = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        self.count.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// The number of the newest operation.
+    pub fn newest(&self) -> u64 {
+        self.count.load(Ordering::SeqCst)
+    }
+
+    /// `act`, only while `operation` is the newest one, and no newer one begins until it is done. `None` — a newer one has
+    /// begun: `act` did not run.
+    pub fn while_newest<R>(&self, operation: u64, act: impl FnOnce() -> R) -> Option<R> {
+        let _acting = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        (self.newest() == operation).then(act)
+    }
 }
 
 pub trait KeysApi {
@@ -52,7 +86,7 @@ pub fn paste_text(
 ) -> Result<PasteResult, String> {
     let text = crlf(text);
     // The clipboard is this paste's now: a late-copy guard of an earlier Ctrl+C copy stands down.
-    clip.begin_operation();
+    clip.operations().begin();
     if !keys.wait_modifiers_released(Duration::from_secs(5)) {
         clip.write_text(&text, false)?;
         return Ok(PasteResult::LeftInClipboard);
@@ -107,6 +141,19 @@ pub trait ReadClipboard {
     fn read_text(&mut self) -> Result<Option<String>, String>;
     /// The process of the window that owns the clipboard: the last one to write it. `None` — no owner, or not known.
     fn owner_process(&self) -> Option<u32>;
+    /// The late-copy guard's act, with one opening of the clipboard and no wait for it — it runs under the operations
+    /// lock: if the clipboard is still at number `seq`, its text is read and `snap` put back.
+    fn take_back(&mut self, seq: u32, snap: &Snapshot) -> TakeBack;
+}
+
+/// What `ReadClipboard::take_back` did.
+pub enum TakeBack {
+    /// Another app held the clipboard open: nothing was done; worth another try.
+    Busy,
+    /// The clipboard was written again after `seq`: nothing was done.
+    Changed,
+    /// The text that was in it, and whether the snapshot went back.
+    Done { text: Option<String>, restored: Result<(), String> },
 }
 
 /// Pressing Ctrl+C for the Ctrl+C fallback of "Ask".
@@ -115,9 +162,9 @@ pub trait CopyKeys {
     fn press_ctrl_c(&mut self) -> bool;
     /// The process the keys go to: the foreground window's. `None` — no foreground window.
     fn target_process(&self) -> Option<u32>;
-    /// The user holds Ctrl or a mouse button right now: a clipboard change now may be their own copy (Ctrl+C,
-    /// Ctrl+Insert, a menu's Copy).
-    fn user_input_held(&self) -> bool;
+    /// When the session's last input came in (a tick in ms): any key, click or mouse move, the user's or injected.
+    /// `None` — not known.
+    fn last_input(&self) -> Option<u32>;
 }
 
 /// How long the chord's keys may stay down before the copy gives up: Ctrl + Win + Alt + C would be another shortcut.
@@ -127,6 +174,10 @@ const COPY_WAIT: Duration = Duration::from_millis(400);
 const COPY_POLL: Duration = Duration::from_millis(20);
 /// How long after `COPY_WAIT` a copy of a slow app is still caught and the user's clipboard put back.
 const LATE_COPY_WAIT: Duration = Duration::from_secs(2);
+/// A clipboard another app holds open: the late-copy guard tries again this many times, this far apart (as `open` does),
+/// waiting outside the operations lock.
+const TAKE_BACK_TRIES: u32 = 10;
+const TAKE_BACK_RETRY: Duration = Duration::from_millis(50);
 
 /// What the Ctrl+C fallback of "Ask" got. `Debug` shows lengths only.
 #[derive(Clone, PartialEq)]
@@ -158,8 +209,10 @@ pub struct LateCopy {
     /// The process Ctrl+C went to; `None` — not known: no late copy can be told from another app's.
     target: Option<u32>,
     since: SystemTime,
-    /// The copy's clipboard operation (`ClipboardApi::begin_operation`).
+    /// The copy's clipboard operation (`Operations::begin`).
     operation: u64,
+    /// The last input once CUE's own Ctrl+C had gone through (`CopyKeys::last_input`): any later is the user's.
+    input_mark: Option<u32>,
 }
 
 /// The Ctrl+C fallback of "Ask" (spec 2 §6.1): the selection of an app that does not report it, copied and read, and the
@@ -184,7 +237,7 @@ pub fn copy_selection(
 ) -> SelectionCopy {
     let nothing = |since| SelectionCopy { text: None, since, restore_failed: false };
     // The clipboard is this copy's now: a late-copy guard of an earlier one stands down.
-    let operation = clip.begin_operation();
+    let operation = clip.operations().begin();
     if !keys.wait_modifiers_released(COPY_KEYS_WAIT) {
         return nothing(SystemTime::now());
     }
@@ -196,13 +249,18 @@ pub fn copy_selection(
     if !keys.press_ctrl_c() {
         return nothing(since);
     }
+    let mut input_mark = None;
     let mut waited = Duration::ZERO;
     while clip.sequence() == before {
         if waited >= COPY_WAIT {
-            on_late(LateCopy { snap, before, target, since, operation });
+            on_late(LateCopy { snap, before, target, since, operation, input_mark });
             return nothing(since);
         }
         keys.sleep(COPY_POLL);
+        if waited.is_zero() {
+            // CUE's own Ctrl+C has gone through the input stream by now: any input after this mark is the user's.
+            input_mark = keys.last_input();
+        }
         waited += COPY_POLL;
     }
     // An app that writes several formats may put the text a moment after the first one.
@@ -212,59 +270,100 @@ pub fn copy_selection(
 
 /// After `copy_selection` handed a `LateCopy` over, on a thread of its own: the clipboard is watched from the end of
 /// `COPY_WAIT` for `LATE_COPY_WAIT` — 0.4 to 2.4 s after CUE's Ctrl+C. The first write in that time is taken for the
-/// app's answer to that Ctrl+C — the user's clipboard put back, and the copy returned for `forget_in_history` — only when
-/// it looks like one:
+/// app's answer to that Ctrl+C — the user's clipboard put back, the copy returned, and `on_caught` run with it (the start
+/// of its removal from the Win+V history) — only when it looks like one:
 /// - its owner is the process Ctrl+C went to (another app's write, or one whose owner is not known, is a newer copy the
 ///   user may want);
-/// - the user held neither Ctrl nor a mouse button while it was watched for (their own Ctrl+C, Ctrl+Insert or a menu's
-///   Copy in the same app would look just the same otherwise);
-/// - no newer clipboard operation of CUE's has started (a paste, the next Ctrl+C copy): the clipboard is that one's.
+/// - there was no input at all since CUE's Ctrl+C went through — no key, click or mouse move: the user's own Ctrl+C,
+///   Shift+Delete or a menu's Copy in the same app would look just the same otherwise;
+/// - the clipboard was not written again after it;
+/// - no newer clipboard operation of CUE's has begun (a paste, the next Ctrl+C copy): the clipboard is that one's. The
+///   last of these checks, the restore and `on_caught` happen under the operations lock (`Operations::while_newest`), so
+///   none begins in between.
 ///
 /// Otherwise the clipboard is left alone and the watch ends. `None` — nothing was put back. Without the target process
 /// nothing can be told apart: no watch at all.
-pub fn guard_late_copy(
+pub fn guard_late_copy<R>(
     clip: &mut (impl ClipboardApi + ReadClipboard),
     keys: &mut (impl KeysApi + CopyKeys),
     late: LateCopy,
-) -> Option<SelectionCopy> {
+    mut on_caught: impl FnMut(&SelectionCopy) -> R,
+) -> Option<(SelectionCopy, R)> {
+    /// What one try under the lock came to.
+    enum Act<T> {
+        Retry,
+        Leave,
+        Done(T),
+    }
     let target = late.target?;
-    let mut user_input = false;
+    let operations = clip.operations();
     let mut waited = Duration::ZERO;
-    loop {
-        if clip.last_operation() != late.operation {
+    let seq = loop {
+        if operations.newest() != late.operation {
             return None;
         }
-        user_input |= keys.user_input_held();
-        if clip.sequence() != late.before {
-            break;
+        let seq = clip.sequence();
+        if seq != late.before {
+            break seq;
         }
         if waited >= LATE_COPY_WAIT {
             return None;
         }
         keys.sleep(COPY_POLL);
         waited += COPY_POLL;
-    }
+    };
     if clip.owner_process() != Some(target) {
         tracing::info!("ask: another app wrote the clipboard after the copy wait; left alone");
         return None;
     }
-    if user_input {
-        tracing::info!("ask: the clipboard changed after the copy wait while the user held Ctrl or a mouse button; left alone");
-        return None;
-    }
     // An app that writes several formats may put the text a moment after the first one.
     keys.sleep(COPY_POLL);
-    // Once more right before the clipboard is touched: a paste may have started meanwhile.
-    if clip.last_operation() != late.operation {
-        return None;
+    for attempt in 0..TAKE_BACK_TRIES {
+        if attempt > 0 {
+            // Outside the lock: another app holding the clipboard never holds up a newer paste of CUE's.
+            keys.sleep(TAKE_BACK_RETRY);
+        }
+        let acted = operations.while_newest(late.operation, || {
+            if input_since(&*keys, late.input_mark) {
+                tracing::info!("ask: the clipboard changed after the copy wait, with input of the user's; left alone");
+                return Act::Leave;
+            }
+            match clip.take_back(seq, &late.snap) {
+                TakeBack::Busy => Act::Retry,
+                TakeBack::Changed => Act::Leave,
+                TakeBack::Done { text, restored } => {
+                    let copy = caught(text, restored, late.since);
+                    let then = on_caught(&copy);
+                    Act::Done((copy, then))
+                }
+            }
+        });
+        match acted {
+            Some(Act::Retry) => {}
+            Some(Act::Done(done)) => return Some(done),
+            // A newer operation of CUE's has begun, there was input, or the clipboard was written again.
+            None | Some(Act::Leave) => return None,
+        }
     }
-    Some(read_and_restore(clip, &late.snap, late.since))
+    tracing::info!("ask: the clipboard stayed held by another app; a late copy was not put back");
+    None
+}
+
+/// There was input since `mark` — a key, a click, a mouse move — or it cannot be told.
+fn input_since(keys: &impl CopyKeys, mark: Option<u32>) -> bool {
+    mark.is_none() || keys.last_input() != mark
 }
 
 /// The app's copy is in the clipboard: its text, and the user's clipboard put back.
 fn read_and_restore(clip: &mut (impl ClipboardApi + ReadClipboard), snap: &Snapshot, since: SystemTime) -> SelectionCopy {
     let text = clip.read_text().ok().flatten();
-    let restore_failed = match clip.restore(snap) {
+    let restored = clip.restore(snap);
+    caught(text, restored, since)
+}
+
+/// The app's copy as taken: its text unless blank; a failed restore logged, without text.
+fn caught(text: Option<String>, restored: Result<(), String>, since: SystemTime) -> SelectionCopy {
+    let restore_failed = match restored {
         Ok(()) => false,
         Err(e) => {
             tracing::warn!(error = %e, "ask: the user's clipboard was not put back after the copy");
@@ -312,7 +411,6 @@ fn history_time(t: SystemTime) -> i64 {
 
 #[cfg(windows)]
 mod win {
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime};
 
     use windows::core::{w, PCWSTR};
@@ -324,20 +422,16 @@ mod win {
     };
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DestroyWindow, GetForegroundWindow, GetWindowThreadProcessId, HWND_MESSAGE, WINDOW_EX_STYLE,
         WINDOW_STYLE,
     };
 
-    use super::{ClipboardApi, HistoryForget, KeysApi, LateCopy, Snapshot};
+    use super::{ClipboardApi, HistoryForget, KeysApi, LateCopy, Operations, Snapshot, TakeBack};
 
-    /// CUE's clipboard operations so far in this process (`ClipboardApi::begin_operation`): every `WinClipboard` counts
-    /// here, the late-copy guard's own too.
-    static OPERATIONS: AtomicU64 = AtomicU64::new(0);
-    /// Mouse buttons, for `CopyKeys::user_input_held`.
-    const VK_LBUTTON: u16 = 0x01;
-    const VK_RBUTTON: u16 = 0x02;
-    const VK_MBUTTON: u16 = 0x04;
+    /// CUE's clipboard operations in this process: every `WinClipboard` counts here, the late-copy guard's own too.
+    static OPERATIONS: Operations = Operations::new();
 
     const CF_DIB: u32 = 8;
     const CF_UNICODETEXT: u32 = 13;
@@ -406,8 +500,12 @@ mod win {
     /// Our own owner window and up to 10 attempts 50 ms apart: another app may be holding the clipboard open.
     /// If it did not open, the window is destroyed right away.
     fn open() -> Result<Open, String> {
+        open_tries(10)
+    }
+
+    fn open_tries(tries: u32) -> Result<Open, String> {
         let owner = Owner::new()?;
-        for attempt in 0..10 {
+        for attempt in 0..tries {
             if attempt > 0 {
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -453,6 +551,43 @@ mod win {
                 put(fmt, &0u32.to_le_bytes())?;
             }
             Ok(())
+        }
+
+        /// Puts `s` back into the clipboard, which this thread holds open.
+        fn put_back(&self, s: &Snapshot) -> Result<(), String> {
+            // SAFETY: the caller holds the clipboard open on this thread.
+            unsafe { EmptyClipboard() }.map_err(|e| format!("EmptyClipboard: {e}"))?;
+            // An empty clipboard is restored as empty — not as marks alone.
+            if !s.items.is_empty() {
+                self.put_marks()?;
+            }
+            for (fmt, bytes) in &s.items {
+                put(*fmt, bytes)?;
+            }
+            Ok(())
+        }
+    }
+
+    /// The text in the clipboard, which this thread holds open; `None` — no text.
+    fn text_now() -> Option<String> {
+        // SAFETY: the caller holds the clipboard open on this thread; CF_UNICODETEXT data is an HGLOBAL owned by the system,
+        // read only under GlobalLock and no further than GlobalSize.
+        unsafe {
+            if IsClipboardFormatAvailable(CF_UNICODETEXT).is_err() {
+                return None;
+            }
+            let h = GetClipboardData(CF_UNICODETEXT).ok()?;
+            let g = HGLOBAL(h.0);
+            let p = GlobalLock(g).cast::<u16>().cast_const();
+            if p.is_null() {
+                return None;
+            }
+            let units = GlobalSize(g) / 2;
+            let all = std::slice::from_raw_parts(p, units);
+            let end = all.iter().position(|&c| c == 0).unwrap_or(units);
+            let text = String::from_utf16_lossy(&all[..end]);
+            let _ = GlobalUnlock(g);
+            Some(text)
         }
     }
 
@@ -530,24 +665,11 @@ mod win {
 
         fn restore(&mut self, s: &Snapshot) -> Result<(), String> {
             let _open = open()?;
-            // SAFETY: the clipboard is open by this thread (`_open`).
-            unsafe { EmptyClipboard() }.map_err(|e| format!("EmptyClipboard: {e}"))?;
-            // An empty clipboard is restored as empty — not as marks alone.
-            if !s.items.is_empty() {
-                self.put_marks()?;
-            }
-            for (fmt, bytes) in &s.items {
-                put(*fmt, bytes)?;
-            }
-            Ok(())
+            self.put_back(s)
         }
 
-        fn begin_operation(&mut self) -> u64 {
-            OPERATIONS.fetch_add(1, Ordering::SeqCst) + 1
-        }
-
-        fn last_operation(&self) -> u64 {
-            OPERATIONS.load(Ordering::SeqCst)
+        fn operations(&self) -> &'static Operations {
+            &OPERATIONS
         }
     }
 
@@ -569,25 +691,17 @@ mod win {
     impl super::ReadClipboard for WinClipboard {
         fn read_text(&mut self) -> Result<Option<String>, String> {
             let _open = open()?;
-            // SAFETY: the clipboard is open by this thread (`_open`); CF_UNICODETEXT data is an HGLOBAL owned by the system,
-            // read only under GlobalLock and no further than GlobalSize.
-            unsafe {
-                if IsClipboardFormatAvailable(CF_UNICODETEXT).is_err() {
-                    return Ok(None);
-                }
-                let Ok(h) = GetClipboardData(CF_UNICODETEXT) else { return Ok(None) };
-                let g = HGLOBAL(h.0);
-                let p = GlobalLock(g).cast::<u16>().cast_const();
-                if p.is_null() {
-                    return Ok(None);
-                }
-                let units = GlobalSize(g) / 2;
-                let all = std::slice::from_raw_parts(p, units);
-                let end = all.iter().position(|&c| c == 0).unwrap_or(units);
-                let text = String::from_utf16_lossy(&all[..end]);
-                let _ = GlobalUnlock(g);
-                Ok(Some(text))
+            Ok(text_now())
+        }
+
+        fn take_back(&mut self, seq: u32, snap: &Snapshot) -> TakeBack {
+            // One try, no wait: the caller holds the operations lock, and waits outside it.
+            let Ok(_open) = open_tries(1) else { return TakeBack::Busy };
+            // Open, the clipboard cannot be written by anyone else: the number checked now holds until it is closed.
+            if self.sequence() != seq {
+                return TakeBack::Changed;
             }
+            TakeBack::Done { text: text_now(), restored: self.put_back(snap) }
         }
 
         fn owner_process(&self) -> Option<u32> {
@@ -606,8 +720,10 @@ mod win {
             window_process(unsafe { GetForegroundWindow() })
         }
 
-        fn user_input_held(&self) -> bool {
-            [crate::chord::VK_CONTROL, VK_LBUTTON, VK_RBUTTON, VK_MBUTTON].into_iter().any(crate::input::key_held)
+        fn last_input(&self) -> Option<u32> {
+            let mut info = LASTINPUTINFO { cbSize: size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+            // SAFETY: `info` with `cbSize` filled in lives until the end of the call.
+            unsafe { GetLastInputInfo(&mut info) }.as_bool().then_some(info.dwTime)
         }
     }
 
@@ -626,10 +742,12 @@ mod win {
     pub fn spawn_late_guard(late: LateCopy) -> Option<std::thread::JoinHandle<Option<super::LateCaught>>> {
         let spawned = std::thread::Builder::new().name("cue-late-copy".into()).spawn(move || {
             let mut clip = WinClipboard::new().inspect_err(|e| tracing::warn!("late copy: no clipboard: {e}")).ok()?;
-            let copy = super::guard_late_copy(&mut clip, &mut WinKeys, late)?;
+            // The removal starts under the operations lock, together with the restore.
+            let (copy, removal) = super::guard_late_copy(&mut clip, &mut WinKeys, late, |copy| {
+                copy.text.clone().and_then(|text| forget_in_history(text, copy.since))
+            })?;
             tracing::info!(restore_failed = copy.restore_failed, "ask: the app copied the selection late; caught");
-            let history = copy.text.clone().and_then(|text| forget_in_history(text, copy.since)).and_then(|h| h.join().ok());
-            Some((copy, history))
+            Some((copy, removal.and_then(|h| h.join().ok())))
         });
         spawned.inspect_err(|e| tracing::warn!("late copy thread not started: {e}")).ok()
     }
@@ -729,7 +847,7 @@ mod tests {
         content: Snapshot,
         writes: Vec<(String, bool)>,
         restored: Option<Snapshot>,
-        operations: u64,
+        ops: std::cell::OnceCell<&'static Operations>,
         log: Log,
     }
 
@@ -769,12 +887,8 @@ mod tests {
             self.restored = Some(s.clone());
             Ok(())
         }
-        fn begin_operation(&mut self) -> u64 {
-            self.operations += 1;
-            self.operations
-        }
-        fn last_operation(&self) -> u64 {
-            self.operations
+        fn operations(&self) -> &'static Operations {
+            self.ops.get_or_init(|| Box::leak(Box::default()))
         }
     }
 
@@ -993,7 +1107,7 @@ mod tests {
 #[cfg(test)]
 mod copy_tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{OnceCell, RefCell};
     use std::rc::Rc;
 
     /// The app Ctrl+C goes to, another one, and CUE.
@@ -1001,9 +1115,10 @@ mod copy_tests {
     const OTHER: u32 = 200;
     const CUE: u32 = 300;
 
-    /// The clipboard and the app behind it: on Ctrl+C the app copies `selection` (if any) after `copy_after` sleeps;
-    /// another app writes the clipboard at sleep `other_writes_at`; the user copies in the app (Ctrl held) at sleep
-    /// `user_copies_at`.
+    /// The clipboard, the app behind it and the user, counted in sleeps: on Ctrl+C the app copies `selection` (if any)
+    /// after `copy_after` sleeps; another app writes the clipboard at sleep `other_writes_at`; the user copies in the app
+    /// at `user_copies_at`, or just types or moves the mouse at `user_input_at`; a newer clipboard operation of CUE's
+    /// begins at `newer_begins_at`; the clipboard is held open by another app for the first `busy_takes` take-backs.
     #[derive(Default)]
     struct World {
         seq: u32,
@@ -1014,22 +1129,32 @@ mod copy_tests {
         copy_after: u32,
         other_writes_at: Option<u32>,
         user_copies_at: Option<u32>,
-        user_holding: bool,
+        user_input_at: Option<u32>,
+        newer_begins_at: Option<u32>,
+        busy_takes: u32,
+        input_tick: u32,
         no_target: bool,
         sleeps: u32,
         pressed_c: bool,
+        app_copied: bool,
+        ctrl_v: u32,
         stuck: bool,
         snapshot_fails: bool,
         restore_fails: bool,
         restored: Option<Snapshot>,
         restores: u32,
         writes: Vec<String>,
-        operations: u64,
+        ops: OnceCell<&'static Operations>,
     }
 
     impl World {
+        fn ops(&self) -> &'static Operations {
+            self.ops.get_or_init(|| Box::leak(Box::default()))
+        }
+
+        /// The app answers Ctrl+C once.
         fn maybe_copy(&mut self) {
-            if self.pressed_c && self.sleeps >= self.copy_after && self.text != self.selection {
+            if self.pressed_c && !self.app_copied && self.sleeps >= self.copy_after {
                 self.app_copies_now();
             }
         }
@@ -1039,7 +1164,19 @@ mod copy_tests {
                 self.text = Some(s);
                 self.owner = Some(APP);
                 self.seq += 1;
+                self.app_copied = true;
             }
+        }
+
+        fn restore_now(&mut self, s: &Snapshot) -> Result<(), String> {
+            if self.restore_fails {
+                return Err("EmptyClipboard: refused".into());
+            }
+            self.restored = Some(s.clone());
+            self.restores += 1;
+            self.owner = None;
+            self.seq += 1;
+            Ok(())
         }
     }
 
@@ -1063,23 +1200,10 @@ mod copy_tests {
             Ok(())
         }
         fn restore(&mut self, s: &Snapshot) -> Result<(), String> {
-            let mut w = self.0.borrow_mut();
-            if w.restore_fails {
-                return Err("EmptyClipboard: refused".into());
-            }
-            w.restored = Some(s.clone());
-            w.restores += 1;
-            w.owner = None;
-            w.seq += 1;
-            Ok(())
+            self.0.borrow_mut().restore_now(s)
         }
-        fn begin_operation(&mut self) -> u64 {
-            let mut w = self.0.borrow_mut();
-            w.operations += 1;
-            w.operations
-        }
-        fn last_operation(&self) -> u64 {
-            self.0.borrow().operations
+        fn operations(&self) -> &'static Operations {
+            self.0.borrow().ops()
         }
     }
 
@@ -1090,6 +1214,18 @@ mod copy_tests {
         fn owner_process(&self) -> Option<u32> {
             self.0.borrow().owner
         }
+        fn take_back(&mut self, seq: u32, snap: &Snapshot) -> TakeBack {
+            let mut w = self.0.borrow_mut();
+            if w.busy_takes > 0 {
+                w.busy_takes -= 1;
+                return TakeBack::Busy;
+            }
+            if w.seq != seq {
+                return TakeBack::Changed;
+            }
+            let text = w.text.clone();
+            TakeBack::Done { text, restored: w.restore_now(snap) }
+        }
     }
 
     impl KeysApi for Keys {
@@ -1097,21 +1233,29 @@ mod copy_tests {
             !self.0.borrow().stuck
         }
         fn press_ctrl_v(&mut self) -> bool {
+            self.0.borrow_mut().ctrl_v += 1;
             true
         }
         fn sleep(&mut self, _d: Duration) {
             let mut w = self.0.borrow_mut();
             w.sleeps += 1;
-            if w.other_writes_at == Some(w.sleeps) {
+            let now = Some(w.sleeps);
+            if w.other_writes_at == now {
                 w.text = Some("чужое".into());
                 w.owner = Some(OTHER);
                 w.seq += 1;
             }
-            if w.user_copies_at == Some(w.sleeps) {
-                w.user_holding = true;
+            if w.user_copies_at == now {
+                w.input_tick += 1;
                 w.text = Some("своё".into());
                 w.owner = Some(APP);
                 w.seq += 1;
+            }
+            if w.user_input_at == now {
+                w.input_tick += 1;
+            }
+            if w.newer_begins_at == now {
+                w.ops().begin();
             }
             w.maybe_copy();
         }
@@ -1127,8 +1271,8 @@ mod copy_tests {
         fn target_process(&self) -> Option<u32> {
             (!self.0.borrow().no_target).then_some(APP)
         }
-        fn user_input_held(&self) -> bool {
-            self.0.borrow().user_holding
+        fn last_input(&self) -> Option<u32> {
+            Some(self.0.borrow().input_tick)
         }
     }
 
@@ -1136,8 +1280,11 @@ mod copy_tests {
         Snapshot { items: vec![(13, vec![65, 0, 0, 0])] }
     }
 
+    /// The world after a copy and its guard: neither ever pastes or writes the clipboard itself.
     fn world(w: Rc<RefCell<World>>) -> World {
-        Rc::try_unwrap(w).ok().unwrap().into_inner()
+        let w = Rc::try_unwrap(w).ok().unwrap().into_inner();
+        assert_eq!((w.ctrl_v, w.writes.len()), (0, 0), "the copy and the guard never paste or write");
+        w
     }
 
     /// `copy_selection` on `w`, and whether it handed a late copy over.
@@ -1153,8 +1300,12 @@ mod copy_tests {
         let w = Rc::new(RefCell::new(w));
         let mut late = None;
         let got = copy_selection(&mut Clip(w.clone()), &mut Keys(w.clone()), |l| late = Some(l));
-        let watched = late.and_then(|l| guard_late_copy(&mut Clip(w.clone()), &mut Keys(w.clone()), l));
-        (got, watched, world(w))
+        let watched = late.and_then(|l| guard_late_copy(&mut Clip(w.clone()), &mut Keys(w.clone()), l, |_| ()));
+        (got, watched.map(|(copy, ())| copy), world(w))
+    }
+
+    fn late_app() -> World {
+        World { content: user_clip(), selection: Some("поздно".into()), copy_after: 40, ..Default::default() }
     }
 
     #[test]
@@ -1164,8 +1315,7 @@ mod copy_tests {
         assert_eq!(got.text.as_deref(), Some("выделенный текст"));
         assert!(!got.restore_failed && !late);
         assert_eq!(w.restored, Some(user_clip()), "the user's clipboard is back");
-        assert!(w.writes.is_empty(), "the copy never writes the clipboard itself");
-        assert_eq!(w.operations, 1, "a clipboard operation of its own");
+        assert_eq!(w.ops().newest(), 1, "a clipboard operation of its own");
     }
 
     #[test]
@@ -1193,8 +1343,7 @@ mod copy_tests {
     /// to leave the Win+V history.
     #[test]
     fn a_late_copy_still_gets_the_clipboard_back() {
-        let late_app = World { content: user_clip(), selection: Some("поздно".into()), copy_after: 40, ..Default::default() };
-        let (got, watched, w) = copy_and_watch(late_app);
+        let (got, watched, w) = copy_and_watch(late_app());
         assert_eq!(got.text, None, "too late for the question");
         let watched = watched.expect("the late copy is caught");
         assert_eq!(watched.text.as_deref(), Some("поздно"));
@@ -1204,13 +1353,7 @@ mod copy_tests {
 
     #[test]
     fn a_late_write_of_another_app_is_left_alone() {
-        let other = World {
-            content: user_clip(),
-            selection: Some("x".into()),
-            copy_after: 1_000,
-            other_writes_at: Some(30),
-            ..Default::default()
-        };
+        let other = World { selection: Some("x".into()), copy_after: 1_000, other_writes_at: Some(30), ..late_app() };
         let (_, watched, w) = copy_and_watch(other);
         assert_eq!(watched, None);
         assert_eq!(w.restored, None, "a newer copy of another app is not overwritten");
@@ -1222,15 +1365,140 @@ mod copy_tests {
             copy(World { content: user_clip(), selection: Some("x".into()), restore_fails: true, ..Default::default() });
         assert_eq!((got.text.as_deref(), got.restore_failed), (Some("x"), true));
         assert_eq!(w.restored, None);
-        let late = World {
-            content: user_clip(),
-            selection: Some("x".into()),
-            copy_after: 40,
-            restore_fails: true,
-            ..Default::default()
-        };
-        let (_, watched, _) = copy_and_watch(late);
+        let (_, watched, _) = copy_and_watch(World { restore_fails: true, ..late_app() });
         assert!(watched.is_some_and(|c| c.restore_failed), "a late copy that could not be put back says so too");
+    }
+
+    /// The user copies something themselves in the same app 0.4–2.4 s after CUE's Ctrl+C (nothing was selected): it
+    /// is not taken for the app's late answer — not overwritten, and not removed from Win+V.
+    #[test]
+    fn the_users_own_copy_in_the_same_app_is_left_alone() {
+        let (_, watched, w) = copy_and_watch(World { content: user_clip(), user_copies_at: Some(30), ..Default::default() });
+        assert_eq!(watched, None, "no copy is returned, so none is removed from the history");
+        assert_eq!(w.restored, None);
+        assert_eq!(w.text.as_deref(), Some("своё"), "the user's copy stays in the clipboard");
+    }
+
+    /// Any input of the user's after CUE's Ctrl+C — a key (Shift+Delete, a keyboard menu), a click, a mouse move — and the
+    /// change may be theirs: left alone, even when it is in fact the app's late copy.
+    #[test]
+    fn any_input_of_the_users_stands_the_guard_down() {
+        let (_, watched, w) = copy_and_watch(World { user_input_at: Some(30), ..late_app() });
+        assert_eq!(watched, None);
+        assert_eq!(w.restored, None);
+    }
+
+    /// An older guard and a newer paste (or Ctrl+C copy) would react to the same write: the older one stands down as soon
+    /// as a newer clipboard operation of CUE's has begun.
+    #[test]
+    fn an_older_guard_stands_down_once_a_newer_paste_or_copy_has_started() {
+        // A paste: the app's late copy lands right after its Ctrl+V, while the older guard still watches.
+        let w = Rc::new(RefCell::new(World { copy_after: 1_000, ..late_app() }));
+        let mut late = None;
+        copy_selection(&mut Clip(w.clone()), &mut Keys(w.clone()), |l| late = Some(l));
+        let late = late.expect("the late copy is watched for");
+        let mut watched = None;
+        let pasted = paste_text(&mut Clip(w.clone()), &mut Keys(w.clone()), "ответ", || {
+            w.borrow_mut().app_copies_now();
+            watched = Some(guard_late_copy(&mut Clip(w.clone()), &mut Keys(w.clone()), late, |_| ()));
+        });
+        assert!(pasted.is_ok());
+        assert_eq!(watched, Some(None), "the older guard stood down");
+        assert_eq!(w.borrow().restores, 0, "nothing was put back over the paste");
+        assert_eq!(w.borrow().ops().newest(), 2, "the paste is a clipboard operation of its own");
+
+        // A newer Ctrl+C copy has begun.
+        let w = Rc::new(RefCell::new(World { copy_after: 1_000, ..late_app() }));
+        let mut late = None;
+        copy_selection(&mut Clip(w.clone()), &mut Keys(w.clone()), |l| late = Some(l));
+        copy_selection(&mut Clip(w.clone()), &mut Keys(w.clone()), |_| {});
+        w.borrow_mut().app_copies_now();
+        let late = late.expect("watched for");
+        assert_eq!(guard_late_copy(&mut Clip(w.clone()), &mut Keys(w.clone()), late, |_| ()), None);
+        assert_eq!(w.borrow().restores, 0);
+    }
+
+    /// The last moment: a newer operation begins after the guard's last poll, while it is about to put the clipboard back.
+    #[test]
+    fn a_newer_operation_as_the_guard_is_about_to_act_stands_it_down() {
+        // Sleep 40: the app's late copy; 41: the moment the formats get to settle.
+        let (_, watched, w) = copy_and_watch(World { newer_begins_at: Some(41), ..late_app() });
+        assert_eq!(watched, None);
+        assert_eq!(w.restores, 0);
+    }
+
+    /// Another app holds the clipboard open: the guard tries again, waiting outside the lock — and a newer operation that
+    /// begins meanwhile still stands it down.
+    #[test]
+    fn a_busy_clipboard_is_tried_again_outside_the_lock() {
+        let (_, watched, w) = copy_and_watch(World { busy_takes: 2, ..late_app() });
+        assert!(watched.is_some());
+        assert_eq!(w.restored, Some(user_clip()));
+        assert_eq!(w.sleeps, 43, "two waits for the clipboard after the settle");
+
+        let (_, watched, w) = copy_and_watch(World { busy_takes: 1, newer_begins_at: Some(42), ..late_app() });
+        assert_eq!(watched, None);
+        assert_eq!(w.restores, 0);
+    }
+
+    /// The clipboard is written again between the late change and the take-back: that write is left alone.
+    #[test]
+    fn a_write_after_the_late_copy_is_left_alone() {
+        let (_, watched, w) = copy_and_watch(World { other_writes_at: Some(41), ..late_app() });
+        assert_eq!(watched, None);
+        assert_eq!(w.restored, None);
+        assert_eq!(w.text.as_deref(), Some("чужое"));
+    }
+
+    /// What the guard does once it has taken the copy back — the start of the history removal — happens under the lock
+    /// too: no newer operation can begin before it.
+    #[test]
+    fn the_history_removal_starts_under_the_lock() {
+        let w = Rc::new(RefCell::new(late_app()));
+        let ops = w.borrow().ops();
+        let mut late = None;
+        copy_selection(&mut Clip(w.clone()), &mut Keys(w.clone()), |l| late = Some(l));
+        let mut calls = 0;
+        let caught = guard_late_copy(&mut Clip(w.clone()), &mut Keys(w.clone()), late.expect("watched for"), |copy| {
+            calls += 1;
+            (copy.text.clone(), ops.lock.try_lock().is_err())
+        });
+        let (_, (text, locked)) = caught.expect("caught");
+        assert_eq!((calls, text.as_deref(), locked), (1, Some("поздно"), true));
+    }
+
+    /// With real threads: a newer operation that begins while a guard acts waits for it, and the guard, once done, is
+    /// older — it would stand down from then on.
+    #[test]
+    fn a_newer_operation_begins_only_after_an_acting_guard_is_done() {
+        use std::sync::{mpsc, Arc, Mutex};
+        let ops: &'static Operations = Box::leak(Box::default());
+        let first = ops.begin();
+        let (inside_tx, inside) = mpsc::channel();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let guard_order = Arc::clone(&order);
+        let guard = std::thread::spawn(move || {
+            ops.while_newest(first, || {
+                inside_tx.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(50));
+                guard_order.lock().unwrap().push("put back");
+            })
+        });
+        inside.recv().unwrap();
+        let newer = ops.begin();
+        order.lock().unwrap().push("newer began");
+        assert_eq!(guard.join().unwrap(), Some(()));
+        assert_eq!(*order.lock().unwrap(), ["put back", "newer began"]);
+        assert_eq!(newer, first + 1);
+        assert_eq!(ops.while_newest(first, || ()), None, "an older guard stands down");
+    }
+
+    #[test]
+    fn without_the_target_process_there_is_no_watch() {
+        let (_, watched, w) = copy_and_watch(World { no_target: true, ..late_app() });
+        assert_eq!(watched, None);
+        assert_eq!(w.sleeps, 20, "the guard returns at once");
+        assert_eq!(w.restored, None);
     }
 
     #[test]
@@ -1246,70 +1514,6 @@ mod copy_tests {
         let (got, _, w) = copy(World { content: user_clip(), selection: Some(" \r\n".into()), ..Default::default() });
         assert_eq!(got.text, None);
         assert_eq!(w.restored, Some(user_clip()));
-    }
-
-    /// The user copies something themselves in the same app 0.4–2.4 s after CUE's Ctrl+C (nothing was selected): it
-    /// is not taken for the app's late answer — not overwritten, and not removed from Win+V.
-    #[test]
-    fn the_users_own_copy_in_the_same_app_is_left_alone() {
-        let (_, watched, w) = copy_and_watch(World { content: user_clip(), user_copies_at: Some(30), ..Default::default() });
-        assert_eq!(watched, None, "no copy is returned, so none is removed from the history");
-        assert_eq!(w.restored, None);
-        assert_eq!(w.text.as_deref(), Some("своё"), "the user's copy stays in the clipboard");
-    }
-
-    /// An older guard and a newer paste (or Ctrl+C copy) would react to the same write: the older one stands down as soon
-    /// as a newer clipboard operation of CUE's has started.
-    #[test]
-    fn an_older_guard_stands_down_once_a_newer_paste_or_copy_has_started() {
-        // A paste: the app's late copy lands right after its Ctrl+V, while the older guard still watches.
-        let w = Rc::new(RefCell::new(World {
-            content: user_clip(),
-            selection: Some("поздно".into()),
-            copy_after: 1_000,
-            ..Default::default()
-        }));
-        let mut late = None;
-        copy_selection(&mut Clip(w.clone()), &mut Keys(w.clone()), |l| late = Some(l));
-        let late = late.expect("the late copy is watched for");
-        let mut watched = None;
-        let pasted = paste_text(&mut Clip(w.clone()), &mut Keys(w.clone()), "ответ", || {
-            w.borrow_mut().app_copies_now();
-            watched = Some(guard_late_copy(&mut Clip(w.clone()), &mut Keys(w.clone()), late));
-        });
-        assert!(pasted.is_ok());
-        assert_eq!(watched, Some(None), "the older guard stood down");
-        assert_eq!(w.borrow().restores, 0, "nothing was put back over the paste");
-        assert_eq!(w.borrow().operations, 2, "the paste is a clipboard operation of its own");
-
-        // A newer Ctrl+C copy has started.
-        let w = Rc::new(RefCell::new(World {
-            content: user_clip(),
-            selection: Some("поздно".into()),
-            copy_after: 1_000,
-            ..Default::default()
-        }));
-        let mut late = None;
-        copy_selection(&mut Clip(w.clone()), &mut Keys(w.clone()), |l| late = Some(l));
-        copy_selection(&mut Clip(w.clone()), &mut Keys(w.clone()), |_| {});
-        w.borrow_mut().app_copies_now();
-        assert_eq!(guard_late_copy(&mut Clip(w.clone()), &mut Keys(w.clone()), late.expect("watched for")), None);
-        assert_eq!(w.borrow().restores, 0);
-    }
-
-    #[test]
-    fn without_the_target_process_there_is_no_watch() {
-        let target_unknown = World {
-            content: user_clip(),
-            selection: Some("поздно".into()),
-            copy_after: 40,
-            no_target: true,
-            ..Default::default()
-        };
-        let (_, watched, w) = copy_and_watch(target_unknown);
-        assert_eq!(watched, None);
-        assert_eq!(w.sleeps, 20, "the guard returns at once");
-        assert_eq!(w.restored, None);
     }
 
     #[test]
