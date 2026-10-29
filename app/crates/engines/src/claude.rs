@@ -46,11 +46,11 @@ pub fn request_body(model: &str, raw: &str, ctx: &RefineContext, terms: &[String
     request_body_for(model, raw, ctx, terms, Job::Clean)
 }
 
-/// [`request_body`] for a job. A translation adds one system block after the cache mark: the cached prefix is the one
-/// plain dictation uses, so translating never writes a second cache. The answer may be longer in tokens than the speech
-/// (another alphabet), so the budget doubles. A selection that goes with the dictation ([`RefineContext::selection`])
-/// adds its block last, after the cache mark too, and the message carries the selection itself; without one the body
-/// is the same, byte for byte, as before selections could go.
+/// [`request_body`] for a job. A translation adds one system block after the cache mark, the last one: the cached prefix
+/// is the one plain dictation uses, so translating never writes a second cache. The answer may be longer in tokens than
+/// the speech (another alphabet), so the budget doubles. A selection that goes with the dictation
+/// ([`RefineContext::sent_selection`]) adds its block after the cache mark too, before a translation's, and the message
+/// carries the selection itself; without one the body is the same, byte for byte, as before selections could go.
 pub fn request_body_for(model: &str, raw: &str, ctx: &RefineContext, terms: &[String], job: Job) -> Value {
     let thinking = thinking_for(model);
     let budget = max_tokens(raw) + if thinking.is_none() { THINKING_HEADROOM } else { 0 };
@@ -82,14 +82,15 @@ pub fn request_body_for(model: &str, raw: &str, ctx: &RefineContext, terms: &[St
     if let Some(t) = thinking {
         v["thinking"] = t;
     }
+    // The selection's block goes after the cache mark too (spec 2 §12.13): the cached prefix stays the one every dictation
+    // reads, and the message carries the selection itself. It comes before a translation's block: with the selection's
+    // rules last, the model kept a woven result in the spoken language (bench of 2026-10-29).
+    if ctx.sent_selection().is_some() {
+        v["system"].as_array_mut().expect("system is an array").push(json!({ "type": "text", "text": SELECTION_PROMPT }));
+    }
     if let Job::Translate(to) = job {
         v["system"].as_array_mut().expect("system is an array").push(json!({ "type": "text", "text": translate::instruction(to) }));
         v["max_tokens"] = json!(v["max_tokens"].as_u64().unwrap_or(0).saturating_mul(2).min(16_000));
-    }
-    // The selection's block goes last, after the cache mark too (spec 2 §12.13): the cached prefix stays the one every
-    // dictation reads, and the message carries the selection itself.
-    if ctx.sent_selection().is_some() {
-        v["system"].as_array_mut().expect("system is an array").push(json!({ "type": "text", "text": SELECTION_PROMPT }));
     }
     v
 }
@@ -694,8 +695,11 @@ mod tests {
         let system = v["system"].as_array().unwrap();
         assert_eq!(system.len(), 4);
         assert_eq!(&system[..2], warm_body("claude-haiku-5-5", &terms)["system"].as_array().unwrap().as_slice(), "the warm-up's prefix");
-        assert_eq!(system[2]["text"], translate::instruction("en"));
-        assert_eq!(system[3]["text"], SELECTION_PROMPT, "the selection's block comes last");
+        assert_eq!(system[2]["text"], SELECTION_PROMPT);
+        assert_eq!(system[3]["text"], translate::instruction("en"), "the translation's block comes last: it wins");
+        let alone = request_body_for("claude-haiku-5-5", "x", &selected("Kubernetes"), &terms, Job::Clean);
+        assert_eq!(alone["system"][2]["text"], SELECTION_PROMPT, "without a translation the selection's block is last");
+        assert_eq!(v["max_tokens"], json!(alone["max_tokens"].as_u64().unwrap() * 2), "a translation's budget");
     }
 
     /// The selection counts as said for the markup rules: a woven `cargo test` keeps its backticks, and the check knows
