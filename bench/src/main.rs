@@ -701,7 +701,14 @@ mod tests {
     }
 
     fn price(model: &str) -> ModelPrice {
-        ModelPrice { model: model.into(), input_per_mtok: 1.0, output_per_mtok: 1.0, cache_read_per_mtok: 0.1, cache_write_per_mtok: 1.25 }
+        ModelPrice {
+            model: model.into(),
+            input_per_mtok: 1.0,
+            output_per_mtok: 1.0,
+            cache_read_per_mtok: 0.1,
+            cache_write_per_mtok: 1.25,
+            long_context: None,
+        }
     }
 
     #[test]

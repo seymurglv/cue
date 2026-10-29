@@ -50,11 +50,12 @@ need no search. When the answer depends on where the user is, put their country 
 the search results support, and never make up a source or a link. If the search fails, answer from what you know and \
 say that it may be out of date.
 
-Reading pages, when the tool is available: when the question is about a page whose link is in <selection> or \
-<question>, read that page with web_fetch instead of searching for it by name, and read a page from the search results \
-when its snippet is not enough. Open no other links. A page that cannot be read (one built by JavaScript, a file of \
-another kind, an error) is no failure: answer from the search or from what you know, and say in a few words that the \
-page could not be opened.";
+Reading pages, when the tool is available: when the user points at a page, its link in <selection> or <question>, read \
+that one page with web_fetch and answer briefly. Search only when the page cannot be read or the question needs more than \
+the page. Never fetch a PDF or another document file (a link whose path ends in .pdf, or one the question or the \
+selection calls a PDF or a document): answer from a search instead. Open no other links. A page that cannot be read (one \
+built by JavaScript, a file of another kind, an error) is no failure: answer from the search or from what you know, and \
+say in a few words that the page could not be opened.";
 
 /// The client tool that puts text into the field (spec 2 §6.2).
 pub const WRITE_TOOL: &str = "write_to_field";
@@ -79,7 +80,8 @@ pub const MAX_CONTINUATIONS: usize = 3;
 /// Pages a question may read (spec 2 §12.12: two a question, a continuation of a paused turn included — it goes with the
 /// reads left).
 pub const FETCH_MAX_USES: u32 = 2;
-/// A read page is cut to this many tokens (spec 2 §12.12: about $0.001 a page at Haiku 5.5's prices).
+/// A read page's text is cut to this many tokens (spec 2 §12.12: about $0.001 a page at Haiku 5.5's prices). A PDF is not
+/// cut: it comes whole (on 2026-10-29 RFC 9110's, about 524 thousand tokens), so the instruction asks never to fetch one.
 pub const FETCH_MAX_CONTENT_TOKENS: u32 = 10_000;
 /// Where a long selection leaves out its middle.
 pub const ELISION: &str = "\n[… part of the selection is left out …]\n";
@@ -588,10 +590,15 @@ mod tests {
         }
     }
 
+    /// The page the user points at, read and answered briefly; a search only when it is not enough; never a PDF, which
+    /// comes whole, past the page limit.
     #[test]
     fn the_instruction_reads_the_pages_the_user_points_at() {
         for phrase in [
-            "read that page with web_fetch instead of searching for it by name",
+            "read that one page with web_fetch and answer briefly",
+            "Search only when the page cannot be read or the question needs more than the page.",
+            "Never fetch a PDF or another document file",
+            "ends in .pdf",
             "Open no other links.",
             "is no failure: answer from the search or from what you know",
         ] {

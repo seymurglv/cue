@@ -1,8 +1,10 @@
-//! The first probe of page reading in "Ask" (spec 2 §12.12), paid (usually about $0.05; it stops before the next request
-//! once past $0.08, so at most about $0.10): what the Models API says, which web_fetch version Haiku 5.5 takes next to
-//! the filtered web search, whether the warm-up writes and reads the new prefix, whether the end of a response reports its
-//! page reads, how a read page, a page that cannot be read and a PDF come back, which page a citation's `document_index`
-//! names (in one response and after a follow-up that reads one more), and whether a site named in the question is opened.
+//! The first probe of page reading in "Ask" (spec 2 §12.12), paid (usually about $0.02; it stops before the next request
+//! once past $0.08, so at most about $0.10 while the pages it reads are small: a PDF comes whole, past
+//! `max_content_tokens`, and a long one alone costs more than the cap): what the Models API says, which web_fetch version
+//! Haiku 5.5 takes next to the filtered web search, whether the warm-up writes and reads the new prefix, whether the end of
+//! a response reports its page reads, how a read page, a page that cannot be read and a PDF come back, which page a
+//! citation's `document_index` names (in one response and after a follow-up that reads one more), and whether a site
+//! named in the question is opened.
 //! Prints kinds, counts, codes and numbers, and the API's own message of a refused request (no text of ours is in it).
 //! Run: cargo run -p cue-engines --example fetch_probe [-- <model>]
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -22,8 +24,8 @@ const PAGE: &str = "https://en.wikipedia.org/wiki/Hyper_Text_Coffee_Pot_Control_
 const TWO: &str = "https://www.rfc-editor.org/rfc/rfc2324.txt https://www.rfc-editor.org/rfc/rfc7168.txt";
 const MORE: &str = "https://en.wikipedia.org/wiki/Larry_Masinter";
 /// A PDF of one page. A PDF is read whole, past `max_content_tokens`: on 2026-10-29 RFC 9110's PDF came in as about
-/// 524 thousand tokens, which alone spent more than the cap (and past 100 thousand a prompt is priced higher than
-/// `Pricing` counts). RFC 2324, the coffee pot's, has no PDF at the RFC Editor (404).
+/// 524 thousand tokens, which alone spent more than the cap (a prompt past 100 thousand tokens is priced at the long
+/// rates). RFC 2324, the coffee pot's, has no PDF at the RFC Editor (404).
 const PDF: &str = "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf";
 const SCRIPTED: &str = "https://excalidraw.com/";
 

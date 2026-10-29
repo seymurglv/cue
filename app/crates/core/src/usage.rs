@@ -162,15 +162,15 @@ pub fn stt_cost(p: &Pricing, engine: SttEngineKind, path: SttPath, audio_ms: u64
     hours * per_hour
 }
 
-/// The cost of a refine request at the model's prices from settings.
-/// A model missing from the prices costs 0.0: the core has no log, so the warning (once, when `claude_price` is None)
-/// is written by the app itself.
+/// The cost of a Claude request (refine, a warm-up, a question of "Ask") at the model's prices from settings, a long
+/// prompt at its long rates. A model missing from the prices costs 0.0: the core has no log, so the warning (once, when
+/// `claude_price` is None) is written by the app itself.
 pub fn refine_cost(p: &Pricing, model: &str, input: u64, cache_read: u64, cache_write: u64, output: u64) -> f64 {
     let Some(m) = p.claude_price(model) else { return 0.0 };
-    (input as f64 * m.input_per_mtok
-        + cache_read as f64 * m.cache_read_per_mtok
-        + cache_write as f64 * m.cache_write_per_mtok
-        + output as f64 * m.output_per_mtok)
+    // A long prompt is priced higher, all of it (`ModelPrice::rates`). The tokens of a question of "Ask" are its
+    // responses' together, so one whose responses each stay under the tier is counted as long: the cost errs high.
+    let r = m.rates(input.saturating_add(cache_read).saturating_add(cache_write));
+    (input as f64 * r.input + cache_read as f64 * r.cache_read + cache_write as f64 * r.cache_write + output as f64 * r.output)
         / 1_000_000.0
 }
 
@@ -414,9 +414,27 @@ mod tests {
         assert!((stt_cost(&p, SttEngineKind::Soniox, SttPath::Stream, hour) - 0.12).abs() < 1e-9);
         assert!((stt_cost(&p, SttEngineKind::Soniox, SttPath::StreamThenBatch, hour) - 0.22).abs() < 1e-9, "stream + batch");
         assert!((stt_cost(&p, SttEngineKind::Soniox, SttPath::Batch, hour) - 0.10).abs() < 1e-9, "batch");
-        let c = refine_cost(&p, "claude-haiku-5-5", 1_000_000, 1_000_000, 0, 1_000_000);
-        assert!((c - (0.10 + 0.01 + 0.50)).abs() < 1e-9);
+        let c = refine_cost(&p, "claude-haiku-5-5", 10_000, 80_000, 0, 1_000);
+        assert!((c - (10_000.0 * 0.10 + 80_000.0 * 0.01 + 1_000.0 * 0.50) / 1e6).abs() < 1e-12);
         assert_eq!(refine_cost(&p, "unknown-model", 1_000, 0, 0, 1_000), 0.0);
+    }
+
+    /// Claude Haiku 5.5 prices a prompt over 100 000 tokens higher, all of it ($0.50 / $2.50 per million; a cache write
+    /// 1.25 ×, a cache read 0.1 × the input price): the prompt is the new, cache write and cache read tokens together.
+    #[test]
+    fn a_long_prompt_is_priced_at_the_long_rates() {
+        let p = Pricing::default();
+        let haiku = |input, cache_read, cache_write, output| refine_cost(&p, "claude-haiku-5-5", input, cache_read, cache_write, output);
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        assert!(close(haiku(100_000, 0, 0, 1_000), (100_000.0 * 0.10 + 1_000.0 * 0.50) / 1e6), "100 000: the usual rates");
+        assert!(close(haiku(100_001, 0, 0, 1_000), (100_001.0 * 0.50 + 1_000.0 * 2.50) / 1e6), "100 001: the long rates");
+        assert!(
+            close(haiku(1_000, 90_000, 10_000, 100), (1_000.0 * 0.50 + 90_000.0 * 0.05 + 10_000.0 * 0.625 + 100.0 * 2.50) / 1e6),
+            "the cache tokens count toward the prompt"
+        );
+        assert!(close(haiku(1_000, 90_000, 9_000, 100), (1_000.0 * 0.10 + 90_000.0 * 0.01 + 9_000.0 * 0.125 + 100.0 * 0.50) / 1e6));
+        let sonnet = refine_cost(&p, "claude-sonnet-5-5", 200_000, 0, 0, 0);
+        assert!(close(sonnet, 200_000.0 * 2.0 / 1e6), "a model without a long tier keeps its rates");
     }
 
     #[test]

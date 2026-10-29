@@ -50,10 +50,11 @@ pub fn search_tool(max_uses: u32) -> Option<SearchTool> {
     Some(SearchTool::Filtered { max_uses })
 }
 
-/// Reading a page the user pointed at (spec 2 §12.12): Claude's server tool, up to `max_uses` pages a request, each cut to
-/// `FETCH_MAX_CONTENT_TOKENS` tokens, with citations (off by default in the API). A question reads `FETCH_MAX_USES` pages
-/// at most, its continuations included: a continuation goes with what is left (`run`). Which version — the first probe's
-/// choice (`examples/fetch_probe.rs`).
+/// Reading a page the user pointed at (spec 2 §12.12): Claude's server tool, up to `max_uses` pages a request, the text of
+/// each cut to `FETCH_MAX_CONTENT_TOKENS` tokens, with citations (off by default in the API). A PDF is not cut — it comes
+/// whole, hundreds of thousands of tokens for a long one — so the instruction asks never to fetch one. A question reads
+/// `FETCH_MAX_USES` pages at most, its continuations included: a continuation goes with what is left (`run`). Which
+/// version — the first probe's choice (`examples/fetch_probe.rs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FetchTool {
     /// `web_fetch_20250910`, called by the model directly: the filtered search's code may not call it.
