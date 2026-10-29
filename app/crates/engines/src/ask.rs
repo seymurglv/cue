@@ -70,7 +70,7 @@ pub fn tools(search: Option<SearchTool>) -> Value {
 }
 
 /// Thinking for "Ask" (spec 2 §6.2, decision 8): adaptive — the model's default, left out of the request — at low effort,
-/// or off. The bench (Task 8) compares the two; the app sends `DEFAULT`.
+/// or off. The bench compares the two; the app sends `DEFAULT`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Thinking {
     Adaptive,
@@ -294,10 +294,12 @@ impl StreamState {
                     }
                     "citations_delta" => {
                         let c = d["citation"].clone();
+                        // The title is optional in the API: without one the source goes under its site.
                         if c["type"] == "web_search_result_location"
-                            && let (Some(url), Some(title)) = (c["url"].as_str(), c["title"].as_str())
+                            && let Some(url) = c["url"].as_str()
                         {
-                            steps.push(Step::Cite { url: url.to_owned(), title: title.to_owned() });
+                            let title = c["title"].as_str().map_or_else(|| core_ask::site_of(url), str::to_owned);
+                            steps.push(Step::Cite { url: url.to_owned(), title });
                         }
                         match block["citations"].as_array_mut() {
                             Some(list) => list.push(c),
@@ -735,14 +737,37 @@ mod tests {
         assert_eq!(decide(&cut, Some("max_tokens")), Decision::Empty, "cut at max_tokens: never carried out");
     }
 
-    /// A refusal wins over whatever came before it: a call it cut must not run (spec 2 §6.2).
+    /// A refusal wins over whatever came before it, a complete and valid call too: that call must not run (spec 2 §6.2).
     #[test]
     fn a_refusal_wins() {
         let mut events = write_answer("x", "insert");
-        events.truncate(4);
+        events.truncate(5);
         events.extend(end("refusal", json!({ "output_tokens": 3 })));
         let (_, turn) = feed_all(&events);
+        let write = Decision::Write { text: "x".into(), replace: false };
+        assert_eq!(decide(&turn.content, Some("tool_use")), write, "the call itself is whole and valid");
         assert_eq!(decide(&turn.content, turn.stop_reason.as_deref()), Decision::Refused);
+    }
+
+    /// Decision 6: the deadlines wait for text that is not blank, or for the start of a write.
+    #[test]
+    fn the_first_words_are_text_or_the_start_of_a_write() {
+        assert!(Step::Text("Да".into()).is_first_words() && Step::WriteStart.is_first_words());
+        assert!(!Step::Text(" \n".into()).is_first_words() && !Step::TextStart.is_first_words());
+        assert!([Step::Searching, Step::Reading, Step::Cite { url: "https://a.io".into(), title: "A".into() }].iter().all(|s| !s.is_first_words()));
+    }
+
+    /// A cited result's title is optional in the API: a citation without one still numbers its source, under its site.
+    #[test]
+    fn a_citation_without_a_title_is_still_a_source() {
+        let mut st = StreamState::default();
+        st.feed(&block_start(0, json!({ "type": "text", "text": "" })).to_string()).unwrap();
+        let cite = json!({ "type": "web_search_result_location", "url": "https://www.rust-lang.org/learn", "title": null, "encrypted_index": "Eo8B", "cited_text": "a" });
+        assert_eq!(
+            st.feed(&delta(0, json!({ "type": "citations_delta", "citation": cite })).to_string()),
+            Ok(vec![Step::Cite { url: "https://www.rust-lang.org/learn".into(), title: "rust-lang.org".into() }])
+        );
+        assert_eq!(st.finish().content[0]["citations"], json!([cite]), "the citation goes back as it came");
     }
 
     #[test]

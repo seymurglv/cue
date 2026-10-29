@@ -174,7 +174,7 @@ pub fn plain_answer(markdown: &str) -> String {
     tidy_list_items(&strip_markup("", markdown)).trim().to_owned()
 }
 
-/// Text the model wrote for the field, in the dictation's form (spec 2 §6.2: "как в диктовке"): markup the question did
+/// Text the model wrote for the field, in the dictation's form (spec 2 §6.2: as in dictation): markup the question did
 /// not ask for taken off and list separators tidied, as refine does with its result — the code guarantees it, the
 /// instruction only asks for it.
 pub fn field_text(question: &str, text: &str) -> String {
@@ -195,8 +195,7 @@ pub fn site_of(url: &str) -> String {
 pub fn openable(url: &str) -> bool {
     let scheme = url.get(..8).map(str::to_ascii_lowercase).unwrap_or_default();
     let web = scheme.starts_with("https://") || scheme.starts_with("http://");
-    let host = url.split_once("://").map_or("", |(_, r)| r.split(['/', '?', '#']).next().unwrap_or(""));
-    web && !host.is_empty()
+    web && !site_of(url).is_empty()
         && url.len() <= 2_048
         && !url.chars().any(|c| c.is_whitespace() || c.is_control() || c == '"')
 }
@@ -252,17 +251,18 @@ pub enum WriteTarget {
     Show,
 }
 
-/// Spec 2 §6.2: "replace" over a selection that can be changed; "insert" below a selection (the card's "Insert below"),
-/// at the caret without one; a replace in a terminal, and any write about read-only text (someone else's message, a
-/// page), is shown, not written: the user copies it (decisions 3–4).
+/// Spec 2 §6.2: in a terminal a write goes to the caret whatever is selected, as the answer's buttons there are Insert
+/// and Copy: terminal text cannot be replaced, and a paste at the prompt is what dictation does (the console paste keeps
+/// it on one line). Elsewhere "replace" goes over a selection that can be changed, and "insert" below a selection (the
+/// card's "Insert below") or at the caret without one; any write about read-only text (someone else's message, a page)
+/// is shown, not written: the user copies it (decisions 3–4).
 pub fn write_target(replace: bool, sel: SelectionKind, terminal: bool) -> WriteTarget {
     match (replace, sel) {
+        _ if terminal => WriteTarget::Paste(PasteHow::AtCaret),
         (_, SelectionKind::ReadOnly) => WriteTarget::Show,
-        (true, SelectionKind::None) => WriteTarget::Paste(PasteHow::AtCaret),
-        (true, SelectionKind::Writable) if terminal => WriteTarget::Show,
         (true, SelectionKind::Writable) => WriteTarget::Paste(PasteHow::Replace),
-        (false, SelectionKind::Writable) if !terminal => WriteTarget::Paste(PasteHow::Below),
-        (false, _) => WriteTarget::Paste(PasteHow::AtCaret),
+        (false, SelectionKind::Writable) => WriteTarget::Paste(PasteHow::Below),
+        (_, SelectionKind::None) => WriteTarget::Paste(PasteHow::AtCaret),
     }
 }
 
@@ -483,6 +483,7 @@ mod tests {
             "javascript:alert(1)",
             "https://exa mple.com",
             "https://",
+            "https://@/",
             "ms-settings:privacy",
             "https://example.com/a\"b",
         ] {
@@ -498,15 +499,18 @@ mod tests {
         let cases = [
             ((true, S::None, false), W::Paste(PasteHow::AtCaret)),
             ((true, S::Writable, false), W::Paste(PasteHow::Replace)),
-            ((true, S::Writable, true), W::Show),
             ((true, S::ReadOnly, false), W::Show),
             ((false, S::None, false), W::Paste(PasteHow::AtCaret)),
-            ((false, S::None, true), W::Paste(PasteHow::AtCaret)),
             ((false, S::Writable, false), W::Paste(PasteHow::Below)),
-            ((false, S::Writable, true), W::Paste(PasteHow::AtCaret)),
             // New text about read-only text is shown in the answer, with Copy (decisions 3–4).
             ((false, S::ReadOnly, false), W::Show),
-            ((false, S::ReadOnly, true), W::Show),
+            // A terminal wins over the selection: its text cannot be replaced, and the write goes to the prompt.
+            ((true, S::None, true), W::Paste(PasteHow::AtCaret)),
+            ((true, S::Writable, true), W::Paste(PasteHow::AtCaret)),
+            ((true, S::ReadOnly, true), W::Paste(PasteHow::AtCaret)),
+            ((false, S::None, true), W::Paste(PasteHow::AtCaret)),
+            ((false, S::Writable, true), W::Paste(PasteHow::AtCaret)),
+            ((false, S::ReadOnly, true), W::Paste(PasteHow::AtCaret)),
         ];
         for ((replace, sel, terminal), want) in cases {
             assert_eq!(write_target(replace, sel, terminal), want, "replace={replace} {sel:?} terminal={terminal}");
@@ -524,6 +528,7 @@ mod tests {
         assert_eq!(answer_actions(S::Writable, true), [Insert, Copy], "no Replace or Below in a terminal");
         assert_eq!(answer_actions(S::ReadOnly, false), [Copy]);
         assert_eq!(answer_actions(S::None, true), [Insert, Copy]);
+        assert_eq!(answer_actions(S::ReadOnly, true), [Insert, Copy], "a terminal wins over the selection, as in a write");
     }
 
     /// Spec 2 §6.2: text for the field takes the dictation's form in code, not only by the instruction.
