@@ -33,8 +33,8 @@ pub enum HotkeyEvent {
     ModeChange(Mode),
     /// A fresh Shift press (not its auto-repeat) while the chord is held, or on its own while CUE records
     /// (`Chord::set_recording`): dictation and translation swap. The core keeps the mode; a release changes nothing.
-    /// After a tap, a key pressed while that Shift is still held takes the toggle back with one more `ModeToggle`
-    /// (`Decision::undo_toggle`).
+    /// After a tap, a key or a mouse button pressed while that Shift is still held takes the toggle back with one more
+    /// `ModeToggle` (`Decision::undo_toggle`, `Chord::on_mouse_down`).
     ModeToggle,
     /// The pair broke up after `ChordDown`; also comes after `ChordAborted`.
     ChordUp,
@@ -79,7 +79,7 @@ pub struct Chord {
     /// CUE is starting or recording: a fresh Shift press on its own toggles the mode after the chord was released too.
     recording: bool,
     /// Shift keys (`LEFT` / `RIGHT` bits) that toggled the mode on their own after a tap and are still held: the next
-    /// other key takes their toggle back.
+    /// other key or mouse button takes their toggle back.
     undo_shift: u8,
     /// This Win press had a `ChordDown`: the last Win release is masked.
     win_needs_mask: bool,
@@ -207,6 +207,26 @@ impl Chord {
         self.active
     }
 
+    /// A mouse button went down (spec 2 §4): while a Shift that toggled after a tap is still held, this is Shift + click —
+    /// extending a selection — and the toggle is taken back, as another key takes it back. A Shift that `held` reports
+    /// released lost its release on the way: its toggle stands. Returns whether the core gets one more `ModeToggle`.
+    pub fn on_mouse_down(&mut self, held: impl Fn(u16) -> bool) -> bool {
+        for vk in [VK_LSHIFT, VK_RSHIFT] {
+            if !held(vk) {
+                self.set(vk, false);
+            }
+        }
+        self.undo_shift &= self.shift;
+        let undo = self.undo_shift.count_ones() % 2 == 1;
+        self.undo_shift = 0;
+        undo
+    }
+
+    /// A mouse button press would take a Shift toggle back now: the mouse hook is needed only while this holds.
+    pub fn watches_mouse(&self) -> bool {
+        self.undo_shift != 0
+    }
+
     /// Decision for one keyboard hook event.
     ///
     /// - `vk` — virtual key code; `down` — press (including auto-repeat), otherwise release.
@@ -220,9 +240,10 @@ impl Chord {
     /// is a system shortcut — no events, no swallowed V, no mask: Windows sees everything as is. Every fresh Shift press
     /// while the chord is held toggles the mode, its auto-repeat and its release do not. While CUE records with the chord
     /// released (`set_recording`), only Shift on its own toggles (Ctrl, Win and Alt up), and the next other key pressed
-    /// while that Shift is still held takes the toggle back (`Decision::undo_toggle`). An Alt press inside a held chord
-    /// picks "Ask". Shift and Alt together inside a held chord cancel it and drop the masks. Any other third key (Alt
-    /// while "Ask" is off included) cancels the chord, and the mask stays: this Win press had a `ChordDown`.
+    /// while that Shift is still held takes the toggle back (`Decision::undo_toggle`; a mouse button too,
+    /// `on_mouse_down`). An Alt press inside a held chord picks "Ask". Shift and Alt together inside a held chord cancel
+    /// it and drop the masks. Any other third key (Alt while "Ask" is off included) cancels the chord, and the mask
+    /// stays: this Win press had a `ChordDown`.
     pub fn on_key(&mut self, vk: u16, down: bool, injected: bool, esc_active: bool) -> Decision {
         let mut d = Decision::default();
         if injected {
@@ -856,6 +877,59 @@ mod tests {
         let d = c.on_key(VK_ESCAPE, true, false, true);
         assert_eq!(d, Decision { swallow: true, event: Some(Esc), inject_mask_first: false, undo_toggle: true });
         assert_eq!(sent(d), [ModeToggle, Esc], "the mode is back before the cancel, so Restore refines in it");
+    }
+
+    /// Spec 2 §4: Shift + click extends a selection while CUE records; the click takes the Shift's toggle back.
+    #[test]
+    fn a_click_while_the_toggling_shift_is_held_takes_its_toggle_back() {
+        let mut c = tapped();
+        assert!(!c.watches_mouse());
+        assert_eq!(press(&mut c, VK_LSHIFT), TOGGLE);
+        assert!(c.watches_mouse(), "the mouse matters while that Shift is held");
+        assert!(c.on_mouse_down(|vk| vk == VK_LSHIFT));
+        assert!(!c.watches_mouse());
+        assert!(!c.on_mouse_down(|vk| vk == VK_LSHIFT), "a second click takes nothing back: once per Shift press");
+        assert_eq!(sent(press(&mut c, VK_D)), NOTHING, "nor does a key after it");
+        release(&mut c, VK_D);
+        release(&mut c, VK_LSHIFT);
+        // The right Shift was released first: its toggle stands, the left one's is taken back.
+        let mut c = tapped();
+        press(&mut c, VK_LSHIFT);
+        press(&mut c, VK_RSHIFT);
+        release(&mut c, VK_RSHIFT);
+        assert!(c.on_mouse_down(|vk| vk == VK_LSHIFT));
+    }
+
+    #[test]
+    fn a_click_takes_nothing_back_without_a_held_toggling_shift() {
+        assert!(!tapped().on_mouse_down(|_| false), "no Shift");
+        let mut c = tapped();
+        assert_eq!(keys(&mut c, &[VK_LSHIFT]), [ModeToggle]);
+        assert!(!c.watches_mouse());
+        assert!(!c.on_mouse_down(|_| false), "Shift pressed and released before the click");
+        let mut c = Chord::default();
+        c.set_recording(true);
+        press(&mut c, VK_LCONTROL);
+        press(&mut c, VK_LWIN);
+        assert_eq!(press(&mut c, VK_LSHIFT), TOGGLE);
+        assert!(!c.watches_mouse());
+        assert!(!c.on_mouse_down(|vk| [VK_LCONTROL, VK_LWIN, VK_LSHIFT].contains(&vk)), "Shift inside a held chord");
+        let mut c = tapped();
+        press(&mut c, VK_LCONTROL);
+        assert_eq!(press(&mut c, VK_LSHIFT), Decision::default());
+        assert!(!c.on_mouse_down(|vk| [VK_LCONTROL, VK_LSHIFT].contains(&vk)), "Shift with Ctrl down after a tap");
+        // The Shift release went to the secure desktop: the toggle stands, and nothing is left to take back.
+        let mut c = tapped();
+        assert_eq!(press(&mut c, VK_LSHIFT), TOGGLE);
+        assert!(!c.on_mouse_down(|_| false), "a lost Shift release");
+        assert!(!c.watches_mouse());
+        assert_eq!(sent(press(&mut c, VK_D)), NOTHING);
+        // Both Shifts toggled: two toggles cancel out, as with a key.
+        let mut c = tapped();
+        press(&mut c, VK_LSHIFT);
+        press(&mut c, VK_RSHIFT);
+        assert!(!c.on_mouse_down(|vk| vk == VK_LSHIFT || vk == VK_RSHIFT), "both Shifts");
+        assert!(!c.watches_mouse());
     }
 
     #[test]

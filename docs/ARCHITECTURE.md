@@ -45,8 +45,9 @@ without windows, a microphone, a network or a real clock.
   (`block_on`) because it makes short blocking Windows calls (UI Automation up to 150 ms, Credential Manager).
   Network calls and timers are tokio tasks that send their results back as events. A panic while handling one event
   is caught and logged, and the core keeps running.
-- **`cue-keyboard`**: the `WH_KEYBOARD_LL` hook with its own message loop at time-critical priority. The handler only
-  classifies the key and sends a `HotkeyEvent`; `cue-hotkeys` forwards it to the core. The hook reads three atomics
+- **`cue-keyboard`**: the `WH_KEYBOARD_LL` hook (and, while a Shift that toggled the mode is held, `WH_MOUSE_LL`: see
+  Hotkey chord) with its own message loop at time-critical priority. The handler only classifies the key and sends a
+  `HotkeyEvent`; `cue-hotkeys` forwards it to the core. The hook reads three atomics
   the core updates as soon as the flow has handled an event: `ESC_ACTIVE`, `RECORDING` and `PAUSED`; and
   `ASK_ENABLED`, set once at startup from `ask.enabled`.
 - **`cue-focus`**: UI Automation on its own COM thread. Each query has a deadline; a late answer becomes "unknown",
@@ -157,10 +158,16 @@ keeps the answer open with the error and Retry, and the question is kept.
   or Win, Ctrl + Shift + a key, Alt + Shift, Win + Shift + S) it changes nothing. Second, when any other key goes down
   while the Shift that toggled is still held (a capital letter, Shift + Alt, a finishing chord started with Shift,
   Shift + Esc), the chord takes the toggle back: `Decision::undo_toggle` puts a second `ModeToggle` before that key's
-  own event, so the flow is back in its mode before the finishing `ChordDown` or the cancel. Each Shift press is taken
-  back at most once (both Shifts held: two toggles cancel out); a released Shift's toggle stands, also when the
-  release was lost and the resync drops it. The Drop shows the brief switch and back. Inside a held chord neither
-  guard applies.
+  own event, so the flow is back in its mode before the finishing `ChordDown` or the cancel. A mouse button pressed
+  while that Shift is held (Shift + click extends a selection) takes it back the same way (`Chord::on_mouse_down`).
+  A `WH_MOUSE_LL` hook on the same thread sees the click; it is installed only while such a Shift is held, since a
+  low-level mouse hook routes every mouse event of the system through CUE's thread. The keyboard hook procedure posts
+  `WM_MOUSE_WATCH` to its own loop, which installs or removes it (a hook procedure installs no hook). The mouse hook
+  counts button presses only, lets injected ones pass and never swallows a click; it is removed after the click, the
+  Shift's release or the next key, set again after a reinstall if still needed, and removed when the thread ends. Each
+  Shift press is taken back at most once (both Shifts held: two toggles cancel out); a released Shift's toggle stands,
+  also when the release was lost and the resync drops it. The Drop shows the brief switch and back. Inside a held
+  chord neither guard applies.
 - An Alt press inside a held chord, once "Ask" is on, picks "Ask". Shift and Alt together inside a held chord (the
   Office key pressed late) count as a third key (below) and also drop the Win and Alt masks whatever the order of the
   presses, so Windows sees the Office key as is.

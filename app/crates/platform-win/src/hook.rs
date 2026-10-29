@@ -1,5 +1,6 @@
-//! Low-level keyboard hook on its own thread. The hook procedure only classifies the event
-//! and hands it to a channel: Windows removes the hook if the procedure takes too long to answer.
+//! Low-level keyboard hook on its own thread, and, only while a Shift that toggled the mode after a tap is held, a
+//! low-level mouse hook on the same thread: a click then takes the toggle back. The hook procedures only classify the
+//! event and hand it to a channel: Windows removes a hook if its procedure takes too long to answer.
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Sender, SyncSender};
@@ -12,8 +13,9 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, KillTimer, PeekMessageW, PostThreadMessageW, SetTimer,
-    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
-    PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
+    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED,
+    LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOWS_HOOK_ID, WM_APP, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_TIMER, WM_XBUTTONDOWN,
 };
 
 use crate::chord::{Chord, Decision, HotkeyEvent, VK_ESCAPE, VK_LCONTROL, VK_LWIN, VK_RCONTROL, VK_RWIN, VK_V};
@@ -38,6 +40,8 @@ static INSTALLED: AtomicBool = AtomicBool::new(false);
 static SPAWNED: AtomicBool = AtomicBool::new(false);
 static THREAD_ID: AtomicU32 = AtomicU32::new(0);
 const WM_REINSTALL: u32 = WM_APP + 1;
+/// Install or remove the mouse hook, as `MOUSE_WANTED` says: posted by a hook procedure, which installs no hook itself.
+const WM_MOUSE_WATCH: u32 = WM_APP + 2;
 /// Scan code of the fake left Ctrl that Windows sends before the right Alt in layouts with AltGr.
 const SC_ALTGR_LCONTROL: u32 = 0x21D;
 /// Chord timer period: a stuck chord ends no later than two ticks after.
@@ -49,6 +53,10 @@ thread_local! {
     static TIMER: Cell<usize> = const { Cell::new(0) };
     /// Modifiers on the previous timer tick.
     static DEBOUNCE: Cell<Debounce> = const { Cell::new(Debounce::ARMED) };
+    /// The mouse hook while it is installed (`follow_mouse`).
+    static MOUSE: Cell<Option<HHOOK>> = const { Cell::new(None) };
+    /// Whether the mouse hook is wanted, as last asked of the message loop (`want_mouse`).
+    static MOUSE_WANTED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// The hook did not start.
@@ -166,6 +174,37 @@ fn after_gap(chord: &mut Chord, paused: bool, held: impl Fn(u16) -> bool) -> Opt
     if paused { None } else { event }
 }
 
+/// A mouse button went down by the user's hand: `msg` — the mouse hook procedure's `wParam`, `flags` — its
+/// `MSLLHOOKSTRUCT` flags. Moves, releases and the wheel are no clicks; a press sent by a program passes by, as injected
+/// keys do.
+fn mouse_button_down(msg: u32, flags: u32) -> bool {
+    matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN) && flags & LLMHF_INJECTED == 0
+}
+
+/// `Chord`'s answer to a click (`Chord::on_mouse_down`): one more `ModeToggle` when the click takes a Shift toggle back.
+/// While paused `Chord` still sees the click, but the core gets nothing.
+fn feed_mouse(chord: &mut Chord, paused: bool, held: impl Fn(u16) -> bool) -> Option<HotkeyEvent> {
+    let undo = chord.on_mouse_down(held);
+    (undo && !paused).then_some(HotkeyEvent::ModeToggle)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MouseChange {
+    Install,
+    Remove,
+    Keep,
+}
+
+/// The mouse hook is needed exactly while a click would take a Shift toggle back (`Chord::watches_mouse`): a low-level
+/// mouse hook routes every mouse event of the system through this thread, so it lives only for that second or so.
+fn mouse_change(wanted: bool, installed: bool) -> MouseChange {
+    match (wanted, installed) {
+        (true, false) => MouseChange::Install,
+        (false, true) => MouseChange::Remove,
+        _ => MouseChange::Keep,
+    }
+}
+
 /// Timer resync while the chord is held: it ends even if the Ctrl and Win releases never reached the hook
 /// (UAC prompt, Ctrl+Alt+Del, lock screen, elevated window) and there are no new presses.
 /// A key counts as released only if it is not seen held on this tick or the previous one: a tick may come
@@ -268,6 +307,62 @@ fn on_tick() {
     follow_chord(active.unwrap_or(false), false);
 }
 
+/// Asks the message loop to install or remove the mouse hook (`WM_MOUSE_WATCH`) when the wish has changed. No hook calls
+/// and no logging: it runs in a hook procedure. A post that failed leaves the old wish, and the next event asks again.
+fn want_mouse(wanted: bool) {
+    if wanted == MOUSE_WANTED.get() {
+        return;
+    }
+    // SAFETY: our own thread's id and constants.
+    if unsafe { PostThreadMessageW(GetCurrentThreadId(), WM_MOUSE_WATCH, WPARAM(0), LPARAM(0)) }.is_ok() {
+        MOUSE_WANTED.set(wanted);
+    }
+}
+
+/// Installs or removes the mouse hook as `MOUSE_WANTED` says (in the message loop, never in a hook procedure). If Windows
+/// did not install it, a click goes unseen and the Shift's toggle stands, as it would without the hook.
+fn follow_mouse() {
+    match mouse_change(MOUSE_WANTED.get(), MOUSE.get().is_some()) {
+        MouseChange::Install => match set_hook(WH_MOUSE_LL, mouse_proc) {
+            Ok(hook) => MOUSE.set(Some(hook)),
+            Err(e) => tracing::warn!("mouse hook not installed, a Shift + click may switch the mode: {e}"),
+        },
+        MouseChange::Remove => unhook_mouse(),
+        MouseChange::Keep => {}
+    }
+}
+
+fn unhook_mouse() {
+    if let Some(hook) = MOUSE.take() {
+        // SAFETY: the hook was installed by this thread.
+        let _ = unsafe { UnhookWindowsHookEx(hook) };
+    }
+}
+
+/// The mouse hook procedure, installed only while `Chord::watches_mouse`: a button press takes a Shift toggle back.
+/// It never swallows the click — Shift + click still extends the selection — and does not log.
+unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 {
+        // SAFETY: with HC_ACTION lparam points to an MSLLHOOKSTRUCT that is alive for the duration of the call.
+        let flags = unsafe { (*(lparam.0 as *const MSLLHOOKSTRUCT)).flags };
+        if mouse_button_down(wparam.0 as u32, flags) {
+            let watch = STATE.with(|s| {
+                let mut s = s.try_borrow_mut().ok()?;
+                let (chord, tx) = s.as_mut()?;
+                let paused = PAUSED.load(Ordering::Relaxed);
+                if let Some(event) = feed_mouse(chord, paused, key_held) {
+                    let _ = tx.send(event);
+                }
+                Some(chord.watches_mouse() && !paused)
+            });
+            // After a click nothing is left to take back: the hook goes.
+            want_mouse(watch.unwrap_or(false));
+        }
+    }
+    // SAFETY: the arguments are the ones Windows called the procedure with.
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         // SAFETY: with HC_ACTION lparam points to a KBDLLHOOKSTRUCT that is alive for the duration of the call.
@@ -280,14 +375,18 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 chord.set_ask(ASK_ENABLED.load(Ordering::Relaxed));
                 chord.set_recording(RECORDING.load(Ordering::Relaxed));
                 let esc_active = ESC_ACTIVE.load(Ordering::Relaxed);
-                let (out, chord_down) = feed(chord, &ev, how, esc_active, PAUSED.load(Ordering::Relaxed), key_held);
+                let paused = PAUSED.load(Ordering::Relaxed);
+                let (out, chord_down) = feed(chord, &ev, how, esc_active, paused, key_held);
                 for event in out.events.into_iter().flatten() {
                     let _ = tx.send(event);
                 }
-                Some((out, chord.active(), chord_down))
+                Some((out, chord.active(), chord_down, chord.watches_mouse() && !paused))
             });
-            if let Some((out, active, chord_down)) = outcome {
+            if let Some((out, active, chord_down, watch)) = outcome {
                 follow_chord(active, chord_down);
+                // The mouse hook lives while a Shift that toggled after a tap is held, when a click takes the toggle back.
+                // The message loop installs it right after this procedure returns, long before a hand can click.
+                want_mouse(watch);
                 if ev.down {
                     let mut debounce = DEBOUNCE.get();
                     debounce.pressed(ev.vk);
@@ -310,10 +409,18 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 }
 
 fn install() -> windows::core::Result<HHOOK> {
+    set_hook(WH_KEYBOARD_LL, hook_proc)
+}
+
+/// A low-level hook of this thread: its procedure runs here, while the message loop waits for messages.
+fn set_hook(
+    id: WINDOWS_HOOK_ID,
+    procedure: unsafe extern "system" fn(i32, WPARAM, LPARAM) -> LRESULT,
+) -> windows::core::Result<HHOOK> {
     // SAFETY: the module of our own exe; the procedure is a static `extern "system"` function.
     unsafe {
         let module: HINSTANCE = GetModuleHandleW(None)?.into();
-        SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), Some(module), 0)
+        SetWindowsHookExW(id, Some(procedure), Some(module), 0)
     }
 }
 
@@ -376,6 +483,10 @@ fn run(tx: Sender<HotkeyEvent>, ready: SyncSender<windows::core::Result<()>>) {
             hook = install_again(hook);
             continue;
         }
+        if msg.message == WM_MOUSE_WATCH {
+            follow_mouse();
+            continue;
+        }
         if msg.message == WM_TIMER && msg.wParam.0 != 0 && msg.wParam.0 == TIMER.get() {
             on_tick();
             continue;
@@ -389,6 +500,7 @@ fn run(tx: Sender<HotkeyEvent>, ready: SyncSender<windows::core::Result<()>>) {
     THREAD_ID.store(0, Ordering::SeqCst);
     INSTALLED.store(false, Ordering::SeqCst);
     follow_chord(false, false);
+    unhook_mouse();
     if let Some(hook) = hook {
         // SAFETY: the hook was installed by this thread.
         let _ = unsafe { UnhookWindowsHookEx(hook) };
@@ -400,15 +512,21 @@ fn install_again(old: Option<HHOOK>) -> Option<HHOOK> {
         // SAFETY: the hook was installed by this thread; the procedure is not called while the thread is not waiting for messages.
         let _ = unsafe { UnhookWindowsHookEx(old) };
     }
-    let active = STATE.with(|s| {
+    // Windows may have removed the mouse hook too: it goes in again below if it is still wanted.
+    unhook_mouse();
+    let state = STATE.with(|s| {
         let mut s = s.borrow_mut();
         let (chord, tx) = s.as_mut()?;
-        if let Some(event) = after_gap(chord, PAUSED.load(Ordering::Relaxed), key_held) {
+        let paused = PAUSED.load(Ordering::Relaxed);
+        if let Some(event) = after_gap(chord, paused, key_held) {
             let _ = tx.send(event);
         }
-        Some(chord.active())
+        Some((chord.active(), chord.watches_mouse() && !paused))
     });
-    follow_chord(active.unwrap_or(false), false);
+    let (active, watch) = state.unwrap_or((false, false));
+    follow_chord(active, false);
+    MOUSE_WANTED.set(watch);
+    follow_mouse();
     match install() {
         Ok(hook) => {
             INSTALLED.store(true, Ordering::SeqCst);
@@ -447,7 +565,8 @@ mod tests {
     use cue_core::flow::{Effect, Flow, Input, Ms};
     use cue_core::ui::Mode;
     use windows::Win32::UI::WindowsAndMessaging::{
-        KBDLLHOOKSTRUCT_FLAGS, LLKHF_LOWER_IL_INJECTED, LLKHF_UP, WM_KEYUP, WM_SYSKEYUP,
+        KBDLLHOOKSTRUCT_FLAGS, LLKHF_LOWER_IL_INJECTED, LLKHF_UP, LLMHF_LOWER_IL_INJECTED, WM_KEYUP, WM_LBUTTONUP,
+        WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_SYSKEYUP,
     };
     use HotkeyEvent::*;
 
@@ -700,6 +819,15 @@ mod tests {
             }
         }
 
+        /// A mouse button press, through `feed_mouse` as in the mouse hook procedure.
+        fn click(&mut self) {
+            self.now += 40;
+            let held = self.held.clone();
+            if let Some(event) = feed_mouse(&mut self.chord, false, |k| held.contains(&k)) {
+                self.flow.handle(input(event), self.now);
+            }
+        }
+
         /// Presses the keys in order, then releases them in the same order.
         fn keys(&mut self, keys: &[u16]) {
             keys.iter().for_each(|&vk| self.key(vk, true));
@@ -753,6 +881,82 @@ mod tests {
         assert_eq!(live.flow.mode(), Mode::Translate, "Alt + Shift and Shift + Alt");
         live.keys(&[VK_LCONTROL, VK_LWIN]);
         assert_eq!(live.refined_in(), Some(Mode::Translate));
+    }
+
+    /// Spec 2 §4: Shift + click extends a selection while CUE records; it does not switch the mode.
+    #[test]
+    fn shift_click_in_a_tapped_recording_keeps_its_mode() {
+        for (start, mode) in [(&[VK_LCONTROL, VK_LWIN][..], Mode::Dictate), (&[VK_LCONTROL, VK_LSHIFT, VK_LWIN][..], Mode::Translate)] {
+            let mut live = Live::tapped(start);
+            assert_eq!(live.flow.mode(), mode, "{start:x?}");
+            live.key(VK_LSHIFT, true);
+            assert!(live.chord.watches_mouse(), "the mouse hook goes in");
+            live.click();
+            live.key(VK_LSHIFT, false);
+            assert_eq!(live.flow.mode(), mode, "Shift + click, {start:x?}");
+            assert!(!live.chord.watches_mouse(), "and out again");
+            live.keys(&[VK_LCONTROL, VK_LWIN]);
+            assert_eq!(live.refined_in(), Some(mode), "{start:x?}");
+        }
+        // A lone Shift press after a Shift + click still switches.
+        let mut live = Live::tapped(&[VK_LCONTROL, VK_LWIN]);
+        live.key(VK_LSHIFT, true);
+        live.click();
+        live.key(VK_LSHIFT, false);
+        live.keys(&[VK_LSHIFT]);
+        assert_eq!(live.flow.mode(), Mode::Translate);
+        live.click();
+        assert_eq!(live.flow.mode(), Mode::Translate, "a click with no Shift held takes nothing back");
+        live.keys(&[VK_LCONTROL, VK_LWIN]);
+        assert_eq!(live.refined_in(), Some(Mode::Translate));
+    }
+
+    #[test]
+    fn only_a_real_button_press_is_a_click() {
+        for msg in [WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN, WM_XBUTTONDOWN] {
+            assert!(mouse_button_down(msg, 0), "{msg:#06x}");
+        }
+        for msg in [WM_MOUSEMOVE, WM_LBUTTONUP, WM_RBUTTONUP, WM_MOUSEWHEEL, WM_MOUSEHWHEEL] {
+            assert!(!mouse_button_down(msg, 0), "{msg:#06x}");
+        }
+        assert!(!mouse_button_down(WM_LBUTTONDOWN, LLMHF_INJECTED), "a program's click");
+        assert!(!mouse_button_down(WM_LBUTTONDOWN, LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED));
+    }
+
+    #[test]
+    fn the_mouse_hook_lives_only_while_a_toggling_shift_is_held() {
+        assert_eq!(mouse_change(true, false), MouseChange::Install);
+        assert_eq!(mouse_change(false, true), MouseChange::Remove);
+        assert_eq!(mouse_change(true, true), MouseChange::Keep);
+        assert_eq!(mouse_change(false, false), MouseChange::Keep);
+        let mut c = Chord::default();
+        c.set_recording(true);
+        assert!(!c.watches_mouse(), "recording, no Shift");
+        hook(&mut c, key(VK_LSHIFT, true), held_set(&[]));
+        assert!(c.watches_mouse(), "the Shift toggled");
+        hook(&mut c, key(VK_LSHIFT, false), held_set(&[VK_LSHIFT]));
+        assert!(!c.watches_mouse(), "released: its toggle stands");
+        hook(&mut c, key(VK_LSHIFT, true), held_set(&[]));
+        assert_eq!(hook(&mut c, key(VK_A, true), held_set(&[VK_LSHIFT])), Some(undo(None)));
+        assert!(!c.watches_mouse(), "a key took the toggle back");
+        let mut c = Chord::default();
+        c.set_recording(true);
+        hook(&mut c, key(VK_LCONTROL, true), held_set(&[]));
+        hook(&mut c, key(VK_LWIN, true), held_set(&[VK_LCONTROL]));
+        hook(&mut c, key(VK_LSHIFT, true), held_set(&[VK_LCONTROL, VK_LWIN]));
+        assert!(!c.watches_mouse(), "inside a held chord a click takes nothing back");
+    }
+
+    #[test]
+    fn a_paused_click_does_nothing() {
+        let mut c = Chord::default();
+        c.set_recording(true);
+        hook(&mut c, key(VK_LSHIFT, true), held_set(&[]));
+        assert_eq!(feed_mouse(&mut c, true, held_set(&[VK_LSHIFT])), None);
+        assert!(!c.watches_mouse(), "Chord saw the click");
+        hook(&mut c, key(VK_LSHIFT, false), held_set(&[VK_LSHIFT]));
+        hook(&mut c, key(VK_LSHIFT, true), held_set(&[]));
+        assert_eq!(feed_mouse(&mut c, false, held_set(&[VK_LSHIFT])), Some(ModeToggle), "not paused");
     }
 
     #[test]

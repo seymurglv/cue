@@ -19,7 +19,8 @@ is built for personal use with your own Soniox and Anthropic API keys.
   longer: recording ends when you let go. While CUE records, a press of `Shift` (left or right; on its own after a tap,
   or added while the starting chord is still held) switches between dictation and translation, and the Drop changes its
   icon at once: a second press takes it back. A `Shift` pressed together with other keys (a capital letter, a shortcut)
-  does not switch the mode; letting go of `Shift` changes nothing, and outside a recording `Shift` does nothing.
+  or with a mouse click (`Shift` + click extends a selection) does not switch the mode; letting go of `Shift` changes
+  nothing, and outside a recording `Shift` does nothing.
   `Alt` picks "Ask" only together with `Ctrl + Win` held, pressed before them or while they are still down; after a
   tap it changes nothing. `Ctrl + Win` with `Shift` and `Alt` together is the Office key: CUE leaves it to Windows, and
   `Ctrl + Win + Alt` too when "Ask" is off (`ask.enabled`).
