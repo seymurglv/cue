@@ -5,6 +5,8 @@
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
+use crate::placement::PxRect;
+
 pub const UIA_EDIT: i32 = 50004;
 pub const UIA_DOCUMENT: i32 = 50030;
 pub const UIA_LIST_ITEM: i32 = 50007;
@@ -34,12 +36,48 @@ pub struct FocusFacts {
     pub has_caret: bool,
 }
 
+/// What the focused field says about its selection (spec 2 §6.1); asked only for "Ask".
+#[derive(Clone, Default, PartialEq)]
+pub enum SelectionRead {
+    /// Not asked (every dictation query), or the answer came late.
+    #[default]
+    NotAsked,
+    /// Nothing is selected: a caret only.
+    Empty,
+    /// The selected text, already limited (`cue_core::ask::MAX_SELECTION_CHARS`, start and end); its rectangles on
+    /// screen in physical px when the app gives them (none from a classic field); whether the text there can be changed.
+    Text { text: String, rects: Vec<PxRect>, read_only: bool },
+    /// A password field: never read.
+    Password,
+    /// The field has no way to report a selection (no text pattern, not a classic field): there may be one.
+    Unknown,
+}
+
+/// Lengths only: the selected text must not reach a log through `{:?}`.
+impl std::fmt::Debug for SelectionRead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SelectionRead::Text { text, rects, read_only } => f
+                .debug_struct("Text")
+                .field("chars", &text.chars().count())
+                .field("rects", &rects.len())
+                .field("read_only", read_only)
+                .finish(),
+            SelectionRead::NotAsked => f.write_str("NotAsked"),
+            SelectionRead::Empty => f.write_str("Empty"),
+            SelectionRead::Password => f.write_str("Password"),
+            SelectionRead::Unknown => f.write_str("Unknown"),
+        }
+    }
+}
+
 #[derive(Clone, Default, PartialEq)]
 pub struct FocusInfo {
     pub app: String,
     pub editable: Editability,
     pub is_password: bool,
     pub before_cursor: Option<String>,
+    pub selection: SelectionRead,
 }
 
 /// Without the text before the caret itself — only its length: `{info:?}` in the log must not carry the document there.
@@ -50,6 +88,7 @@ impl std::fmt::Debug for FocusInfo {
             .field("editable", &self.editable)
             .field("is_password", &self.is_password)
             .field("before_cursor_chars", &self.before_cursor.as_ref().map(|s| s.chars().count()))
+            .field("selection", &self.selection)
             .finish()
     }
 }
@@ -150,10 +189,11 @@ impl Deadline {
     }
 }
 
-/// A request to the `cue-focus` thread: how many characters before the caret to read, until when the answer is still
-/// awaited, and where to reply.
+/// A request to the `cue-focus` thread: how many characters before the caret to read, how many of the selection (`None`
+/// — the selection is not read), until when the answer is still awaited, and where to reply.
 struct Request {
     chars: usize,
+    selection: Option<usize>,
     deadline: Deadline,
     reply: Sender<FocusInfo>,
 }
@@ -172,7 +212,7 @@ impl FocusWorker {
 
     /// `setup` runs on the new `cue-focus` thread and prepares the field query there; `None` — there will be no query,
     /// the thread ends, and `query` answers "don't know" at once.
-    fn start<F: FnMut(usize, Deadline) -> FocusInfo>(setup: impl FnOnce() -> Option<F> + Send + 'static) -> Self {
+    fn start<F: FnMut(usize, Option<usize>, Deadline) -> FocusInfo>(setup: impl FnOnce() -> Option<F> + Send + 'static) -> Self {
         let (tx, rx) = channel::<Request>();
         std::thread::Builder::new()
             .name("cue-focus".into())
@@ -187,9 +227,18 @@ impl FocusWorker {
 
     /// Not done within `timeout` — "don't know" (paste anyway).
     pub fn query(&self, context_chars: usize, timeout: Duration) -> FocusInfo {
+        self.ask(context_chars, None, timeout)
+    }
+
+    /// Like `query`, and the selection too, up to `selection_chars` characters (spec 2 §6.1, "Ask").
+    pub fn query_with_selection(&self, context_chars: usize, selection_chars: usize, timeout: Duration) -> FocusInfo {
+        self.ask(context_chars, Some(selection_chars), timeout)
+    }
+
+    fn ask(&self, context_chars: usize, selection: Option<usize>, timeout: Duration) -> FocusInfo {
         let (reply, answer) = channel();
         let deadline = Deadline::after(timeout);
-        if self.tx.send(Request { chars: context_chars, deadline, reply }).is_err() {
+        if self.tx.send(Request { chars: context_chars, selection, deadline, reply }).is_err() {
             return unknown();
         }
         answer.recv_timeout(timeout).unwrap_or_else(|_| unknown())
@@ -199,12 +248,12 @@ impl FocusWorker {
 /// Requests one by one until `FocusWorker` is closed. One whose deadline passed while the thread was busy with a hung app
 /// is skipped without touching UI Automation: nobody waits for the answer any more, and the queue does not pile up behind
 /// the hung app. A query that finished after the deadline (and may have been cut short halfway) is not sent.
-fn serve(rx: Receiver<Request>, mut inspect: impl FnMut(usize, Deadline) -> FocusInfo) {
+fn serve(rx: Receiver<Request>, mut inspect: impl FnMut(usize, Option<usize>, Deadline) -> FocusInfo) {
     for req in rx {
         if req.deadline.passed() {
             continue;
         }
-        let info = inspect(req.chars, req.deadline);
+        let info = inspect(req.chars, req.selection, req.deadline);
         if !req.deadline.passed() {
             let _ = req.reply.send(info);
         }
@@ -222,6 +271,9 @@ mod win {
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
     };
+    use windows::Win32::System::Ole::{
+        SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayUnaccessData,
+    };
     use windows::Win32::System::Threading::{
         GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
         PROCESS_QUERY_LIMITED_INFORMATION,
@@ -229,18 +281,22 @@ mod win {
     use windows::Win32::UI::Accessibility::{
         CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationTextPattern,
         IUIAutomationTextRange, IUIAutomationValuePattern, TextPatternRangeEndpoint_End, TextPatternRangeEndpoint_Start,
-        TextUnit_Character, TextUnit_Line, UIA_TextPatternId, UIA_ValuePatternId,
+        TextUnit_Character, TextUnit_Line, UIA_IsReadOnlyAttributeId, UIA_TextPatternId, UIA_ValuePatternId,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowLongW, GetWindowThreadProcessId,
-        RealGetWindowClassW, SendMessageTimeoutW, ES_PASSWORD, GUITHREADINFO, GWL_STYLE, SMTO_ABORTIFHUNG,
-        WM_GETTEXT,
+        RealGetWindowClassW, SendMessageTimeoutW, ES_PASSWORD, ES_READONLY, GUITHREADINFO, GWL_STYLE,
+        SMTO_ABORTIFHUNG, WM_GETTEXT,
     };
+
+    use cue_core::ask::{clip_selection, join_head_tail};
 
     use super::{
         classify, context_tail, file_and_stem, line_break_may_be_missing, mark_line_start, unknown, Deadline, FocusFacts,
-        FocusInfo,
+        FocusInfo, SelectionRead,
     };
+    use crate::placement::PxRect;
+    use crate::selection::px_rect;
 
     /// How long UI Automation waits for a hung app (the system default is 2 and 20 s): any longer and the thread would
     /// not answer the following requests either.
@@ -253,6 +309,9 @@ mod win {
     const FRAME_HOST: &str = "ApplicationFrameHost.exe";
     /// `EM_GETSEL` (the `Win32_UI_Controls` feature is not enabled for a single constant).
     const EM_GETSEL: u32 = 0x00B0;
+    /// Whether Chromium's selection rectangles (Edge, Chrome, Electron apps) are used for the card. The live probe
+    /// (spec 2 §13.2) switches it off if they come wrong: the answer then goes to the tray there.
+    const CHROMIUM_RECTS: bool = true;
 
     /// COM of the `cue-focus` thread. Closed last — after the UI Automation objects (`Uia`).
     struct Com;
@@ -274,7 +333,7 @@ mod win {
 
     /// Runs on the `cue-focus` thread: COM and UI Automation of that thread. If it fails — one log entry
     /// and no queries.
-    pub(super) fn setup() -> Option<impl FnMut(usize, Deadline) -> FocusInfo> {
+    pub(super) fn setup() -> Option<impl FnMut(usize, Option<usize>, Deadline) -> FocusInfo> {
         // SAFETY: the first COM call on a new thread; the paired `CoUninitialize` is in `Com::drop`.
         let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         if hr.is_err() {
@@ -300,14 +359,18 @@ mod win {
         }
         let mut uia = Uia { uia, names: HashMap::new(), _com: com };
         // The method call captures the whole `uia`: COM is closed only together with the closure.
-        Some(move |chars, deadline| uia.inspect(chars, deadline))
+        Some(move |chars, sel, deadline| uia.inspect(chars, sel, deadline))
     }
 
     impl Uia {
         /// After the deadline the app is not asked anything new: the result will not be sent anyway (`serve`).
-        fn inspect(&mut self, context_chars: usize, deadline: Deadline) -> FocusInfo {
+        fn inspect(&mut self, context_chars: usize, selection_chars: Option<usize>, deadline: Deadline) -> FocusInfo {
             let mut facts = FocusFacts::default();
             let mut info = FocusInfo::default();
+            // Asked, so answered: every early way out (no focused element, an error, a late element) says "cannot tell".
+            if selection_chars.is_some() {
+                info.selection = SelectionRead::Unknown;
+            }
             // SAFETY: no arguments. The window may close at any moment — further calls with it return an error or 0.
             let fg = unsafe { GetForegroundWindow() };
             facts.fg_class = class_name(fg);
@@ -329,15 +392,28 @@ mod win {
             match unsafe { self.uia.GetFocusedElement() } {
                 Ok(el) => {
                     facts.has_element = true;
-                    let readable = read_element(&el, context_chars, deadline, &mut facts, &mut info);
-                    if readable && info.before_cursor.is_none() && !facts.has_text_pattern && !deadline.passed() {
-                        // "Not a password" was said about the UIA element — read the window only if it is that element's own window.
-                        // SAFETY: as above.
-                        let same = unsafe { el.CurrentNativeWindowHandle() }
-                            .is_ok_and(|h| !h.is_invalid() && h == gti.hwndFocus);
-                        if same && !deadline.passed() {
-                            info.before_cursor = edit_text_before_caret(gti.hwndFocus, context_chars, deadline);
-                        }
+                    let readable = read_element(&el, context_chars, selection_chars, deadline, &mut facts, &mut info);
+                    // "Not a password" was said about the UIA element — read the window only if it is that element's own window
+                    // (a classic field's selection checks `ES_PASSWORD` itself).
+                    // SAFETY: as above.
+                    let same = || unsafe { el.CurrentNativeWindowHandle() }.is_ok_and(|h| !h.is_invalid() && h == gti.hwndFocus);
+                    if readable
+                        && info.before_cursor.is_none()
+                        && !facts.has_text_pattern
+                        && !deadline.passed()
+                        && same()
+                        && !deadline.passed()
+                    {
+                        info.before_cursor = edit_text_before_caret(gti.hwndFocus, context_chars, deadline);
+                    }
+                    if let Some(max) = selection_chars
+                        && info.selection == SelectionRead::Unknown
+                        && !deadline.passed()
+                        && same()
+                        && !deadline.passed()
+                        && let Some(read) = edit_selection(gti.hwndFocus, max, deadline)
+                    {
+                        info.selection = read;
                     }
                     if facts.process.eq_ignore_ascii_case(FRAME_HOST) && !deadline.passed() {
                         // SAFETY: as above.
@@ -384,11 +460,13 @@ mod win {
         (pid, tid)
     }
 
-    /// Type, patterns and password flag of the focused element; the text before the caret — through the text pattern.
-    /// `true` — it is known for sure that this is not a password, and the text was asked for: it may be read another way too.
+    /// Type, patterns and password flag of the focused element; the text before the caret and, when asked, the selection —
+    /// through the text pattern. `true` — it is known for sure that this is not a password, and the text was asked for: it
+    /// may be read another way too.
     fn read_element(
         el: &IUIAutomationElement,
         context_chars: usize,
+        selection_chars: Option<usize>,
         deadline: Deadline,
         facts: &mut FocusFacts,
         info: &mut FocusInfo,
@@ -401,6 +479,9 @@ mod win {
             }
             let password = el.CurrentIsPassword().map(|b| b.as_bool());
             info.is_password = matches!(password, Ok(true));
+            if selection_chars.is_some() && info.is_password {
+                info.selection = SelectionRead::Password;
+            }
             let readable = matches!(password, Ok(false)) && context_chars > 0;
             if deadline.passed() {
                 return false;
@@ -416,6 +497,13 @@ mod win {
                 if readable && !deadline.passed() {
                     let chromium = el.CurrentFrameworkId().is_ok_and(|f| f == CHROMIUM);
                     info.before_cursor = text_before_caret(&tp, context_chars, chromium, deadline);
+                }
+                if let Some(max) = selection_chars
+                    && matches!(password, Ok(false))
+                    && !deadline.passed()
+                {
+                    let chromium = el.CurrentFrameworkId().is_ok_and(|f| f == CHROMIUM);
+                    info.selection = selection_of(&tp, max, chromium, deadline);
                 }
             }
             readable
@@ -486,6 +574,111 @@ mod win {
         }
     }
 
+    /// The first selected range: its text (two short reads, from its start and from its end, so a whole document selected
+    /// costs no more), its rectangles and whether its text is read-only. A degenerate range is a caret: nothing selected.
+    unsafe fn selection_of(tp: &IUIAutomationTextPattern, max: usize, chromium: bool, deadline: Deadline) -> SelectionRead {
+        // SAFETY: calls on the pattern of a live element and its ranges on the UI Automation thread; errors — `Err`.
+        unsafe {
+            let Ok(ranges) = tp.GetSelection() else { return SelectionRead::Unknown };
+            if ranges.Length().unwrap_or(0) < 1 {
+                return SelectionRead::Empty;
+            }
+            let Ok(range) = ranges.GetElement(0) else { return SelectionRead::Unknown };
+            let max32 = i32::try_from(max).unwrap_or(i32::MAX);
+            let Ok(head) = range.GetText(max32.saturating_add(1)) else { return SelectionRead::Unknown };
+            let head = head.to_string();
+            if head.trim().is_empty() {
+                return SelectionRead::Empty;
+            }
+            let text = if head.chars().count() <= max {
+                head
+            } else {
+                join_head_tail(&head, &tail_text(&range, max / 2).unwrap_or_default(), max)
+            };
+            if deadline.passed() {
+                return SelectionRead::Unknown;
+            }
+            let rects = if chromium && !CHROMIUM_RECTS { Vec::new() } else { bounding_rects(&range) };
+            SelectionRead::Text { text, rects, read_only: read_only(&range) }
+        }
+    }
+
+    /// Up to `n` characters at the end of `range`.
+    unsafe fn tail_text(range: &IUIAutomationTextRange, n: usize) -> Option<String> {
+        // SAFETY: as in `selection_of`.
+        unsafe {
+            let tail = range.Clone().ok()?;
+            tail.MoveEndpointByRange(TextPatternRangeEndpoint_Start, range, TextPatternRangeEndpoint_End).ok()?;
+            let n32 = i32::try_from(n).unwrap_or(i32::MAX);
+            tail.MoveEndpointByUnit(TextPatternRangeEndpoint_Start, TextUnit_Character, -n32).ok()?;
+            Some(tail.GetText(n32.saturating_mul(2)).ok()?.to_string())
+        }
+    }
+
+    /// The range's lines on screen (physical px: CUE is per-monitor DPI aware). A SAFEARRAY of doubles, four per line.
+    unsafe fn bounding_rects(range: &IUIAutomationTextRange) -> Vec<PxRect> {
+        // SAFETY: the array comes from UI Automation and is ours to destroy; it is read only between AccessData and
+        // UnaccessData, no further than its bounds (an empty array may have no data at all: then it is not read).
+        unsafe {
+            let Ok(array) = range.GetBoundingRectangles() else { return Vec::new() };
+            if array.is_null() {
+                return Vec::new();
+            }
+            let mut out = Vec::new();
+            let mut data: *mut std::ffi::c_void = std::ptr::null_mut();
+            if let (Ok(lo), Ok(hi)) = (SafeArrayGetLBound(array, 1), SafeArrayGetUBound(array, 1))
+                && SafeArrayAccessData(array, &mut data).is_ok()
+            {
+                let n = usize::try_from(hi - lo + 1).unwrap_or(0);
+                if n > 0 && !data.is_null() {
+                    let values = std::slice::from_raw_parts(data.cast::<f64>(), n);
+                    out = values.as_chunks::<4>().0.iter().filter_map(|&[l, t, w, h]| px_rect(l, t, w, h)).collect();
+                }
+                let _ = SafeArrayUnaccessData(array);
+            }
+            let _ = SafeArrayDestroy(array);
+            out
+        }
+    }
+
+    /// The range's text cannot be changed there (a web page, a read-only document). Not known — changeable.
+    unsafe fn read_only(range: &IUIAutomationTextRange) -> bool {
+        // SAFETY: as in `selection_of`; a mixed value (part read-only) is not a bool and reads as changeable.
+        unsafe { range.GetAttributeValue(UIA_IsReadOnlyAttributeId).ok().and_then(|v| bool::try_from(&v).ok()).unwrap_or(false) }
+    }
+
+    /// The selection of a classic Win32 field (spec 2 §6.1: `EM_GETSEL` + `WM_GETTEXT`, as the text before the caret). A
+    /// password field (`ES_PASSWORD`) is never read; `ES_READONLY` is read-only. No rectangles: the answer goes to the tray.
+    /// `None` — not a classic field, or it did not answer.
+    fn edit_selection(hwnd: HWND, max: usize, deadline: Deadline) -> Option<SelectionRead> {
+        // SAFETY: no arguments.
+        let own = unsafe { GetCurrentProcessId() };
+        if hwnd.is_invalid() || window_process(hwnd).0 == own || !is_edit(hwnd) {
+            return None;
+        }
+        // SAFETY: only reads the window style.
+        let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) };
+        if style & ES_PASSWORD != 0 {
+            return Some(SelectionRead::Password);
+        }
+        // Start in the low word, end in the high one; −1 — beyond the 65,535th character.
+        let sel = send(hwnd, EM_GETSEL, 0, 0, deadline)? as u32;
+        if sel == u32::MAX {
+            return None;
+        }
+        let (start, end) = ((sel & 0xFFFF) as usize, (sel >> 16) as usize);
+        if start >= end {
+            return Some(SelectionRead::Empty);
+        }
+        let mut buf = vec![0u16; end + 1];
+        let copied = send(hwnd, WM_GETTEXT, buf.len(), buf.as_mut_ptr() as isize, deadline)?;
+        let text = String::from_utf16_lossy(&buf[start.min(copied)..end.min(copied)]);
+        if text.trim().is_empty() {
+            return Some(SelectionRead::Empty);
+        }
+        Some(SelectionRead::Text { text: clip_selection(&text, max), rects: Vec::new(), read_only: style & ES_READONLY != 0 })
+    }
+
     /// A classic Win32 field (`Edit` and its descendants, for example the WinForms `TextBox`). Such a field often answers
     /// the system itself through MSAA, and UI Automation exposes it through an MSAA proxy that has no text
     /// pattern. Then the selection start and the text before it are asked from the field itself with messages that the
@@ -531,7 +724,7 @@ mod win {
         let left = deadline.0.map_or(cap, |d| d.saturating_duration_since(Instant::now()));
         let ms = left.min(cap).as_millis().max(1) as u32;
         let mut result = 0usize;
-        // SAFETY: a window of another process (checked in `edit_text_before_caret`), so the system copies the `WM_GETTEXT`
+        // SAFETY: a window of another process (checked by both callers), so the system copies the `WM_GETTEXT`
         // data through its own buffer and does not write to `lparam` after the timeout; `lparam` is a live buffer of
         // `wparam` characters or 0; `result` lives until the end of the call.
         let ok = unsafe {
@@ -628,15 +821,23 @@ mod win {
         #[test]
         fn ui_automation_starts_and_answers_without_text_when_not_asked() {
             let mut inspect = setup().expect("UI Automation");
-            let info = inspect(0, Deadline::after(Duration::from_secs(5)));
+            let info = inspect(0, None, Deadline::after(Duration::from_secs(5)));
             assert!(!info.app.is_empty());
             assert_eq!(info.before_cursor, None);
         }
 
         #[test]
+        fn a_selection_query_answers_with_some_selection_kind() {
+            let mut inspect = setup().expect("UI Automation");
+            let info = inspect(0, Some(8_000), Deadline::after(Duration::from_secs(5)));
+            assert_ne!(info.selection, SelectionRead::NotAsked, "asked, so answered: {:?}", info.selection);
+            assert_eq!(inspect(0, None, Deadline::after(Duration::from_secs(5))).selection, SelectionRead::NotAsked);
+        }
+
+        #[test]
         fn nothing_is_asked_after_the_deadline() {
             let mut inspect = setup().expect("UI Automation");
-            let info = inspect(500, Deadline(Some(Instant::now())));
+            let info = inspect(500, None, Deadline(Some(Instant::now())));
             assert_eq!(info, unknown());
         }
     }
@@ -814,14 +1015,20 @@ mod tests {
 
     fn notepad() -> FocusInfo {
         let before_cursor = Some("Привет, ".into());
-        FocusInfo { app: "Блокнот".into(), editable: Editability::Yes, is_password: false, before_cursor }
+        FocusInfo {
+            app: "Блокнот".into(),
+            editable: Editability::Yes,
+            is_password: false,
+            before_cursor,
+            selection: SelectionRead::NotAsked,
+        }
     }
 
     #[test]
     fn fast_reply_is_returned() {
         let (seen_tx, seen) = channel();
         let w = FocusWorker::start(move || {
-            Some(move |chars, deadline: Deadline| {
+            Some(move |chars, _sel, deadline: Deadline| {
                 let _ = seen_tx.send((chars, deadline.0.is_some() && !deadline.passed()));
                 notepad()
             })
@@ -833,7 +1040,7 @@ mod tests {
     #[test]
     fn hung_app_gives_unknown_within_timeout() {
         let w = FocusWorker::start(|| {
-            Some(|_, _| {
+            Some(|_, _, _| {
                 std::thread::sleep(Duration::from_secs(1));
                 notepad()
             })
@@ -849,7 +1056,7 @@ mod tests {
         let (seen_tx, seen) = channel();
         let (release_tx, release) = channel::<()>();
         let w = FocusWorker::start(move || {
-            Some(move |chars, _| {
+            Some(move |chars, _sel, _| {
                 let _ = seen_tx.send(chars);
                 if chars == 1 {
                     let _ = release.recv(); // a "hung app" — until the test lets go
@@ -869,9 +1076,9 @@ mod tests {
     fn answer_finished_after_the_deadline_is_not_sent() {
         let (tx, rx) = channel();
         let (reply, answer) = channel();
-        tx.send(Request { chars: 500, deadline: Deadline::after(Duration::from_millis(50)), reply }).unwrap();
+        tx.send(Request { chars: 500, selection: None, deadline: Deadline::after(Duration::from_millis(50)), reply }).unwrap();
         drop(tx);
-        serve(rx, |_, _| {
+        serve(rx, |_, _, _| {
             std::thread::sleep(Duration::from_millis(100));
             notepad()
         });
@@ -880,9 +1087,37 @@ mod tests {
 
     #[test]
     fn worker_without_ui_automation_answers_unknown_at_once() {
-        let w = FocusWorker::start(|| None::<fn(usize, Deadline) -> FocusInfo>);
+        let w = FocusWorker::start(|| None::<fn(usize, Option<usize>, Deadline) -> FocusInfo>);
         let t = Instant::now();
         assert_eq!(w.query(500, Duration::from_secs(5)), unknown());
         assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn a_selection_query_asks_for_the_selection_and_a_plain_one_does_not() {
+        let w = FocusWorker::start(|| {
+            Some(|chars: usize, sel: Option<usize>, _d: Deadline| FocusInfo {
+                before_cursor: Some(chars.to_string()),
+                selection: match sel {
+                    Some(max) => SelectionRead::Text { text: "x".repeat(max.min(3)), rects: vec![], read_only: false },
+                    None => SelectionRead::NotAsked,
+                },
+                ..notepad()
+            })
+        });
+        assert_eq!(w.query(16, Duration::from_secs(2)).selection, SelectionRead::NotAsked);
+        let asked = w.query_with_selection(500, 8_000, Duration::from_secs(2));
+        assert_eq!(asked.selection, SelectionRead::Text { text: "xxx".into(), rects: vec![], read_only: false });
+        assert_eq!(asked.before_cursor.as_deref(), Some("500"));
+    }
+
+    #[test]
+    fn selection_debug_shows_lengths_not_text() {
+        let read = SelectionRead::Text { text: "секретный текст".into(), rects: vec![PxRect { left: 0, top: 0, right: 1, bottom: 1 }], read_only: true };
+        let shown = format!("{read:?}");
+        assert!(!shown.contains("секрет"), "{shown}");
+        assert!(shown.contains("chars: 15") && shown.contains("rects: 1") && shown.contains("read_only: true"), "{shown}");
+        let info = FocusInfo { selection: read, ..notepad() };
+        assert!(!format!("{info:?}").contains("секрет"));
     }
 }

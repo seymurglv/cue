@@ -2,7 +2,7 @@
 use std::time::{Duration, Instant};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, VIRTUAL_KEY,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, VIRTUAL_KEY,
 };
 
 use crate::chord::{
@@ -75,6 +75,26 @@ pub fn press_ctrl_v() -> bool {
     ])
 }
 
+const VK_C: u16 = 0x43;
+const VK_RIGHT: u16 = 0x27;
+
+/// Ctrl+C for the copy fallback of "Ask". `false` — not all presses were accepted.
+pub fn press_ctrl_c() -> bool {
+    send(&[key_input(VK_CONTROL, false), key_input(VK_C, false), key_input(VK_C, true), key_input(VK_CONTROL, true)])
+}
+
+/// Right arrow: collapses a selection to its end in text fields ("Insert below", spec 2 §7). An extended key: without the
+/// flag its scan code is the keypad's 6.
+pub fn press_right() -> bool {
+    send(&[extended(key_input(VK_RIGHT, false)), extended(key_input(VK_RIGHT, true))])
+}
+
+fn extended(mut input: INPUT) -> INPUT {
+    // SAFETY: key_input fills the ki variant; only its flags change.
+    unsafe { input.Anonymous.ki.dwFlags = KEYBD_EVENT_FLAGS(input.Anonymous.ki.dwFlags.0 | KEYEVENTF_EXTENDEDKEY.0) };
+    input
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,5 +115,19 @@ mod tests {
         let ki = unsafe { up.Anonymous.ki };
         assert_eq!(ki.dwFlags, KEYEVENTF_KEYUP);
         assert_eq!(ki.wScan, 0x1D);
+    }
+
+    #[test]
+    fn the_right_arrow_is_an_extended_key() {
+        let down = extended(key_input(VK_RIGHT, false));
+        // SAFETY: key_input fills the ki variant.
+        let ki = unsafe { down.Anonymous.ki };
+        assert_eq!(ki.wVk, VIRTUAL_KEY(VK_RIGHT));
+        assert_ne!(ki.dwFlags.0 & KEYEVENTF_EXTENDEDKEY.0, 0);
+        assert_eq!(ki.dwFlags.0 & KEYEVENTF_KEYUP.0, 0);
+        // SAFETY: as above.
+        let ki = unsafe { extended(key_input(VK_RIGHT, true)).Anonymous.ki };
+        assert_ne!(ki.dwFlags.0 & KEYEVENTF_EXTENDEDKEY.0, 0);
+        assert_ne!(ki.dwFlags.0 & KEYEVENTF_KEYUP.0, 0, "a key-up stays a key-up");
     }
 }
