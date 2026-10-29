@@ -1,9 +1,9 @@
 # How CUE works
 
 CUE is a Tauri 2 app: a Rust core that runs in the background and makes every decision, and a small TypeScript UI
-(the Drop and its tray cards) rendered by WebView2. The Drop only draws the state the core sends and reports button
-clicks back. The dictation logic is a pure state machine, so it is tested without windows, a microphone, a network or
-a real clock.
+(the Drop with its tray cards, and the "Ask" card at the selection) rendered by WebView2. The windows only draw the
+state the core sends and report button clicks back. The dictation logic is a pure state machine, so it is tested
+without windows, a microphone, a network or a real clock.
 
 ## Crates
 
@@ -15,19 +15,26 @@ a real clock.
     Markdown stripping, list tidying, and the join space before a paste.
   - `translate`: the languages Soniox recognizes, the speech-language tally, the translation direction, the
     instruction block, the timeout and the translation check.
+  - `ask`: the "Ask" instruction and user message, the selection limit, where a written text goes, the buttons of an
+    answer, its sources, the plain text for pasting, and `AnswerView`, the answer as the windows draw it.
   - `audio`: resampling to 16 kHz mono, voice level, the "microphone is silent" detector.
   - `settings`, `usage` (CSV rows, costs, monthly summary), `paths`.
 - **`cue-engines`** (`app/crates/engines`): `stt` (session facade, ~100 ms chunks, batch fallback), `soniox`
   (WebSocket stream) and `soniox::batch` (REST, with cleanup of uploads), `claude` (refine and translation requests
-  and responses, the cache warm-up),
-  `keys` (Windows Credential Manager), `check` (free key probes), `error`. `openrouter` serves only the
-  `refine_compare` example.
+  and responses, the cache warm-up), `ask` (the streaming "Ask" request, its event parser and decision, `run` and its
+  cache warm-up `warm`), `keys` (Windows Credential Manager), `check` (free key probes), `error`. `openrouter` holds
+  the server-sent-events reader "Ask" uses too, and otherwise serves only the `refine_compare` example.
 - **`cue-platform-win`** (`app/crates/platform-win`): `hook` and `chord` (keyboard), `input` (`SendInput`, modifier
-  state), `clipboard`, `focus` (UI Automation), `mic` (cpal), `wav`, `dropwin` (window styles, moves, the z-order
-  guard), `placement` (the four places, the nearest place, monitors), `power`.
-- **`cue`** (`app/src-tauri`): startup, the `runtime` actor, `ipc`, `drop_window`, `tray` and `trayicon`, `logging`.
+  state), `clipboard` (paste, and the `Ctrl + C` fallback of "Ask"), `focus` (UI Automation: the field, the text
+  before the caret, the selection), `selection` (when to copy the selection, where it is on screen), `cardplace` (where
+  the "Ask" card goes), `mic` (cpal), `wav`, `dropwin` (window styles, moves, the z-order guard), `placement` (the four
+  places, the nearest place, monitors), `power`.
+- **`cue`** (`app/src-tauri`): startup, the `runtime` actor (with `runtime::ask`, the conversation of an open answer),
+  `ipc`, `drop_window`, `card_window`, `tray` and `trayicon`, `logging`.
 - **`app/ui`**: `main.ts` (events, commands, frame loop), `controller.ts` (`DropController`), `trays.ts`,
-  `strings.ts`, and `design/` (Drop, tray card and animation code, styles, the Bebas Neue font).
+  `answer.ts` (the "Ask" answer, one view for the tray and the card), `markdown.ts` (its safe Markdown), `card.ts` and
+  `cardPage.ts` (the card window), `strings.ts`, and `design/` (Drop, tray card, answer and animation code, styles, the
+  Bebas Neue font).
 - **`cue-cli`** (`app/crates/cli`) and **`cue-bench`** (`bench`): developer tools.
 
 ## Threads
@@ -40,16 +47,20 @@ a real clock.
   is caught and logged, and the core keeps running.
 - **`cue-keyboard`**: the `WH_KEYBOARD_LL` hook with its own message loop at time-critical priority. The handler only
   classifies the key and sends a `HotkeyEvent`; `cue-hotkeys` forwards it to the core. The hook reads three atomics
-  the core updates as soon as the flow has handled an event: `ESC_ACTIVE`, `RECORDING` and `PAUSED`.
+  the core updates as soon as the flow has handled an event: `ESC_ACTIVE`, `RECORDING` and `PAUSED`; and
+  `ASK_ENABLED`, set once at startup from `ask.enabled`.
 - **`cue-focus`**: UI Automation on its own COM thread. Each query has a deadline; a late answer becomes "unknown",
   and queries whose deadline passed while a hung app blocked the thread are skipped.
-- **`cue-insert`**: owns all clipboard work, one job at a time. Every job ends within about 7 s; the core also keeps a
-  10 s watchdog.
+- **`cue-insert`**: owns all clipboard work, one job at a time: pastes, texts left in the clipboard and the `Ctrl + C`
+  fallback of "Ask". Every job ends within about 7 s ("Insert below" within about 9 s); the core also keeps a 10 s
+  watchdog. A late copy of the fallback is watched on `cue-late-copy`, and its removal from the Win+V history runs on
+  `cue-clip-history` (WinRT); both are short-lived.
+- **`cue-card`**: moves, shows and hides the "Ask" card window.
 - **`cue-mic`** (cpal) with `cue-mic-events` forwarding frames; `cue-mic-stop` closes a microphone off the core thread.
 - **`cue-power`**: a hidden top-level window for `WM_POWERBROADCAST` and session lock notifications.
-- **`cue-hit-test`** (~60 Hz while the Drop is shown), **`cue-placement`** (every 0.5 s; every 8 ms while the Drop
-  is dragged or snapping into place), **`cue-tray-watch`**
-  (every 5 s), **`cue-log-prune`** (daily).
+- **`cue-hit-test`** (one for the Drop and one for the card, ~60 Hz while the window is shown), **`cue-placement`**
+  (every 0.5 s; every 8 ms while the Drop is dragged or snapping into place), **`cue-tray-watch`** (every 5 s),
+  **`cue-log-prune`** (daily), **`cue-open-source`** (a short thread for each click on a source).
 
 ## Dictation flow
 
@@ -60,35 +71,77 @@ a real clock.
    │                                ▼                                  ▼
    └──────────────────────── Cancelled (Restore, 3.6 s) ◄──────────────┘
       Empty (nothing recognized, 1 s)      Error (cause + Retry; stays until closed, Esc or the next dictation)
+
+  "Ask": Thinking ──(first real step, or the end)──► Answer ──(Esc, the cross)──► Idle
+                                                       │ ▲
+                                Ctrl+Win: a follow-up  ▼ │  its answer shows, or it is dropped
+                                                 Starting → Recording → Thinking
 ```
 
 `Flow` emits effects (`OpenMic`, `StopMic`, `StartStt`, `FinishStt`, `AbortStt`, `TranscribeSaved`, `Refine`,
-`RefineAgain`, `AbortRefine`, `Insert`, `PasteLast`, `Ui`, `Shake`, `Tray`, `SetTimer`, `CancelTimer`,
-`HoldHintShown`, `Finished`) and the runtime executes them. Late results never reach `Flow`: every timer kind and
-every transcription or refine task has a generation number, microphone frames are tagged with the dictation id and
-dropped after `StopMic`, and a transcription result is accepted only after `FinishStt` or `TranscribeSaved`. A task
-that crashes still reports: transcription as a network error (so Retry is offered), refine as the raw text, paste as
-"no field".
+`RefineAgain`, `AbortRefine`, `Ask`, `AskAgain`, `AbortAsk`, `AskPaste`, `CloseAnswer`, `Insert`, `PasteLast`, `Ui`,
+`Shake`, `Tray`, `SetTimer`, `CancelTimer`, `HoldHintShown`, `Finished`) and the runtime executes them. Late results
+never reach `Flow`: every timer kind and every transcription, refine or "Ask" task has a generation number, microphone
+frames are tagged with the dictation id and dropped after `StopMic`, and a transcription result is accepted only after
+`FinishStt` or `TranscribeSaved`. A task that crashes still reports: transcription as a network error (so Retry is
+offered), refine as the raw text, a question as a failure with Retry, paste as "no field".
 
-**Modes.** `Flow` keeps the mode of the dictation (`Mode`: `Dictate`, `Translate`, `Ask`; "Ask" cannot be picked in
-this version). `ChordDown(mode)` starts a dictation in the mode the chord picked. `ModeToggle` (a fresh Shift press)
-swaps dictation and translation ("Ask" becomes a translation) while starting or recording, whether the chord is still
-held or was tapped (then only a Shift on its own, see below): people often tap the chord and decide on a translation
-only while speaking, and a second Shift takes a slip back. `ModeChange(mode)` (Alt, for "Ask") counts only while the
-starting chord is still held (in hold mode too). Once the finishing press has moved the flow to thinking, neither
+**Modes.** `Flow` keeps the mode of the dictation (`Mode`: `Dictate`, `Translate`, `Ask`). `ChordDown(mode)` starts a
+dictation in the mode the chord picked. `ModeToggle` (a fresh Shift press) swaps dictation and translation ("Ask"
+becomes a translation) while starting or recording, whether the chord is still held or was tapped (then only a Shift on
+its own, see below): people often tap the chord and decide on a translation only while speaking, and a second Shift
+takes a slip back. `ModeChange(mode)` (Alt, for "Ask") counts only while the starting chord is still held (in hold mode
+too). Once the finishing press has moved the flow to thinking, neither
 changes the mode, and neither does anything outside a recording. The mode reaches the Drop in `UiState` and the
 runtime in `Refine { mode }` and `RefineAgain { mode }`; every path into Idle resets it to `Dictate`. A translation
 that comes back as anything but a refined, non-empty text is never pasted: the attempt ends as `failed`, and the flow
 shows the `translate` error (`claudeKey` for a key, balance or limit problem) with Retry. That Retry emits
 `RefineAgain` with the saved transcript: the text is translated again, the audio is not transcribed again.
 
+**"Ask" in the flow.** A question is recorded and transcribed like a dictation; then, instead of `Refine`, the flow
+emits `Ask { id, question, follow_up }` and stays in Thinking (the Drop's three dots) until the answer has something to
+show. The runtime reports back with four inputs: `AskOpened` (the first real step: a search began, its results came,
+or the first words), `AskAnswered` (the answer is complete; a refusal, or a written text shown instead of written,
+too), `AskWrite { how }` (the model wrote text for the field and the runtime holds it; `PasteHow` is `AtCaret`,
+`Replace` or `Below`) and `AskFailed { error }` (`AskError::Key` or `Failed`). An answer that opens or ends moves the
+flow to the `Answer` phase: the Drop rests (it looks idle), the answer shows in the tray or the card, `Esc` stays
+swallowed, and a chord records a follow-up. A write goes to `Inserting` at once with `AskPaste { id, how }` and ends
+the conversation (`CloseAnswer`); the answer's buttons (Insert, Insert below, Replace) do the same for an answer that
+is complete on screen, and Retry after a failure emits `AskAgain { id }`. `AbortAsk { id }` drops the request in
+flight. A `Key` failure closes the answer and shows the Drop's "Claude key problem" without Retry; any other failure
+keeps the answer open with the error and Retry, and the question is kept.
+
+- `asking` is the dictation whose request is in flight, and it can be an earlier one than the current dictation: a
+  follow-up may be recorded while the answer it follows is still printing. Results are matched against it, so a late
+  one of a dropped request never reaches the flow. `asked` is the request whose answer the open answer shows: Retry and
+  the paste buttons act on it, and a follow-up takes it over only once its own answer shows.
+- `held` is a follow-up's question, transcribed while the answer it follows still prints: it goes (`Ask` with
+  `follow_up: true`) as soon as that answer has ended, answered or failed. A follow-up that could not be transcribed
+  shows the error with Retry inside the open answer ("Couldn't make out the follow-up"); dismissing it, `Esc`, or an
+  empty follow-up goes back to the answer, which stays.
+- `Esc` by phase: while a first question records, it is cancelled with Restore, as a dictation; a first question
+  being transcribed or waiting for its answer is aborted and cancelled with Restore, which asks the same question again
+  with the same context (the runtime keeps it, `KeptTaken`); a follow-up recording, being transcribed or waiting is
+  dropped and the answer stays, still printing if it was, with no Restore; in `Answer` it closes the answer, aborts a
+  request still in flight and forgets the conversation; during a paste it is only swallowed.
+- A write that ends while a follow-up is under way (recording, being transcribed, held or missed) is never pasted
+  under the user's hands, and CUE never injects input while paused: the runtime asks `Flow::shows_write` and shows such
+  a text in the answer instead. A pause closes an open answer (with a follow-up under way and the request in flight),
+  since `Esc` does not reach CUE then.
+- Shift and Alt do nothing to a follow-up (it stays "Ask"), and a dictation needs the answer closed first. A
+  microphone that fails during a follow-up closes the answer for its own card (one card at a time).
+- Accounting: an answer shown in full ends its attempt as `answered` (paid, nothing pasted), a written text as
+  `inserted` or `no_field`, a pasted answer adds no second `Finished` (it was counted when it was complete). An answer
+  still printing when a follow-up starts keeps its attempt aside (`answering` in the runtime) until it ends, with its
+  own row; an answer closed or aborted mid-stream still writes what it spent.
+
 ### Hotkey chord
 
 - The chord is Ctrl + Win (left or right, any order) and at most one of Shift / Alt, pressed in any order: Ctrl + Win
-  alone dictates, with Shift it translates. Alt would pick "Ask", which is switched off in this version
-  (`hook::ASK_ENABLED`). If Shift and Alt together (Ctrl + Shift + Alt + Win is the Office key), or Alt while "Ask" is
-  off, are held when the pair forms, it is a system shortcut: no events, no swallowed `V`, no mask, and Windows sees
-  every key as is.
+  alone dictates, with Shift it translates, with Alt it asks. Alt picks "Ask" only while `hook::ASK_ENABLED` is set (the
+  core sets it at startup from `ask.enabled`, on by default). If Shift and Alt together (Ctrl + Shift + Alt + Win is the
+  Office key), or Alt while "Ask" is off, are held when the pair forms, it is a system shortcut: no events, no swallowed
+  `V`, no mask, and Windows sees every key as is.
 - Every fresh Shift press (left or right; not its auto-repeat, not an injected one) toggles the mode while the chord
   is held, and also after the chord was released while CUE is starting or recording (then only a Shift on its own, and
   a key pressed while it is held takes the toggle back: see the guards below): the core sets `hook::RECORDING`
@@ -124,9 +177,11 @@ shows the `translate` error (`claudeKey` for a key, balance or limit problem) wi
   A chord while thinking only makes the Drop shake.
 - Injected key events (including CUE's own) pass untouched. Before each key-down the remembered modifiers are
   checked against `GetAsyncKeyState`, so key-ups lost to the secure desktop or UAC do not leave a stuck chord; a
-  250 ms timer ends a chord whose keys are gone. The timer never drops Shift: a tick may come before Windows records
-  a fresh Shift press, and the held Shift's auto-repeat would then toggle the mode back; the check before the next
-  key-down drops a Shift whose key-up was lost.
+  250 ms timer ends a chord whose keys are gone. A modifier counts as released only when it is seen up on this tick and
+  the one before, and a modifier the hook has just seen go down counts as held on the next tick (`Debounce::pressed`):
+  a tick may come before Windows records the press in `GetAsyncKeyState`, and dropping it then would lose what the key
+  did — a Shift's toggle (its auto-repeat would toggle back) or the Alt of an "Ask" chord (its release would reach the
+  app unmasked and open its menu). The check before the next key-down drops a modifier whose key-up was lost.
 - The hook is installed again after resume from sleep and after unlock, since Windows may remove it.
 - Pause for an hour sets `PAUSED`: the hook swallows and masks nothing and sends no events.
 
@@ -255,7 +310,8 @@ Dictation and translation share the prefix, so one warm-up serves both. A model 
 (Opus 5.5) gets no warm-up: a one-token answer leaves it no thinking budget. The warm-up has a 5 s timeout; a failure
 writes one log line with the reason, and the dictation's own refine writes the cache. After waking from sleep or an
 unlock the next dictation warms the cache again. The tokens are paid for and get a usage row of their own
-(`warmup`); a recording cancelled after the press has paid for its warm-up.
+(`warmup`); a recording cancelled after the press has paid for its warm-up. "Ask" has a prefix and a warm-up of its
+own (see Ask).
 
 ### Paste
 
@@ -278,23 +334,169 @@ list or folder tree, or nowhere at all. Apps that expose nothing to UI Automatio
 then put in the clipboard normally, without markers, and the "Nowhere to paste" card offers Copy. The same happens
 if the keys are not released in time, if Ctrl+V is not delivered (an elevated window), or if the 10 s watchdog fires.
 
+## Ask
+
+"Ask" (`Ctrl + Win + Alt`) is a dictation whose text becomes a question to Claude (`ask.model`, Haiku 5.5 by default).
+The flow decides when to ask, paste and close (see Dictation flow); `runtime` and `runtime::ask` keep what those
+effects need, and `cue_engines::ask` talks to the API.
+
+### Context
+
+- **At the chord** (or when Alt picks "Ask" while the chord is held), while the focus and the selection are where the
+  user left them, the runtime asks `cue-focus` for the field with its selection (`query_with_selection`, 500 ms): the
+  app, up to `refine.context_chars` characters before the caret, and the selection. A text-pattern field gives its
+  first selected range (`GetSelection`): its text, its lines on screen (`GetBoundingRectangles`, physical px) and
+  whether it is read-only (`IsReadOnly` of the range; a mixed or unknown value reads as editable). A classic Win32 field
+  gives its selection through `EM_GETSEL` and `WM_GETTEXT`, with no rectangles; `ES_READONLY` is read-only. Password
+  fields, and fields that will not say whether they are one, are never read. A selection of more than 8,000 characters
+  (`MAX_SELECTION_CHARS`) keeps 4,000 from its start and 4,000 from its end with a note between them, from two short
+  reads, one at each end, so a whole document selected costs no more. The answer is `SelectionRead`: `Empty`, `Text`,
+  `Password` or `Unknown` (the field has no way to report a selection); its `Debug` shows lengths only. Chromium gives
+  rectangles too; `CHROMIUM_RECTS` in `focus.rs` turns them off should a browser page or an Electron app place them
+  wrongly.
+- **The `Ctrl + C` fallback**, at the end of the recording (the chord's keys are up only then): when the field said
+  `Unknown`, there may be a field (not the desktop or File Explorer's list), and the app named at the chord is not a
+  terminal (`is_terminal`) nor an editor that copies its current line with nothing selected (`COPIES_LINE`, empty for
+  now). It runs on `cue-insert` (`InsertJob::CopySelection`), alongside the transcription, and only into the window
+  read at the chord: right before `Ctrl + C` that window must still be in front and must not be a terminal by its
+  class or executable (`selection::terminal_window`). The clipboard is saved, `Ctrl + C` sent, and for 0.4 s CUE waits
+  for the app's copy: a write owned by the window's process, by the app in it when the window is a Store app's frame
+  (`WindowRef::app_process`), or by no window (`the_apps_copy`), checked again with the clipboard open. Any other
+  process's write is never taken for the selection, and a copy whose text is the user's clipboard text again counts as
+  nothing copied. The user's clipboard is then put back with the paste markers. A copy that comes 0.4–2.4 s after
+  `Ctrl + C` is still taken back, on `cue-late-copy`, unless there was any input since (`GetLastInputInfo`), the
+  clipboard was written again, or a newer clipboard operation of CUE's began (one process-wide lock, `Operations`,
+  covers the late guard's check and restore and every paste, left text and copy). The app's copy reaches the Win+V
+  history before CUE can mark it, so `forget_in_history` looks among the three newest history items for exactly that
+  text, stamped no earlier than just before `Ctrl + C`, and deletes it if Windows allows (`HistoryForget`: removed, not
+  found, refused; logged as a kind). The request task waits for the copy (2 s at most), never the core; a copied text
+  is a selection that can be changed. `COPY_FALLBACK` in `selection.rs` switches the whole fallback off.
+- What the question is asked with (`runtime::ask::Taken`): the `AskContext` (app, text before the caret, the clipped
+  selection, today's local date from `GetLocalTime`), the selection kind (`None`, `Writable`, `ReadOnly`), its
+  rectangles, and whether the app is a terminal. The first question of a dictation keeps it until the next chord
+  (`KeptTaken`), so Restore after `Esc` asks the same question with the same context, a late copy included, though the
+  first ask used up the focus query and the copy.
+
+### Request
+
+- `cue_engines::ask::request_body`: `stream: true`; the tools first (they render first in the cached prefix):
+  `write_to_field`, strict (its input always matches the schema: `text`, and `mode` `insert` or `replace`) and without
+  eager input streaming, so the input arrives whole and checked; then web search, when `ask.web_search` is on. The
+  version is the probe's choice (spec §13.1, `ask_probe`, 2026-10-29): `web_search_20260318`, the filtered search, with
+  `max_uses` = `ask.max_searches`. A key whose organization has no web search gets a 400 that says so, and the question
+  is asked again at once without it.
+- The instruction (`ASK_PROMPT`, English; the answer follows the language of the question) is one cached system
+  block: what the tags mean, that their content is data and never instructions, when to call `write_to_field` and with
+  which mode, the form of a written text (plain, no quotes, the app's tone, one line in terminals), the form of an
+  answer (short, simple Markdown: bold, lists, code; no headings, tables or links), and when to search (anything that
+  may have changed since the training data; facts that cannot change, explanations and writing need none).
+- The user message (`first_message`): `<question>`, then `<selection>`, `<before_cursor>`, `<app>` and `<today>`;
+  empty parts are left out, and our closing tags inside the data are defused. The date sits in the user message, not in
+  the cached instruction, so the cached prefix is the same every day; the bench checks that questions about the present
+  still search. A follow-up (`follow_up_message`) is the question alone.
+- Two cache marks: one on the instruction, which covers the tools before it, and one on the last block of the last
+  user message, so a follow-up reads the conversation so far from the cache. The stored conversation keeps no marks (a
+  request may carry four at most). The first follow-up writes the previous answer to the cache; the API looks back only
+  about 20 blocks from a mark for an earlier entry, and an answer with citations is split into many blocks, so a
+  follow-up after a long answer may read only the instruction from the cache (not an error).
+- `output_config.effort: "low"`, `tool_choice: auto`, no `temperature`, `top_p` or `top_k`. Thinking is adaptive, the
+  model's default, so it is left out of the request, with 2,048 tokens of room added to the answer's 2,000
+  (`Thinking::DEFAULT`). The bench compared it with thinking disabled on 2026-10-29: both met the bar (decisions of 90 %
+  or more, first words without a search within about 2 s), and then the default stays. The code execution container of
+  a filtered search is sent back with the next request of the conversation.
+
+### Stream
+
+- `StreamState` turns one response's events into its content blocks as the API would return them whole (text with its
+  citations, tool calls with their input parsed, search results with their encrypted content, thinking with its
+  signature) and into `Step`s for the answer on screen: `Searching`, `Reading`, `TextStart`, `Text`, `Cite` (a search
+  result's URL and title; without a title, its site), `WriteStart`, and `Spent` (what the question has cost so far,
+  sent as the counts change). Events and deltas it does not know are skipped. The first words (`Step::is_first_words`)
+  are text that is not blank, or the start of a write.
+- The decision (`decide`): a refusal (`stop_reason: refusal`) wins over anything the stream already had; a
+  `write_to_field` call counts only complete and valid (not cut at `max_tokens`, a mode from the schema, some text);
+  otherwise any text is an answer; nothing to show is a `Malformed` failure.
+- `run`: a paused turn (`pause_turn`) is continued with its blocks and the same tools, at most 3 times and only while
+  the question's searches are fewer than `max_uses`, so a question runs at most `2 × max_searches − 1` searches. A
+  write cut at `max_tokens` (a long email) is asked again once with 4,000 more tokens of room, under deadlines of its
+  own from when the retry is sent. The deadlines: the first words within 8 s, or within 20 s once a search began; the
+  whole answer, continuations included, within 30 s. The rest of an answered response's body is read in the background
+  (5 s at most), so the connection can be reused.
+- Failures (`AskFailure`, one log line with the kind): no key; 401, 402 or 403, or a 400 about the credit balance (a
+  key problem: `AskError::Key`, the Drop's "Claude key problem" without Retry); 404, the model in `ask.model` does not
+  exist (`NoModel`, the log says to check `settings.json`); a timeout; the network; another HTTP status (429 and 5xx
+  too: spec §8 counts a 429 with the network); an `error` event in the stream (its type); a stream against the protocol.
+  Everything but a key problem shows "Couldn't get an answer" with Retry. A failure keeps what the question spent, the
+  response that failed part-way included.
+
+### Conversation and the answer
+
+- `runtime::ask::Conversation` lives from the first question until `CloseAnswer`, and is then forgotten. It keeps the
+  answered exchanges, the question in flight, the container, the sources (numbered in the order a URL is first cited,
+  across the conversation) and `AnswerView`, the answer as the windows draw it. A first question is asked with its
+  context; once an exchange has succeeded, a follow-up goes alone. The model's blocks go back as they came, except
+  a search the API never ran (it defers a search when the model also calls a client tool, and a follow-up that leaves
+  it unanswered is refused). A follow-up after a written text that was shown answers that call first, with a
+  `tool_result` saying the text was shown instead of written. A refusal and an empty turn never join the conversation,
+  and a failure keeps its question for Retry.
+- The request runs in a task of its own (`ask_task`, with a generation, as transcription and refine do): the steps and
+  the end come back as events of that generation, so a dropped or replaced request's never reach the conversation. The
+  view goes to the windows (`cue://answer`) at once for a new turn, an end, an opening or a follow-up row, and at most
+  every 50 ms while words stream (`ViewGate`); the flow hears `AskOpened` once per request (`ShownOnce`).
+- Where it opens (`open_answer`): in the card when the card window exists, the selection has a rectangle with a size,
+  and `cardplace::card_place` finds room for it on the selection's monitor; otherwise in the tray from the Drop. The log
+  gets the place only.
+- A written text takes the dictation's form in code (`field_text`: Markdown the question did not ask for taken off,
+  list separators tidied), whatever the instruction achieved. Where it goes (`write_target`): about read-only text, it
+  is shown in the answer (in a terminal too); a `replace` in a terminal is shown (its text cannot be replaced); a
+  `replace` over a writable selection goes over it; an `insert` goes to the caret in a terminal (a line break there is
+  Enter, so never below), below a writable selection, or to the caret without one. A text shown instead of written is
+  an answer to copy.
+- The buttons (`answer_actions`) follow the selection: read-only → Copy (in a terminal too); a terminal → Insert,
+  Copy; writable → Insert below, Replace, Copy; none → Insert, Copy. A refused turn has none. They paste or copy the
+  last turn's plain text (`plain_answer`: the Markdown taken off) or the written text. A pasted answer, by a button or
+  as a write, becomes the last result (`last\result.txt`), so `Ctrl + Win + V` pastes it again.
+- Insert and Replace paste the way a dictation does (Replace pastes over the selection, which is still selected).
+  Insert below (`InsertJob::Paste { collapse: true }`) waits for the modifiers to be up (2 s at most), presses Right to
+  collapse the selection to its end, and pastes a line break and the text in one paste (an Enter would send a chat
+  message). A selection that cannot be collapsed is never pasted over: the text stays in the clipboard, and the flow
+  hears "no field". Copy leaves the text in the clipboard the normal way.
+- A click on a source chip sends only its number (`answer_source`); the core opens the URL only when it is a web page
+  (`openable`: `http` or `https` with a host, no spaces, control characters or quotes, 2,048 characters at most), with
+  `ShellExecuteW` on a short thread of its own.
+
+### Cache warm-up of "Ask"
+
+At the "Ask" chord (and when Alt picks "Ask"), and at a follow-up's chord, when no "Ask" request or warm-up started in
+the last 4 minutes, the runtime sends `ask::warm`: the request's prefix (the same tools, instruction, thinking, effort
+and tool choice) with a one-character placeholder, no stream, `max_tokens: 0` (the probe found it accepted), and the
+cache mark on the instruction only. It has a 5 s timeout; a failure writes one log line, and the question's own request
+writes the cache. Its tokens get a `warmup` usage row priced with `ask.model`. The refine warm-up is not sent for
+"Ask", and after sleep both warm again on the next chord.
+
 ## The Drop and tray cards
 
 The Drop window is transparent, borderless, always on top, absent from the taskbar and Alt+Tab, and never takes focus:
 `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW` are enforced by a window subclass, because the windowing library rebuilds the
 extended style on every flag change, and the subclass adds `SWP_NOACTIVATE` to every move, show and z-order change.
 The window is larger than the capsule; the UI reports the capsule and card rectangles (`drop_hit_rects`) and
-`cue-hit-test` lets the mouse through everywhere else.
+`cue-hit-test` lets the mouse through everywhere else. The "Ask" card has a window of its own built the same way (see
+The "Ask" card below).
 
 ### Places
 
 The Drop sits at one of four places on the work area of the monitor with the foreground window (`drop.position`):
 `bottom` (the default) and `top` are centered on that edge, `left` and `right` halfway up it; in each the Drop's outer
-edge is 12 px from the work area's edge. The window (640 × 400 logical px) is always centered on the Drop's center (the
-center of its circle), and the page draws the Drop at the window's center. A new place therefore moves only the window,
-never the Drop inside it; the rest of the layout changes with CSS transitions. The window reaches far enough every way
-for the widest Drop and the largest tray card growing toward the screen center; the part past the edge of the work area
-(over the taskbar, or off the screen) is transparent and lets the mouse through like the rest.
+edge is 12 px from the work area's edge. The window is always centered on the Drop's center (the center of its
+circle), and the page draws the Drop at the window's center. A new place therefore moves only the window, never the Drop
+inside it; the rest of the layout changes with CSS transitions. The window reaches far enough every way for the widest
+Drop, the tray cards and the "Ask" answer tray (420 × up to 410 logical px, with its spring overshoot and shadow)
+growing toward the screen center, so its size depends on the place (`drop_window::window_size`): 640 × 860 logical px
+at the bottom and the top, 900 × 540 at the sides. A square big enough for both would lie mostly on the old monitor
+after a move to a monitor of another scale, so it would keep the old scale and never arrive there (see below). The size
+changes at the end of a drag, around the Drop's center, so the Drop stays where it was let go; no drag happens while the
+answer tray is open. The part past the edge of the work area (over the taskbar, or off the screen) is transparent and
+lets the mouse through like the rest.
 
 At the bottom and the top the Drop is centered and grows both ways along the edge, and tray cards open above it (at
 the bottom) or below it (at the top). At the sides its outer end is pinned at the edge and it grows toward the center;
@@ -357,10 +559,19 @@ when that cannot help; always-on-top windows above the Drop are never answered a
 ### Events and sizes
 
 Core → window events: `cue://state` (phase, error cause, retry, paused, mode), `cue://level`, `cue://tray` (card kind
-or none), `cue://shake`, `cue://idle-hidden`, `cue://place`. Window → core commands: `drop_action` (`cancel`,
-`finish`, `undo`, `retry`, `dismiss`, `trayAction`, `trayClose`), `drop_hit_rects`, `drop_drag` (`start`, `end`), and
-`drop_ready`, after which the core resends the current state, card, `idle-hidden` and place. The place also comes in an
-initialization script, so the first frame is already laid out for it. No dictation text crosses this boundary.
+or none), `cue://shake`, `cue://idle-hidden`, `cue://place`, `cue://answer` (the whole `AnswerView` of the open "Ask"
+answer, or none when it closes: sent at once for a new turn, an end or an opening, at most every 50 ms while words
+stream) and `cue://card-place` (for the card: which side of the selection, where the arrow is, how tall the card may
+grow). Window → core commands: `drop_action` (`cancel`, `finish`, `undo`, `retry`, `dismiss`, `trayAction`,
+`trayClose`, and the answer's `answerInsert`, `answerBelow`, `answerReplace`, `answerCopy`, `answerRetry`,
+`answerClose`), `answer_source` (the number of a source chip clicked), `drop_hit_rects`, `drop_drag` (`start`, `end`),
+`drop_ready`, after which the core resends the current state, card, `idle-hidden`, place and open answer, and, from the
+card window, `card_hit_rects` and `card_ready`, after which the core resends the state, the card's place and the open
+answer. The place also comes in an initialization script, so the first frame is already laid out for it.
+
+The windows get the text of an "Ask" question and its answer, and the titles and sites of its sources, to draw them;
+never a source's address. A click on a source sends only its number, and the core opens the page with `ShellExecuteW`
+(see Ask). No dictation text crosses this boundary.
 
 One size: the Drop is 36 px high in every state (`--h` in `drop.css`; `DROP_SIZE` in `drop_window.rs` places it, and a
 test keeps them equal). The circle states are 36 × 36. Everything inside is the original 40 px drawing scaled by
@@ -370,13 +581,14 @@ into a circle of the same diameter. Tray cards keep their own sizes.
 
 Phases: `idle` (a thin strip; on hover the mark and the hotkey), `start`, `listen` (voice bars and no timer; cancel
 and done buttons on hover), `think` (three dots), `done` (a check, gone after 1.5 s), `empty`, `cancel` (Restore with
-a 3.6 s ring), `error` (amber "!", the cause on hover, Retry when available). The frame loop sleeps when nothing moves;
-with reduced motion turned on in Windows, states change instantly.
+a 3.6 s ring), `error` (amber "!", the cause on hover, Retry when available), `answer` (an "Ask" answer is open and
+nothing records: the Drop rests as in `idle`). The frame loop sleeps when nothing moves; with reduced motion turned on
+in Windows, states change instantly.
 
 The mode shows while recording: in a translation the mark of `start` takes the translation shape and `listen` adds
-the arrows icon next to the voice bars; a mode change re-enters the phase, so the icon changes at once. The error of a
-failed translation reads "Couldn't translate" with the network cause icon and Retry. The idle Drop shows no mode, and
-its hint stays `Ctrl + Win`.
+the arrows icon next to the voice bars, and "Ask" has an icon of its own; a mode change re-enters the phase, so the icon
+changes at once. The error of a failed translation reads "Couldn't translate" with the network cause icon and Retry.
+The idle Drop shows no mode, and its hint stays `Ctrl + Win`.
 
 Tray cards grow out of the Drop, one at a time; a new card replaces the old one, a new recording closes it, and hovering
 pauses the countdown ring:
@@ -391,8 +603,46 @@ pauses the countdown ring:
 A card button arrives as `trayAction`; the core acts on the last card it sent.
 
 The interface is in English, or in Russian when the Windows display language is Russian; `ui.language` in
-`settings.json` (`en` or `ru`) overrides Windows. The core makes that choice once at startup, so the tray menu and
-the Drop always match.
+`settings.json` (`en` or `ru`) overrides Windows. The core makes that choice once at startup, so the tray menu, the Drop
+and the card always match.
+
+**The answer tray.** An "Ask" answer without a card opens in a second tray of the same kind (`.ansA`, 420 px wide, up to
+410 high), with the Drop's material, growing toward the screen center from any of the four places. It holds the header
+(the mark, the question, the cross), the turns (a follow-up's question, the thinking line, the answer revealed a few
+words at a time, its source chips), the row of a follow-up being recorded ("Listening for a follow-up…") or one that
+could not be made out (with Retry), and the buttons. The thinking line names only real steps ("Searching the web",
+"Reading sources", "Writing the answer"); before the first one it is shimmering placeholder lines, and the answer opens
+only with a real step. The buttons wait while the answer is still coming or still being revealed (Retry excepted), and
+all of them and the cross outside the `answer` phase. While any tray is open the Drop steps aside. `answer.ts` is one view for the tray and the
+card: the core sends the whole answer every time, and the view keeps what is on screen and reveals only what is new.
+
+**Safe Markdown** (`markdown.ts`): paragraphs, `- ` and `1. ` lists, bold, italic, inline code and fenced code;
+headings come out as bold lines and links as their text. No HTML: every piece of the model's text reaches the page
+through `textContent` or a text node, never as markup. Source numbers become chips, marked in the text with
+private-use characters, and the model's own such characters are taken out first, so no answer can fake one.
+
+### The "Ask" card
+
+The card at the selection has its own window (`card_window`, the page `card.html`), created hidden at startup with the
+Drop's non-activating subclass, always on top, out of the taskbar, click-through outside the card through its own
+`cue-hit-test` and `card_hit_rects`. It is shown and hidden only through Tauri, never with a bare `ShowWindow`: on any
+change of its flags (the hit test switches click-through about 60 times a second) the windowing library hides a window
+it believes hidden. Without the window (it could not be created) every answer opens in the tray.
+
+- **Where** (`cardplace::card_place`, pure): the card is 390 logical px wide and up to 300 high, with a 6 px arrow 4 px
+  from the selection, kept 8 px inside the work area of the selection's monitor. The arrow points into the selection's
+  first line (at most 140 px in, at its middle when the line is shorter) and keeps 18 px from the card's rounded
+  corners; the card goes under the selection when the tallest card fits there or there is more room below than above,
+  and above it otherwise. With less than 120 px of room, or a selection off the work area, the answer goes to the tray.
+  The window is the card's size plus 24 px of transparent room for its shadow on every side.
+- **Showing** (`cue-card`): the hidden window moves to its place; on a monitor of another scale Windows gives it that
+  scale and its size there a moment later, so the thread waits for that size (300 ms at most) and moves it again, so
+  the arrow lands exactly; then it raises the window and shows it. The page folds the card away in 0.25 s before the
+  window hides; a new answer in that time keeps the window.
+- **The page** (`cardPage.ts`) draws the same answer view in the system material, with the arrow, and reports the card's
+  rectangle for click-through whenever it changes. Its frame loop runs on for 500 ms after the last change, longer than
+  the card's 450 ms pop-in, so the last rectangle it reports is the card at its full size, also for an answer that shows
+  whole at once.
 
 ## Tray icon
 
@@ -423,8 +673,12 @@ The `translate` fields (`target`, `home`, `speech`) go through `translate::known
 subtag of a locale name (`ru-RU`, `zh-Hans-CN`), the aliases `nb`/`nn` → `no`, `fil` → `tl`, `iw` → `he`, `in` → `id`;
 anything else (`auto`, an unknown code, a number) reads as nothing, that is the default, and a `translate` that is not
 an object reads as the default section. A `target` of `en` reads as nothing too, so the default is never written
-back, and the block is written only when one of its fields is set. Model names are settings, so a new model version
-needs no code change.
+back, and the block is written only when one of its fields is set. The `ask` fields read the same way (`AskSettings`):
+`enabled` and `web_search` are turned off only by `false` (anything else reads as on), `model` is a trimmed non-empty
+string, `max_searches` a whole number from 1 to 10; any other value, and the default itself, reads as nothing, an `ask`
+that is not an object reads as the default section, and the block is written only when a field differs from its
+default, so the file never becomes unreadable through it. Model names are settings, so a new model version needs no
+code change.
 
 ## Usage accounting
 
@@ -433,18 +687,28 @@ its own row in `%LOCALAPPDATA%\CUE\usage.csv`:
 `ts, audio_ms, stt_engine, stt_path, stt_usd, refine_model, input_tokens, cache_read_tokens, cache_write_tokens,
 output_tokens, refine_usd, latency_ms, outcome, mode, web_searches, search_usd`. `stt_path` is `stream`,
 `stream+batch` or `batch`; outcomes are `inserted`, `no_field`, `cancelled`, `empty`, `failed`, `discarded` (written
-only when audio ran past 380 ms). `mode` is `dictate` or `translate` as the dictation's refine started (for an attempt
-that ends before refine, the mode it was recording in: the attempt follows a `ModeToggle` or `ModeChange` the flow
-accepts; `ask` is reserved), or `warmup`. `web_searches` and `search_usd` (searches × `pricing.web_search_usd`) are for
-"Ask" and are 0 for now. The Retry of a failed translation re-translates the saved text: a new row with no audio. A
-cache warm-up is a row of its own: its tokens and cost, no audio, latency 0, outcome `discarded`, mode `warmup`. Rows
-written before the last three columns existed read as dictation, and the header of an existing file is never rewritten
-(new files get the 16-column header). Latency runs from the second press to Ctrl+V (from Retry or Restore when used);
-the target for a ~30-word phrase is 1.5 s or less. Rows that fail to write, for example while the file is open in Excel,
-wait in memory and go out before the next one. `cue-cli usage` sums a UTC month: dictations are `inserted` plus
-`no_field` rows, average latency counts only `inserted` rows, and a separate average covers recordings of 20 s or less.
-The cost includes failed attempts and warm-ups; web search is shown only when there was some, and the rows and dollars
-of each `mode` value follow, in the order they first appear.
+only when audio ran past 380 ms) and `answered` (an "Ask" answer shown in full, a refusal too: paid for, nothing
+pasted). `mode` is `dictate`, `translate` or `ask` as the dictation's refine or question started (for an attempt that
+ends before that, the mode it was recording in: the attempt follows a `ModeToggle` or `ModeChange` the flow accepts),
+or `warmup`. The Retry of a failed translation re-translates the saved text: a new row with no audio. A cache warm-up
+is a row of its own: its tokens and cost, no audio, latency 0, outcome `discarded`, mode `warmup`, and the model it
+warmed (`refine.model`, or `ask.model` for "Ask"). Rows written before the last three columns existed read as
+dictation, and the header of an existing file is never rewritten (new files get the 16-column header). Latency runs
+from the second press to Ctrl+V (from Retry or Restore when used); the target for a ~30-word phrase is 1.5 s or less.
+Rows that fail to write, for example while the file is open in Excel, wait in memory and go out before the next one.
+`cue-cli usage` sums a UTC month: dictations are `inserted` plus `no_field` rows (an `answered` row is not one),
+average latency counts only `inserted` rows, and a separate average covers recordings of 20 s or less. The cost includes
+failed attempts and warm-ups; web search is shown only when there was some, and the rows and dollars of each `mode`
+value follow, in the order they first appear.
+
+An `ask` row carries `ask.model` in `refine_model`, the tokens of all the question's requests (continuations, a widened
+write, and a request aborted by `Esc` before Restore asked again), and its searches in `web_searches` with
+`search_usd` = searches × `pricing.web_search_usd`. What a question has spent reaches the attempt as the stream goes
+(`Step::Spent`), so an answer closed or aborted mid-stream, a failed one and one cut by a deadline still write their
+cost. Its latency runs from the second press to the first words for an `answered` row (spec §11 judges the first words
+by it: 2.5 s), and to Ctrl+V for a written text. A follow-up is an attempt of its own, and so is the Retry of a failed
+question (no audio). An answer still printing when a follow-up starts waits aside (`answering`) and gets its own row
+when it ends. Pasting a complete answer with its button adds no row.
 
 ## Logging and privacy rules
 
@@ -452,11 +716,16 @@ of each `mode` value follow, in the order they first appear.
   pruned at startup and daily (7 days, 10 MB).
 - Logged: events, per-stage timings (`stt_ms`, `refine_ms`, `insert_ms`, `latency_ms`), outcomes and error kinds;
   at startup, how many dictionary terms are used and skipped, and the translation pair (two language codes); the
-  target code of each translation; the token counts of each cache warm-up. Never logged: dictation text, text before
-  the caret, translations, dictionary terms, audio, API keys, response bodies.
+  target code of each translation; the token counts of each cache warm-up; for "Ask", the kind and length of the
+  selection read, whether the `Ctrl + C` fallback ran and what became of its Win+V copy (a kind), the number of turns
+  of a request, where the answer opened (tray or card), how a request ended and its number of web searches. Never
+  logged: dictation text, text before the caret, translations, dictionary terms, questions, answers, selected text,
+  written texts, the addresses and titles of sources, where the selection is on screen, audio, API keys, response
+  bodies. `Effect` and `Input` are never logged with `{:?}`, since their `Debug` prints text.
 - WebSocket handshake tracing is switched off by a fixed filter, since it would include the `Authorization` header.
 - The panic hook is installed first and records only the thread and code location, never the message, which could
-  contain dictated text. Debug output of focus results and microphone frames shows only lengths.
+  contain dictated text. Debug output of focus results, of the selection read and copied, of the "Ask" context and of
+  microphone frames shows only lengths.
 - Keys are read from Credential Manager on use, appear in the CLI only masked, and are cut out of engine error texts.
 - Soniox uploads are deleted after use. The last dictation (`last\`) and bench recordings stay on this computer only.
 
@@ -480,3 +749,15 @@ in `out.json`. `out.json` holds every call (the outcome, `to`, and the text that
 when the outcome is not `refined`) and per-model medians, p90 and cost; the console gets only ids and numbers. A
 translation that fails its check counts as `raw_fallback`, where the app pastes nothing and says "Couldn't translate";
 on the direct path the model's own answer is not kept.
+
+`ask_compare` (an example in `cue-engines`) is the bench of "Ask": a phrase file
+(`{id, question, app, selection?, before_cursor?, then?, expect, mode?}`) is asked the way the app asks it
+(`first_message` with today's date, `ask::run` with its deadlines and continuations, web search of 2 searches a request
+unless `--no-search`, thinking as `--thinking adaptive|off` says, the app's default otherwise), one call at a time over
+`--runs` rounds, under a `--max-usd` budget. A phrase's `then` is a follow-up asked after the first answer, and the
+follow-up is what is scored. `out.json` holds every call (the decision, the mode of a write, its text or the answer's
+Markdown, the first words, the total time, the searches, the cost) and a summary: right decisions and modes, the
+median first words of warm calls with and without a search (the very first call, with an empty cache, is left out),
+and the cost. The console gets only ids, kinds and numbers. The phrase set and the scoring script (format and content
+checks) live outside the repository. The run of 2026-10-29 (Haiku 5.5, 30 phrases × 5) decided 99 % right, with the
+first words of warm calls in 1.7 s without a search and 5.8 s with one, for $0.19.
