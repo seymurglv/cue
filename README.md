@@ -167,8 +167,8 @@ session and does not overwrite it. The defaults:
 
 - `stt.soniox_model` / `soniox_async_model`: the real-time model and the batch model used for fallback and Retry.
   `language_hints` are hints, not limits. `engine` has a single value today, `soniox`.
-- `refine.model`: the Claude model for cleanup. `context_chars`: how much text before the caret is sent as context
-  (0 turns it off). `min_ratio`, `max_ratio`, `min_overlap`: the sanity check (see
+- `refine.model`: the Claude model for cleanup. `context_chars`: how much text before the caret is sent as context,
+  for cleanup and for "Ask" alike (0 turns it off). `min_ratio`, `max_ratio`, `min_overlap`: the sanity check (see
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
 - `hold_hints_left`: how many more times the "Press and release" card appears after a held chord.
 - `bench.save_recordings`: copy each successful dictation's audio and app name for the bench.
@@ -227,7 +227,7 @@ Everything else lives in `%LOCALAPPDATA%\CUE`:
 
 | Path | What |
 |---|---|
-| `last\audio.wav`, `last\result.txt` | The last successful dictation (16 kHz mono WAV and the final text), for `Ctrl + Win + V` and Copy. Replaced by the next one, and by an "Ask" answer pasted with its button or written into a field (text only). |
+| `last\audio.wav`, `last\result.txt` | The last successful dictation (16 kHz mono WAV and the final text), for `Ctrl + Win + V` and Copy. Replaced by the next one, and by an "Ask" result: a text written into a field keeps its question's recording as `audio.wav`; an answer pasted with its button has no audio, so the old `audio.wav` is deleted. |
 | `last\current.wav` | Audio of the dictation in progress; after a failure it waits there for Retry. Deleted when a dictation is cancelled or comes out empty, and when a question has been answered. |
 | `logs\cue.log.YYYY-MM-DD` | Daily log: events, per-stage timings, error kinds. No dictation text, no questions, answers or selected text, no audio, no keys. Kept 7 days and 10 MB at most. **Open log** in the tray menu opens this folder. |
 | `usage.csv` | One row per attempt: time (UTC), audio length, transcription path, cost, model, tokens, latency, outcome, mode, web searches. A cache warm-up gets a row of its own. No text. |
@@ -293,7 +293,8 @@ it. It does not tune the thresholds.
 
 `ask_compare` (an example in `cue-engines`; needs the Anthropic key, and it is paid) asks a file of questions the way
 the app asks them: the same instruction, tools, web search (2 searches a request), deadlines and continuations, with
-today's date. It writes every call and a summary to `out.json`; the console gets only ids and numbers.
+today's date. It writes every call and a summary to `out.json`, before the first call and again after every call, so a
+run cut short keeps what it paid for; the console gets only ids and numbers.
 
 ```powershell
 cargo run -p cue-engines --example ask_compare -- phrases.json out.json [--runs 5] [--max-usd 1.00]
@@ -316,8 +317,9 @@ follow-up is what is scored; `expect` is `answer` or `write`, and `mode` (`repla
 the mode the write should take. Each run asks every question once, one at a time; the very first call (an empty prompt
 cache) is left out of the medians. The summary counts the right decisions and modes, the median time to the first
 words with and without a search, and the cost; the run stops once more than `--max-usd` is spent. `--model` asks
-another model (`claude-haiku-5-5` by default), `--no-search` asks without web search, and `--thinking off` sends the
-request with thinking disabled, to compare with the app's default (`--thinking adaptive`).
+another model (`claude-haiku-5-5` by default; one without a default price is refused, since the budget could not count
+it), `--no-search` asks without web search, and `--thinking off` sends the request with thinking disabled, to compare
+with the app's default (`--thinking adaptive`).
 
 ## Privacy
 
@@ -335,18 +337,21 @@ request with thinking disabled, to compare with the app's default (`--thinking a
   longer selection goes as its start and its end), up to `refine.context_chars` (500) characters before the caret, the
   app name and today's local date; a follow-up sends only its question, with the conversation so far. With web search
   on, Anthropic searches the web for what the model asks it to. Nothing is read from password fields. When the "Ask"
-  chord starts, and on a follow-up, four minutes or more after the last question, CUE sends a cache warm-up of the
-  "Ask" instruction with a one-character placeholder, nothing of yours. The conversation lives only while the answer is
-  open.
+  chord starts, and on a follow-up, four minutes or more after the last "Ask" request or warm-up, CUE sends a cache
+  warm-up of the "Ask" instruction with a one-character placeholder, nothing of yours. The conversation lives only while
+  the answer is open.
 - **The `Ctrl + C` fallback of "Ask".** When the app does not tell CUE what is selected, CUE presses `Ctrl + C` in that
   window once the recording ends (never in a terminal CUE knows, nor in another window than the one you asked in), reads
-  the selection from the clipboard and puts your clipboard back as it was. Only a copy made by that app counts, and a
-  copy that is the same text as your clipboard already held counts as nothing selected. The app's copy reaches the
-  Windows clipboard history (Win+V) before CUE can mark it, so CUE then tries to remove it from there; whether Windows
-  allows that has not been confirmed for every app (see Known limitations).
-- **Inside CUE:** the Drop and the card windows get the text of the question and the answer, and the titles and sites
-  of the sources, to draw them; never the addresses. A click on a source asks the core to open it, and the core opens
-  only `http` and `https` pages, in the default browser.
+  the selection from the clipboard and puts your clipboard back as it was. Only a copy made by that app counts (or one
+  with no owner, as some apps copy), and a copy that is the same text as your clipboard already held counts as nothing
+  selected. The app's copy reaches the Windows clipboard history (Win+V) before CUE can mark it, so CUE then tries to
+  remove it from there; whether Windows allows that has not been confirmed for every app (see Known limitations). CUE's
+  own writes (each paste, and your clipboard put back) carry the marks that keep them out of the history and the cloud
+  clipboard, but the app's copy carries none: with Windows clipboard sync on, Windows may upload it to your other
+  devices, and removing it from Win+V does not take that back. This is Windows behaviour and was not checked live.
+- **Inside CUE:** the Drop and the card windows get the text of the question and the answer, the card's short quote of
+  the selection (40 characters at most), and the titles and sites of the sources, to draw them; never the addresses. A
+  click on a source asks the core to open it, and the core opens only `http` and `https` pages, in the default browser.
 - The microphone is open only while CUE is recording.
 - **Stays on this computer:** the last dictation's audio and text, recordings saved for the bench, settings, logs and
   usage rows. Logs and `usage.csv` never contain dictation text, questions, answers, selected text or sources; a crash
@@ -374,7 +379,9 @@ request with thinking disabled, to compare with the app's default (`--thinking a
   text or in Electron apps, where a misplaced card would be the sign to switch it off (`CHROMIUM_RECTS` in
   `focus.rs`).
 - The `Ctrl + C` fallback's copy may stay in the Win+V history when Windows does not let CUE remove it. Its removal has
-  not been seen working live yet: in the one app checked, nothing was selected, so nothing was copied.
+  not been seen working live yet: in the one app checked, nothing was selected, so nothing was copied. With Windows
+  clipboard sync on, that copy may also reach your other devices, since it carries none of CUE's marks; this was not
+  checked live either. Turning clipboard sync off (Settings → System → Clipboard), or "Ask" off, avoids it.
 - Editors that copy the current line on `Ctrl + C` with nothing selected (VS Code does by default) could hand that line
   to "Ask" as the selection when they do not report the selection themselves. None is listed yet (`COPIES_LINE` in
   `selection.rs`): VS Code was not available to check.
@@ -383,8 +390,8 @@ request with thinking disabled, to compare with the app's default (`--thinking a
 - **Insert below** moves the caret with the Right arrow, which ends the selection at its end in most editors; where
   Right behaves differently with a selection, the text lands at the caret instead. When the Right arrow cannot be sent,
   the text stays in the clipboard and the "Nowhere to paste" card offers Copy.
-- When web search fails or is not available to your key, the model answers from what it knows and says that it may be
-  out of date. A key without web search is asked again without it, at once.
+- When web search fails or is not available to your key, the model answers from what it knows, which may be out of
+  date. A key without web search is asked again without it, at once.
 - The `Ctrl + C` fallback stays out of the terminals it knows by window class or executable (the console host with
   Command Prompt and PowerShell, Windows Terminal, mintty, ConEmu, PuTTY, WezTerm, Alacritty, WSL). In a terminal
   outside that list that does not report its selection, a question asked there would press `Ctrl + C`, which stops the

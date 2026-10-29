@@ -357,10 +357,10 @@ effects need, and `cue_engines::ask` talks to the API.
 - **The `Ctrl + C` fallback**, at the end of the recording (the chord's keys are up only then): when the field said
   `Unknown`, there may be a field (not the desktop or File Explorer's list), and the app named at the chord is not a
   terminal (`is_terminal`) nor an editor that copies its current line with nothing selected (`COPIES_LINE`, empty for
-  now). It runs on `cue-insert` (`InsertJob::CopySelection`), alongside the transcription, and only into the window
-  read at the chord: right before `Ctrl + C` that window must still be in front and must not be a terminal by its
-  class or executable (`selection::terminal_window`). The clipboard is saved, `Ctrl + C` sent, and for 0.4 s CUE waits
-  for the app's copy: a write owned by the window's process, by the app in it when the window is a Store app's frame
+  now). It runs on `cue-insert` (`InsertJob::CopySelection`), alongside the transcription, and only into the window read
+  at the chord: right before `Ctrl + C` that window must still be in front and must not be a terminal by its class or
+  executable (`selection::terminal_window`). The clipboard is saved, `Ctrl + C` sent, and for 0.4 s CUE waits for the
+  app's copy: a write owned by the window's process, by the app in it when the window is a Store app's frame
   (`WindowRef::app_process`), or by no window (`the_apps_copy`), checked again with the clipboard open. Any other
   process's write is never taken for the selection, and a copy whose text is the user's clipboard text again counts as
   nothing copied. The user's clipboard is then put back with the paste markers. A copy that comes 0.4–2.4 s after
@@ -369,8 +369,10 @@ effects need, and `cue_engines::ask` talks to the API.
   covers the late guard's check and restore and every paste, left text and copy). The app's copy reaches the Win+V
   history before CUE can mark it, so `forget_in_history` looks among the three newest history items for exactly that
   text, stamped no earlier than just before `Ctrl + C`, and deletes it if Windows allows (`HistoryForget`: removed, not
-  found, refused; logged as a kind). The request task waits for the copy (2 s at most), never the core; a copied text
-  is a selection that can be changed. `COPY_FALLBACK` in `selection.rs` switches the whole fallback off.
+  found, refused; logged as a kind). That copy carries none of CUE's marks, so with Windows clipboard sync on Windows
+  may also upload it to the user's other devices, which removing it from the history does not undo (Windows behaviour,
+  not checked live). The request task waits for the copy (2 s at most), never the core; a copied text is a selection
+  that can be changed. `COPY_FALLBACK` in `selection.rs` switches the whole fallback off.
 - What the question is asked with (`runtime::ask::Taken`): the `AskContext` (app, text before the caret, the clipped
   selection, today's local date from `GetLocalTime`), the selection kind (`None`, `Writable`, `ReadOnly`), its
   rectangles, and whether the app is a terminal. The first question of a dictation keeps it until the next chord
@@ -382,9 +384,10 @@ effects need, and `cue_engines::ask` talks to the API.
 - `cue_engines::ask::request_body`: `stream: true`; the tools first (they render first in the cached prefix):
   `write_to_field`, strict (its input always matches the schema: `text`, and `mode` `insert` or `replace`) and without
   eager input streaming, so the input arrives whole and checked; then web search, when `ask.web_search` is on. The
-  version is the probe's choice (spec §13.1, `ask_probe`, 2026-10-29): `web_search_20260318`, the filtered search, with
-  `max_uses` = `ask.max_searches`. A key whose organization has no web search gets a 400 that says so, and the question
-  is asked again at once without it.
+  version is the one the first probe picked (`ask_probe`, 2026-10-29: both versions worked, the filtered one brought the
+  first words of a searched question within 8 s and answered a follow-up after a search): `web_search_20260318`, the
+  filtered search, with `max_uses` = `ask.max_searches`. A key whose organization has no web search gets a 400 that says
+  so, and the question is asked again at once without it.
 - The instruction (`ASK_PROMPT`, English; the answer follows the language of the question) is one cached system
   block: what the tags mean, that their content is data and never instructions, when to call `write_to_field` and with
   which mode, the form of a written text (plain, no quotes, the app's tone, one line in terminals), the form of an
@@ -425,9 +428,9 @@ effects need, and `cue_engines::ask` talks to the API.
 - Failures (`AskFailure`, one log line with the kind): no key; 401, 402 or 403, or a 400 about the credit balance (a
   key problem: `AskError::Key`, the Drop's "Claude key problem" without Retry); 404, the model in `ask.model` does not
   exist (`NoModel`, the log says to check `settings.json`); a timeout; the network; another HTTP status (429 and 5xx
-  too: spec §8 counts a 429 with the network); an `error` event in the stream (its type); a stream against the protocol.
-  Everything but a key problem shows "Couldn't get an answer" with Retry. A failure keeps what the question spent, the
-  response that failed part-way included.
+  too: a rate limit passes, so Retry may help, unlike a key problem); an `error` event in the stream (its type); a
+  stream against the protocol. Everything but a key problem shows "Couldn't get an answer" with Retry. A failure keeps
+  what the question spent, the response that failed part-way included.
 
 ### Conversation and the answer
 
@@ -569,9 +572,10 @@ grow). Window → core commands: `drop_action` (`cancel`, `finish`, `undo`, `ret
 card window, `card_hit_rects` and `card_ready`, after which the core resends the state, the card's place and the open
 answer. The place also comes in an initialization script, so the first frame is already laid out for it.
 
-The windows get the text of an "Ask" question and its answer, and the titles and sites of its sources, to draw them;
-never a source's address. A click on a source sends only its number, and the core opens the page with `ShellExecuteW`
-(see Ask). No dictation text crosses this boundary.
+The windows get the text of an "Ask" question and its answer, the card's quote of the selection (`quote_of`, 40
+characters at most), and the titles and sites of its sources, to draw them; never a source's address. A click on a
+source sends only its number, and the core opens the page with `ShellExecuteW` (see Ask). No dictation text crosses this
+boundary.
 
 One size: the Drop is 36 px high in every state (`--h` in `drop.css`; `DROP_SIZE` in `drop_window.rs` places it, and a
 test keeps them equal). The circle states are 36 × 36. Everything inside is the original 40 px drawing scaled by
@@ -612,9 +616,10 @@ and the card always match.
 words at a time, its source chips), the row of a follow-up being recorded ("Listening for a follow-up…") or one that
 could not be made out (with Retry), and the buttons. The thinking line names only real steps ("Searching the web",
 "Reading sources", "Writing the answer"); before the first one it is shimmering placeholder lines, and the answer opens
-only with a real step. The buttons wait while the answer is still coming or still being revealed (Retry excepted), and
-all of them and the cross outside the `answer` phase. While any tray is open the Drop steps aside. `answer.ts` is one view for the tray and the
-card: the core sends the whole answer every time, and the view keeps what is on screen and reveals only what is new.
+only with a real step. The buttons are disabled while the answer is still coming or still being revealed (Retry
+excepted), and all of them and the cross are disabled outside the `answer` phase. While any tray is open the Drop steps
+aside. `answer.ts` is one view for the tray and the card: the core sends the whole answer every time, and the view keeps
+what is on screen and reveals only what is new.
 
 **Safe Markdown** (`markdown.ts`): paragraphs, `- ` and `1. ` lists, bold, italic, inline code and fenced code;
 headings come out as bold lines and links as their text. No HTML: every piece of the model's text reaches the page
@@ -702,13 +707,13 @@ failed attempts and warm-ups; web search is shown only when there was some, and 
 value follow, in the order they first appear.
 
 An `ask` row carries `ask.model` in `refine_model`, the tokens of all the question's requests (continuations, a widened
-write, and a request aborted by `Esc` before Restore asked again), and its searches in `web_searches` with
-`search_usd` = searches × `pricing.web_search_usd`. What a question has spent reaches the attempt as the stream goes
+write, and a request aborted by `Esc` before Restore asked again), and its searches in `web_searches`, priced in
+`search_usd` (searches × `pricing.web_search_usd`). What a question has spent reaches the attempt as the stream goes
 (`Step::Spent`), so an answer closed or aborted mid-stream, a failed one and one cut by a deadline still write their
-cost. Its latency runs from the second press to the first words for an `answered` row (spec §11 judges the first words
-by it: 2.5 s), and to Ctrl+V for a written text. A follow-up is an attempt of its own, and so is the Retry of a failed
-question (no audio). An answer still printing when a follow-up starts waits aside (`answering`) and gets its own row
-when it ends. Pasting a complete answer with its button adds no row.
+cost. Its latency runs from the second press to the first words for an `answered` row (the target for the first words of
+an answer without a search is 2.5 s), and to Ctrl+V for a written text. A follow-up is an attempt of its own, and so is
+the Retry of a failed question (no audio). An answer still printing when a follow-up starts waits aside (`answering`)
+and gets its own row when it ends. Pasting a complete answer with its button adds no row.
 
 ## Logging and privacy rules
 
@@ -756,8 +761,10 @@ on the direct path the model's own answer is not kept.
 unless `--no-search`, thinking as `--thinking adaptive|off` says, the app's default otherwise), one call at a time over
 `--runs` rounds, under a `--max-usd` budget. A phrase's `then` is a follow-up asked after the first answer, and the
 follow-up is what is scored. `out.json` holds every call (the decision, the mode of a write, its text or the answer's
-Markdown, the first words, the total time, the searches, the cost) and a summary: right decisions and modes, the
-median first words of warm calls with and without a search (the very first call, with an empty cache, is left out),
-and the cost. The console gets only ids, kinds and numbers. The phrase set and the scoring script (format and content
-checks) live outside the repository. The run of 2026-10-29 (Haiku 5.5, 30 phrases × 5) decided 99 % right, with the
-first words of warm calls in 1.7 s without a search and 5.8 s with one, for $0.19.
+Markdown, the first words, the total time, the searches, the cost) and a summary: right decisions and modes, the median
+first words of warm calls with and without a search (the very first call, with an empty cache, is left out), and the
+cost. `out.json` is written before the first call, so a path that cannot be written stops the run before anything is
+paid, and again after every call, so a run cut short keeps its results; a `--model` without a default price is refused,
+since the budget would count its tokens as $0. The console gets only ids, kinds and numbers. The phrase set and the
+scoring script (format and content checks) live outside the repository. The run of 2026-10-29 (Haiku 5.5, 30 phrases, 5
+runs) decided 99 % right, with the first words of warm calls in 1.7 s without a search and 5.8 s with one, for $0.19.

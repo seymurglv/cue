@@ -13,7 +13,10 @@
 //!   `ask.max_searches` = 2 (none with `--no-search`), thinking as `--thinking` says (the app's default when left out).
 //! - Runs 1..runs, each over all phrases, one call at a time. The very first call is cold (the prompt cache is empty) and
 //!   is left out of the medians; first words are split by whether the model searched.
-//! - Stops as soon as more than `--max-usd` has been spent.
+//! - Stops as soon as more than `--max-usd` has been spent. A model without a default price is refused before any call:
+//!   its tokens would count as $0, and the budget would never stop the run.
+//! - `out.json` is written before the first call (a path that cannot be written stops the run before anything is paid)
+//!   and again after every call, so a run cut short keeps what it paid for.
 //!
 //! The key comes from Credential Manager (`cue-cli keys set anthropic`). The console gets ids, kinds and numbers only;
 //! questions and answers go only to `out.json`.
@@ -241,16 +244,39 @@ fn summarize(calls: &[Call]) -> Summary {
     }
 }
 
+/// The budget counts tokens at the default prices (`refine_cost`, which prices a model it does not know at 0): a model
+/// without one would cost $0 a call, and `--max-usd` would never stop the run.
+fn check_priced(p: &Pricing, model: &str) -> anyhow::Result<()> {
+    if p.claude_price(model).is_none() {
+        let known: Vec<&str> = p.claude.iter().map(|m| m.model.as_str()).collect();
+        bail!("--model {model} has no default price, so --max-usd could not stop the run; priced: {}", known.join(", "));
+    }
+    Ok(())
+}
+
+/// `out.json`: the run's settings, every call so far and their summary, written whole each time.
+fn write_out(args: &Args, stopped: bool, calls: &[Call]) -> anyhow::Result<()> {
+    let thinking = format!("{:?}", args.thinking).to_lowercase();
+    let out = json!({
+        "model": args.model, "runs": args.runs, "search": args.search, "thinking": thinking, "stopped": stopped,
+        "calls": calls, "summary": summarize(calls)
+    });
+    std::fs::write(&args.out, serde_json::to_string_pretty(&out)?).with_context(|| args.out.display().to_string())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = parse_args(&argv)?;
     let phrases = read_phrases(&args.phrases)?;
+    let pricing = Pricing::default();
+    check_priced(&pricing, &args.model)?;
+    // Before the first paid call: a path that cannot be written must not lose what the run pays for.
+    write_out(&args, false, &[])?;
     let key = keys::get(KeyName::Anthropic)?;
     let http = reqwest::Client::new();
     let search = if args.search { ask::search_tool(MAX_SEARCHES) } else { None };
     let today = utc_timestamp(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())[..10].to_owned();
-    let pricing = Pricing::default();
     let (mut calls, mut spent, mut stopped) = (Vec::new(), 0.0, false);
     'runs: for run in 1..=args.runs {
         for p in &phrases {
@@ -288,20 +314,15 @@ async fn main() -> anyhow::Result<()> {
                 c.searches
             );
             calls.push(c);
+            // After every call: a run cut short keeps what it paid for.
+            write_out(&args, false, &calls)?;
         }
     }
-    let summary = summarize(&calls);
-    println!("{}", serde_json::to_string_pretty(&summary)?);
+    println!("{}", serde_json::to_string_pretty(&summarize(&calls))?);
     if stopped {
         println!("stopped: more than ${} spent", args.max_usd);
     }
-    let thinking = format!("{:?}", args.thinking).to_lowercase();
-    let out = json!({
-        "model": args.model, "runs": args.runs, "search": args.search, "thinking": thinking, "stopped": stopped,
-        "calls": calls, "summary": summary
-    });
-    std::fs::write(&args.out, serde_json::to_string_pretty(&out)?).with_context(|| args.out.display().to_string())?;
-    Ok(())
+    write_out(&args, stopped, &calls)
 }
 
 #[cfg(test)]
@@ -395,6 +416,35 @@ mod tests {
         assert_eq!(s.first_words_ms_no_search, Some(1_300), "the cold call is left out");
         assert_eq!(s.first_words_ms_search, Some(6_000));
         assert!((s.cost_usd - 2.0).abs() < 1e-9);
+    }
+
+    /// A model without a price would cost $0 a call, and `--max-usd` would never stop the run.
+    #[test]
+    fn a_model_without_a_price_is_refused() {
+        let p = Pricing::default();
+        assert!(check_priced(&p, "claude-haiku-5-5").is_ok());
+        let e = check_priced(&p, "claude-haiku-9").unwrap_err().to_string();
+        assert!(e.contains("claude-haiku-9") && e.contains("claude-haiku-5-5"), "names the model and the priced ones: {e}");
+    }
+
+    /// `out.json` is whole after every call, and a path that cannot be written fails before anything is paid for.
+    #[test]
+    fn out_json_is_whole_after_every_call() {
+        let dir = std::env::temp_dir().join(format!("cue-ask-compare-out-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("o.json");
+        let args = parse_args(&s(&["p.json", out.to_str().unwrap()])).unwrap();
+        let read = || serde_json::from_str::<Value>(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        write_out(&args, false, &[]).unwrap();
+        let v = read();
+        assert_eq!((v["calls"].as_array().map(Vec::len), &v["summary"]["calls"]), (Some(0), &json!(0)));
+        write_out(&args, true, &[call(Expect::Answer, "answer", None, None, Some(900), 0, true)]).unwrap();
+        let v = read();
+        assert_eq!((v["calls"].as_array().map(Vec::len), &v["stopped"], &v["model"]), (Some(1), &json!(true), &json!("claude-haiku-5-5")));
+        assert_eq!(v["summary"]["cost_usd"], json!(0.25));
+        let nowhere = Args { out: dir.join("missing").join("o.json"), ..args };
+        assert!(write_out(&nowhere, false, &[]).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
