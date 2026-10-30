@@ -24,6 +24,12 @@
 //!   an end or an opening, and at most every 50 ms while words stream (`state::ViewGate`); the flow hears once per
 //!   request that its answer shows (`state::ShownOnce`). The attempt of an answer still printing when a follow-up
 //!   starts waits aside (`answering`) and gets its own row when it ends;
+//! - every result goes to the history (spec 3 §2, `HistoryLog`): a dictation or a translation when its text is
+//!   committed, an "Ask" turn when it ends; never in the way of the result: a disk error is one log line, and nothing
+//!   is written while the history is off. The new entry goes to the main window only;
+//! - the main window reads and changes the settings through the core (`CoreEvent::Settings`): the core's copy takes the
+//!   change, the whole file is written, and what depends on it follows at once (the translation pair, the interface
+//!   language, the history's period);
 //! - the log gets events, per-stage latencies and error codes; no text, no audio, no keys. Never `Effect` or `Input`
 //!   with `{:?}`: their `Debug` prints text.
 mod ask;
@@ -34,15 +40,17 @@ mod state;
 mod tasks;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cue_core::ask::{AnswerPlace, AskContext, MAX_SELECTION_CHARS, SelectionKind};
+use cue_core::ask::{AnswerPlace, AskContext, MAX_SELECTION_CHARS, SelectionKind, TurnState};
 use cue_core::audio::{Silence, SilenceDetector};
 use cue_core::flow::{DictationId, Effect, Flow, InsertOutcome, Input, Outcome, PasteHow, SttError, TimerKind};
+use cue_core::history;
 use cue_core::refine::RefineContext;
-use cue_core::settings::{self, DropPosition, Settings};
+use cue_core::settings::{self, DropPosition, Keep, SettingChange, Settings};
 use cue_core::translate;
 use cue_core::ui::{Mode, TrayKind, UiAction, UiPhase, UiState};
 use cue_core::usage::{self, SttPath, UsageRecord};
@@ -66,8 +74,8 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
 use crate::card_window::Card;
-use crate::ipc::{CardPlaceView, Ui};
-use crate::lang;
+use crate::ipc::{CardPlaceView, EntryView, SettingsView, Ui};
+use crate::lang::{self, Lang};
 use crate::paths::Paths;
 use crate::trayicon::TrayLook;
 use attempt::{Attempt, UsageLog, log_finished, needs_row, warmup_record};
@@ -129,6 +137,20 @@ pub enum CoreEvent {
     Wake,
     /// The Drop was dragged to a new place: saved in settings.json.
     DropMoved(DropPosition),
+    /// The main window reads the settings or changes one (spec 3 §3). The answer is always the settings as the core
+    /// holds them after the command.
+    #[expect(dead_code, reason = "the main window's commands send it")]
+    Settings { cmd: SettingsCmd, reply: tokio::sync::oneshot::Sender<SettingsView> },
+    /// "Clear history" in the main window: every day of the history goes.
+    #[expect(dead_code, reason = "the main window's commands send it")]
+    HistoryClear,
+}
+
+/// What the main window wants of the settings: to read them, or to change one.
+#[expect(dead_code, reason = "the main window's commands send it")]
+pub enum SettingsCmd {
+    Get,
+    Set(SettingChange),
 }
 
 pub fn input_of(ev: HotkeyEvent) -> Input {
@@ -162,10 +184,14 @@ pub struct Runtime {
     /// The settings were read without error. Otherwise we run with defaults and do not overwrite the file for the
     /// whole session: the user's corrupt or unreadable settings.json must not be replaced with defaults.
     can_save_settings: bool,
-    /// The other language of the translation pair (`translate::resolve_home`), decided once at startup like the
-    /// interface language. `None`: no language other than the target was found, and target speech is only cleaned up.
+    /// The other language of the translation pair (`translate_pair`), decided at startup and again when the main window
+    /// changes the target. `None`: no language other than the target was found, and target speech is only cleaned up.
     translate_home: Option<&'static str>,
+    /// The interface language the tray menu, the Drop and the card speak now (decided at startup, changed from the main
+    /// window).
+    lang: Lang,
     paths: Paths,
+    history: HistoryLog,
     /// One client for the whole app (refine, batch transcription, warm-up): a shared connection pool.
     http: reqwest::Client,
     focus: Arc<FocusWorker>,
@@ -228,6 +254,7 @@ impl Runtime {
         card: Card,
         settings: Settings,
         can_save_settings: bool,
+        lang: Lang,
         paths: Paths,
         tx: UnboundedSender<CoreEvent>,
     ) -> Self {
@@ -239,15 +266,8 @@ impl Runtime {
                 None
             }
         };
-        let target = settings.translate.target();
-        let translate_home = translate::resolve_home(
-            settings.translate.home.as_deref(),
-            lang::windows_language_code().as_deref(),
-            &settings.stt.language_hints,
-            target,
-        );
-        // Language codes only, no user text.
-        tracing::info!(to = target, home = translate_home.unwrap_or("none"), "translation pair");
+        let translate_home = pair_now(&settings);
+        let history = HistoryLog::new(paths.history.clone());
         // Alt picks "Ask" only when it is on (spec 2 §9); the hook reads the switch on every key.
         hook::ASK_ENABLED.store(settings.ask.enabled(), Ordering::Relaxed);
         tracing::info!(ask = settings.ask.enabled(), web_search = settings.ask.web_search(), "ask");
@@ -260,7 +280,9 @@ impl Runtime {
             settings,
             can_save_settings,
             translate_home,
+            lang,
             paths,
+            history,
             http: reqwest::Client::new(),
             focus: Arc::new(FocusWorker::spawn()),
             insert,
@@ -303,6 +325,8 @@ impl Runtime {
     /// so `run` spins on its own thread (`block_on`), not in the shared tokio pool.
     pub async fn run(mut self, mut rx: UnboundedReceiver<CoreEvent>) {
         self.sync_hook_flags();
+        // The days the history no longer keeps go at startup, before any new entry.
+        self.history.prune(self.settings.history.keep, &local_today());
         while let Some(ev) = rx.recv().await {
             // A crash in one event does not stop the core; the panic hook logs where it happened.
             if catch_unwind(AssertUnwindSafe(|| self.on_event(ev))).is_err() {
@@ -474,6 +498,46 @@ impl Runtime {
                 self.settings.drop.position = place;
                 self.save_settings();
             }
+            CoreEvent::Settings { cmd, reply } => {
+                if let SettingsCmd::Set(change) = cmd {
+                    self.change_setting(change);
+                }
+                // The window may have closed meanwhile.
+                let _ = reply.send(SettingsView::of(&self.settings, self.lang, self.can_save_settings));
+            }
+            CoreEvent::HistoryClear => self.history.clear(),
+        }
+    }
+
+    /// A setting changed in the main window (spec 3 §3): the core's copy takes it and the file is written
+    /// (`apply_setting`), then what depends on it follows at once — the translation pair, the interface language
+    /// (decision 5), the days the history keeps. The microphone is read when the next recording opens it. The log gets
+    /// codes and states, never a device name.
+    fn change_setting(&mut self, change: SettingChange) {
+        let s = &self.settings;
+        let (target, language, keep) = (s.translate.target(), s.ui.language, s.history.keep);
+        let device = s.audio.device.clone();
+        if !apply_setting(&mut self.settings, change, &self.paths.settings, self.can_save_settings) {
+            return;
+        }
+        let s = &self.settings;
+        if s.translate.target() != target {
+            self.translate_home = pair_now(s);
+        }
+        if s.ui.language != language {
+            let lang = Lang::resolve(s.ui.language, Lang::detect);
+            tracing::info!(lang = lang.code(), setting = ?s.ui.language, "interface language");
+            if lang != self.lang {
+                self.lang = lang;
+                self.ui.relang(lang);
+            }
+        }
+        if s.history.keep != keep {
+            tracing::info!(keep = s.history.keep.code(), "history: period changed");
+            self.history.prune(s.history.keep, &local_today());
+        }
+        if s.audio.device != device {
+            tracing::info!(pinned = s.audio.device.is_some(), "microphone setting changed");
         }
     }
 
@@ -1223,6 +1287,8 @@ impl Runtime {
         let (window, terminal) = (c.taken.window, c.taken.terminal);
         let heard = c.end(&result, show_write, |how, text| write_may_paste(window, terminal, how, text));
         let opened = c.opened;
+        // The turn that ended goes to the history once the flow has heard of it (decision 2).
+        let entry = ask_entry(heard, c, self.history.stamp(local_time()));
         // Kinds and counts only.
         tracing::info!(heard = ?heard, searches = result.usage.web_searches, "ask: done");
         if heard.shows() {
@@ -1237,6 +1303,7 @@ impl Runtime {
             ask::Heard::Failed(error) => Input::AskFailed { id, error },
         };
         self.feed(input);
+        self.add_to_history(entry);
     }
 
     /// Where the answer shows (spec 2 §7): the card at the selection when the selection is on screen and there is room for a
@@ -1399,15 +1466,8 @@ impl Runtime {
         self.save_settings();
     }
 
-    /// The whole settings file at once, so the hint counter and the Drop's place never overwrite each other. Not when
-    /// the file could not be read at startup: the user's file stays as it is.
     fn save_settings(&self) {
-        if !self.can_save_settings {
-            return;
-        }
-        if let Err(e) = settings::save(&self.settings, &self.paths.settings) {
-            tracing::warn!("settings not saved: {e}");
-        }
+        write_settings(&self.settings, &self.paths.settings, self.can_save_settings);
     }
 
     /// The tray card button arrives without a kind: it acts on the last tray card sent to the window (a click that
@@ -1455,7 +1515,13 @@ impl Runtime {
             return;
         }
         let committed = match files::last_files(outcome) {
-            LastFiles::Commit => self.commit_last(id),
+            LastFiles::Commit => {
+                // The history takes the text before `commit_last` moves it out (decision 2).
+                let entry = dictation_entry(&self.attempt, self.final_text.as_ref(), self.history.stamp(local_time()));
+                let committed = self.commit_last(id);
+                self.add_to_history(entry);
+                committed
+            }
             LastFiles::KeepForRetry => false,
             LastFiles::Discard => {
                 if let Err(e) = files::discard(&self.paths) {
@@ -1494,6 +1560,15 @@ impl Runtime {
         written
     }
 
+    /// A result goes to the history (decision 2) and, once written, to the main window if it is open. Never in the way
+    /// of the result itself: nothing is written while the history is off, and a disk error is one log line, no text.
+    fn add_to_history(&mut self, entry: Option<history::Entry>) {
+        let Some(entry) = entry else { return };
+        if self.history.write(self.settings.history.keep, &entry) {
+            self.ui.history_added(&EntryView::from(&entry));
+        }
+    }
+
     fn write_usage(&mut self, outcome: Outcome, ts: &str) {
         let rec = self.attempt.record(outcome, ts.to_owned(), &self.settings);
         self.append_usage(rec);
@@ -1527,6 +1602,141 @@ impl Runtime {
             tracing::warn!("bench recording not saved: {e}");
         }
     }
+}
+
+/// When an entry came and its id (`history::Entry`): `ts` is the local time, `YYYY-MM-DDTHH:MM:SS.mmm`, and the id is
+/// `ts-n`, `n` counting this run's entries, so two entries of one millisecond still have ids of their own.
+struct Stamp {
+    ts: String,
+    id: String,
+}
+
+/// The history's writer (spec 3 §2): only the core writes. It counts this run's entries for their ids and remembers
+/// the day it last deleted old days for, so the first entry of a new day deletes them first.
+struct HistoryLog {
+    dir: PathBuf,
+    count: u64,
+    pruned: Option<String>,
+}
+
+impl HistoryLog {
+    fn new(dir: PathBuf) -> Self {
+        Self { dir, count: 0, pruned: None }
+    }
+
+    /// The time and the id of the next entry, at the local time `ts`.
+    fn stamp(&mut self, ts: String) -> Stamp {
+        self.count += 1;
+        Stamp { id: format!("{ts}-{}", self.count), ts }
+    }
+
+    /// Deletes the days `keep` no longer keeps, counted back from `today` (`YYYY-MM-DD`): at startup, on the first
+    /// entry of a new day and when the period changes. An error is one log line.
+    fn prune(&mut self, keep: Keep, today: &str) {
+        self.pruned = Some(today.to_owned());
+        match history::prune(&self.dir, keep, today) {
+            Ok(0) => {}
+            Ok(days) => tracing::info!(days, keep = keep.code(), "history: old days deleted"),
+            Err(e) => tracing::warn!("history: old days not deleted: {e}"),
+        }
+    }
+
+    /// Writes `entry` while the history is on (`keep`); `true` if it was written. Nothing at all while it is off. A
+    /// disk error is one log line, without text.
+    fn write(&mut self, keep: Keep, entry: &history::Entry) -> bool {
+        if keep == Keep::Off {
+            return false;
+        }
+        let day = entry.ts.get(..10).unwrap_or_default();
+        if self.pruned.as_deref() != Some(day) {
+            self.prune(keep, day);
+        }
+        match history::append(&self.dir, entry) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("history: entry not written: {e}");
+                false
+            }
+        }
+    }
+
+    /// "Clear history": every day goes.
+    fn clear(&self) {
+        match history::clear(&self.dir) {
+            Ok(()) => tracing::info!("history cleared"),
+            Err(e) => tracing::warn!("history: not cleared: {e}"),
+        }
+    }
+}
+
+/// The history entry of a dictation or a translation that gave its text (decision 2): the text `commit_last` takes for
+/// the attempt `a` (`final_text`) — the one pasted or left in the clipboard — its mode, and the app it was recorded in
+/// (empty when not known). An "Ask" attempt writes none here: its turn was written when it ended (`ask_entry`), and an
+/// answer pasted with its button is not a new result.
+fn dictation_entry(a: &Attempt, final_text: Option<&(DictationId, String)>, at: Stamp) -> Option<history::Entry> {
+    let mode = match a.mode {
+        Mode::Dictate => history::Mode::Dictation,
+        Mode::Translate => history::Mode::Translation,
+        Mode::Ask => return None,
+    };
+    let (_, text) = final_text.filter(|(id, _)| *id == a.id)?;
+    let (Stamp { ts, id }, app) = (at, stored_app(&a.app));
+    Some(history::Entry { id, ts, mode, app, text: text.clone(), question: None })
+}
+
+/// The history entry of an "Ask" turn that ended (decision 2): the question, and the text the model wrote for the field
+/// or the answer as a paste puts it in, without its Markdown (`Conversation::paste_text`), with the app the question
+/// was asked in. A refusal, a failure and an answer without words write none.
+fn ask_entry(heard: ask::Heard, c: &ask::Conversation, at: Stamp) -> Option<history::Entry> {
+    if !matches!(heard, ask::Heard::Answered | ask::Heard::Write(_)) {
+        return None;
+    }
+    // A refusal is heard as an answer too: only a turn that is done has something to keep.
+    let turn = c.view.turns.last().filter(|t| t.state == TurnState::Done)?;
+    let text = c.paste_text()?;
+    let (Stamp { ts, id }, app) = (at, stored_app(&c.taken.ctx.app));
+    Some(history::Entry { id, ts, mode: history::Mode::Ask, app, text, question: Some(turn.question.clone()) })
+}
+
+/// One change from the main window (spec 3 §3) on the core's copy of the settings; `true` if a value changed. Only then
+/// is the whole file written, and never when settings.json could not be read at startup (`can_save`): the change still
+/// holds until CUE quits. The same value again, or one the settings refuse, changes and writes nothing.
+fn apply_setting(settings: &mut Settings, change: SettingChange, path: &Path, can_save: bool) -> bool {
+    let changed = settings.apply(change);
+    if changed {
+        write_settings(settings, path, can_save);
+    }
+    changed
+}
+
+/// The whole settings file at once, so the hint counter, the Drop's place and the main window's changes never
+/// overwrite each other. Not when the file could not be read at startup: the user's file stays as it is.
+fn write_settings(settings: &Settings, path: &Path, can_save: bool) {
+    if !can_save {
+        return;
+    }
+    if let Err(e) = settings::save(settings, path) {
+        tracing::warn!("settings not saved: {e}");
+    }
+}
+
+/// The other language of the translation pair (spec 2 §9): `translate.home`, else the Windows display language
+/// (`windows`, a locale name), else a language hint — never the target itself. `None`: no other language was found.
+fn translate_pair(s: &Settings, windows: Option<&str>) -> Option<&'static str> {
+    translate::resolve_home(s.translate.home.as_deref(), windows, &s.stt.language_hints, s.translate.target())
+}
+
+/// The translation pair of the settings as they are now, with this Windows' display language. The log gets the codes.
+fn pair_now(s: &Settings) -> Option<&'static str> {
+    let home = translate_pair(s, lang::windows_language_code().as_deref());
+    // Language codes only, no user text.
+    tracing::info!(to = s.translate.target(), home = home.unwrap_or("none"), "translation pair");
+    home
+}
+
+/// The app as the history keeps it: empty when not known.
+fn stored_app(app: &str) -> String {
+    known_app(app).unwrap_or_default().to_owned()
 }
 
 /// What refine does with the dictation. A translation goes the way the speech language says (spec 2 §5,
@@ -1597,10 +1807,21 @@ fn write_may_paste(window: Option<WindowRef>, terminal: bool, how: PasteHow, tex
 }
 
 /// Today's local date, `YYYY-MM-DD` (spec 2 §6.1): it grounds searches, so a user east of UTC must not get yesterday.
+/// The history's days are local days too.
 fn local_today() -> String {
+    let mut now = local_time();
+    now.truncate(10);
+    now
+}
+
+/// The local time now, `YYYY-MM-DDTHH:MM:SS.mmm`: the time of a history entry, whose date names its day file.
+fn local_time() -> String {
     // SAFETY: no arguments; returns a SYSTEMTIME by value.
     let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
-    format!("{:04}-{:02}-{:02}", t.wYear, t.wMonth, t.wDay)
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}",
+        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds
+    )
 }
 
 /// The rows an open answer shows for a follow-up: (listening, missed). Listening while it records (spec 2 §7); missed
@@ -1663,6 +1884,7 @@ fn soniox_key() -> Result<String, EngineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cue_engines::ask::{AskEnd, AskFailure, AskResult, AskUsage, Step};
 
     #[test]
     fn a_fixed_speech_language_is_the_only_hint_in_translation() {
@@ -1711,6 +1933,272 @@ mod tests {
         let d = local_today();
         let shape = d.char_indices().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() });
         assert!(d.len() == 10 && shape, "{d}");
+    }
+
+    /// The time of a history entry: the local date, then the time to the millisecond.
+    #[test]
+    fn an_entry_time_is_local_to_the_millisecond() {
+        let t = local_time();
+        let separator = |i: usize| match i {
+            4 | 7 => Some('-'),
+            10 => Some('T'),
+            13 | 16 => Some(':'),
+            19 => Some('.'),
+            _ => None,
+        };
+        let shape = t.char_indices().all(|(i, c)| separator(i).map_or(c.is_ascii_digit(), |s| c == s));
+        assert!(t.len() == 23 && shape, "{t}");
+        assert!(history::date_minus(&t[..10], 0).is_some(), "a real date: {t}");
+    }
+
+    /// A fresh directory for one test; a leftover of an earlier run is removed first.
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cue-test-{}-runtime-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn at(ts: &str) -> Stamp {
+        HistoryLog::new(PathBuf::new()).stamp(ts.into())
+    }
+
+    fn attempt(mode: Mode, app: &str) -> Attempt {
+        let mut a = Attempt::new(DictationId(7));
+        a.mode = mode;
+        a.app = app.into();
+        a
+    }
+
+    #[test]
+    fn stamps_count_this_runs_entries() {
+        let mut log = HistoryLog::new(PathBuf::new());
+        let first = log.stamp("2026-10-31T07:30:00.123".into());
+        let second = log.stamp("2026-10-31T07:30:00.123".into());
+        assert_eq!((first.ts.as_str(), first.id.as_str()), ("2026-10-31T07:30:00.123", "2026-10-31T07:30:00.123-1"));
+        assert_eq!(second.id, "2026-10-31T07:30:00.123-2", "the same millisecond, an id of its own");
+    }
+
+    /// The text `commit_last` takes — the one given to the user, line breaks and edges as they are — with the attempt's
+    /// mode and app.
+    #[test]
+    fn dictation_entry_takes_the_committed_text_mode_and_app() {
+        let a = attempt(Mode::Dictate, "Notepad");
+        let committed = (DictationId(7), "Hello, world.\nSecond line ".to_owned());
+        let e = dictation_entry(&a, Some(&committed), at("2026-10-31T07:30:00.123")).unwrap();
+        let expected = history::Entry {
+            id: "2026-10-31T07:30:00.123-1".into(),
+            ts: "2026-10-31T07:30:00.123".into(),
+            mode: history::Mode::Dictation,
+            app: "Notepad".into(),
+            text: "Hello, world.\nSecond line ".into(),
+            question: None,
+        };
+        assert_eq!(e, expected);
+        // Another attempt's text, or none, is not this attempt's result.
+        let other = (DictationId(6), "earlier".to_owned());
+        assert_eq!(dictation_entry(&a, Some(&other), at("2026-10-31T07:30:00.123")), None);
+        assert_eq!(dictation_entry(&a, None, at("2026-10-31T07:30:00.123")), None);
+        // A write of "Ask" pasted at its end was written when its turn ended.
+        let asked = attempt(Mode::Ask, "Notepad");
+        assert_eq!(dictation_entry(&asked, Some(&committed), at("2026-10-31T07:30:00.123")), None);
+    }
+
+    #[test]
+    fn translation_entry_is_marked_translation() {
+        let a = attempt(Mode::Translate, "Telegram Desktop");
+        let committed = (DictationId(7), "See you on Friday.".to_owned());
+        let e = dictation_entry(&a, Some(&committed), at("2026-10-31T07:30:00.123")).unwrap();
+        assert_eq!(e.mode, history::Mode::Translation);
+        assert_eq!((e.app.as_str(), e.text.as_str(), e.question), ("Telegram Desktop", "See you on Friday.", None));
+    }
+
+    fn asked_in(app: &str) -> ask::Conversation {
+        let ctx = AskContext { app: app.into(), before_cursor: None, selection: None, today: "2026-10-31".into() };
+        ask::Conversation::new(ask::Taken { ctx, ..Default::default() })
+    }
+
+    fn ended(end: AskEnd) -> AskResult {
+        let content = vec![serde_json::json!({ "type": "text", "text": "x" })];
+        AskResult { end, content, usage: AskUsage::default(), container: None }
+    }
+
+    /// A question and its answer as streamed, then ended with `end`; `may_paste` — the window asked in is in front.
+    fn turn(c: &mut ask::Conversation, question: &str, words: &str, end: AskEnd, may_paste: bool) -> ask::Heard {
+        c.ask(question);
+        c.step(Step::TextStart);
+        c.step(Step::Text(words.into()));
+        c.end(&ended(end), false, |_, _| may_paste)
+    }
+
+    #[test]
+    fn ask_turn_entry_has_the_question_and_the_plain_answer() {
+        let mut c = asked_in("Telegram Desktop");
+        let heard = turn(&mut c, "What is CUE?", "**CUE** is a dictation app.", AskEnd::Answer, true);
+        assert_eq!(heard, ask::Heard::Answered);
+        let e = ask_entry(heard, &c, at("2026-10-31T07:30:00.123")).unwrap();
+        assert_eq!(e.mode, history::Mode::Ask);
+        assert_eq!(e.question.as_deref(), Some("What is CUE?"));
+        assert_eq!(e.text, "CUE is a dictation app.", "as a paste of the answer puts it in");
+        assert_eq!(e.app, "Telegram Desktop");
+        assert_eq!((e.id.as_str(), e.ts.as_str()), ("2026-10-31T07:30:00.123-1", "2026-10-31T07:30:00.123"));
+        // A follow-up is an entry of its own, with its own question.
+        let heard = turn(&mut c, "And who makes it?", "One person.", AskEnd::Answer, true);
+        let e = ask_entry(heard, &c, at("2026-10-31T07:31:00.000")).unwrap();
+        assert_eq!((e.question.as_deref(), e.text.as_str()), (Some("And who makes it?"), "One person."));
+    }
+
+    #[test]
+    fn ask_write_entry_has_the_written_text() {
+        let write = || AskEnd::Write { text: "I will send it on Thursday.".into(), replace: false };
+        let mut c = asked_in("Notepad");
+        let heard = turn(&mut c, "write that I will send it on Thursday", "", write(), true);
+        assert!(matches!(heard, ask::Heard::Write(_)), "{heard:?}");
+        let e = ask_entry(heard, &c, at("2026-10-31T07:30:00.123")).unwrap();
+        assert_eq!(e.text, "I will send it on Thursday.");
+        assert_eq!(e.question.as_deref(), Some("write that I will send it on Thursday"));
+        // A write shown instead (the window asked in is not in front): the same text, as it was written.
+        let mut c = asked_in("Notepad");
+        let heard = turn(&mut c, "write that I will send it on Thursday", "", write(), false);
+        assert_eq!(heard, ask::Heard::Answered);
+        assert_eq!(ask_entry(heard, &c, at("2026-10-31T07:30:00.123")).unwrap().text, "I will send it on Thursday.");
+    }
+
+    #[test]
+    fn refused_or_failed_turn_writes_no_entry() {
+        let mut c = asked_in("Notepad");
+        let heard = turn(&mut c, "q", "Partial words", AskEnd::Refused, true);
+        assert_eq!(heard, ask::Heard::Answered, "the flow hears a refusal as an answer");
+        assert_eq!(ask_entry(heard, &c, at("2026-10-31T07:30:00.123")), None);
+
+        let mut c = asked_in("Notepad");
+        let failed = AskEnd::Failed(AskFailure::Network);
+        let heard = turn(&mut c, "q", "Words already shown", failed, true);
+        assert!(matches!(heard, ask::Heard::Failed(_)), "{heard:?}");
+        assert_eq!(ask_entry(heard, &c, at("2026-10-31T07:30:00.123")), None);
+
+        // An answer without words has nothing to keep.
+        let mut c = asked_in("Notepad");
+        let heard = turn(&mut c, "q", "  ", AskEnd::Answer, true);
+        assert_eq!(ask_entry(heard, &c, at("2026-10-31T07:30:00.123")), None);
+    }
+
+    #[test]
+    fn unknown_app_is_stored_empty() {
+        use cue_platform_win::focus::UNKNOWN_APP;
+        let committed = (DictationId(7), "Hello.".to_owned());
+        for app in [UNKNOWN_APP, "", "  "] {
+            let dictation = dictation_entry(&attempt(Mode::Dictate, app), Some(&committed), at("2026-10-31T07:30:00.123"));
+            assert_eq!(dictation.unwrap().app, "", "{app:?}");
+            let mut c = asked_in(app);
+            let heard = turn(&mut c, "q", "An answer.", AskEnd::Answer, true);
+            assert_eq!(ask_entry(heard, &c, at("2026-10-31T07:30:00.123")).unwrap().app, "", "{app:?}");
+        }
+    }
+
+    fn dictated(ts: &str, text: &str) -> history::Entry {
+        let a = attempt(Mode::Dictate, "Notepad");
+        dictation_entry(&a, Some(&(DictationId(7), text.to_owned())), at(ts)).unwrap()
+    }
+
+    #[test]
+    fn keep_off_writes_nothing() {
+        let dir = tmp("keep-off");
+        let mut log = HistoryLog::new(dir.clone());
+        let e = dictated("2026-10-31T07:30:00.123", "Hello.");
+        assert!(!log.write(Keep::Off, &e));
+        assert!(!dir.exists(), "not even the directory");
+        assert!(log.write(Keep::Month, &e));
+        assert_eq!(history::find(&dir, &e.id), Some(e));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Old days go at startup and with the first entry of each new day, not with every entry.
+    #[test]
+    fn the_first_entry_of_a_new_day_deletes_old_days() {
+        let dir = tmp("new-day");
+        for ts in ["2026-10-22T09:00:00.000", "2026-10-23T09:00:00.000"] {
+            history::append(&dir, &dictated(ts, "old")).unwrap();
+        }
+        let mut log = HistoryLog::new(dir.clone());
+        log.prune(Keep::Week, "2026-10-30");
+        let days = |dir: &Path| -> Vec<String> {
+            history::older(dir, "2026-11-01", 10).days.into_iter().map(|d| d.date).collect()
+        };
+        assert_eq!(days(&dir), ["2026-10-23"], "a week back from the 30th keeps the 23rd");
+        assert!(log.write(Keep::Week, &dictated("2026-10-30T10:00:00.000", "same day")));
+        assert_eq!(days(&dir), ["2026-10-30", "2026-10-23"]);
+        assert!(log.write(Keep::Week, &dictated("2026-10-31T00:00:01.000", "a new day")));
+        assert_eq!(days(&dir), ["2026-10-31", "2026-10-30"], "a week back from the 31st no longer keeps the 23rd");
+        // Within the day nothing more is deleted.
+        history::append(&dir, &dictated("2026-10-01T09:00:00.000", "put back")).unwrap();
+        assert!(log.write(Keep::Week, &dictated("2026-10-31T08:00:00.000", "later that day")));
+        assert_eq!(days(&dir), ["2026-10-31", "2026-10-30", "2026-10-01"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn target_change_recomputes_the_translation_pair() {
+        let path = tmp("pair").join("settings.json");
+        let windows = Some("ru-RU");
+        let mut s = Settings::default();
+        assert_eq!((s.translate.target(), translate_pair(&s, windows)), ("en", Some("ru")));
+        assert!(apply_setting(&mut s, SettingChange::TranslateTarget("de".into()), &path, true));
+        assert_eq!((s.translate.target(), translate_pair(&s, windows)), ("de", Some("ru")));
+        // The target is the Windows language now: the pair takes the first other language hint.
+        assert!(apply_setting(&mut s, SettingChange::TranslateTarget("ru".into()), &path, true));
+        assert_eq!((s.translate.target(), translate_pair(&s, windows)), ("ru", Some("en")));
+        let home = translate_pair(&s, windows);
+        assert_eq!(job_for(Mode::Translate, None, Some("en"), s.translate.target(), home), Job::Translate("ru"));
+        assert_eq!(job_for(Mode::Translate, None, Some("ru"), s.translate.target(), home), Job::Translate("en"));
+        // A home language in the settings comes first; no Windows language: the hints.
+        s.translate.home = Some("uk".into());
+        assert_eq!(translate_pair(&s, windows), Some("uk"));
+        s.translate.home = None;
+        assert_eq!(translate_pair(&s, None), Some("en"));
+        assert_eq!(settings::load(&path).unwrap().translate.target(), "ru", "written at once");
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn unchanged_setting_is_not_saved() {
+        let path = tmp("unchanged").join("settings.json");
+        let mut s = Settings::default();
+        let same_or_refused = [
+            SettingChange::HistoryKeep(Keep::Month),
+            SettingChange::TranslateTarget("en".into()),
+            SettingChange::TranslateTarget(" EN ".into()),
+            SettingChange::UiLanguage(settings::UiLanguage::Auto),
+            SettingChange::MicDevice(None),
+            SettingChange::MicDevice(Some("   ".into())),
+            // Refused: a language Soniox does not know, a name no microphone has.
+            SettingChange::TranslateTarget("xx".into()),
+            SettingChange::MicDevice(Some("m".repeat(201))),
+        ];
+        for change in same_or_refused {
+            let shown = format!("{change:?}");
+            assert!(!apply_setting(&mut s, change, &path, true), "{shown}");
+        }
+        assert_eq!(s, Settings::default());
+        assert!(!path.exists(), "nothing written");
+        assert!(apply_setting(&mut s, SettingChange::HistoryKeep(Keep::Week), &path, true));
+        assert_eq!(settings::load(&path).unwrap().history.keep, Keep::Week);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    /// settings.json that could not be read at startup is never replaced: the changes hold until CUE quits.
+    #[test]
+    fn unreadable_settings_apply_but_never_save() {
+        let dir = tmp("unreadable");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        let mut s = Settings::default();
+        assert!(apply_setting(&mut s, SettingChange::HistoryKeep(Keep::Week), &path, false));
+        assert!(apply_setting(&mut s, SettingChange::TranslateTarget("de".into()), &path, false));
+        assert_eq!((s.history.keep, s.translate.target()), (Keep::Week, "de"), "the changes hold");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json", "the user's file stays as it is");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no other file either");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// The listening row while a follow-up records, the missed row while it could not be transcribed (decision 7); none

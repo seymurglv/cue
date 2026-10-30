@@ -36,7 +36,9 @@ function wake() {
   requestAnimationFrame(loop);
 }
 
-const lang = pickLang((window as any).__CUE_LANG__);
+// The core sets the language in an initialization script; when the interface language changes while CUE runs, it loads
+// the page again with the language in its address, which wins over the script's value of startup.
+const lang = pickLang(new URLSearchParams(location.search).get('lang') ?? (window as any).__CUE_LANG__);
 document.documentElement.lang = lang;
 const page = new CardPage(
   document.getElementById('card')!,

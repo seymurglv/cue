@@ -8,10 +8,11 @@ use std::time::{Duration, Instant};
 use cue_core::settings::DropPosition;
 use cue_platform_win::dropwin::{self, GuardStep, Seen, ZGuard};
 use cue_platform_win::placement::{self, DropMetrics, Monitor, PxRect};
-use tauri::{AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use windows::Win32::Foundation::HWND;
 
 use crate::ipc::Ui;
+use crate::lang::Lang;
 
 pub const DROP_LABEL: &str = "drop";
 /// The Drop's height in every state and the diameter of its circle, logical px. The same value as `--h` in
@@ -111,7 +112,7 @@ pub fn drop_drag(phase: DragPhase, placer: tauri::State<'_, Placer>) {
     let _ = placer.0.send(phase);
 }
 
-pub fn create(app: &AppHandle, lang: crate::lang::Lang, place: DropPosition) -> anyhow::Result<WebviewWindow> {
+pub fn create(app: &AppHandle, lang: Lang, place: DropPosition) -> anyhow::Result<WebviewWindow> {
     let (w, h) = window_size(place);
     let win = WebviewWindowBuilder::new(app, DROP_LABEL, WebviewUrl::App("drop.html".into()))
         .initialization_script(lang.init_script())
@@ -141,6 +142,24 @@ pub fn create(app: &AppHandle, lang: crate::lang::Lang, place: DropPosition) -> 
     win.set_ignore_cursor_events(true)?;
     win.show()?;
     Ok(win)
+}
+
+/// Loads the Drop's page again in another interface language (decision 5). Its address gets the language and the place
+/// the Drop has now, which the page reads before the initialization scripts' values of startup: the first frame is laid
+/// out for the place it is in. Once loaded, the page says it is ready (`drop_ready`) and gets the core's state back.
+/// Main thread.
+pub fn reload(app: &AppHandle, lang: Lang, place: DropPosition) {
+    let Some(win) = app.get_webview_window(DROP_LABEL) else { return };
+    let url = match win.url() {
+        Ok(url) => crate::lang::with_param(crate::lang::lang_url(url, lang.code()), "place", place.code()),
+        Err(e) => {
+            tracing::warn!("Drop window: page address not read: {e}");
+            return;
+        }
+    };
+    if let Err(e) = win.navigate(url) {
+        tracing::warn!("Drop window: page not loaded again: {e}");
+    }
 }
 
 /// Initialization script for the Drop window: the place before the page's own scripts run, so the first frame is

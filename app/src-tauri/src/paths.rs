@@ -1,6 +1,6 @@
 //! Where CUE keeps its data: settings in `%APPDATA%\CUE`, everything else in `%LOCALAPPDATA%\CUE`.
-//! Both folders, settings.json, usage.csv and the bench folder come from the shared helper `cue_core::paths`, which
-//! `cue-cli usage` and `cue-bench` use too.
+//! Both folders, settings.json, usage.csv, the history and the bench folder come from the shared helper
+//! `cue_core::paths`, which `cue-cli usage` and `cue-bench` use too.
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -9,6 +9,8 @@ pub struct Paths {
     pub last_dir: PathBuf,
     pub logs: PathBuf,
     pub usage: PathBuf,
+    /// The history's day files (spec 3 §2): only the core writes them, the main window reads them.
+    pub history: PathBuf,
     pub bench_recordings: PathBuf,
 }
 
@@ -20,6 +22,7 @@ impl Paths {
             last_dir: local_dir.join("last"),
             logs: local_dir.join("logs"),
             usage: cue_core::paths::usage_csv(local),
+            history: cue_core::paths::history_dir(local),
             bench_recordings: cue_core::paths::bench_dir(local).join("recordings"),
         }
     }
@@ -59,6 +62,7 @@ mod tests {
         assert_eq!(p.last_wav(), Path::new(r"C:\U\AppData\Local\CUE\last\audio.wav"));
         assert_eq!(p.logs, Path::new(r"C:\U\AppData\Local\CUE\logs"));
         assert_eq!(p.usage, Path::new(r"C:\U\AppData\Local\CUE\usage.csv"));
+        assert_eq!(p.history, Path::new(r"C:\U\AppData\Local\CUE\history"));
         assert_eq!(p.bench_recordings, Path::new(r"C:\U\AppData\Local\CUE\bench\recordings"));
     }
 

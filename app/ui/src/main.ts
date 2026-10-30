@@ -38,17 +38,21 @@ function wake() {
   requestAnimationFrame(loop);
 }
 
-// The core sets the language in an initialization script, before this module runs.
-const lang = pickLang((window as any).__CUE_LANG__);
+// The core sets the language in an initialization script, before this module runs. When the interface language changes
+// while CUE runs, the core loads the page again with the language and the place in its address: they win over the
+// script's values, which stay those of startup.
+const params = new URLSearchParams(location.search);
+const lang = pickLang(params.get('lang') ?? (window as any).__CUE_LANG__);
 document.documentElement.lang = lang;
 // The place comes the same way as the language, before the Drop is built; later changes come as cue://place.
+const place: unknown = params.get('place') ?? (window as any).__CUE_PLACE__;
 const ctl = new DropController(document.getElementById('stage')!, {
   send: (action: UiAction) => void call('drop_action', { action }),
   rects: (rects) => void call('drop_hit_rects', { rects }),
   wake,
   drag: (phase: DragPhase) => void call('drop_drag', { phase }),
   source: (n: number) => void call('answer_source', { n }),
-}, lang, (window as any).__CUE_PLACE__);
+}, lang, place);
 wake();
 
 /** Subscribe to every core event first, then drop_ready: otherwise the first state could arrive before the subscriptions. */

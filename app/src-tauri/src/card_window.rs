@@ -10,10 +10,11 @@ use std::time::{Duration, Instant};
 use cue_platform_win::cardplace::{self, CARD};
 use cue_platform_win::dropwin;
 use cue_platform_win::placement::PxRect;
-use tauri::{AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use windows::Win32::Foundation::HWND;
 
 use crate::drop_window::{HitRect, HitState};
+use crate::lang::Lang;
 
 pub const CARD_LABEL: &str = "card";
 /// How long a card moved to a monitor of another scale waits for Windows to give it its size there.
@@ -31,7 +32,7 @@ pub fn card_hit_rects(rects: Vec<HitRect>, state: tauri::State<'_, CardHits>) {
     state.0.set(rects);
 }
 
-pub fn create(app: &AppHandle, lang: crate::lang::Lang) -> anyhow::Result<WebviewWindow> {
+pub fn create(app: &AppHandle, lang: Lang) -> anyhow::Result<WebviewWindow> {
     let (w, h) = cardplace::window_size(CARD);
     let win = WebviewWindowBuilder::new(app, CARD_LABEL, WebviewUrl::App("card.html".into()))
         .initialization_script(lang.init_script())
@@ -51,6 +52,23 @@ pub fn create(app: &AppHandle, lang: crate::lang::Lang) -> anyhow::Result<Webvie
     dropwin::make_non_activating(win.hwnd()?)?;
     win.set_ignore_cursor_events(true)?;
     Ok(win)
+}
+
+/// Loads the card's page again in another interface language (decision 5): its address gets the language, which the
+/// page reads before the initialization script's value of startup. Shown or hidden, the window stays as it is; once
+/// loaded, the page says it is ready (`card_ready`) and gets the state, its place and an open answer back. Main thread.
+pub fn reload(app: &AppHandle, lang: Lang) {
+    let Some(win) = app.get_webview_window(CARD_LABEL) else { return };
+    let url = match win.url() {
+        Ok(url) => crate::lang::lang_url(url, lang.code()),
+        Err(e) => {
+            tracing::warn!("card window: page address not read: {e}");
+            return;
+        }
+    };
+    if let Err(e) = win.navigate(url) {
+        tracing::warn!("card window: page not loaded again: {e}");
+    }
 }
 
 enum Cmd {

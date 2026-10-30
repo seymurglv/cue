@@ -91,8 +91,8 @@ fn setup(
             (Default::default(), false)
         }
     };
-    // Interface language: decided once here (settings.json first, then Windows);
-    // the Drop window and the tray menu both get it.
+    // Interface language: decided here (settings.json first, then Windows); the Drop window and the tray menu both get
+    // it, and the core decides it again when the main window changes it.
     let lang = lang::Lang::resolve(settings.ui.language, lang::Lang::detect);
     tracing::info!(lang = lang.code(), setting = ?settings.ui.language, "interface language");
     // Counts only: the terms themselves stay out of the log.
@@ -153,7 +153,9 @@ fn setup(
         }
     });
 
-    let rt = runtime::Runtime::new(ui, card, settings, can_save_settings, paths, core_tx);
+    // The main window's commands find CUE's files (the history) here.
+    app.manage(paths.clone());
+    let rt = runtime::Runtime::new(ui, card, settings, can_save_settings, lang, paths, core_tx);
     // The core blocks its thread on short Windows calls (UI Automation, microphone), so it gets its own thread;
     // tasks (network, timers) run on the shared tokio runtime.
     std::thread::Builder::new()

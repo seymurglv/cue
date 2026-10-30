@@ -1,8 +1,10 @@
-//! Interface language, decided once at startup: `ui.language` from settings.json when it is `en` or `ru`, otherwise
-//! the Windows UI language (Russian when its primary language is Russian, English otherwise). The tray menu and the
-//! Drop window both use this one value, so they always match. The same Windows language, as a locale name, is the
-//! default home language of translation.
+//! Interface language, decided at startup: `ui.language` from settings.json when it is `en` or `ru`, otherwise the
+//! Windows UI language (Russian when its primary language is Russian, English otherwise). The tray menu and the Drop
+//! window both use this one value, so they always match. A change from the main window decides it again: the menu takes
+//! the new labels and the windows load their pages again with the code in their address (`lang_url`). The same Windows
+//! language, as a locale name, is the default home language of translation.
 use cue_core::settings::UiLanguage;
+use tauri::Url;
 use windows::Win32::Globalization::{GetUserDefaultUILanguage, LCIDToLocaleName};
 
 /// `LANG_RUSSIAN` from winnt.h.
@@ -51,6 +53,35 @@ impl Lang {
     pub fn init_script(self) -> String {
         format!("window.{WINDOW_GLOBAL} = {:?};", self.code())
     }
+}
+
+/// A window's page address in another interface language (decision 5): `lang=code` in its query, which the page reads
+/// before the initialization script's value of startup. Everything else in the address stays.
+pub fn lang_url(url: Url, code: &str) -> Url {
+    with_param(url, "lang", code)
+}
+
+/// `url` with the query parameter `key` set to `value`: the first `key` pair takes the value where it stands and any
+/// other `key` pair goes; every other pair stays as it was and where it was. No `key` yet: the pair goes last.
+pub fn with_param(mut url: Url, key: &str, value: &str) -> Url {
+    let pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+    let mut set = false;
+    {
+        let mut query = url.query_pairs_mut();
+        query.clear();
+        for (k, v) in &pairs {
+            if k != key {
+                query.append_pair(k, v);
+            } else if !set {
+                query.append_pair(key, value);
+                set = true;
+            }
+        }
+        if !set {
+            query.append_pair(key, value);
+        }
+    }
+    url
 }
 
 /// The Windows display language as a locale name ("ru-RU"), for the home language of translation (spec 2 §9).
@@ -122,6 +153,30 @@ mod tests {
     fn windows_gives_its_language_as_a_locale_name() {
         let code = windows_language_code().expect("Windows has a display language");
         assert!(!code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "{code:?}");
+    }
+
+    #[test]
+    fn lang_url_replaces_only_the_lang_pair() {
+        let lang = |url: &str, code: &str| lang_url(Url::parse(url).unwrap(), code).to_string();
+        // The pages as Tauri serves them, and the dev server.
+        assert_eq!(lang("http://tauri.localhost/drop.html", "ru"), "http://tauri.localhost/drop.html?lang=ru");
+        assert_eq!(lang("http://tauri.localhost/card.html?lang=ru", "en"), "http://tauri.localhost/card.html?lang=en");
+        assert_eq!(lang("http://localhost:1420/drop.html?lang=en", "ru"), "http://localhost:1420/drop.html?lang=ru");
+        // Other pairs, their order and the fragment stay.
+        assert_eq!(
+            lang("http://tauri.localhost/drop.html?place=left&lang=en&x=1#top", "ru"),
+            "http://tauri.localhost/drop.html?place=left&lang=ru&x=1#top"
+        );
+        let placed = "http://tauri.localhost/drop.html?place=left";
+        assert_eq!(lang(placed, "ru"), "http://tauri.localhost/drop.html?place=left&lang=ru");
+        // One lang pair is left, however many there were; a key that only starts with "lang" is another key.
+        assert_eq!(
+            lang("http://tauri.localhost/drop.html?lang=en&language=de&lang=xx", "ru"),
+            "http://tauri.localhost/drop.html?lang=ru&language=de"
+        );
+        // The Drop's place goes in the same way.
+        let url = Url::parse("http://tauri.localhost/drop.html?lang=ru&place=top").unwrap();
+        assert_eq!(with_param(url, "place", "right").as_str(), "http://tauri.localhost/drop.html?lang=ru&place=right");
     }
 
     #[test]
