@@ -2,7 +2,7 @@
 //! sits, the user's dictionary, the translation pair, "Ask", the pinned microphone, how long the history keeps its days,
 //! prices for usage accounting. The main window changes a setting one at a time (`SettingChange`).
 use crate::translate;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -343,12 +343,49 @@ impl Keep {
     }
 }
 
-/// Like `DropPosition`: any value that is not one of the five names (another word, a number, `null`) reads as `Month`,
-/// so a typo never makes the whole file unreadable.
-impl<'de> Deserialize<'de> for Keep {
+/// `history.keep` as settings.json has it: one of the five periods, or a value CUE does not know — a typo, a later
+/// version's name, `null` — which leaves the period unknown. While it is unknown the history is neither written nor
+/// cleaned up, until the user picks a period in the main window: a guess could delete days the user keeps, or keep
+/// entries the user turned off. Such a value is written back as it was, so saving the file never turns it into a period
+/// the user did not choose, and it never makes the file unreadable. A missing value is a month (`Default`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Period {
+    Set(Keep),
+    Unknown(serde_json::Value),
+}
+
+impl Period {
+    /// The period, if it is known.
+    pub fn known(&self) -> Option<Keep> {
+        match self {
+            Self::Set(keep) => Some(*keep),
+            Self::Unknown(_) => None,
+        }
+    }
+}
+
+impl Default for Period {
+    fn default() -> Self {
+        Self::Set(Keep::default())
+    }
+}
+
+impl Serialize for Period {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Set(keep) => keep.serialize(serializer),
+            Self::Unknown(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Period {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
-        Ok(value.as_str().and_then(Self::parse).unwrap_or_default())
+        Ok(match value.as_str().and_then(Keep::parse) {
+            Some(keep) => Self::Set(keep),
+            None => Self::Unknown(value),
+        })
     }
 }
 
@@ -356,7 +393,7 @@ impl<'de> Deserialize<'de> for Keep {
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HistorySettings {
-    pub keep: Keep,
+    pub keep: Period,
 }
 
 impl HistorySettings {
@@ -405,10 +442,10 @@ impl Settings {
     /// the settings would not hold is refused (`false`, nothing changes): a microphone name longer than
     /// `MAX_DEVICE_CHARS` characters, a translation language Soniox does not know. Values are kept the way reading the
     /// file keeps them: a microphone name trimmed, a blank one as the Windows microphone, the default translation
-    /// language (`en`) as no value.
+    /// language (`en`) as no value. A period set here makes an unknown one known.
     pub fn apply(&mut self, change: SettingChange) -> bool {
         match change {
-            SettingChange::HistoryKeep(keep) => set_if_changed(&mut self.history.keep, keep),
+            SettingChange::HistoryKeep(keep) => set_if_changed(&mut self.history.keep, Period::Set(keep)),
             SettingChange::MicDevice(device) => {
                 let device = device.as_deref().map(str::trim).filter(|d| !d.is_empty());
                 if device.is_some_and(|d| d.chars().count() > MAX_DEVICE_CHARS) {
@@ -1204,7 +1241,7 @@ mod tests {
         save(&earlier, &p).unwrap();
         let before = std::fs::read(&p).unwrap();
         let s = load(&p).unwrap();
-        assert_eq!((s.audio.device.as_deref(), s.history.keep), (None, Keep::Month));
+        assert_eq!((s.audio.device.as_deref(), s.history.keep.known()), (None, Some(Keep::Month)));
         save(&s, &p).unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), before, "the file changed on a write without a change");
         std::fs::remove_dir_all(dir).unwrap();
@@ -1217,7 +1254,7 @@ mod tests {
         for keep in [Keep::Forever, Keep::Year, Keep::Week, Keep::Off] {
             let mut s = Settings::default();
             s.audio.device = Some("Microphone (USB Audio Device)".into());
-            s.history.keep = keep;
+            s.history.keep = Period::Set(keep);
             save(&s, &p).unwrap();
             let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
             assert_eq!(json["audio"], serde_json::json!({ "device": "Microphone (USB Audio Device)" }));
@@ -1227,36 +1264,52 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A period CUE does not know leaves it unknown (the history is neither written nor cleaned up), not a month; a
+    /// missing one — or a `history` section that is not an object, like any other section — is a month.
     #[test]
-    fn history_keep_unknown_reads_as_month() {
+    fn history_keep_unknown_is_unknown_not_a_month() {
         for (text, expected) in
             [("forever", Keep::Forever), (" Year ", Keep::Year), ("WEEK", Keep::Week), ("off", Keep::Off), ("month", Keep::Month)]
         {
             let json = serde_json::json!({ "history": { "keep": text } }).to_string();
             let s: Settings = serde_json::from_str(&json).unwrap();
-            assert_eq!(s.history.keep, expected, "{text:?}");
+            assert_eq!(s.history.keep, Period::Set(expected), "{text:?}");
         }
-        for history in [
-            r#"{"keep":"always"}"#,
-            r#"{"keep":"for ever"}"#,
-            r#"{"keep":""}"#,
-            r#"{"keep":31}"#,
-            r#"{"keep":null}"#,
-            r#"{"keep":true}"#,
-            r#"{"keep":["week"]}"#,
-            r#"{"future":1}"#,
-            r#"{}"#,
-            r#""week""#,
-            "5",
-            "null",
-            "[]",
-        ] {
+        for keep in [r#""always""#, r#""for ever""#, r#""""#, "31", "null", "true", r#"["week"]"#] {
+            let text = format!(r#"{{"history":{{"keep":{keep}}},"hold_hints_left":0}}"#);
+            let s: Settings = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{keep}: {e}"));
+            let value: serde_json::Value = serde_json::from_str(keep).unwrap();
+            assert_eq!(s.history.keep, Period::Unknown(value), "{keep}");
+            assert_eq!(s.history.keep.known(), None, "{keep}");
+            assert_eq!(s.hold_hints_left, 0, "{keep}");
+        }
+        for history in [r#"{"future":1}"#, r#"{}"#, r#""week""#, "5", "null", "[]"] {
             let text = format!(r#"{{"history":{history},"hold_hints_left":0}}"#);
             let s: Settings = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{history}: {e}"));
-            assert_eq!(s.history.keep, Keep::Month, "{history}");
-            assert_eq!(s.hold_hints_left, 0, "{history}");
+            assert_eq!(s.history.keep.known(), Some(Keep::Month), "{history}");
         }
         assert_eq!(serde_json::from_str::<Settings>("{}").unwrap().history, HistorySettings::default());
+    }
+
+    /// Saving the file (the Drop dragged, a hint shown) never turns an unknown period into one the user did not
+    /// choose: it is written back as it was. A period set from the main window replaces it.
+    #[test]
+    fn an_unknown_period_is_written_back_as_it_was() {
+        let dir = tmp("unknown-period");
+        let p = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&p, r#"{"history":{"keep":"forver"},"hold_hints_left":2}"#).unwrap();
+        let mut s = load(&p).unwrap();
+        s.hold_hints_left = 1;
+        save(&s, &p).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        assert_eq!(json["history"], serde_json::json!({ "keep": "forver" }));
+        assert_eq!(load(&p).unwrap().history.keep.known(), None);
+
+        assert!(s.apply(SettingChange::HistoryKeep(Keep::Year)));
+        save(&s, &p).unwrap();
+        assert_eq!(load(&p).unwrap().history.keep, Period::Set(Keep::Year));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1343,7 +1396,7 @@ mod tests {
         }
         assert!(!s.apply(SettingChange::MicDevice(Some(" Mic ".into()))));
         assert!(!s.apply(SettingChange::TranslateTarget("FR".into())));
-        assert_eq!((s.history.keep, s.audio.device.as_deref()), (Keep::Week, Some("Mic")));
+        assert_eq!((s.history.keep.known(), s.audio.device.as_deref()), (Some(Keep::Week), Some("Mic")));
         assert_eq!((s.translate.target(), s.ui.language), ("fr", UiLanguage::Ru));
     }
 

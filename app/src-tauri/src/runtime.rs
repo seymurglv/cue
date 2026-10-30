@@ -26,7 +26,9 @@
 //!   starts waits aside (`answering`) and gets its own row when it ends;
 //! - every result goes to the history (spec 3 §2, `HistoryLog`): a dictation or a translation when its text is
 //!   committed, an "Ask" turn when it ends; never in the way of the result: a disk error is one log line, and nothing
-//!   is written while the history is off. The new entry goes to the main window only;
+//!   is written while the history is off. While its period is unknown (settings.json not read, or a value CUE does not
+//!   know) the history is neither written nor cleaned up, until the main window sets it. The new entry goes to the main
+//!   window only;
 //! - the main window reads and changes the settings through the core (`CoreEvent::Settings`): the core's copy takes the
 //!   change, the whole file is written, and what depends on it follows at once (the translation pair, the interface
 //!   language, the history's period); its "Paste again" and "Copy" of a history entry go through the insert thread like
@@ -51,7 +53,7 @@ use cue_core::audio::{Silence, SilenceDetector};
 use cue_core::flow::{DictationId, Effect, Flow, InsertOutcome, Input, Outcome, PasteHow, SttError, TimerKind};
 use cue_core::history;
 use cue_core::refine::RefineContext;
-use cue_core::settings::{self, DropPosition, Keep, SettingChange, Settings};
+use cue_core::settings::{self, DropPosition, Keep, Period, SettingChange, Settings};
 use cue_core::translate;
 use cue_core::ui::{Mode, TrayKind, UiAction, UiPhase, UiState};
 use cue_core::usage::{self, SttPath, UsageRecord};
@@ -260,6 +262,7 @@ impl Runtime {
         paths: Paths,
         tx: UnboundedSender<CoreEvent>,
     ) -> Self {
+        let settings = kept_settings(settings, can_save_settings);
         let has_last = paths.last_text().exists();
         let insert = match insert::spawn_inserter(tx.clone()) {
             Ok(tx) => Some(tx),
@@ -327,8 +330,12 @@ impl Runtime {
     /// so `run` spins on its own thread (`block_on`), not in the shared tokio pool.
     pub async fn run(mut self, mut rx: UnboundedReceiver<CoreEvent>) {
         self.sync_hook_flags();
-        // The days the history no longer keeps go at startup, before any new entry.
-        self.history.prune(self.settings.history.keep, &local_today());
+        // The days the history no longer keeps go at startup, before any new entry; none while its period is unknown.
+        let keep = self.settings.history.keep.known();
+        if keep.is_none() {
+            tracing::warn!("history: period unknown, nothing is written to it or deleted from it until it is set");
+        }
+        self.history.prune(keep, &local_today());
         while let Some(ev) = rx.recv().await {
             // A crash in one event does not stop the core; the panic hook logs where it happened.
             if catch_unwind(AssertUnwindSafe(|| self.on_event(ev))).is_err() {
@@ -521,7 +528,7 @@ impl Runtime {
     /// codes and states, never a device name.
     fn change_setting(&mut self, change: SettingChange) {
         let s = &self.settings;
-        let (target, language, keep) = (s.translate.target(), s.ui.language, s.history.keep);
+        let (target, language, keep) = (s.translate.target(), s.ui.language, s.history.keep.clone());
         let device = s.audio.device.clone();
         if !apply_setting(&mut self.settings, change, &self.paths.settings, self.can_save_settings) {
             return;
@@ -539,8 +546,9 @@ impl Runtime {
             }
         }
         if s.history.keep != keep {
-            tracing::info!(keep = s.history.keep.code(), "history: period changed");
-            self.history.prune(s.history.keep, &local_today());
+            let keep = s.history.keep.known();
+            tracing::info!(keep = keep.map_or("unknown", Keep::code), "history: period changed");
+            self.history.prune(keep, &local_today());
         }
         if s.audio.device != device {
             tracing::info!(pinned = s.audio.device.is_some(), "microphone setting changed");
@@ -1570,7 +1578,7 @@ impl Runtime {
     /// of the result itself: nothing is written while the history is off, and a disk error is one log line, no text.
     fn add_to_history(&mut self, entry: Option<history::Entry>) {
         let Some(entry) = entry else { return };
-        if self.history.write(self.settings.history.keep, &entry) {
+        if self.history.write(self.settings.history.keep.known(), &entry) {
             self.ui.history_added(&EntryView::from(&entry));
         }
     }
@@ -1637,8 +1645,10 @@ impl HistoryLog {
     }
 
     /// Deletes the days `keep` no longer keeps, counted back from `today` (`YYYY-MM-DD`): at startup, on the first
-    /// entry of a new day and when the period changes. An error is one log line.
-    fn prune(&mut self, keep: Keep, today: &str) {
+    /// entry of a new day and when the period changes. Nothing while the period is unknown (`None`). An error is one
+    /// log line.
+    fn prune(&mut self, keep: Option<Keep>, today: &str) {
+        let Some(keep) = keep else { return };
         self.pruned = Some(today.to_owned());
         match history::prune(&self.dir, keep, today) {
             Ok(0) => {}
@@ -1647,15 +1657,13 @@ impl HistoryLog {
         }
     }
 
-    /// Writes `entry` while the history is on (`keep`); `true` if it was written. Nothing at all while it is off. A
-    /// disk error is one log line, without text.
-    fn write(&mut self, keep: Keep, entry: &history::Entry) -> bool {
-        if keep == Keep::Off {
-            return false;
-        }
+    /// Writes `entry` while the history is on (`keep`); `true` if it was written. Nothing at all while it is off or
+    /// its period unknown (`None`). A disk error is one log line, without text.
+    fn write(&mut self, keep: Option<Keep>, entry: &history::Entry) -> bool {
+        let Some(keep) = keep.filter(|k| *k != Keep::Off) else { return false };
         let day = entry.ts.get(..10).unwrap_or_default();
         if self.pruned.as_deref() != Some(day) {
-            self.prune(keep, day);
+            self.prune(Some(keep), day);
         }
         match history::append(&self.dir, entry) {
             Ok(()) => true,
@@ -1720,6 +1728,16 @@ fn history_job(text: String, target: Option<WindowRef>) -> HistoryJob {
         Some(target) => HistoryJob::Paste { text, target },
         None => HistoryJob::Leave(InsertJob::Leave { id: None, text }),
     }
+}
+
+/// The settings the core keeps: as read, except that with settings.json unreadable the history's period is unknown —
+/// the defaults' month is not the user's choice — so the history is neither written nor cleaned up until the main
+/// window sets it. Nothing of this reaches the file: an unreadable one is never written.
+fn kept_settings(mut settings: Settings, can_save: bool) -> Settings {
+    if !can_save {
+        settings.history.keep = Period::Unknown(serde_json::Value::Null);
+    }
+    settings
 }
 
 /// One change from the main window (spec 3 §3) on the core's copy of the settings; `true` if a value changed. Only then
@@ -2144,9 +2162,9 @@ mod tests {
         let dir = tmp("keep-off");
         let mut log = HistoryLog::new(dir.clone());
         let e = dictated("2026-10-31T07:30:00.123", "Hello.");
-        assert!(!log.write(Keep::Off, &e));
+        assert!(!log.write(Some(Keep::Off), &e));
         assert!(!dir.exists(), "not even the directory");
-        assert!(log.write(Keep::Month, &e));
+        assert!(log.write(Some(Keep::Month), &e));
         assert_eq!(history::find(&dir, &e.id), Some(e));
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -2159,19 +2177,54 @@ mod tests {
             history::append(&dir, &dictated(ts, "old")).unwrap();
         }
         let mut log = HistoryLog::new(dir.clone());
-        log.prune(Keep::Week, "2026-10-30");
+        log.prune(Some(Keep::Week), "2026-10-30");
         let days = |dir: &Path| -> Vec<String> {
             history::older(dir, "2026-11-01", 10).days.into_iter().map(|d| d.date).collect()
         };
         assert_eq!(days(&dir), ["2026-10-23"], "a week back from the 30th keeps the 23rd");
-        assert!(log.write(Keep::Week, &dictated("2026-10-30T10:00:00.000", "same day")));
+        assert!(log.write(Some(Keep::Week), &dictated("2026-10-30T10:00:00.000", "same day")));
         assert_eq!(days(&dir), ["2026-10-30", "2026-10-23"]);
-        assert!(log.write(Keep::Week, &dictated("2026-10-31T00:00:01.000", "a new day")));
+        assert!(log.write(Some(Keep::Week), &dictated("2026-10-31T00:00:01.000", "a new day")));
         assert_eq!(days(&dir), ["2026-10-31", "2026-10-30"], "a week back from the 31st no longer keeps the 23rd");
         // Within the day nothing more is deleted.
         history::append(&dir, &dictated("2026-10-01T09:00:00.000", "put back")).unwrap();
-        assert!(log.write(Keep::Week, &dictated("2026-10-31T08:00:00.000", "later that day")));
+        assert!(log.write(Some(Keep::Week), &dictated("2026-10-31T08:00:00.000", "later that day")));
         assert_eq!(days(&dir), ["2026-10-31", "2026-10-30", "2026-10-01"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// While the period is unknown — settings.json unreadable, or a value CUE does not know — the history is neither
+    /// written nor cleaned up, at startup or on a new day; once the user sets it in the main window, both resume.
+    #[test]
+    fn an_unknown_period_neither_writes_nor_prunes_until_it_is_set() {
+        let dir = tmp("unknown-period");
+        let old = dictated("2026-01-05T09:00:00.000", "Kept.");
+        history::append(&dir, &old).unwrap();
+        let unreadable = kept_settings(Settings::default(), false);
+        let typo = kept_settings(serde_json::from_str(r#"{"history":{"keep":"forver"}}"#).unwrap(), true);
+        for s in [unreadable, typo] {
+            let keep = s.history.keep.known();
+            assert_eq!(keep, None);
+            let mut log = HistoryLog::new(dir.clone());
+            log.prune(keep, "2026-10-30");
+            assert!(!log.write(keep, &dictated("2026-10-30T10:00:00.000", "Not kept.")));
+            assert!(!log.write(keep, &dictated("2026-10-31T00:00:01.000", "A new day.")));
+            assert_eq!(history::older(&dir, "2026-11-01", 10).days.len(), 1, "nothing written");
+            assert_eq!(history::find(&dir, &old.id), Some(old.clone()), "nothing deleted");
+        }
+        let readable = kept_settings(Settings::default(), true);
+        assert_eq!(readable.history.keep.known(), Some(Keep::Month), "no period in the file is a month");
+
+        let mut s = kept_settings(Settings::default(), false);
+        assert!(apply_setting(&mut s, SettingChange::HistoryKeep(Keep::Week), &dir.join("settings.json"), false));
+        let keep = s.history.keep.known();
+        assert_eq!(keep, Some(Keep::Week));
+        let mut log = HistoryLog::new(dir.clone());
+        log.prune(keep, "2026-10-31");
+        assert_eq!(history::find(&dir, &old.id), None, "cleaned up with the period the user chose");
+        let new = dictated("2026-10-31T10:00:00.000", "Kept now.");
+        assert!(log.write(keep, &new));
+        assert_eq!(history::find(&dir, &new.id), Some(new));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2220,7 +2273,7 @@ mod tests {
         assert_eq!(s, Settings::default());
         assert!(!path.exists(), "nothing written");
         assert!(apply_setting(&mut s, SettingChange::HistoryKeep(Keep::Week), &path, true));
-        assert_eq!(settings::load(&path).unwrap().history.keep, Keep::Week);
+        assert_eq!(settings::load(&path).unwrap().history.keep.known(), Some(Keep::Week));
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -2234,7 +2287,7 @@ mod tests {
         let mut s = Settings::default();
         assert!(apply_setting(&mut s, SettingChange::HistoryKeep(Keep::Week), &path, false));
         assert!(apply_setting(&mut s, SettingChange::TranslateTarget("de".into()), &path, false));
-        assert_eq!((s.history.keep, s.translate.target()), (Keep::Week, "de"), "the changes hold");
+        assert_eq!((s.history.keep.known(), s.translate.target()), (Some(Keep::Week), "de"), "the changes hold");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json", "the user's file stays as it is");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no other file either");
         std::fs::remove_dir_all(dir).unwrap();

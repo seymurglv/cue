@@ -20,14 +20,16 @@ pub const MAIN_LABEL: &str = "main";
 /// Channel to the core for window commands.
 pub struct CoreTx(pub tokio::sync::mpsc::UnboundedSender<CoreEvent>);
 
-/// The settings the main window shows (spec 3 §3), as the core holds them: the history's period, the pinned microphone
-/// (`None` — the one Windows uses), the translation language, the interface language as set and as it is now (`lang`),
-/// the languages a translation can go to (code and English name), and whether changes reach settings.json (`saved`:
-/// it was read at startup). `Debug` shows the microphone's name only by its length.
+/// The settings the main window shows (spec 3 §3), as the core holds them: the history's period (`None` — unknown, so
+/// nothing is written to the history or deleted from it until the user picks one: settings.json was not read, or its
+/// value is not one CUE knows), the pinned microphone (`None` — the one Windows uses), the translation language, the
+/// interface language as set and as it is now (`lang`), the languages a translation can go to (code and English name),
+/// and whether changes reach settings.json (`saved`: it was read at startup). `Debug` shows the microphone's name only
+/// by its length.
 #[derive(Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsView {
-    pub history_keep: Keep,
+    pub history_keep: Option<Keep>,
     pub mic_device: Option<String>,
     pub translate_target: &'static str,
     pub ui_language: UiLanguage,
@@ -39,7 +41,7 @@ pub struct SettingsView {
 impl SettingsView {
     pub fn of(s: &Settings, lang: Lang, saved: bool) -> Self {
         Self {
-            history_keep: s.history.keep,
+            history_keep: s.history.keep.known(),
             mic_device: s.audio.device.clone(),
             translate_target: s.translate.target(),
             ui_language: s.ui.language,
@@ -333,7 +335,7 @@ pub fn card_ready(core: State<'_, CoreTx>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cue_core::settings::SettingChange;
+    use cue_core::settings::{Period, SettingChange};
     use serde_json::{Value, json};
 
     /// The names the main window reads.
@@ -381,6 +383,11 @@ mod tests {
             assert_eq!(view[name], value, "{name}");
         }
         assert!(!format!("{:?}", SettingsView::of(&s, Lang::Ru, false)).contains("USB"), "no device name in a log");
+
+        // A period CUE does not know shows unset.
+        s.history.keep = Period::Unknown(json!("forver"));
+        let view = serde_json::to_value(SettingsView::of(&s, Lang::Ru, false)).unwrap();
+        assert_eq!(view["historyKeep"], Value::Null);
     }
 
     #[test]
