@@ -445,7 +445,7 @@ impl Flow {
                     }
                     AskError::Failed => {
                         self.answer_shows(id, true);
-                        self.answer_open = true;
+                        self.answer_on_screen(&mut fx);
                         if !self.follow_up_under_way(id) {
                             // The answer shows the error with Retry; the question is kept (spec 2 §8).
                             self.phase = Phase::Answer;
@@ -535,9 +535,18 @@ impl Flow {
     }
 
     fn open_answer(&mut self, fx: &mut Vec<Effect>) {
-        self.answer_open = true;
+        self.answer_on_screen(fx);
         self.phase = Phase::Answer;
         self.push_ui(fx);
+    }
+
+    /// The answer is on screen from now on. One card at a time: a tray card still up (a missing microphone told at the
+    /// start of the question) closes as the answer opens.
+    fn answer_on_screen(&mut self, fx: &mut Vec<Effect>) {
+        if !self.answer_open {
+            fx.push(Effect::Tray(None));
+        }
+        self.answer_open = true;
     }
 
     /// Aborts the request in flight, if any. `counted` — its attempt ends "cancelled" now (an open answer closing), not
@@ -1544,6 +1553,37 @@ mod tests {
         answer_open(&mut f, 0);
         follow_up(&mut f, 10_000);
         assert!(f.handle(I::MicFallback, 10_500).is_empty(), "a follow-up under an open answer");
+    }
+
+    /// One card at a time: a tray card still up when an "Ask" answer opens (a missing microphone told at the start of
+    /// the question) closes, also when the answer opens with an error or as a refusal.
+    #[test]
+    fn an_answer_opening_closes_a_tray_card() {
+        let mut f = Flow::new(2, false);
+        f.handle(I::ChordDown(Mode::Ask), 0);
+        let id = f.current_id();
+        assert_eq!(f.handle(I::MicFallback, 40), vec![E::Tray(Some(TrayKind::MicMissing))]);
+        f.handle(I::ChordUp, 100);
+        f.handle(I::Timer(TimerKind::StartingDone), STARTING_MS);
+        f.handle(I::ChordDown(Mode::Dictate), 2_000);
+        f.handle(I::ChordUp, 2_100);
+        let fx = f.handle(I::SttFinal { id, text: "что такое HTTP 418".into() }, 2_300);
+        assert!(!has(&fx, &E::Tray(None)), "the card stays while the question is asked");
+        let fx = f.handle(I::AskOpened { id }, 3_000);
+        let closed = fx.iter().position(|e| *e == E::Tray(None)).expect("the card goes as the answer opens");
+        let shown = fx.iter().position(|e| matches!(e, E::Ui(s) if s.phase == UiPhase::Answer)).expect("the answer");
+        assert!(closed < shown);
+        assert!(f.handle(I::AskAnswered { id }, 4_000).iter().all(|e| *e != E::Tray(None)), "already open");
+
+        let mut f = Flow::new(2, false);
+        let id = asking(&mut f, 0, "что такое HTTP 418");
+        let fx = f.handle(I::AskFailed { id, error: AskError::Failed }, 6_000);
+        assert!(has(&fx, &E::Tray(None)) && phase(&fx) == Some(UiPhase::Answer), "the error, with Retry");
+
+        let mut f = Flow::new(2, false);
+        let id = asking(&mut f, 0, "что такое HTTP 418");
+        let fx = f.handle(I::AskAnswered { id }, 6_000);
+        assert!(has(&fx, &E::Tray(None)) && phase(&fx) == Some(UiPhase::Answer), "a refusal shown at once");
     }
 
     #[test]

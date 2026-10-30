@@ -290,9 +290,11 @@ pub async fn mic_list(window: WebviewWindow) -> Result<MicList, CmdError> {
 }
 
 /// The live level of a microphone (`device`, by its name; `None` or blank — the Windows one) while the settings show it
-/// (`on`), as `cue://mic-level`; `on: false` ends it. The level only: the audio goes nowhere.
+/// (`on`), as `cue://mic-level`; `on: false` ends it. The level only: the audio goes nowhere. Not `async` on purpose:
+/// Tauri runs it on the main thread, in the order the page sent them and in turn with the window's end
+/// (`main_window`), so an "on" and an "off" never cross and no preview outlives the window. It only starts threads.
 #[tauri::command]
-pub async fn mic_preview(
+pub fn mic_preview(
     window: WebviewWindow,
     on: bool,
     device: Option<String>,
