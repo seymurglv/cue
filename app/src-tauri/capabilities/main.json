@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "The main window: it only listens to the microphone level. Its commands are the app's own (each checks the window's label), and its history channel needs no permission.",
+  "windows": ["main"],
+  "permissions": ["core:event:allow-listen"]
+}

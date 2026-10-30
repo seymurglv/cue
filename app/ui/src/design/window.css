@@ -1,0 +1,156 @@
+/* CUE — the main window: its header, the History section and the settings tray from the gear. Ported from the approved
+   design (stage 5, design/05-main-window/final.html), Windows look, only these parts: no Today, Dictionary or Habits
+   sections and no links to them in the header, no window chrome of its own (Windows draws the frame), no "as you said"
+   expansion of a history row. Layout, classes and motion are the design's; where it had a macOS and a Windows variant,
+   the Windows one is folded into the rule. The theme follows prefers-color-scheme (the page sets data-theme on <html>;
+   the tokens and their dark values are design/cue.css).
+   Added for the real data: a history row shows its mode (a small badge) and its app as muted text before the text, an
+   "Ask" question muted before the answer; a period note and a "not connected" mark in menus; long menus scroll; a key
+   field; quiet lines for an empty history and for nothing found. */
+@font-face{font-family:"Bebas Neue";src:url("./fonts/BebasNeue-Regular.ttf") format("truetype");font-display:block}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{color-scheme:light;background:var(--bg)}
+html[data-theme=dark]{color-scheme:dark}
+/* Before the page script has set the theme: no white flash in a dark Windows. */
+@media (prefers-color-scheme: dark){html:not([data-theme]){background:#0E0E0F;color-scheme:dark}}
+html,body{height:100%}
+body{overflow:hidden;background:var(--bg);color:var(--text)}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;letter-spacing:inherit}
+button:disabled{cursor:default}
+input{font:inherit;color:inherit;letter-spacing:inherit}
+
+/* ================= the window ================= */
+.app{position:fixed;inset:0;display:flex;flex-direction:column;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--win-font);font-size:13px;line-height:1.45;letter-spacing:0;-webkit-font-smoothing:antialiased}
+.app svg{display:block;flex:none}
+.app [hidden]{display:none!important}
+.app .mut{color:var(--muted)}
+.app mark{background:color-mix(in srgb,var(--warn) 30%,transparent);color:inherit;border-radius:2px}
+
+/* small parts */
+.ibt{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;color:var(--muted);transition:background .2s,color .2s,opacity .2s}
+.ibt:hover{background:color-mix(in srgb,var(--text) 7%,transparent);color:var(--text)}
+.ibt.sm{width:24px;height:24px;border-radius:6px}
+.ibt.sm svg{width:14px;height:14px}
+.ibt.done{color:var(--ok)}
+.btn2{display:inline-flex;align-items:center;gap:4px;height:26px;padding:0 10px 0 6px;border-radius:999px;background:color-mix(in srgb,var(--text) 7%,transparent);font-size:12px;font-weight:500;white-space:nowrap}
+.btn2 svg{width:14px;height:14px}
+.btn2:hover{background:color-mix(in srgb,var(--text) 11%,transparent)}
+.btn2.ck{padding:0 10px}
+.btn2:disabled{opacity:.5}
+.srch{display:flex;align-items:center;gap:6px;height:28px;width:100%;margin:2px 0 6px;padding:0 8px;border-radius:5px;background:color-mix(in srgb,var(--card) 60%,transparent);box-shadow:inset 0 -1px 0 color-mix(in srgb,var(--text) 35%,transparent),0 0 0 1px color-mix(in srgb,var(--text) 8%,transparent);color:var(--muted)}
+.srch svg{width:14px;height:14px}
+.srch input{flex:1;min-width:0;border:0;outline:0;background:none;font-size:12.5px;color:var(--text)}
+/* a key field: the search field's look */
+.kin{width:100px;height:26px;padding:0 8px;border:0;outline:0;border-radius:5px;background:color-mix(in srgb,var(--card) 60%,transparent);box-shadow:inset 0 -1px 0 color-mix(in srgb,var(--text) 35%,transparent),0 0 0 1px color-mix(in srgb,var(--text) 8%,transparent);font-size:12px;color:var(--text)}
+.kin:focus{box-shadow:inset 0 -2px 0 var(--text),0 0 0 1px color-mix(in srgb,var(--text) 8%,transparent)}
+.kin::placeholder{color:var(--muted)}
+/* switch */
+.sw{position:relative;flex:none;width:40px;height:20px;border-radius:999px;background:transparent;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--text) 60%,transparent);transition:background .25s,box-shadow .25s}
+.sw::after{content:"";position:absolute;left:4px;top:4px;width:12px;height:12px;border-radius:50%;background:color-mix(in srgb,var(--text) 78%,transparent);transition:transform .4s var(--e-spring),background .25s}
+.sw[aria-checked=true]{background:var(--text);box-shadow:none}
+.sw[aria-checked=true]::after{transform:translateX(20px);background:var(--card)}
+/* segments */
+.segc{position:relative;display:inline-flex;padding:2px;border-radius:5px;background:color-mix(in srgb,var(--text) 6%,transparent);isolation:isolate}
+.segc button{position:relative;z-index:1;display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 10px;border-radius:6px;font-size:12px;font-weight:500;color:var(--muted);white-space:nowrap;transition:color .2s}
+.segc button[aria-pressed=true]{color:var(--text)}
+.segc .thb{position:absolute;z-index:0;top:2px;bottom:2px;left:0;width:0;border-radius:5px;background:var(--card);box-shadow:0 1px 2px rgba(0,0,0,.1),0 0 0 .5px rgba(0,0,0,.06);transition:transform .45s var(--e-spring),width .45s var(--e-spring)}
+[data-theme=dark] .segc .thb{background:color-mix(in srgb,var(--text) 15%,transparent)}
+/* drop-down */
+.dd{display:inline-flex;align-items:center;gap:6px;height:28px;max-width:190px;padding:0 8px 0 10px;border-radius:5px;background:var(--card);box-shadow:0 0 0 .5px color-mix(in srgb,var(--text) 20%,transparent),0 1px 1.5px rgba(0,0,0,.06);font-size:12.5px;white-space:nowrap}
+.dd .ddv{overflow:hidden;text-overflow:ellipsis}
+.dd svg{width:13px;height:13px;opacity:.55;transform:rotate(90deg)}
+[data-theme=dark] .dd{background:color-mix(in srgb,var(--text) 8%,transparent)}
+.menu{position:absolute;z-index:45;min-width:180px;max-width:320px;overflow-x:hidden;overflow-y:auto;scrollbar-width:thin;padding:4px;border-radius:7px;background:var(--card);box-shadow:0 14px 32px -10px rgba(0,0,0,.32),0 0 0 .5px color-mix(in srgb,var(--text) 18%,transparent);transform-origin:50% 0;animation:mnIn .32s var(--e-spring)}
+[data-theme=dark] .menu{background:#222225}
+.menu button{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;height:28px;padding:0 8px 0 10px;border-radius:6px;font-size:12.5px;text-align:left;white-space:nowrap}
+.menu button:hover{background:color-mix(in srgb,var(--text) 6%,transparent)}
+.menu button svg{width:14px;height:14px}
+.menu .mlb{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.menu .mnc{font-size:11.5px;color:var(--muted)}
+.menu .mnote{padding:6px 10px 4px;border-top:1px solid var(--line);margin-top:4px;font-size:11.5px;line-height:1.35;color:var(--muted);white-space:normal}
+@keyframes mnIn{from{opacity:0;transform:translateY(-4px) scale(.97)}}
+/* microphone level */
+.meter{display:flex;gap:2px;align-items:center;height:14px}
+.meter i{width:4px;height:100%;border-radius:2px;background:color-mix(in srgb,var(--text) 12%,transparent);transition:background .08s}
+.meter i.on{background:var(--text)}
+
+/* history */
+.hday{font-size:11.5px;font-weight:600;color:var(--muted);margin:16px 0 4px}
+.hgrp:first-child .hday{margin-top:2px}
+.hl{display:flex;flex-direction:column;margin:0 -8px}
+.hr{position:relative;display:grid;grid-template-columns:38px 20px 1fr auto;column-gap:10px;align-items:start;padding:8px;border-radius:8px;transition:background .2s}
+.hr:hover{background:color-mix(in srgb,var(--text) 4%,transparent)}
+.hr.new{animation:rowIn .6s var(--e-spring),rowHl 2.6s var(--e-out)}
+@keyframes rowIn{from{opacity:0;transform:translateY(-8px)}}
+@keyframes rowHl{0%,30%{background:color-mix(in srgb,var(--text) 8%,transparent)}}
+.ht{font-family:"Bebas Neue",sans-serif;font-size:15px;letter-spacing:.03em;line-height:20px;color:var(--muted);font-variant-numeric:tabular-nums}
+.aski,.hmi{width:20px;height:20px;border-radius:6px;display:grid;place-items:center}
+.aski{background:color-mix(in srgb,var(--ask) 14%,transparent);color:var(--ask)}
+.hmi{background:color-mix(in srgb,var(--text) 7%,transparent);color:var(--muted)}
+.aski svg,.hmi svg{width:14px;height:14px}
+.hx{min-width:0}
+.htx{font-size:13px;line-height:20px;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
+.htx .happ,.htx .hq{color:var(--muted);margin-right:6px}
+.hact{display:flex;gap:2px;margin:-3px -4px -3px 0;opacity:0;transition:opacity .2s}
+.hr:hover .hact,.hr:focus-within .hact{opacity:1}
+
+/* settings in the tray */
+.sgrp{display:flex;flex-direction:column}
+.srow{display:flex;align-items:center;gap:10px;min-height:40px;padding:8px 0}
+.srow+.srow{border-top:1px solid var(--line)}
+.srow .stx{flex:1;min-width:0}
+.srow .stx b{display:block;font-weight:500}
+.srow .stx small{display:block;font-size:11.5px;line-height:1.35;color:var(--muted);margin-top:1px}
+.srow .stx small.ok{color:var(--ok)}
+.srow .stx small.warn{color:var(--warn)}
+.srow .sc{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;flex:none;max-width:64%}
+
+/* ================= one page ================= */
+.bsc{position:relative;flex:1;min-height:0;overflow:auto;scrollbar-width:thin}
+.bh{position:sticky;top:-1px;z-index:10;display:flex;align-items:center;gap:16px;max-width:540px;margin:0 auto;padding:13px 20px 12px;background:var(--bg);transition:box-shadow .3s}
+.bh.sc{box-shadow:0 1px 0 var(--line)}
+.logo{display:flex;align-items:center;gap:7px;font-family:"Bebas Neue",sans-serif;font-size:22px;letter-spacing:.05em;line-height:1;padding-top:2px}
+.logo svg{width:20px;height:20px;overflow:visible;margin-top:-2px}
+/* without the section links the gear is pushed to the right by itself */
+.gear{margin-left:auto;transition:opacity .2s}
+.gear.hid{opacity:0}
+.bcol{max-width:540px;margin:0 auto;padding:0 20px 90px}
+.bsec{padding-top:22px}
+.bsec>h3{display:flex;align-items:center;gap:10px;margin:0 0 8px;font-size:13px;font-weight:600}
+.bsec>h3::after{content:"";order:5;flex:1;height:1px;background:var(--line)}
+.bsec>h3 .ibt{order:6;margin:-4px -4px -4px 0}
+.bsr{display:grid;grid-template-rows:0fr;transition:grid-template-rows .45s var(--e-spring)}
+.bsr>div{overflow:hidden}
+.bsr.open{grid-template-rows:1fr}
+.bmore{display:flex;align-items:center;gap:12px;margin-top:8px;font-size:12.5px;color:var(--muted)}
+.bmore button{color:var(--muted)}
+.bmore button:hover{color:var(--text)}
+.bmore .sp{flex:1}
+.bmore .dd{height:24px;font-size:12px}
+.bmore .dd .ddv{color:var(--text)}
+.bmore .lbl{display:inline-flex}
+.hempty{font-size:12.5px;color:var(--muted);padding:6px 0}
+/* a label that changes by its common letters (CUE.setLabel) */
+.lbl span{display:inline-block}
+.ch-in{animation:chIn .42s var(--e-out) both;animation-delay:calc(var(--i)*16ms)}
+@keyframes chIn{from{opacity:0;transform:translateY(5px);filter:blur(2px)}to{opacity:1;transform:none;filter:none}}
+
+/* the settings tray grows out of the gear */
+.btray{position:absolute;z-index:25;overflow:hidden;border-radius:14px;background:var(--card);color:var(--text);box-shadow:0 22px 50px -16px rgba(0,0,0,.42),0 0 0 .5px color-mix(in srgb,var(--text) 18%,transparent);transition:left .55s var(--e-spring),top .5s var(--e-spring),width .55s var(--e-spring),height .5s var(--e-spring),border-radius .45s var(--e-out)}
+[data-theme=dark] .btray{background:#1C1C1F}
+.btray .bin{position:absolute;top:0;right:0;width:340px;overflow-x:hidden;overflow-y:auto;scrollbar-width:thin;opacity:0;transition:opacity .12s}
+.btray.open .bin{opacity:1;transition:opacity .28s .14s}
+.tpg{padding:9px 9px 12px 14px}
+.tph{display:flex;align-items:center;gap:4px;height:30px;margin-bottom:4px}
+.tph b{flex:1;font-size:13.5px;font-weight:600;white-space:nowrap}
+.tph .back{margin-left:-8px}
+.tph .back svg{transform:rotate(180deg)}
+.trw{display:flex;align-items:center;gap:10px;width:100%;height:38px;padding:0 6px 0 4px;border-radius:8px;text-align:left}
+.trw:hover{background:color-mix(in srgb,var(--text) 5%,transparent)}
+.trw .si{display:grid;color:var(--muted)}
+.trw .si svg{width:17px;height:17px}
+.trw em{flex:1;min-width:0;text-align:right;font-style:normal;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.trw>svg{width:14px;height:14px;color:var(--faint)}
+.tft{margin-top:6px;padding:9px 4px 0;border-top:1px solid var(--line);font-size:11.5px;color:var(--muted)}
+
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition-duration:.001s!important}}
