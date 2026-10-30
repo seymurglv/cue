@@ -8,8 +8,9 @@ and English into your home language (Russian, say); any pair of the languages So
 instead (`Ctrl + Win + Alt`) and ask a question out loud: the answer appears next to your work, at the text you selected
 or by the Drop, and a request to write, fix, reply or translate puts the text straight into the field. It runs
 quietly in the background: a small indicator at the bottom of the screen (the Drop; drag it to the top or to either
-side if you prefer) shows what CUE is doing, and a tray icon next to the clock holds a short menu. This first version
-is built for personal use with your own Soniox and Anthropic API keys.
+side if you prefer) shows what CUE is doing, and a tray icon next to the clock opens the main window, with the history
+of everything CUE wrote and the settings, and holds a short menu. This first version is built for personal use with
+your own Soniox and Anthropic API keys.
 
 ## Features
 
@@ -77,17 +78,38 @@ is built for personal use with your own Soniox and Anthropic API keys.
   halfway up. The place is remembered (`drop.position` in `settings.json`). A plain click without moving does what it
   always did, and dragging never takes the focus from the app you are typing in. The Drop can be dragged only while
   idle, and it always stays on top of ordinary windows.
-- **Tray icon menu:** Pause for an hour, Start at sign-in, Open log, Quit.
-- **Interface language:** English, or Russian when the Windows display language is Russian; `ui.language` in
-  `settings.json` can fix it to either.
+- **The main window** opens from the tray icon: **Open CUE** in its menu, or a double click. It is one ordinary window
+  in the Windows theme; opening it again brings it forward, and closing it leaves CUE running.
+  - **History:** every result of CUE, newest first, with its time, mode and app: dictations, translations, "Ask"
+    answers (the question and the answer) and texts "Ask" wrote into a field. Today and yesterday first, earlier days
+    with **Show earlier**, and a search over the texts and the questions. Hover over a row for **Copy** and **Paste
+    again**: the text goes into the window right under the main window (usually the one you were in before opening it),
+    or into the clipboard when there is none. `Ctrl + Win + V`, a paste with an answer's button, a refusal and a
+    failure add no entry, and **Paste again** does not change the last result. **Keep**: Forever, A year, A month (the
+    default), A week or Don't keep; older days are deleted on their own, a shorter period deletes them at once, and
+    **Clear history** needs a second press.
+  - **Settings** (the gear): **Keys** (Soniox and Anthropic: paste a key and press **Check**, which saves it and sends
+    a free test request; the window shows only its mask), **Microphone** (As in Windows, or a device of your own, with
+    a live level), **Translation** (the target language of `Ctrl + Win + Shift`, any of the 60), **General** (Start at
+    sign-in, the interface language). A change takes effect at once, without a restart, and is written to
+    `settings.json`.
+- **A pinned microphone.** A microphone chosen in the settings stays CUE's even when Windows changes its default (a
+  headset plugged in, say). When it is not connected, CUE records from the Windows microphone, and a card says so once:
+  "*name* not found — recording from *name*".
+- **Tray icon:** a double click opens the main window, and the right button opens the menu: Open CUE, Pause for an
+  hour, Start at sign-in, Open log, Quit. A single left click does nothing.
+- **Interface language:** English, or Russian when the Windows display language is Russian; the main window's General
+  settings (or `ui.language` in `settings.json`) can fix it to either, and the tray menu, the Drop and the main window
+  switch at once.
 - **Usage accounting:** every dictation's cost is recorded locally, with its mode; `cue-cli usage` shows a monthly
   summary.
 - **Comparison bench** (a developer tool): runs your saved recordings through Soniox stream and batch and through
   several Claude models, and builds a blind A/B report. A second one (`ask_compare`) asks a set of questions the way
   "Ask" does and measures its decisions, speed and cost.
 
-Not in this version: a settings window, history, a vocabulary for speech recognition itself (`dictionary.terms` guides
-only the cleanup, see Settings), an installer, macOS.
+Not in this version: changing the hotkeys, editing the dictionary in the window (`dictionary.terms` is set in
+`settings.json`), a vocabulary for speech recognition itself (`dictionary.terms` guides only the cleanup, see
+Settings), an installer, macOS.
 
 ## Requirements
 
@@ -102,7 +124,8 @@ only the cleanup, see Settings), an installer, macOS.
 ## API keys
 
 Keys live in Windows Credential Manager under the service name `CUE`. They are never written to files, never
-printed in full and never logged. Enter them once with the command-line tool (input is hidden):
+printed in full and never logged. Enter them once in the main window (Settings → Keys: paste the key and press
+**Check**), or with the command-line tool (input is hidden):
 
 ```powershell
 cargo run -p cue-cli -- keys set soniox
@@ -146,9 +169,11 @@ The tests need no microphone, network or API keys (network code is tested agains
 
 ## Settings
 
-`%APPDATA%\CUE\settings.json`. CUE reads it at startup, so restart CUE after editing it. A missing file or missing
-fields mean defaults; unknown fields are ignored. If the file cannot be read or parsed, CUE runs on defaults for that
-session and does not overwrite it. The defaults:
+`%APPDATA%\CUE\settings.json`. CUE reads it at startup, so restart CUE after editing it by hand. A change made in the
+main window takes effect at once and is written to the file right away. A missing file or missing fields mean
+defaults; unknown fields are ignored. If the file cannot be read or parsed, CUE runs on defaults for that session and
+does not overwrite it: changes made in the main window then last until CUE quits (the window says so), and the
+history is neither written nor cleaned up until a period is chosen in the window. The defaults:
 
 ```json
 {
@@ -177,9 +202,21 @@ session and does not overwrite it. The defaults:
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
 - `hold_hints_left`: how many more times the "Press and release" card appears after a held chord.
 - `bench.save_recordings`: copy each successful dictation's audio and app name for the bench.
-- `ui.language`: the language of the tray menu and the Drop. `"auto"` (the default) follows the Windows display
-  language, `"en"` and `"ru"` fix it (case and surrounding spaces do not matter), any other value means `"auto"`. The
-  value is kept in the file only when it is `"en"` or `"ru"`. Example: `"ui": { "language": "ru" }`.
+- `ui.language`: the language of the tray menu, the Drop, the "Ask" card and the main window. `"auto"` (the default)
+  follows the Windows display language, `"en"` and `"ru"` fix it (case and surrounding spaces do not matter), any
+  other value means `"auto"`. The value is kept in the file only when it is `"en"` or `"ru"`. The main window's General
+  settings set it too. Example: `"ui": { "language": "ru" }`.
+- `audio.device`: the microphone CUE records from, by the name Windows shows for it, chosen in the main window's
+  settings. Without it (the default) CUE records from the microphone Windows uses by default; with it, CUE keeps that
+  device when Windows changes its default, and when the device is not connected records from the Windows microphone
+  and says so on a card, once. Surrounding spaces are trimmed; a blank value or one that is not a string means the
+  Windows microphone. The value is kept in the file only when set. Example:
+  `"audio": { "device": "Microphone (USB Audio Device)" }`.
+- `history.keep`: how long the history keeps its days: `"forever"`, `"year"`, `"month"` (the default), `"week"` or
+  `"off"` (nothing is written, and the days already kept are deleted). Case and surrounding spaces do not matter. Any
+  other value leaves the period unknown: CUE then neither writes nor deletes history until a period is chosen in the
+  main window, and keeps the value in the file as it was. The value is kept in the file only when it is not
+  `"month"`. Example: `"history": { "keep": "forever" }`.
 - `drop.position`: where the Drop sits: `"bottom"` (the default; centered, 12 px above the taskbar), `"top"`
   (centered, 12 px below the top of the screen), `"left"` or `"right"` (halfway up, 12 px from the edge). Dragging the
   Drop sets it. Case and surrounding spaces do not matter; any other value means `"bottom"`. The value is kept in the
@@ -195,7 +232,8 @@ session and does not overwrite it. The defaults:
 - `translate`: the language pair of `Ctrl + Win + Shift`, as the ISO 639-1 codes of the 60 languages Soniox
   recognizes (`en`, `ru`, `de`, `zh`, …). Case and surrounding spaces do not matter, and a locale name reads as its
   language (`"ru-RU"` is `ru`).
-  - `target` (default `en`): speech in any other language is translated into it.
+  - `target` (default `en`): speech in any other language is translated into it. The main window's Translation
+    settings set it too.
   - `home`: speech in the target language is translated into it. By default the Windows display language, else the
     first `stt.language_hints` entry; one equal to the target is skipped. With no home language, speech in the target
     language is only cleaned up.
@@ -224,7 +262,8 @@ session and does not overwrite it. The defaults:
   Soniox $0.12 / hour (stream) and $0.10 / hour (batch); Haiku 5.5 $0.10 / $0.50, Sonnet 5.5 $2 / $10,
   Opus 5.5 $4 / $20 per million input / output tokens. `web_search_usd` ($0.01) prices one web search of "Ask".
 
-Start at sign-in is not a setting: it is the Windows `Run` registry entry, toggled from the tray menu.
+Start at sign-in is not a setting: it is the Windows `Run` registry entry, toggled from the tray menu or the main
+window's General settings.
 
 ## Local data
 
@@ -234,12 +273,13 @@ Everything else lives in `%LOCALAPPDATA%\CUE`:
 |---|---|
 | `last\audio.wav`, `last\result.txt` | The last successful dictation (16 kHz mono WAV and the final text), for `Ctrl + Win + V` and Copy. Replaced by the next one, and by an "Ask" result: a text written into a field keeps its question's recording as `audio.wav`; an answer pasted with its button has no audio, so the old `audio.wav` is deleted. |
 | `last\current.wav` | Audio of the dictation in progress; after a failure it waits there for Retry. Deleted when a dictation is cancelled or comes out empty, and when a question has been answered. |
-| `logs\cue.log.YYYY-MM-DD` | Daily log: events, per-stage timings, error kinds. No dictation text, no questions, answers or selected text, no audio, no keys. Kept 7 days and 10 MB at most. **Open log** in the tray menu opens this folder. |
+| `history\YYYY-MM-DD.jsonl` | The history the main window shows: one file per local day, one line of JSON per result (its time, mode, app and text, and for "Ask" the question). Days older than `history.keep` are deleted on their own, and **Clear history** deletes them all. |
+| `logs\cue.log.YYYY-MM-DD` | Daily log: events, per-stage timings, error kinds. No dictation text, no questions, answers or selected text, no history, no microphone names, no audio, no keys. Kept 7 days and 10 MB at most. **Open log** in the tray menu opens this folder. |
 | `usage.csv` | One row per attempt: time (UTC), audio length, transcription path, cost, model, tokens, latency, outcome, mode, web searches. A cache warm-up gets a row of its own. No text. |
 | `bench\recordings\` | Recordings for the bench, only when `bench.save_recordings` is `true`. |
 | `bench\runs\<timestamp>\` | Bench runs: `results.json` and `report.html`. |
 
-WebView2 keeps the Drop window's browser profile (cache and storage) separately, in
+WebView2 keeps the browser profile of CUE's windows (cache and storage) separately, in
 `%LOCALAPPDATA%\app.cue.dictation\EBWebView` (`app.cue.dictation` is the app identifier in `tauri.conf.json`).
 
 ## Costs
@@ -362,10 +402,14 @@ whether the model wrote such words (`text_before_search`) and the error codes of
 - **Inside CUE:** the Drop and the card windows get the text of the question and the answer, the card's short quote of
   the selection (40 characters at most), and the titles and sites of the sources, to draw them; never the addresses. A
   click on a source asks the core to open it, and the core opens only `http` and `https` pages, in the default browser.
-- The microphone is open only while CUE is recording.
-- **Stays on this computer:** the last dictation's audio and text, recordings saved for the bench, settings, logs and
-  usage rows. Logs and `usage.csv` never contain dictation text, questions, answers, selected text or sources; a crash
-  records only the thread and code location, not the panic message.
+  The history's text goes to the main window alone; the Drop and the card cannot read the history, the settings or
+  the keys. A key pasted in the main window goes straight to Credential Manager, and the window gets back only its
+  mask.
+- The microphone is open only while CUE is recording, and while the main window's Microphone settings show its level
+  (only the level reaches the window; that audio is never kept).
+- **Stays on this computer:** the history, the last dictation's audio and text, recordings saved for the bench,
+  settings, logs and usage rows. Logs and `usage.csv` never contain dictation text, questions, answers, selected text,
+  sources, the history or microphone names; a crash records only the thread and code location, not the panic message.
 - Check each provider's own data-retention policy for the audio and text they receive.
 
 ## Known limitations
@@ -401,10 +445,10 @@ whether the model wrote such words (`text_before_search`) and the error codes of
 - A selection of more than 8,000 characters reaches "Ask" as its first and last 4,000: it is never replaced (no
   **Replace** button, and a change of it is shown with **Copy**), and an answer about it sees only those parts.
 - Thinking is off for "Ask" (chosen after the bench: 98 % right decisions, 93 % format and checks, the first words in
-  1.2 s without a web search and 1.3 s with one, no timeouts). Before a web search the model may write a short
-  sentence, such as "let me check", which stays at the top of the answer. Now and then it answers a question about
-  something current (the latest version of a program, say) from what it knows, without searching: 1 run in 10 on the
-  bench, and once in the live check. Such an answer can be out of date.
+  1.2 s without a web search and 1.3 s with one, no timeouts). Before a web search the model often writes a short
+  sentence, such as "let me check": it can show for a moment, and goes when the search starts. Now and then it
+  answers a question about something current (the latest version of a program, say) from what it knows, without
+  searching: 1 run in 10 on the bench, and once in the live check. Such an answer can be out of date.
 - Editors that copy the current line on `Ctrl + C` with nothing selected (VS Code does by default) could hand that line
   to "Ask" as the selection when they do not report the selection themselves. None is listed yet (`COPIES_LINE` in
   `selection.rs`): VS Code was not available to check.
@@ -427,15 +471,18 @@ Cargo.toml                Cargo workspace
 app/
   package.json            front-end tooling: Vite, TypeScript, Vitest, Tauri CLI
   crates/core/            cue-core: dictation state machine, settings, refine, translation and "Ask" rules, audio
-                          helpers, usage
+                          helpers, usage, the history files
   crates/engines/         cue-engines: Soniox stream and batch, Claude refine, translation and "Ask", API keys and
                           checks
   crates/platform-win/    cue-platform-win: keyboard hook (and a mouse hook while a Shift that switched the mode is
-                          held), clipboard paste and copy, focus and selection via UI Automation, microphone, Drop
-                          window styles and placement, card placement, sleep and lock events
+                          held), clipboard paste and copy, focus and selection via UI Automation, microphone (a
+                          pinned one by its name), Drop window styles and placement, card placement, sleep and lock
+                          events
   crates/cli/             cue-cli: API keys and monthly usage
-  src-tauri/              the cue app: runtime, Drop and card windows, tray icon, logging
-  ui/                     the Drop, its tray cards and the "Ask" answer and card: TypeScript + Vite, no framework
+  src-tauri/              the cue app: runtime, Drop, card and main windows, the main window's commands, tray icon,
+                          logging
+  ui/                     the Drop, its tray cards, the "Ask" answer and card, and the main window (history and
+                          settings): TypeScript + Vite, no framework
 bench/                    cue-bench: comparison bench
 docs/ARCHITECTURE.md      how CUE works inside
 ```

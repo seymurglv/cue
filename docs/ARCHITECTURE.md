@@ -1,9 +1,11 @@
 # How CUE works
 
 CUE is a Tauri 2 app: a Rust core that runs in the background and makes every decision, and a small TypeScript UI
-(the Drop with its tray cards, and the "Ask" card at the selection) rendered by WebView2. The windows only draw the
-state the core sends and report button clicks back. The dictation logic is a pure state machine, so it is tested
-without windows, a microphone, a network or a real clock.
+(the Drop with its tray cards, the "Ask" card at the selection, and the main window with the history and the
+settings) rendered by WebView2. The Drop and the card only draw the state the core sends and report button clicks
+back; the main window reads the history and changes the settings through commands, and the core stays the only one
+that writes either. The dictation logic is a pure state machine, so it is tested without windows, a microphone, a
+network or a real clock.
 
 ## Crates
 
@@ -18,7 +20,10 @@ without windows, a microphone, a network or a real clock.
   - `ask`: the "Ask" instruction and user message, the selection limit, where a written text goes, the buttons of an
     answer, its sources, the plain text for pasting, and `AnswerView`, the answer as the windows draw it.
   - `audio`: resampling to 16 kHz mono, voice level, the "microphone is silent" detector.
-  - `settings`, `usage` (CSV rows, costs, monthly summary), `paths`.
+  - `history`: the history's day files (`Entry`, `append`, the pages, `search`, `find`, `prune` by the retention
+    period, `clear`).
+  - `settings` (with `SettingChange`, one change from the main window), `usage` (CSV rows, costs, monthly summary),
+    `paths`.
 - **`cue-engines`** (`app/crates/engines`): `stt` (session facade, ~100 ms chunks, batch fallback), `soniox`
   (WebSocket stream) and `soniox::batch` (REST, with cleanup of uploads), `claude` (refine and translation requests
   and responses, the cache warm-up), `ask` (the streaming "Ask" request, its event parser and decision, `run` and its
@@ -26,25 +31,29 @@ without windows, a microphone, a network or a real clock.
   the server-sent-events reader "Ask" uses too, and otherwise serves only the `refine_compare` example.
 - **`cue-platform-win`** (`app/crates/platform-win`): `hook` and `chord` (keyboard, and the mouse while a Shift that
   switched the mode is held), `input` (`SendInput`, modifier state), `clipboard` (paste, and the `Ctrl + C` fallback
-  of "Ask"), `focus` (UI Automation: the field, the text before the caret, the selection), `selection` (when to copy
-  the selection, where it is on screen), `cardplace` (where the "Ask" card goes), `mic` (cpal), `wav`, `dropwin`
-  (window styles, moves, the z-order guard), `placement` (the four places, the nearest place, monitors), `power`.
+  of "Ask"), `focus` (UI Automation: the field, the text before the caret, the selection; and the window under the
+  main window, for Paste again), `selection` (when to copy the selection, where it is on screen), `cardplace` (where
+  the "Ask" card goes), `mic` (cpal; a pinned microphone found by its name), `wav`, `dropwin` (window styles, moves,
+  the z-order guard), `placement` (the four places, the nearest place, monitors), `power`.
 - **`cue`** (`app/src-tauri`): startup, the `runtime` actor (with `runtime::ask`, the conversation of an open answer),
-  `ipc`, `drop_window`, `card_window`, `tray` and `trayicon`, `logging`.
+  `ipc`, `drop_window`, `card_window`, `main_window` and `commands` (the main window and its commands), `micpreview`
+  (the microphone level of the settings), `tray` and `trayicon`, `logging`.
 - **`app/ui`**: `main.ts` (events, commands, frame loop), `controller.ts` (`DropController`), `trays.ts`,
   `answer.ts` (the "Ask" answer, one view for the tray and the card), `markdown.ts` (its safe Markdown), `card.ts` and
-  `cardPage.ts` (the card window), `strings.ts`, and `design/` (Drop, tray card, answer and animation code, styles, the
-  Bebas Neue font).
+  `cardPage.ts` (the card window), `strings.ts`, `window.html` with `window/` (the main window: `page.ts`,
+  `history.ts`, `settings.ts`, `text.ts`, `icons.ts`, `api.ts`), and `design/` (Drop, tray card, answer and animation
+  code, styles including the main window's `window.css`, the Bebas Neue font).
 - **`cue-cli`** (`app/crates/cli`) and **`cue-bench`** (`bench`): developer tools.
 
 ## Threads
 
-- **Main thread** (Tauri event loop): windows, the tray menu, tray icon redraws.
+- **Main thread** (Tauri event loop): windows, the tray menu, tray icon redraws, and the main window's `mic_preview`
+  command (so a preview's start and stop run in order with the window's end).
 - **`cue-core`**: the core actor, `Runtime::run`. All events arrive as `CoreEvent`s on one unbounded channel:
-  hotkeys, Drop actions, microphone frames, engine results, timers, sleep and lock. It runs on its own thread
-  (`block_on`) because it makes short blocking Windows calls (UI Automation up to 150 ms, Credential Manager).
-  Network calls and timers are tokio tasks that send their results back as events. A panic while handling one event
-  is caught and logged, and the core keeps running.
+  hotkeys, Drop actions, microphone frames, engine results, timers, sleep and lock, and the main window's settings and
+  history requests. It runs on its own thread (`block_on`) because it makes short blocking Windows calls (UI
+  Automation up to 150 ms, Credential Manager). Network calls and timers are tokio tasks that send their results back
+  as events. A panic while handling one event is caught and logged, and the core keeps running.
 - **`cue-keyboard`**: the `WH_KEYBOARD_LL` hook (and, while a Shift that toggled the mode is held, `WH_MOUSE_LL`: see
   Hotkey chord) with its own message loop at time-critical priority. The handler only classifies the key and sends a
   `HotkeyEvent`; `cue-hotkeys` forwards it to the core. The hook reads three atomics
@@ -57,7 +66,13 @@ without windows, a microphone, a network or a real clock.
   watchdog. A late copy of the fallback is watched on `cue-late-copy`, and its removal from the Win+V history runs on
   `cue-clip-history` (WinRT); both are short-lived.
 - **`cue-card`**: moves, shows and hides the "Ask" card window.
-- **`cue-mic`** (cpal) with `cue-mic-events` forwarding frames; `cue-mic-stop` closes a microphone off the core thread.
+- **`cue-mic`** (cpal; it also lists the devices to find a pinned microphone) with `cue-mic-events` forwarding
+  frames; `cue-mic-stop` closes a microphone off the core thread (and off the main thread for the preview).
+- **`cue-mic-preview`**: while the main window's Microphone settings are shown, sends the window the level of the
+  preview's own `cue-mic` (see Main window).
+- **`cue-main-window`**: builds the main window and ends; a WebView built on the main thread from a tray or menu
+  handler deadlocks (wry#583). The main window's other commands are async: their file, device-list and Credential
+  Manager work runs on tokio's blocking threads.
 - **`cue-power`**: a hidden top-level window for `WM_POWERBROADCAST` and session lock notifications.
 - **`cue-hit-test`** (one for the Drop and one for the card, ~60 Hz while the window is shown), **`cue-placement`**
   (every 0.5 s; every 8 ms while the Drop is dragged or snapping into place), **`cue-tray-watch`** (every 5 s),
@@ -128,9 +143,9 @@ keeps the answer open with the error and Retry, and the question is kept.
   dropped and the answer stays, still printing if it was, with no Restore; in `Answer` it closes the answer, aborts a
   request still in flight and forgets the conversation; during a paste it is only swallowed.
 - A write that ends while a follow-up is under way (recording, being transcribed, held or missed) is never pasted
-  under the user's hands, and CUE never injects input while paused: the runtime asks `Flow::shows_write` and shows such
-  a text in the answer instead. A pause closes an open answer (with a follow-up under way and the request in flight),
-  since `Esc` does not reach CUE then.
+  under the user's hands, and CUE never injects input on its own while paused (the main window's Paste again is a
+  click): the runtime asks `Flow::shows_write` and shows such a text in the answer instead. A pause closes an open
+  answer (with a follow-up under way and the request in flight), since `Esc` does not reach CUE then.
 - Shift and Alt do nothing to a follow-up (it stays "Ask"), and a dictation needs the answer closed first. A
   microphone that fails during a follow-up closes the answer for its own card (one card at a time).
 - Accounting: an answer shown in full ends its attempt as `answered` (paid, nothing pasted), a written text as
@@ -196,13 +211,24 @@ keeps the answer open with the error and Retry, and the question is kept.
 
 ### Recording
 
-The default microphone opens on the first press. Frames are resampled to 16 kHz mono `i16` in 20 ms frames. Each
+The microphone opens on the first press. Frames are resampled to 16 kHz mono `i16` in 20 ms frames. Each
 frame goes to the WAV file (`last\current.wav`), to the Soniox stream, and, at most ~30 times a second while
 listening, to the Drop as a voice level. Four seconds of digital silence from the start (below −70 dBFS: a muted or
 blocked microphone, not a quiet room) stop the recording and show the "Microphone is silent" card, as does a
 microphone that fails before any sound. One that fails after sound was heard ends the recording normally. At 8:00
 a card says one minute is left; at 9:00 the recording finishes on its own. Locking the session or sleep discards a
 recording in progress.
+
+**Which microphone.** The one Windows uses by default, or the one pinned in the main window (`audio.device`, read
+each time a recording opens the microphone). A pinned one is looked for on the `cue-mic` thread, so the core never
+waits for the list: among the input devices with the names Windows shows, `mic::pick` takes the trimmed name exactly,
+else the first that differs only in case. It is opened as that device, and cpal follows the Windows default only for a
+stream opened on the default device, so Windows changing its default (a headset plugged in) does not move a pinned
+recording. A pinned device that is not there leaves the recording to the Windows default: `MicEvent::Fallback` comes
+before the first frame, and the flow (`MicFallback`, while starting or recording, and not while an "Ask" answer is
+open) shows the "Another microphone" card with both names, which go to the Drop alone (`cue://mic-names`), never to the
+log. Each loss is told once (`state::MicTold`): it counts as told when the card goes out, and a recording that has the
+pinned device again, or a change of the microphone setting, forgets it. With nothing pinned no device list is read.
 
 ### Transcription: Soniox stream and batch fallback
 
@@ -262,8 +288,9 @@ recording in progress.
 - **Direction** (`translate::output_language`). The speech language is `translate.speech` when fixed, else the one
   Soniox heard most (see Transcription). Speech that is not in `translate.target` goes to the target; speech in the
   target goes to the home language; unknown speech goes to the target; with no home language, speech in the target is
-  only cleaned up. The home language (`translate::resolve_home`) is decided once at startup: `translate.home`, else
-  the Windows display language, else the first language hint, skipping any equal to the target. Settings example:
+  only cleaned up. The home language (`translate::resolve_home`) is decided at startup, and again when the main window
+  changes the target: `translate.home`, else the Windows display language, else the first language hint, skipping any
+  equal to the target. Settings example:
   `"translate": { "target": "en", "home": "ru", "speech": "auto" }` sends Russian (or German) speech to English and
   English speech to Russian.
 - **Request** (`claude::Job::Translate(code)`, `request_body_for`). The refine request as is, plus one more system block
@@ -324,7 +351,8 @@ own (see Ask).
 
 ### Paste
 
-The same path serves dictation and `Ctrl + Win + V`:
+The same path serves dictation, `Ctrl + Win + V` and the main window's Paste again (which carries the window it goes
+to, as an "Ask" paste does, see Main window):
 
 1. One short focus query: is there a field, which app, the last few characters before the caret.
 2. Trim the text's edges, then add a join space only when the caret sits right after a word.
@@ -611,7 +639,8 @@ Core → window events: `cue://state` (phase, error cause, retry, paused, mode),
 or none), `cue://shake`, `cue://idle-hidden`, `cue://place`, `cue://answer` (the whole `AnswerView` of the open "Ask"
 answer, or none when it closes: sent at once for a new turn, an end or an opening, at most every 50 ms while words
 stream) and `cue://card-place` (for the card: which side of the selection, where the arrow is, how tall the card may
-grow). Window → core commands: `drop_action` (`cancel`, `finish`, `undo`, `retry`, `dismiss`, `trayAction`,
+grow), and `cue://mic-names` (for the Drop alone: the two names of the "Another microphone" card, sent just before
+it). Window → core commands: `drop_action` (`cancel`, `finish`, `undo`, `retry`, `dismiss`, `trayAction`,
 `trayClose`, and the answer's `answerInsert`, `answerBelow`, `answerReplace`, `answerCopy`, `answerRetry`,
 `answerClose`), `answer_source` (the number of a source chip clicked), `drop_hit_rects`, `drop_drag` (`start`, `end`),
 `drop_ready`, after which the core resends the current state, card, `idle-hidden`, place and open answer, and, from the
@@ -620,8 +649,8 @@ answer. The place also comes in an initialization script, so the first frame is 
 
 The windows get the text of an "Ask" question and its answer, the card's quote of the selection (`quote_of`, 40
 characters at most), and the titles and sites of its sources, to draw them; never a source's address. A click on a
-source sends only its number, and the core opens the page with `ShellExecuteW` (see Ask). No dictation text crosses this
-boundary.
+source sends only its number, and the core opens the page with `ShellExecuteW` (see Ask). No dictation text reaches the
+Drop or the card; the history's text goes to the main window alone (see Main window).
 
 One size: the Drop is 36 px high in every state (`--h` in `drop.css`; `DROP_SIZE` in `drop_window.rs` places it, and a
 test keeps them equal). The circle states are 36 × 36. Everything inside is the original 40 px drawing scaled by
@@ -640,8 +669,8 @@ the arrows icon next to the voice bars, and "Ask" has an icon of its own; a mode
 changes at once. The error of a failed translation reads "Couldn't translate" with the network cause icon and Retry.
 The idle Drop shows no mode, and its hint stays `Ctrl + Win`.
 
-Tray cards grow out of the Drop, one at a time; a new card replaces the old one, a new recording closes it, and hovering
-pauses the countdown ring:
+Tray cards grow out of the Drop, one at a time; a new card replaces the old one, a new recording and an "Ask" answer
+that opens close it, and hovering pauses the countdown ring:
 
 | Card | Button | Closes |
 |---|---|---|
@@ -649,12 +678,17 @@ pauses the countdown ring:
 | Microphone is silent | Settings (opens `ms-settings:privacy-microphone`) | manually |
 | Press and release | Got it | after 7 s |
 | One minute left | — | after 5 s |
+| Another microphone (the pinned one is not there; both names) | — | after 6 s |
 
 A card button arrives as `trayAction`; the core acts on the last card it sent.
 
 The interface is in English, or in Russian when the Windows display language is Russian; `ui.language` in
-`settings.json` (`en` or `ru`) overrides Windows. The core makes that choice once at startup, so the tray menu, the Drop
-and the card always match.
+`settings.json` (`en` or `ru`) overrides Windows. The core makes that choice at startup, and again when the main window
+changes `ui.language`; so the tray menu, the Drop, the card and the main window always match. On a change (`Ui::relang`,
+on the main thread) the tray menu takes the new labels, and the Drop and the card load their pages again with
+`?lang=` (the Drop with `?place=` too, so a Drop dragged since startup lays out its first frame for its place), which
+the pages prefer to the values of their initialization scripts; once loaded, each sends `drop_ready` or `card_ready`
+and gets its state back (see Events and sizes). The main window draws itself in the language `settings_get` reports.
 
 **The answer tray.** An "Ask" answer without a card opens in a second tray of the same kind (`.ansA`, 420 px wide, up to
 410 high), with the Drop's material, growing toward the screen center from any of the four places. It holds the header
@@ -696,14 +730,105 @@ it believes hidden. Without the window (it could not be created) every answer op
   the card's 450 ms pop-in, so the last rectangle it reports is the card at its full size, also for an answer that shows
   whole at once.
 
+## Main window
+
+An ordinary window with the history and the settings (`main_window`, label `main`, the page `window.html`). It opens
+from the tray icon (Open CUE, or a double click); there is one at a time: opening it again restores it, shows it and
+brings it forward, and an open while it is still being created does nothing more. It is created when opened and
+destroyed when closed, so no WebView stays in memory and the page reads the history and the settings again each time.
+It is built on `cue-main-window`, never on the main thread (see Threads). Windows draws its frame, in the Windows theme
+(`theme(None)`; the page follows `prefers-color-scheme`); it is 700 × 760 logical px, at least 700 × 480, centered,
+and unlike the Drop it takes the focus. Closing it never quits CUE: an exit request without a code is prevented, and
+Quit exits with one. When it is destroyed, its history channel is dropped and the microphone preview stops.
+
+### Commands and permissions
+
+The page talks to the core through the app's own commands (`commands.rs`), and every one starts with `guard`: a
+window other than `main` gets `notMain` and a log line with its label. The Drop and the card draw what a model wrote,
+so no page of theirs may read the history, change a setting or touch a key. Errors are short codes (`core`,
+`notFound`, `badValue`, `badName`, `emptyKey`, `store`, `autostart`, `failed`), never text. The main window has a
+capability of its own (`capabilities/main.json`) with `core:event:allow-listen` alone, for `cue://mic-level`; the
+Drop's and the card's `core:default` (`default.json`) does not cover it. The commands:
+
+- `settings_get`, `settings_set` (one `SettingChange`, `{kind, value}`), answered by the core within 3 s with
+  `SettingsView` (the period, `null` while unknown; the microphone; the translation target; the interface language
+  and the language it resolves to; the 60 languages; whether the file is written);
+- `autostart_get`, `autostart_set` (the autostart plugin's Run key, changed only when it differs; the tray menu's
+  check follows within 5 s);
+- `history_subscribe`, `history_page`, `history_search`, `history_copy`, `history_paste`, `history_clear`;
+- `key_state`, `key_set`, `key_check` (Soniox and Anthropic only);
+- `mic_list`, `mic_preview`.
+
+### History
+
+`cue_core::history` keeps one file per local day in `%LOCALAPPDATA%\CUE\history`, `YYYY-MM-DD.jsonl`, one line of
+JSON per entry (`id`, `ts`, `mode`: `dictation`, `translation` or `ask`, `app`, `text`, and `question` for "Ask"),
+appended in one write, so a day is never rewritten. `ts` is the local time to the millisecond; the id is `ts-n`, `n`
+counting the run's entries. A line that does not read as an entry is skipped, and only files named for a real date
+count, so nothing else in the folder is read or deleted. There is no database: a search reads the files.
+
+- **Written** only by the core (`HistoryLog`), never in the way of the result: a dictation or a translation when its
+  text becomes the last result (pasted, or left in the clipboard with "Nowhere to paste"), with the app it went to
+  (empty when not known); an "Ask" turn that ends complete, answered or written: its question and the answer as a
+  paste puts it (`Conversation::paste_text`, without the Markdown), or the text the model wrote. Not written:
+  `Ctrl + Win + V`, an answer pasted with its button, Copy and Paste again from the window, a refusal, a failure, a
+  cancelled or empty dictation. A disk error is one log line.
+- **Read** by the commands on blocking threads: the first page is today and yesterday (`recent`), Show earlier the next
+  7 days that have entries (`older`); a search finds the entries whose text or question holds the query in any case,
+  newest first, 200 at most. New entries reach the page over a `tauri::ipc::Channel` the page registers with
+  `history_subscribe` before its first page (one at a time; a new one replaces it, and the window's end or a failed
+  send drops it): only the webview that made a channel gets its messages, and no event carries history text. The page
+  merges what comes before its first page and drops an entry it already shows (by id).
+- **Retention** (`history.keep`): `forever`, `year` (366 days back from today), `month` (31, the default), `week` (7)
+  or `off`. Older days are deleted at startup, on the first entry of a new local day and when the period changes in the
+  window (the page then reads its first page again); `off` writes nothing and deletes every day, and a day after today
+  (the clock was moved back) is kept. While the period is unknown (`settings::Period::Unknown`: settings.json was not
+  read, or `history.keep` holds a value CUE does not know) nothing is written or deleted, until the window sets a
+  period; the window shows it as not set. Clear history (a second press within 3 s) sends `CoreEvent::HistoryClear`,
+  and the core deletes every day.
+- **Copy and Paste again** look the entry up by id (`history::find`) and send its text to the core
+  (`CoreEvent::HistoryText`). Copy leaves it in the clipboard. Paste again takes the window right under the main window
+  in z-order (`focus::window_below`: visible, not minimized or cloaked, not a tool window, not CUE's, not the desktop),
+  asks Windows to bring it forward and waits for that (`bring_forward`, 500 ms), then pastes there the way
+  `Ctrl + Win + V` does, with the window check right before Ctrl+V; with no such window, one that does not come
+  forward, or another window in front by then, the text stays in the clipboard. The reply is `pasted` or `clipboard`,
+  and the page shows the check on Paste again or on Copy. Neither changes the last result or adds an entry. Paste again
+  works while CUE is paused too: it is a click in the window, and the pause is about the chord.
+
+### Settings tray
+
+The gear opens a tray with four pages: Keys, Microphone, Translation and General. Every change goes to the core at
+once (`settings_set` → `CoreEvent::Settings`), which applies it to its copy (`Settings::apply`), writes the whole file
+and answers with the settings as they are now (see Settings). After a `core` error the page reads them again.
+
+- **Keys**: a password field and Check for each. Check saves a typed key (`key_set`: Credential Manager, the service
+  `CUE`, where `cue-cli keys` keeps them; trimmed, an empty one refused) and empties the field, then checks the saved
+  key with the free probe of `cue_engines::check` (`key_check`, 10 s): works, key error (key, balance or limit),
+  couldn't check, no key. A key never leaves `commands.rs`, in a reply, an error or the log: only its mask
+  (`keys::mask`). A saved key is used from the next request on, since keys are read on use.
+- **Microphone**: As in Windows or one of the devices `mic_list` names (with the one Windows uses by default), saved
+  as `audio.device` and used from the next recording on (see Recording). A pinned one that is not connected shows as
+  such, by the same match as `mic::pick`. While the page is shown, `mic_preview` sends the level of the chosen
+  microphone (`micpreview`): it opens the device in shared mode, as a recording does, so a dictation meanwhile records
+  as usual, and `cue-mic-preview` sends the window only the level, at most ~30 times a second, as `cue://mic-level`;
+  the samples are dropped there. One preview at a time; it stops when the Microphone page is left or the tray closes,
+  when the window's page unloads or loads again, and when the window is destroyed.
+- **Translation**: the target language, any of the 60 Soniox knows; the core decides the home language again.
+- **General**: Start at sign-in, and the interface language (Auto, English, Русский), which switches every window at
+  once (see The Drop and tray cards).
+
 ## Tray icon
 
 A monochrome caret mark drawn in code, light or dark to match the taskbar and sized for its DPI (both rechecked every
-5 s). It shows a red lamp while recording and turns pale while paused. The menu:
+5 s). It shows a red lamp while recording and turns pale while paused. A double click of the left button opens the main
+window, a single one does nothing, and the menu opens on the right button (a menu on the left click would take the
+second click of a double click). The menu:
 
+- **Open CUE**: opens the main window.
 - **Pause for an hour** (checkmark): a recording in progress is discarded, hotkeys and the idle strip are off, and the
   pause ends by itself after an hour.
-- **Start at sign-in** (checkmark): the Windows `Run` entry, re-read every 5 s in case it was changed elsewhere.
+- **Start at sign-in** (checkmark): the Windows `Run` entry, re-read every 5 s in case it was changed elsewhere (the
+  main window too).
 - **Open log**: opens the log folder.
 - **Quit**.
 
@@ -711,16 +836,25 @@ A second launch of `cue.exe` does nothing.
 
 ## Settings
 
-`%APPDATA%\CUE\settings.json` is read once at startup. Missing fields take defaults, unknown fields are ignored, a UTF-8
-BOM is accepted, and any engine name reads as `soniox`. If the file cannot be read, CUE runs on defaults and never
-writes it during that session. Writes (the hold-hint counter, the Drop's place) always write the whole file from the
-core's copy, so they never undo each other, and are atomic: a temp file in the same folder, then a rename. Default
-prices are not written to the file, so price fixes in code reach existing installs; once any price is edited, the whole
-block is written. `ui.language` (`auto`, `en`, `ru`, in any case and with spaces trimmed; any other value reads as
-`auto`) is likewise written only when it is not `auto`, `drop.position` (`bottom`, `top`, `left`, `right`, in any case
-and with spaces trimmed; any other value, or a `drop` that is not an object, reads as `bottom`) only when it is not
-`bottom`, and `dictionary` only when its list is not empty. `dictionary.terms` is kept as written; a value that is not a
-list reads as an empty list and items that are not strings are skipped, so a typo there never makes the file unreadable.
+`%APPDATA%\CUE\settings.json` is read once at startup; after that the core owns its copy, and the main window changes it
+only through the core (`CoreEvent::Settings`, one `SettingChange` at a time, answered over a `oneshot` with the settings
+as they are then). Missing fields take defaults, unknown fields are ignored, a UTF-8 BOM is accepted, and any engine
+name reads as `soniox`. If the file cannot be read, CUE runs on defaults and never writes it during that session: the
+window's changes hold until CUE quits, and the history's period is unknown (see Main window). Writes (the hold-hint
+counter, the Drop's place, the main window's changes) always write the whole file from the core's copy, so they never
+undo each other, and are atomic: a temp file in the same folder, then a rename. A change from the window takes effect
+at once: a new translation target decides the home language again, a new interface language relabels the tray menu
+and reloads the Drop and the card, a new period deletes the days it no longer keeps, and a new microphone is opened by
+the next recording. The value already set, or one the settings refuse (a microphone name of more than 200 characters,
+a translation code Soniox does not know, a period that is not one of the five), changes and writes nothing.
+
+Default prices are not written to the file, so price fixes in code reach existing installs; once any price is edited,
+the whole block is written. `ui.language` (`auto`, `en`, `ru`, in any case and with spaces trimmed; any other value
+reads as `auto`) is likewise written only when it is not `auto`, `drop.position` (`bottom`, `top`, `left`, `right`, in
+any case and with spaces trimmed; any other value, or a `drop` that is not an object, reads as `bottom`) only when it
+is not `bottom`, and `dictionary` only when its list is not empty. `dictionary.terms` is kept as written; a value that
+is not a list reads as an empty list and items that are not strings are skipped, so a typo there never makes the file
+unreadable.
 The `translate` fields (`target`, `home`, `speech`) go through `translate::known`: trimmed, lowercased, the first
 subtag of a locale name (`ru-RU`, `zh-Hans-CN`), the aliases `nb`/`nn` → `no`, `fil` → `tl`, `iw` → `he`, `in` → `id`;
 anything else (`auto`, an unknown code, a number) reads as nothing, that is the default, and a `translate` that is not
@@ -730,7 +864,12 @@ back, and the block is written only when one of its fields is set. The `ask` fie
 string, `max_searches` a whole number from 1 to 10; any other value, and the default itself, reads as nothing, an `ask`
 that is not an object reads as the default section, and the block is written only when a field differs from its
 default, so the file never becomes unreadable through it. Model names are settings, so a new model version needs no
-code change.
+code change. `audio.device` is a trimmed string; a blank value or one that is not a string reads as nothing (the
+Windows microphone), and the block is written only with a device. `history.keep` (`settings::Period`) reads `forever`,
+`year`, `month`, `week` and `off`, in any case and with spaces trimmed; a missing value is `month`, which is not
+written; any other value (a typo, a later version's name, `null`, a number) leaves the period unknown and is written
+back exactly as it was, so no save turns it into a period the user did not choose; a `history` that is not an object
+reads as the default.
 
 ## Usage accounting
 
@@ -770,16 +909,26 @@ and gets its own row when it ends. Pasting a complete answer with its button add
   at startup, how many dictionary terms are used and skipped, and the translation pair (two language codes); the
   target code of each translation; the token counts of each cache warm-up; for "Ask", the kind and length of the
   selection read, whether the `Ctrl + C` fallback ran and what became of its Win+V copy (a kind), the number of turns
-  of a request, where the answer opened (tray or card), how a request ended and its number of web searches. Never
-  logged: dictation text, text before the caret, translations, dictionary terms, questions, answers, selected text,
-  written texts, the addresses and titles of sources, where the selection is on screen, audio, API keys, response
-  bodies. `Effect` and `Input` are never logged with `{:?}`, since their `Debug` prints text.
+  of a request, where the answer opened (tray or card), how a request ended and its number of web searches; for the
+  main window, its opening and closing, a command refused to another window (its label), a setting change as codes and
+  states (the period's code, whether a microphone is pinned, the interface language), how many old days of history were
+  deleted, where Paste again went (`pasted` or `clipboard`), which key was saved or checked and the check's result,
+  and that a pinned microphone was not there. Never logged: dictation text, text before the caret, translations,
+  dictionary terms, questions, answers, selected text, written texts, history entries, microphone names, the addresses
+  and titles of sources, where the selection is on screen, audio, API keys, response bodies. `Effect` and `Input` are
+  never logged with `{:?}`, since their `Debug` prints text.
 - WebSocket handshake tracing is switched off by a fixed filter, since it would include the `Authorization` header.
 - The panic hook is installed first and records only the thread and code location, never the message, which could
-  contain dictated text. Debug output of focus results, of the selection read and copied, of the "Ask" context and of
-  microphone frames shows only lengths.
-- Keys are read from Credential Manager on use, appear in the CLI only masked, and are cut out of engine error texts.
-- Soniox uploads are deleted after use. The last dictation (`last\`) and bench recordings stay on this computer only.
+  contain dictated text. Debug output of focus results, of the selection read and copied, of the "Ask" context, of
+  microphone frames and events, of history entries and their views, and of the microphone setting and its changes
+  shows only lengths and counts.
+- Keys are read from Credential Manager on use, appear in the CLI and the main window only masked, and are cut out of
+  engine error texts.
+- The history's text goes to the main window alone: its commands read the files, and new entries come over its own
+  channel (see Main window). The microphone names of the "Another microphone" card go to the Drop alone, and the main
+  window gets the device list.
+- Soniox uploads are deleted after use. The last dictation (`last\`), the history (`history\`) and bench recordings
+  stay on this computer only.
 
 ## Bench
 
