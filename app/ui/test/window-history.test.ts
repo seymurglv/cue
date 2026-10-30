@@ -251,6 +251,30 @@ describe('The history', () => {
     expect(today.querySelectorAll('.hr')).toHaveLength(3);
   });
 
+  it('day headings follow the date past midnight', async () => {
+    page = await mount();
+    expect($$('.hgrp .hday').map((d) => d.textContent)).toEqual(['Today', 'Yesterday']);
+    // The window stays open past midnight: the first entry of the new day redraws every heading.
+    vi.setSystemTime(new Date(2026, 10, 1, 0, 5));
+    feeds.entry(entry('2026-11-01T00:04:00.000-1', 'Just after midnight.'));
+    expect($$('.hgrp .hday').map((d) => d.textContent)).toEqual(['Today', 'Yesterday', 'Friday, October 30']);
+    const top = rows()[0];
+    expect(top.querySelector('.htx')!.textContent).toBe('Just after midnight.');
+    expect(top.classList.contains('new')).toBe(true);
+    expect($$('.hr.new')).toHaveLength(1);
+  });
+
+  it('day headings follow the date when the window comes back', async () => {
+    page = await mount();
+    vi.setSystemTime(new Date(2026, 10, 1, 9, 0));
+    window.dispatchEvent(new Event('focus'));
+    expect($$('.hgrp .hday').map((d) => d.textContent)).toEqual(['Yesterday', 'Friday, October 30']);
+    // The same day again: nothing is drawn anew.
+    const first = rows()[0];
+    window.dispatchEvent(new Event('focus'));
+    expect(rows()[0]).toBe(first);
+  });
+
   it('a new entry makes Today when there was none', async () => {
     core.historyPage.mockResolvedValue({ days: [{ date: YESTERDAY, entries: [evening] }], more: false });
     page = await mount();

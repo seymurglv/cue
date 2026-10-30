@@ -562,9 +562,9 @@ mod tests {
         let mut t = MicTold::default();
         assert!(record(&mut t, Some("Headset"), 50), "the first recording without it");
         assert!(!record(&mut t, Some("Headset"), 50), "the same loss: told already");
-        assert!(!record(&mut t, Some("Headset"), 0), "not even before any frame");
-        assert!(!record(&mut t, None, 0), "a recording that fails before its first frame proves nothing");
-        assert!(!record(&mut t, Some("Headset"), 50));
+        assert!(!record(&mut t, Some("Headset"), 0), "the same loss before any frame: told already");
+        assert!(!record(&mut t, None, 0), "a recording without a fallback tells nothing");
+        assert!(!record(&mut t, Some("Headset"), 50), "one that ended before its first frame did not show it is back");
         assert!(!record(&mut t, None, 50), "it is back");
         assert!(record(&mut t, Some("Headset"), 50), "lost again: told again");
 

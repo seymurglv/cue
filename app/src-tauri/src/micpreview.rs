@@ -70,7 +70,7 @@ fn slot() -> MutexGuard<'static, Option<Preview>> {
     PREVIEW.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Frames → their level, to the main window; the samples go with the event. Ends when the preview has ended or the
+/// Frames → their level, to the main window; the samples are dropped with it. Ends when the preview has ended or the
 /// microphone's thread has.
 fn forward(app: &AppHandle, events: &Receiver<MicEvent>, live: &AtomicBool) {
     let mut last: Option<Instant> = None;

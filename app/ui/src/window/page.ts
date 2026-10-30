@@ -138,6 +138,8 @@ export class WindowPage implements Ctx {
       if (this.tray.isOpen && !within(e, '.btray, .menu, .gear')) this.tray.close();
     }, { signal });
     window.addEventListener('resize', () => this.tray.place(), { signal });
+    // Back to the window, maybe on another day: "Today" and "Yesterday" follow the date.
+    window.addEventListener('focus', () => this.history.followDate(), { signal });
     // The microphone stays open only while its settings page is shown.
     window.addEventListener('pagehide', () => this.tray.stopPreview(), { signal });
   }
@@ -179,7 +181,7 @@ export class WindowPage implements Ctx {
       return view;
     } catch (e) {
       logFailed(`setting ${c.kind}`, e);
-      // No answer in time: the core may still have taken it (Task 3 review M3) — show what it holds now.
+      // No answer in time: the core may have applied it after the wait — show what it holds now.
       if (codeOf(e) === 'core') {
         await api.settingsGet().then((v) => this.took(v), (err) => logFailed('reading the settings', err));
       }

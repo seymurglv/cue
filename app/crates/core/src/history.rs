@@ -411,10 +411,11 @@ mod tests {
         assert_eq!(texts(&page.days), [("2026-10-20", vec!["day 20"])]);
         assert!(!page.more);
         assert_eq!(older(&dir, "2026-10-20", 7), Page::default());
-        // Exactly as many days as asked for and none left: no more.
+        // Fewer days asked for than there are: more.
         let page = older(&dir, "2026-10-29", 2);
         assert_eq!(texts(&page.days), [("2026-10-27", vec!["day 27"]), ("2026-10-25", vec!["day 25"])]);
         assert!(page.more);
+        // Exactly as many days as asked for and none left: no more.
         assert!(!older(&dir, "2026-10-21", 1).more);
         // Not a date: nothing.
         assert_eq!(older(&dir, "zzzz", 7), Page::default());

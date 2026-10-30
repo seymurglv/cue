@@ -18,7 +18,7 @@ export interface WinText {
   keeps: Record<Keep, string>;
   /** The period is unknown: nothing is chosen. */
   keepUnset: string;
-  /** Next to the periods (review M5 of Task 2). */
+  /** Next to the periods: a shorter period deletes older days at once. */
   keepNote: string;
   clear: string;
   clearAgain: string;

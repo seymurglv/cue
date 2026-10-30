@@ -56,6 +56,8 @@ export class HistoryView {
   private results: DayView[] | null = null;
   private searchSeq = 0;
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The local date the day headings were drawn for ("Today", "Yesterday"). */
+  private drawnFor = '';
   private clearTimer: ReturnType<typeof setTimeout> | null = null;
   private sec: HTMLElement | null = null;
   private list!: HTMLElement;
@@ -159,18 +161,27 @@ export class HistoryView {
       this.pending.push(e);
       return;
     }
-    const date = entryDate(e, this.ctx.today());
+    const today = this.ctx.today();
+    const date = entryDate(e, today);
     if (!this.merge([{ date, entries: [e] }]) || this.results !== null || !this.sec) return;
-    let group = this.list.querySelector<HTMLElement>(`.hgrp[data-day="${date}"]`);
-    if (!group) {
-      group = this.group({ date, entries: [] });
-      const after = [...this.list.children].find((g) => ((g as HTMLElement).dataset.day ?? '') < date);
-      this.list.insertBefore(group, after ?? null);
+    const group = this.list.querySelector<HTMLElement>(`.hgrp[data-day="${date}"]`);
+    if (!group || today !== this.drawnFor) {
+      // A day of its own, or the date changed since the list was drawn (the window stayed open past midnight): every
+      // heading is drawn again for today.
+      this.render();
+      const row = [...this.list.querySelectorAll<HTMLElement>('.hr')].find((r) => r.dataset.id === e.id);
+      row?.classList.add('new');
+      return;
     }
     const row = this.row(e, '');
     row.classList.add('new');
     group.querySelector('.hl')!.prepend(row);
     this.emptyEl.hidden = true;
+  }
+
+  /** The day headings follow the date: the list is drawn again when the date changed since it was drawn. */
+  followDate(): void {
+    if (this.sec && this.ctx.today() !== this.drawnFor) this.render();
   }
 
   /** The period shown next to "Keep": unset when the core does not know it. */
@@ -203,6 +214,7 @@ export class HistoryView {
 
   private render(): void {
     if (!this.sec) return;
+    this.drawnFor = this.ctx.today();
     const days = this.results ?? this.days;
     const q = this.results !== null ? this.query.trim() : '';
     this.list.textContent = '';
