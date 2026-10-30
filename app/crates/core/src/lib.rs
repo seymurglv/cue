@@ -1,6 +1,7 @@
 pub mod ask;
 pub mod audio;
 pub mod flow;
+pub mod history;
 pub mod paths;
 pub mod refine;
 pub mod settings;

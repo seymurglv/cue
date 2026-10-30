@@ -1,5 +1,6 @@
 //! settings.json: engine and models, refine thresholds, the hint counter, bench, interface language, where the Drop
-//! sits, the user's dictionary, the translation pair, "Ask", prices for usage accounting.
+//! sits, the user's dictionary, the translation pair, "Ask", the pinned microphone, how long the history keeps its days,
+//! prices for usage accounting. The main window changes a setting one at a time (`SettingChange`).
 use crate::translate;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::io::Write;
@@ -277,6 +278,162 @@ where
     Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
+/// The microphone CUE records from (spec 3 §3). Not written while it follows Windows.
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioSettings {
+    /// The device's name as Windows shows it; `None` — the microphone Windows uses by default.
+    #[serde(deserialize_with = "device_or_nothing", skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+}
+
+impl AudioSettings {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// A device name is the user's (it may carry a person's name, like "Jane's AirPods"): a log shows only its length.
+impl std::fmt::Debug for AudioSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AudioSettings").field("device_chars", &self.device.as_ref().map(|d| d.chars().count())).finish()
+    }
+}
+
+/// A device name, trimmed; not a string, or blank, reads as nothing (the Windows microphone), so a typo never makes
+/// the file unreadable.
+fn device_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_str().map(str::trim).filter(|d| !d.is_empty()).map(str::to_owned))
+}
+
+/// A longer microphone name from the window is refused: Windows names are far shorter, so it can only be a mistake.
+const MAX_DEVICE_CHARS: usize = 200;
+
+/// How long the history keeps its days (spec 3 §2); `history::prune` deletes the older ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Keep {
+    Forever,
+    Year,
+    #[default]
+    Month,
+    Week,
+    Off,
+}
+
+impl Keep {
+    pub const ALL: [Self; 5] = [Self::Forever, Self::Year, Self::Month, Self::Week, Self::Off];
+
+    /// The name in settings.json and in the main window.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Forever => "forever",
+            Self::Year => "year",
+            Self::Month => "month",
+            Self::Week => "week",
+            Self::Off => "off",
+        }
+    }
+
+    /// Case and surrounding spaces do not matter; anything else is `None`.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        Self::ALL.into_iter().find(|k| k.code().eq_ignore_ascii_case(text))
+    }
+}
+
+/// Like `DropPosition`: any value that is not one of the five names (another word, a number, `null`) reads as `Month`,
+/// so a typo never makes the whole file unreadable.
+impl<'de> Deserialize<'de> for Keep {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(value.as_str().and_then(Self::parse).unwrap_or_default())
+    }
+}
+
+/// The history (spec 3 §2). Not written while it is the default (a month), like `drop`.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HistorySettings {
+    pub keep: Keep,
+}
+
+impl HistorySettings {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// One change of a setting from the main window, as the window sends it: `{"kind": "micDevice", "value": "…"}`. The
+/// core applies it to its copy of the settings with [`Settings::apply`] and writes the whole file.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+pub enum SettingChange {
+    /// Unlike the file, an unknown period is refused rather than read as a month: a slip of the window must never
+    /// shorten the history.
+    #[serde(deserialize_with = "keep_or_refuse")]
+    HistoryKeep(Keep),
+    /// A device name; `None` or a blank name — the Windows microphone.
+    MicDevice(Option<String>),
+    /// A language code Soniox knows.
+    TranslateTarget(String),
+    UiLanguage(UiLanguage),
+}
+
+fn keep_or_refuse<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Keep, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    value.as_str().and_then(Keep::parse).ok_or_else(|| serde::de::Error::custom("unknown history period"))
+}
+
+/// Like `AudioSettings`: a log shows only the length of a device name, and a language code only when Soniox knows it.
+impl std::fmt::Debug for SettingChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HistoryKeep(keep) => f.debug_tuple("HistoryKeep").field(keep).finish(),
+            Self::MicDevice(device) => {
+                f.debug_struct("MicDevice").field("chars", &device.as_ref().map(|d| d.chars().count())).finish()
+            }
+            Self::TranslateTarget(code) => f.debug_tuple("TranslateTarget").field(&translate::known(code)).finish(),
+            Self::UiLanguage(language) => f.debug_tuple("UiLanguage").field(language).finish(),
+        }
+    }
+}
+
+impl Settings {
+    /// Applies one change from the main window; `true` if a value changed (then the core writes the file). A value
+    /// the settings would not hold is refused (`false`, nothing changes): a microphone name longer than
+    /// `MAX_DEVICE_CHARS` characters, a translation language Soniox does not know. Values are kept the way reading the
+    /// file keeps them: a microphone name trimmed, a blank one as the Windows microphone, the default translation
+    /// language (`en`) as no value.
+    pub fn apply(&mut self, change: SettingChange) -> bool {
+        match change {
+            SettingChange::HistoryKeep(keep) => set_if_changed(&mut self.history.keep, keep),
+            SettingChange::MicDevice(device) => {
+                let device = device.as_deref().map(str::trim).filter(|d| !d.is_empty());
+                if device.is_some_and(|d| d.chars().count() > MAX_DEVICE_CHARS) {
+                    return false;
+                }
+                set_if_changed(&mut self.audio.device, device.map(str::to_owned))
+            }
+            SettingChange::TranslateTarget(code) => {
+                let Some(code) = translate::known(&code) else { return false };
+                set_if_changed(&mut self.translate.target, (code != DEFAULT_TARGET).then(|| code.to_owned()))
+            }
+            SettingChange::UiLanguage(language) => set_if_changed(&mut self.ui.language, language),
+        }
+    }
+}
+
+/// Puts `value` into `slot`; whether it was different.
+fn set_if_changed<T: PartialEq>(slot: &mut T, value: T) -> bool {
+    if *slot == value {
+        return false;
+    }
+    *slot = value;
+    true
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelPrice {
     pub model: String,
@@ -318,6 +475,12 @@ pub struct Settings {
     /// Not written while every field is the default, like `translate`.
     #[serde(deserialize_with = "section_or_default", skip_serializing_if = "AskSettings::is_default")]
     pub ask: AskSettings,
+    /// The pinned microphone. Not written while it follows Windows, like `translate`.
+    #[serde(deserialize_with = "section_or_default", skip_serializing_if = "AudioSettings::is_default")]
+    pub audio: AudioSettings,
+    /// How long the history keeps its days. Not written while it is the default, like `translate`.
+    #[serde(deserialize_with = "section_or_default", skip_serializing_if = "HistorySettings::is_default")]
+    pub history: HistorySettings,
     /// Default prices are not written to the file, so a price fix in the code also reaches existing installs.
     /// If the user changed even one price, the whole block is written.
     #[serde(skip_serializing_if = "Pricing::is_default")]
@@ -381,6 +544,8 @@ impl Default for Settings {
             dictionary: DictionarySettings::default(),
             translate: TranslateSettings::default(),
             ask: AskSettings::default(),
+            audio: AudioSettings::default(),
+            history: HistorySettings::default(),
             pricing: Pricing::default(),
         }
     }
@@ -1012,5 +1177,210 @@ mod tests {
             assert_eq!(serde_json::to_string(&position).unwrap(), format!("\"{}\"", position.code()));
         }
         assert_eq!(DropPosition::parse("center"), None);
+    }
+
+    /// Like `translate`: the defaults (also ones the file states) are not written, so the file of a user who never
+    /// opened the main window is written back exactly as it was.
+    #[test]
+    fn audio_and_history_defaults_are_not_written() {
+        let dir = tmp("default-audio-history");
+        let p = dir.join("settings.json");
+        let written = |p: &Path| serde_json::from_slice::<serde_json::Value>(&std::fs::read(p).unwrap()).unwrap();
+        save(&Settings::default(), &p).unwrap();
+        assert!(written(&p).get("audio").is_none(), "the default microphone ended up in the file");
+        assert!(written(&p).get("history").is_none(), "the default retention ended up in the file");
+
+        std::fs::write(&p, r#"{"audio":{"device":" "},"history":{"keep":"MONTH"},"hold_hints_left":2}"#).unwrap();
+        save(&load(&p).unwrap(), &p).unwrap();
+        assert!(written(&p).get("audio").is_none(), "a blank device was written back");
+        assert!(written(&p).get("history").is_none(), "an explicit month was written back");
+
+        // A file of an earlier version, with values the user changed and none of the new sections.
+        let mut earlier = Settings::default();
+        earlier.stt.language_hints = vec!["ru".into()];
+        earlier.hold_hints_left = 0;
+        earlier.ui.language = UiLanguage::Ru;
+        earlier.translate.target = Some("de".into());
+        save(&earlier, &p).unwrap();
+        let before = std::fs::read(&p).unwrap();
+        let s = load(&p).unwrap();
+        assert_eq!((s.audio.device.as_deref(), s.history.keep), (None, Keep::Month));
+        save(&s, &p).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), before, "the file changed on a write without a change");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn chosen_mic_and_keep_are_written_and_survive_roundtrip() {
+        let dir = tmp("chosen-audio-history");
+        let p = dir.join("settings.json");
+        for keep in [Keep::Forever, Keep::Year, Keep::Week, Keep::Off] {
+            let mut s = Settings::default();
+            s.audio.device = Some("Microphone (USB Audio Device)".into());
+            s.history.keep = keep;
+            save(&s, &p).unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+            assert_eq!(json["audio"], serde_json::json!({ "device": "Microphone (USB Audio Device)" }));
+            assert_eq!(json["history"], serde_json::json!({ "keep": keep.code() }));
+            assert_eq!(load(&p).unwrap(), s);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn history_keep_unknown_reads_as_month() {
+        for (text, expected) in
+            [("forever", Keep::Forever), (" Year ", Keep::Year), ("WEEK", Keep::Week), ("off", Keep::Off), ("month", Keep::Month)]
+        {
+            let json = serde_json::json!({ "history": { "keep": text } }).to_string();
+            let s: Settings = serde_json::from_str(&json).unwrap();
+            assert_eq!(s.history.keep, expected, "{text:?}");
+        }
+        for history in [
+            r#"{"keep":"always"}"#,
+            r#"{"keep":"for ever"}"#,
+            r#"{"keep":""}"#,
+            r#"{"keep":31}"#,
+            r#"{"keep":null}"#,
+            r#"{"keep":true}"#,
+            r#"{"keep":["week"]}"#,
+            r#"{"future":1}"#,
+            r#"{}"#,
+            r#""week""#,
+            "5",
+            "null",
+            "[]",
+        ] {
+            let text = format!(r#"{{"history":{history},"hold_hints_left":0}}"#);
+            let s: Settings = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{history}: {e}"));
+            assert_eq!(s.history.keep, Keep::Month, "{history}");
+            assert_eq!(s.hold_hints_left, 0, "{history}");
+        }
+        assert_eq!(serde_json::from_str::<Settings>("{}").unwrap().history, HistorySettings::default());
+    }
+
+    #[test]
+    fn audio_device_blank_or_not_a_string_reads_as_windows() {
+        for audio in [
+            r#"{"device":""}"#,
+            r#"{"device":"  \t "}"#,
+            r#"{"device":5}"#,
+            r#"{"device":null}"#,
+            r#"{"device":true}"#,
+            r#"{"device":["USB"]}"#,
+            r#"{"device":{"name":"USB"}}"#,
+            r#"{"future":1}"#,
+            r#"{}"#,
+            r#""USB""#,
+            "5",
+            "null",
+            "[]",
+        ] {
+            let text = format!(r#"{{"audio":{audio},"hold_hints_left":0}}"#);
+            let s: Settings = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{audio}: {e}"));
+            assert_eq!(s.audio.device, None, "{audio}");
+            assert_eq!(s.hold_hints_left, 0, "{audio}");
+        }
+        let s: Settings = serde_json::from_str(r#"{"audio":{"device":" Microphone (USB) "}}"#).unwrap();
+        assert_eq!(s.audio.device.as_deref(), Some("Microphone (USB)"));
+    }
+
+    #[test]
+    fn apply_trims_mic_and_blank_means_windows() {
+        let mut s = Settings::default();
+        assert!(s.apply(SettingChange::MicDevice(Some("  Microphone (USB) \t".into()))));
+        assert_eq!(s.audio.device.as_deref(), Some("Microphone (USB)"));
+        assert!(s.apply(SettingChange::MicDevice(Some("   ".into()))));
+        assert_eq!(s.audio.device, None);
+
+        // A name longer than 200 characters is refused and the setting stays; the limit counts characters, not bytes.
+        assert!(s.apply(SettingChange::MicDevice(Some("Mic".into()))));
+        assert!(!s.apply(SettingChange::MicDevice(Some("m".repeat(201)))));
+        assert_eq!(s.audio.device.as_deref(), Some("Mic"));
+        assert!(s.apply(SettingChange::MicDevice(Some(format!(" {} ", "м".repeat(200))))));
+        assert_eq!(s.audio.device, Some("м".repeat(200)));
+        assert!(s.apply(SettingChange::MicDevice(None)));
+        assert_eq!(s.audio.device, None);
+    }
+
+    #[test]
+    fn apply_rejects_unknown_target_and_drops_the_default() {
+        let mut s = Settings::default();
+        assert!(!s.apply(SettingChange::TranslateTarget("klingon".into())));
+        assert!(!s.apply(SettingChange::TranslateTarget(String::new())));
+        assert_eq!(s.translate.target, None);
+        assert!(s.apply(SettingChange::TranslateTarget(" DE ".into())));
+        assert_eq!((s.translate.target.as_deref(), s.translate.target()), (Some("de"), "de"));
+        assert!(!s.apply(SettingChange::TranslateTarget("xx".into())));
+        assert_eq!(s.translate.target.as_deref(), Some("de"), "a refused change keeps the language");
+        // The default target is no value, as when the file is read: it is not written back.
+        assert!(s.apply(SettingChange::TranslateTarget("en-US".into())));
+        assert_eq!((s.translate.target.as_deref(), s.translate.target()), (None, "en"));
+    }
+
+    #[test]
+    fn apply_reports_no_change() {
+        let mut s = Settings::default();
+        for change in [
+            SettingChange::HistoryKeep(Keep::Month),
+            SettingChange::MicDevice(None),
+            SettingChange::MicDevice(Some(" ".into())),
+            SettingChange::TranslateTarget("en".into()),
+            SettingChange::UiLanguage(UiLanguage::Auto),
+        ] {
+            assert!(!s.apply(change.clone()), "{change:?}");
+        }
+        assert_eq!(s, Settings::default());
+
+        for change in [
+            SettingChange::HistoryKeep(Keep::Week),
+            SettingChange::MicDevice(Some("Mic".into())),
+            SettingChange::TranslateTarget("fr".into()),
+            SettingChange::UiLanguage(UiLanguage::Ru),
+        ] {
+            assert!(s.apply(change.clone()), "{change:?}");
+            assert!(!s.apply(change.clone()), "the same change twice: {change:?}");
+        }
+        assert!(!s.apply(SettingChange::MicDevice(Some(" Mic ".into()))));
+        assert!(!s.apply(SettingChange::TranslateTarget("FR".into())));
+        assert_eq!((s.history.keep, s.audio.device.as_deref()), (Keep::Week, Some("Mic")));
+        assert_eq!((s.translate.target(), s.ui.language), ("fr", UiLanguage::Ru));
+    }
+
+    /// The window sends `{"kind": …, "value": …}`. An unknown retention is refused rather than read as a month.
+    #[test]
+    fn setting_change_reads_the_window_json() {
+        let read = |json: &str| serde_json::from_str::<SettingChange>(json);
+        assert_eq!(read(r#"{"kind":"historyKeep","value":"week"}"#).unwrap(), SettingChange::HistoryKeep(Keep::Week));
+        assert_eq!(read(r#"{"kind":"micDevice","value":"Mic"}"#).unwrap(), SettingChange::MicDevice(Some("Mic".into())));
+        assert_eq!(read(r#"{"kind":"micDevice","value":null}"#).unwrap(), SettingChange::MicDevice(None));
+        assert_eq!(read(r#"{"kind":"translateTarget","value":"de"}"#).unwrap(), SettingChange::TranslateTarget("de".into()));
+        assert_eq!(read(r#"{"kind":"uiLanguage","value":"ru"}"#).unwrap(), SettingChange::UiLanguage(UiLanguage::Ru));
+        for json in [
+            r#"{"kind":"historyKeep","value":"always"}"#,
+            r#"{"kind":"historyKeep","value":7}"#,
+            r#"{"kind":"historyKeep"}"#,
+            r#"{"kind":"sounds","value":true}"#,
+            r#"{"value":"de"}"#,
+        ] {
+            assert!(read(json).is_err(), "{json}");
+        }
+        let change = serde_json::to_value(SettingChange::HistoryKeep(Keep::Forever)).unwrap();
+        assert_eq!(change, serde_json::json!({ "kind": "historyKeep", "value": "forever" }));
+    }
+
+    /// The device name is the user's: neither the settings nor a change show it in a log.
+    #[test]
+    fn debug_shows_no_device_name() {
+        let mut s = Settings::default();
+        s.audio.device = Some("Headset of Jane".into());
+        let change = SettingChange::MicDevice(Some("Headset of Jane".into()));
+        for text in [format!("{s:?}"), format!("{:?}", s.audio), format!("{change:?}")] {
+            assert!(!text.contains("Jane"), "{text}");
+            assert!(text.contains("Some(15)"), "the length is shown: {text}");
+        }
+        let unknown = SettingChange::TranslateTarget("my secret".into());
+        assert!(!format!("{unknown:?}").contains("secret"));
+        assert!(format!("{:?}", SettingChange::TranslateTarget("de".into())).contains("de"));
     }
 }

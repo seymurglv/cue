@@ -1,4 +1,5 @@
-//! CUE directories: `%LOCALAPPDATA%\CUE` (last dictation, log, usage.csv, bench) and `%APPDATA%\CUE` (settings).
+//! CUE directories: `%LOCALAPPDATA%\CUE` (last dictation, log, usage.csv, bench, history) and `%APPDATA%\CUE`
+//! (settings).
 //! Paths are built by pure functions from a base directory; only `local_app_data` and `app_data` read
 //! environment variables.
 use std::ffi::OsString;
@@ -17,6 +18,11 @@ pub fn usage_csv(local_app_data: &Path) -> PathBuf {
 /// `<base>\CUE\bench`: bench recordings (`recordings\`) and its runs (`runs\`), kept outside the repository.
 pub fn bench_dir(local_app_data: &Path) -> PathBuf {
     local_dir(local_app_data).join("bench")
+}
+
+/// `<base>\CUE\history`: the history, one file per local day (see `crate::history`), kept only on this computer.
+pub fn history_dir(local_app_data: &Path) -> PathBuf {
+    local_dir(local_app_data).join("history")
 }
 
 /// `%LOCALAPPDATA%`. `None` if the variable is missing, empty or a relative path
@@ -55,6 +61,9 @@ mod tests {
         let bench = bench_dir(&base);
         assert_eq!(bench.parent(), Some(dir.as_path()));
         assert_eq!(bench.file_name().unwrap(), "bench");
+        let history = history_dir(&base);
+        assert_eq!(history.parent(), Some(dir.as_path()));
+        assert_eq!(history.file_name().unwrap(), "history");
         let settings = settings_json(&base);
         assert_eq!(settings.parent(), Some(base.join("CUE").as_path()));
         assert_eq!(settings.file_name().unwrap(), "settings.json");
@@ -67,6 +76,7 @@ mod tests {
         assert_eq!(local_dir(base), PathBuf::from(r"C:\Users\u\AppData\Local\CUE"));
         assert_eq!(usage_csv(base), PathBuf::from(r"C:\Users\u\AppData\Local\CUE\usage.csv"));
         assert_eq!(bench_dir(base), PathBuf::from(r"C:\Users\u\AppData\Local\CUE\bench"));
+        assert_eq!(history_dir(base), PathBuf::from(r"C:\Users\u\AppData\Local\CUE\history"));
         let roaming = Path::new(r"C:\Users\u\AppData\Roaming");
         assert_eq!(settings_json(roaming), PathBuf::from(r"C:\Users\u\AppData\Roaming\CUE\settings.json"));
     }
