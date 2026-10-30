@@ -106,8 +106,6 @@ pub struct Conversation {
     /// The failed question a new one took the place of, its turn and its message, while the new one is in flight: an
     /// abort of the new one brings it back with its Retry (the flow's `AskAgain` names it then).
     replaced: Option<(TurnView, Value)>,
-    /// The code execution container of a filtered search, sent back with the next request.
-    pub container: Option<String>,
     pub view: AnswerView,
     sources: Sources,
     /// The answer is on screen: the first step with something to show came.
@@ -120,6 +118,11 @@ pub struct Conversation {
     /// A write_to_field call began in the last turn's stream. One cut at `max_tokens` is asked again with more room, and
     /// that response's steps come from its start (`cue_engines::ask::run`): its first block starts the turn's words over.
     wrote: bool,
+    /// A search came after the last turn's latest words: its next text block goes on a paragraph of its own, or the two
+    /// would run together.
+    searched: bool,
+    /// The last turn has started a search: the words before its first one are gone.
+    turn_searched: bool,
 }
 
 impl Conversation {
@@ -129,7 +132,6 @@ impl Conversation {
             messages: Vec::new(),
             pending: None,
             replaced: None,
-            container: None,
             view: AnswerView {
                 place: AnswerPlace::Tray,
                 quote: None,
@@ -144,6 +146,8 @@ impl Conversation {
             write: None,
             shown_write: None,
             wrote: false,
+            searched: false,
+            turn_searched: false,
         }
     }
 
@@ -163,6 +167,7 @@ impl Conversation {
         self.view.turns.push(TurnView::new(question));
         self.write = None;
         self.wrote = false;
+        self.turn_searched = false;
         // A refused turn took the buttons away; a new question brings them back.
         self.buttons();
     }
@@ -190,6 +195,7 @@ impl Conversation {
             *turn = TurnView::new(&turn.question);
         }
         self.wrote = false;
+        self.turn_searched = false;
     }
 
     /// The request in flight was dropped (Esc on a follow-up): its question goes, and the answer it followed is the last
@@ -246,18 +252,30 @@ impl Conversation {
         if matches!(step, Step::TextStart | Step::WriteStart) && std::mem::take(&mut self.wrote) {
             turn.segments.clear();
             turn.state = TurnState::Pending;
+            self.turn_searched = false;
         }
         match step {
             Step::Searching => {
+                // Words before the turn's first search only say that it is going to search, which the instruction asks
+                // the model not to write: the search line takes their place.
+                if !std::mem::replace(&mut self.turn_searched, true) {
+                    turn.segments.clear();
+                    turn.state = TurnState::Pending;
+                }
                 turn.step = Some(ThinkStep::Searching);
+                self.searched = true;
                 true
             }
             Step::Reading => {
                 turn.step = Some(ThinkStep::Reading);
+                self.searched = true;
                 true
             }
             Step::TextStart => {
-                turn.segments.push(Segment::default());
+                // Words before a search and words after it are two text blocks with nothing between them: the later one
+                // starts a paragraph.
+                let after_search = std::mem::take(&mut self.searched) && !turn.text().trim().is_empty();
+                turn.segments.push(Segment { after_search, ..Segment::default() });
                 if turn.step.is_some() && turn.text().trim().is_empty() {
                     turn.step = Some(ThinkStep::Writing);
                 }
@@ -334,7 +352,7 @@ impl Conversation {
                 // The turn ends with the text either way: a write that is pasted closes the answer, but should it stay
                 // on screen (a follow-up under way), the turn still shows what was written.
                 if let Some(turn) = self.view.turns.last_mut() {
-                    turn.segments = vec![Segment { text: text.clone(), cites: Vec::new() }];
+                    turn.segments = vec![Segment { text: text.clone(), ..Segment::default() }];
                 }
                 self.finish_turn(TurnState::Done, false);
                 match target {
@@ -358,9 +376,6 @@ impl Conversation {
             self.messages.push(turn);
         } else {
             self.pending = None;
-        }
-        if result.container.is_some() {
-            self.container.clone_from(&result.container);
         }
         heard
     }
@@ -426,7 +441,7 @@ mod tests {
     }
 
     fn result(end: AskEnd, content: Vec<Value>) -> AskResult {
-        AskResult { end, content, usage: AskUsage::default(), container: None }
+        AskResult { end, content, usage: AskUsage::default() }
     }
 
     /// Ruling 6b, for a write: the window the question was asked in is not in front any more (or is a terminal for a
@@ -558,6 +573,57 @@ mod tests {
         assert_eq!(c.view.sources, [SourceView { n: 1, site: "blog.rust-lang.org".into(), title: "Rust Blog".into() }]);
         assert!(!c.step(Step::WriteStart), "a write never opens the answer");
         assert!(!c.step(Step::Spent(AskUsage::default())), "the cost is the runtime's, not the view's");
+    }
+
+    /// Words before the turn's first search only say that it is going to search: the search line takes their place, and
+    /// they are neither shown nor pasted ("Это вопрос о текущей погоде, поэтому нужен поиск." before).
+    #[test]
+    fn words_before_the_first_search_go() {
+        let mut c = Conversation::new(taken(SelectionKind::None, false));
+        c.ask("какая погода в Баку");
+        c.open(AnswerPlace::Tray);
+        c.step(Step::TextStart);
+        assert!(c.step(Step::Text("Погода меняется, поэтому проверю актуальные данные.".into())));
+        assert!(c.step(Step::Searching));
+        let turn = &c.view.turns[0];
+        assert_eq!((turn.segments.len(), turn.state, turn.step), (0, TurnState::Pending, Some(ThinkStep::Searching)));
+        c.step(Step::Reading);
+        c.step(Step::TextStart);
+        c.step(Step::Text("В Баку +18 °C.".into()));
+        assert!(!c.view.turns[0].segments[0].after_search, "no words before it are left to set apart");
+        c.end(&result(AskEnd::Answer, vec![text_block("x")]), false, anywhere);
+        assert_eq!(c.paste_text().as_deref(), Some("В Баку +18 °C."));
+    }
+
+    /// Words between two searches and words after the second one are two text blocks with nothing between them: the
+    /// later one starts a paragraph, on screen and in a paste ("…данные.Поиск…" before). A citation splits a block too,
+    /// with no search between.
+    #[test]
+    fn words_after_a_later_search_start_a_paragraph() {
+        let mut c = Conversation::new(taken(SelectionKind::None, false));
+        c.ask("какая погода в Баку");
+        c.step(Step::Searching);
+        c.step(Step::Reading);
+        c.step(Step::TextStart);
+        c.step(Step::Text("Сейчас в Баку ".into()));
+        c.step(Step::TextStart);
+        c.step(Step::Text("+18 °C.".into()));
+        c.step(Step::Cite { url: "https://a.io/x".into(), title: "A".into() });
+        c.step(Step::Searching);
+        c.step(Step::Reading);
+        c.step(Step::TextStart);
+        c.step(Step::Text("Ветер слабый.".into()));
+        let flags: Vec<bool> = c.view.turns[0].segments.iter().map(|s| s.after_search).collect();
+        assert_eq!(flags, [false, false, true], "only the block after the later search");
+        c.end(&result(AskEnd::Answer, vec![text_block("x")]), false, anywhere);
+        assert_eq!(c.paste_text().as_deref(), Some("Сейчас в Баку +18 °C.\n\nВетер слабый."));
+
+        // A follow-up's own first search drops its own words before it, not the answer it follows.
+        c.ask("а завтра");
+        c.step(Step::TextStart);
+        c.step(Step::Text("Проверю прогноз.".into()));
+        c.step(Step::Searching);
+        assert_eq!((c.view.turns[0].text(), c.view.turns[1].segments.len()), ("Сейчас в Баку +18 °C.\n\nВетер слабый.".to_owned(), 0));
     }
 
     /// A write cut at `max_tokens` is asked again with more room, and its steps come again from the start: the turn's

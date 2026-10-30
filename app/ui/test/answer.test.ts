@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AnswerView, COPIED_MS, REVEAL_EVERY_MS, markedText, type Answer, type AnswerCommand, type Turn } from '../src/answer';
+import { CITE_CLOSE, CITE_OPEN } from '../src/markdown';
 import { en, ru } from '../src/strings';
 
 let root: HTMLElement;
@@ -79,6 +80,19 @@ describe('The "Ask" answer', () => {
     expect(markedText([{ text: 'Born 1916', cites: [1, 2] }, { text: '.9', cites: [] }])).toBe(
       'Born 191612.9',
     );
+  });
+
+  it('words after a search start a paragraph; blocks a citation splits run on', () => {
+    const segments = [
+      { text: 'Checking the data.', cites: [] },
+      { text: ' The weather in Baku: ', cites: [], after_search: true },
+      { text: '+18 °C', cites: [1] },
+      { text: ', clear.', cites: [] },
+    ];
+    expect(markedText(segments)).toBe(`Checking the data.\n\nThe weather in Baku: +18 °C${CITE_OPEN}1${CITE_CLOSE}, clear.`);
+    view.update(answer({ turns: [turn({ state: 'done', segments })] }));
+    const paragraphs = [...root.querySelectorAll('.aa p')].map((p) => p.textContent);
+    expect(paragraphs).toEqual(['Checking the data.', 'The weather in Baku: +18 °C1, clear.']);
   });
 
   it('opens with the question; the card quotes the selection', () => {

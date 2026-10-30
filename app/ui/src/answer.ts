@@ -10,8 +10,9 @@ export type AnswerPlace = 'tray' | 'card';
 export type ThinkStep = 'searching' | 'reading' | 'writing';
 export type TurnState = 'pending' | 'streaming' | 'done' | 'refused' | 'failed';
 export type AnswerAction = 'insert' | 'below' | 'replace' | 'copy';
-/** The core's answer (cue_core::ask::AnswerView: the same names). */
-export interface Segment { text: string; cites: number[] }
+/** The core's answer (cue_core::ask::AnswerView: the same names). `after_search` — a search came between this text block
+ *  and the words before it (sent only when true). */
+export interface Segment { text: string; cites: number[]; after_search?: boolean }
 export interface Turn { question: string; step: ThinkStep | null; segments: Segment[]; state: TurnState }
 export interface Source { n: number; site: string; title: string }
 export interface Answer {
@@ -66,11 +67,18 @@ function icons(): Record<AnswerAction | 'globe' | 'retry' | 'ok' | 'x', string> 
   };
 }
 
-/** A turn's text with its citation marks: each segment, then the numbers of the sources it cites. The model's own
- *  private-use marks are taken out first, so no text can fake a citation. */
+/** A turn's text with its citation marks: each segment, then the numbers of the sources it cites; a segment after a
+ *  search on a paragraph of its own, as the core joins it for a paste. The model's own private-use marks are taken out
+ *  first, so no text can fake a citation. */
 export function markedText(segments: Segment[]): string {
   const clean = (s: string) => s.replace(/[]/g, '');
-  return segments.map((s) => clean(s.text) + s.cites.map((n) => `${CITE_OPEN}${n}${CITE_CLOSE}`).join('')).join('');
+  let out = '';
+  for (const s of segments) {
+    const text = clean(s.text);
+    out = s.after_search ? `${out.trimEnd()}\n\n${text.trimStart()}` : out + text;
+    out += s.cites.map((n) => `${CITE_OPEN}${n}${CITE_CLOSE}`).join('');
+  }
+  return out;
 }
 
 /** What one turn has on screen. */

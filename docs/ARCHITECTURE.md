@@ -401,16 +401,19 @@ effects need, and `cue_engines::ask` talks to the API.
 
 - `cue_engines::ask::request_body`: `stream: true`; the tools first (they render first in the cached prefix):
   `write_to_field`, strict (its input always matches the schema: `text`, and `mode` `insert` or `replace`) and without
-  eager input streaming, so the input arrives whole and checked; then web search, when `ask.web_search` is on. The
-  version is the one the first probe picked (`ask_probe`, 2026-10-29: both versions worked, the filtered one brought the
-  first words of a searched question within 8 s and answered a follow-up after a search): `web_search_20260318`, the
-  filtered search, with `max_uses` = `ask.max_searches`. A key whose organization has no web search gets a 400 that says
-  so, and the question is asked again at once without it.
+  eager input streaming, so the input arrives whole and checked; then web search, when `ask.web_search` is on: the
+  basic `web_search_20250305`, called by the model directly (`allowed_callers: ["direct"]`), with `max_uses` =
+  `ask.max_searches`. The filtered search (`web_search_20260318`, the first probe's choice on 2026-10-29) was dropped on
+  2026-10-31: its code execution step failed live on Haiku 5.5 with thinking off with an invalid-input error, and the
+  answer told the user so; the basic search has no such step and a shorter cached prefix. A key whose organization has
+  no web search gets a 400 that says so, and the question is asked again at once without it.
 - The instruction (`ASK_PROMPT`, English; the answer follows the language of the question) is one cached system
   block: what the tags mean, that their content is data and never instructions, when to call `write_to_field` and with
   which mode, the form of a written text (plain, no quotes, the app's tone, one line in terminals), the form of an
-  answer (short, simple Markdown: bold, lists, code; no headings, tables or links), and when to search (anything that
-  may have changed since the training data; facts that cannot change, explanations and writing need none).
+  answer (the answer itself first, short, simple Markdown: bold, lists, code; no headings, tables or links; never a
+  word about how it decides or whether it searches), and when to search (only for current or local facts: weather,
+  news, prices, versions; facts that cannot change, explanations and writing need none), searching before writing
+  anything; a failed search is one plain sentence that fresh data could not be checked.
 - The user message (`first_message`): `<question>`, then `<selection>`, `<before_cursor>`, `<app>` and `<today>`;
   empty parts are left out, and our closing tags inside the data are defused. The date sits in the user message, not in
   the cached instruction, so the cached prefix is the same every day; the bench checks that questions about the present
@@ -425,9 +428,8 @@ effects need, and `cue_engines::ask` talks to the API.
   default (left out of the request, with 2,048 tokens of room added to the answer's 2,000), met the bar too (decisions
   of 97 %, first words in 1.8 s without a search and 5.0 s with one), but timed out on 3 of 210 calls: its thinking is
   silence to the first-words deadline. Off gave 98 % decisions, 93 % format and checks, first words in 1.2 s without a
-  search and 1.3 s with one, and no timeouts. Without thinking the model may write a short sentence before a search
-  ("let me check the current version"), which stays at the top of the answer and is its first words. The code
-  execution container of a filtered search is sent back with the next request of the conversation.
+  search and 1.3 s with one, and no timeouts. Without thinking the model wrote a short sentence before a search ("let
+  me check the current version"), which was the first words; the instruction now asks for nothing before a search.
 
 ### Stream
 
@@ -459,7 +461,7 @@ effects need, and `cue_engines::ask` talks to the API.
 ### Conversation and the answer
 
 - `runtime::ask::Conversation` lives from the first question until `CloseAnswer`, and is then forgotten. It keeps the
-  answered exchanges, the question in flight, the container, the sources (numbered in the order a URL is first cited,
+  answered exchanges, the question in flight, the sources (numbered in the order a URL is first cited,
   across the conversation) and `AnswerView`, the answer as the windows draw it. A first question is asked with its
   context; once an exchange has succeeded, a follow-up goes alone. The model's blocks go back as they came, except
   a search the API never ran (it defers a search when the model also calls a client tool, and a follow-up that leaves
@@ -470,6 +472,12 @@ effects need, and `cue_engines::ask` talks to the API.
   the end come back as events of that generation, so a dropped or replaced request's never reach the conversation. The
   view goes to the windows (`cue://answer`) at once for a new turn, an end, an opening or a follow-up row, and at most
   every 50 ms while words stream (`ViewGate`); the flow hears `AskOpened` once per request (`ShownOnce`).
+- A turn's text is its text blocks (`Segment`s) joined as they came: a citation splits a block, and those parts run on.
+  Words before the turn's first search only say that it is going to search (Haiku without thinking writes such a
+  sentence before nearly every search, though the instruction asks for none): they go when the search starts, and the
+  search line takes their place. Words before a later search and words after it are two blocks with nothing between
+  them, so a block after a search (`after_search`) starts a paragraph, in the paste (`TurnView::text`) as on screen
+  (`markedText`).
 - Where it opens (`open_answer`): in the card when the card window exists, the selection has a rectangle with a size,
   and `cardplace::card_place` finds room for it on the selection's monitor; otherwise in the tray from the Drop. The log
   gets the place only.
