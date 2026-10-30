@@ -1,5 +1,6 @@
-//! Microphone probe: N seconds (3 by default) from the default microphone through `mic::open`, then `stop`.
-//! Run: cargo run -p cue-platform-win --example mic_probe -- [seconds] [--wav <path>]
+//! Microphone probe: N seconds (3 by default) from the default microphone, or the one named with `--device`, through
+//! `mic::open`, then `stop`.
+//! Run: cargo run -p cue-platform-win --example mic_probe -- [seconds] [--wav <path>] [--device <name>]
 //! Prints the microphone config, the frame count, frames per second (≈ 50), peak, mean level and failures; never the audio.
 use cpal::traits::{DeviceTrait, HostTrait};
 use cue_platform_win::mic::{self, MicEvent};
@@ -19,10 +20,13 @@ struct Stats {
 fn main() {
     let mut secs = 3u64;
     let mut wav: Option<PathBuf> = None;
+    let mut device: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if a == "--wav" {
             wav = Some(args.next().unwrap_or_else(|| fail("--wav needs a path")).into());
+        } else if a == "--device" {
+            device = Some(args.next().unwrap_or_else(|| fail("--device needs a name")));
         } else {
             secs = a
                 .parse()
@@ -51,7 +55,7 @@ fn main() {
 
     let (tx, rx) = std::sync::mpsc::channel();
     let deadline = Instant::now() + Duration::from_secs(secs);
-    let handle = mic::open(tx);
+    let handle = mic::open(device, tx);
     println!("Listening for {secs} s…");
     let mut st = Stats::default();
     loop {
@@ -94,6 +98,7 @@ fn take(st: &mut Stats, sink: Option<&mut WavSink>, ev: MicEvent) {
                 s.write(&pcm);
             }
         }
+        MicEvent::Fallback { used } => println!("That microphone is not there, recording from: {used}"),
         MicEvent::Failed(e) => println!("Failure: {e}"),
     }
 }

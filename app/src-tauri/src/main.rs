@@ -7,6 +7,7 @@ mod ipc;
 mod lang;
 mod logging;
 mod main_window;
+mod micpreview;
 mod paths;
 mod runtime;
 mod tray;
@@ -68,7 +69,9 @@ fn main() {
             commands::history_clear,
             commands::key_state,
             commands::key_set,
-            commands::key_check
+            commands::key_check,
+            commands::mic_list,
+            commands::mic_preview
         ])
         .setup(move |app| {
             // We log the reason ourselves: Tauri turns a `setup` error into a panic, and the panic hook does not

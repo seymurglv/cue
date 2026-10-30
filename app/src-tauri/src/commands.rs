@@ -7,7 +7,8 @@
 //! (`CoreEvent::Settings`). Start at sign-in is the autostart plugin's Run key, as in the tray menu, whose check follows
 //! within 5 s. Keys are read and saved in Windows Credential Manager, where `cue-cli keys` keeps them: a key never
 //! leaves this module — not in a reply, an error or the log — only its mask does; a check is a free probe request
-//! (`cue_engines::check`), never a paid one.
+//! (`cue_engines::check`), never a paid one. The microphones are listed as Windows names them, and a preview sends the
+//! page a microphone's level alone (`micpreview`).
 use std::path::Path;
 use std::time::Duration;
 
@@ -15,12 +16,13 @@ use cue_core::history;
 use cue_core::settings::SettingChange;
 use cue_engines::EngineError;
 use cue_engines::keys::{self, KeyName};
-use cue_platform_win::focus;
+use cue_platform_win::{focus, mic};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, State, WebviewWindow};
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::ipc::{CoreTx, DayView, EntryView, HistoryFeed, MAIN_LABEL, PageView, SettingsView};
+use crate::micpreview;
 use crate::paths::Paths;
 use crate::runtime::{CoreEvent, SettingsCmd, local_today};
 
@@ -266,6 +268,45 @@ async fn entry_text(dir: &Path, id: String) -> Result<String, CmdError> {
     blocking(move || history::find(&dir, &id)).await?.map(|e| e.text).ok_or(CmdError::NotFound)
 }
 
+/// The microphones Windows has now, as it names them, and the one it records from by default (spec 3 §3). `Debug` shows
+/// how many, never a name.
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
+pub struct MicList {
+    names: Vec<String>,
+    default: Option<String>,
+}
+
+impl std::fmt::Debug for MicList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MicList").field("names", &self.names.len()).field("default", &self.default.is_some()).finish()
+    }
+}
+
+/// The microphone list for the settings: the devices are listed off the async threads.
+#[tauri::command]
+pub async fn mic_list(window: WebviewWindow) -> Result<MicList, CmdError> {
+    guard(&window)?;
+    blocking(|| MicList { names: mic::input_names(), default: mic::default_name() }).await
+}
+
+/// The live level of a microphone (`device`, by its name; `None` or blank — the Windows one) while the settings show it
+/// (`on`), as `cue://mic-level`; `on: false` ends it. The level only: the audio goes nowhere.
+#[tauri::command]
+pub async fn mic_preview(
+    window: WebviewWindow,
+    on: bool,
+    device: Option<String>,
+    app: AppHandle,
+) -> Result<(), CmdError> {
+    guard(&window)?;
+    if on {
+        micpreview::start(&app, device.filter(|d| !d.trim().is_empty()));
+    } else {
+        micpreview::stop();
+    }
+    Ok(())
+}
+
 /// Whether a key is saved, and its mask.
 #[tauri::command]
 pub async fn key_state(window: WebviewWindow, name: String) -> Result<KeyView, CmdError> {
@@ -454,6 +495,19 @@ mod tests {
         let short = KeyView::of(Some("short-key-123"));
         assert_eq!(serde_json::to_value(&short).unwrap(), json!({ "saved": true, "mask": "•".repeat(13) }));
         assert_eq!(serde_json::to_value(KeyView::of(None)).unwrap(), json!({ "saved": false, "mask": "" }));
+    }
+
+    /// The names go to the window; the log would get only how many.
+    #[test]
+    fn mic_list_names_reach_the_window_but_not_the_log() {
+        let names = vec!["Headset of Jane".into(), "Microphone (USB)".into()];
+        let list = MicList { names, default: Some("Headset of Jane".into()) };
+        let expected = json!({ "names": ["Headset of Jane", "Microphone (USB)"], "default": "Headset of Jane" });
+        assert_eq!(serde_json::to_value(&list).unwrap(), expected);
+        let shown = format!("{list:?}");
+        assert!(!shown.contains("Jane") && !shown.contains("USB"), "{shown}");
+        let none = MicList { names: Vec::new(), default: None };
+        assert_eq!(serde_json::to_value(none).unwrap(), json!({ "names": [], "default": null }));
     }
 
     #[test]

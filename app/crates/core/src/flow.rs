@@ -96,6 +96,9 @@ pub enum Input {
     Ui(UiAction),
     MicFailed { heard: bool },
     MicDead,
+    /// The pinned microphone is not there and the recording goes on with the Windows one (spec 3 §3). The runtime sends
+    /// it once per loss: the flow only shows it.
+    MicFallback,
     SessionLocked,
     SttFinal { id: DictationId, text: String },
     SttFailed { id: DictationId, error: SttError },
@@ -334,6 +337,12 @@ impl Flow {
             Input::TogglePause => self.on_toggle_pause(&mut fx),
             Input::MicFailed { heard } => self.on_mic_lost(heard, &mut fx),
             Input::MicDead => self.on_mic_lost(false, &mut fx),
+            // One card at a time: none over an open answer, as for "one minute left".
+            Input::MicFallback => {
+                if self.recording_now() && !self.answer_open {
+                    fx.push(Effect::Tray(Some(TrayKind::MicMissing)));
+                }
+            }
             Input::SessionLocked => {
                 if self.recording_now() {
                     self.discard(&mut fx);
@@ -1505,6 +1514,36 @@ mod tests {
         assert!(has(&fx, &E::Finished { id, outcome: Outcome::Failed }));
         assert_eq!(phase(&fx), Some(UiPhase::Idle));
         assert!(f.handle(I::Timer(TimerKind::StartingDone), 380).is_empty(), "the start-up is already dropped");
+    }
+
+    /// The pinned microphone is not there: the recording goes on with the Windows one, and the card says so.
+    #[test]
+    fn mic_fallback_shows_the_card_while_recording() {
+        let mut f = Flow::new(2, false);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
+        assert_eq!(f.handle(I::MicFallback, 40), vec![E::Tray(Some(TrayKind::MicMissing))], "during start-up");
+        assert_eq!(f.ui_state().phase, UiPhase::Start, "the recording goes on");
+        let mut f = Flow::new(2, false);
+        recording_in(&mut f, 0, Mode::Translate);
+        assert_eq!(f.handle(I::MicFallback, 1_000), vec![E::Tray(Some(TrayKind::MicMissing))]);
+        assert!(f.recording_now() && f.mode() == Mode::Translate);
+    }
+
+    /// Too late, or while an "Ask" answer is open (one card at a time, as "one minute left"): nothing.
+    #[test]
+    fn mic_fallback_after_recording_is_ignored() {
+        let mut f = Flow::new(2, false);
+        assert!(f.handle(I::MicFallback, 0).is_empty(), "idle");
+        thinking_with_raw(&mut f, 1_000, "x");
+        assert!(f.handle(I::MicFallback, 6_500).is_empty(), "thinking");
+        let mut f = Flow::new(2, false);
+        recording(&mut f, 0);
+        f.handle(I::Esc, 3_000);
+        assert!(f.handle(I::MicFallback, 3_100).is_empty(), "cancelled");
+        let mut f = Flow::new(2, false);
+        answer_open(&mut f, 0);
+        follow_up(&mut f, 10_000);
+        assert!(f.handle(I::MicFallback, 10_500).is_empty(), "a follow-up under an open answer");
     }
 
     #[test]

@@ -10,6 +10,7 @@ use cue_core::ui::{TrayKind, UiAction, UiState};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, State};
 
+use crate::drop_window::DROP_LABEL;
 use crate::lang::Lang;
 use crate::runtime::CoreEvent;
 
@@ -177,7 +178,8 @@ pub struct CardPlaceView {
 }
 
 /// Sends events to the windows: the state, the level, tray card kinds, the Drop's place and the card's. No dictation text
-/// and no audio; an "Ask" answer goes to the windows that draw it (`answer`).
+/// and no audio; an "Ask" answer goes to the windows that draw it (`answer`), a missing microphone's names to the Drop
+/// (`mic_names`).
 #[derive(Clone)]
 pub struct Ui {
     app: AppHandle,
@@ -222,6 +224,19 @@ impl Ui {
 
     pub fn tray(&self, k: Option<TrayKind>) {
         self.emit("cue://tray", k);
+    }
+
+    /// The pinned microphone that is not there and the one recording instead (spec 3 §3), just before their card: to
+    /// the Drop, which draws it.
+    pub fn mic_names(&self, wanted: &str, used: &str) {
+        #[derive(Clone, serde::Serialize)]
+        struct MicNames<'a> {
+            wanted: &'a str,
+            used: &'a str,
+        }
+        if let Err(e) = self.app.emit_to(DROP_LABEL, "cue://mic-names", MicNames { wanted, used }) {
+            tracing::debug!("Drop window: event cue://mic-names not sent: {e}");
+        }
     }
 
     pub fn shake(&self) {

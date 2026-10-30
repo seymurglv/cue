@@ -1,7 +1,7 @@
 // Interface texts in English (default) and Russian. The core picks the language once from the Windows UI language
 // and sets it in the Drop window before any script runs (window.__CUE_LANG__); the tray menu uses the same value.
 export type Lang = 'en' | 'ru';
-export type TrayKind = 'noField' | 'micSilent' | 'holdHint' | 'lastMinute';
+export type TrayKind = 'noField' | 'micSilent' | 'holdHint' | 'lastMinute' | 'micMissing';
 export type ErrorCause = 'net' | 'sonioxKey' | 'claudeKey' | 'translate';
 
 export const KEY_NAME = 'Ctrl + Win';
@@ -21,15 +21,20 @@ export const TRAYS: Record<TrayKind, TrayLook> = {
   micSilent: { icon: 'mic', tone: 'warn', act: 'gear', ttl: 0 },
   holdHint: { icon: 'key', tone: 'ask', act: 'ok', ttl: 7000 },
   lastMinute: { icon: 'timer', tone: 'warn', act: null, ttl: 5000 },
+  micMissing: { icon: 'mic', tone: 'warn', act: null, ttl: 6000 },
 };
 
 export interface TrayText {
   title: string;
-  body: string; // trusted HTML: may contain <b>; {KEY} becomes <kbd>KEY_NAME</kbd>
+  /** Trusted HTML: may contain <b>; {KEY} becomes <kbd>KEY_NAME</kbd>; {WANTED} and {USED} become the device names,
+   *  escaped. */
+  body: string;
   /** Button label: present exactly when TRAYS[kind].act is not null. */
   act?: string;
   /** Label after the press, then the card closes; without it the card closes at once. */
   done?: string;
+  /** In place of {USED} when Windows gave the microphone no name. */
+  unnamed?: string;
 }
 
 /** Labels of the Drop's own buttons and parts (drop.js gets them through its api). */
@@ -94,6 +99,11 @@ export const en: Dict = {
       title: 'One minute left',
       body: 'At 9:00 the recording stops on its own and the text is pasted as usual.',
     },
+    micMissing: {
+      title: 'Another microphone',
+      body: '<b>{WANTED}</b> not found — recording from <b>{USED}</b>',
+      unnamed: 'the Windows microphone',
+    },
   },
   error: {
     net: 'No connection',
@@ -150,6 +160,11 @@ export const ru: Dict = {
     lastMinute: {
       title: 'Осталась минута',
       body: 'На 9:00 запись завершится сама, текст вставится как обычно.',
+    },
+    micMissing: {
+      title: 'Другой микрофон',
+      body: '<b>{WANTED}</b> не найден — пишу с <b>{USED}</b>',
+      unnamed: 'микрофона Windows',
     },
   },
   error: {

@@ -44,6 +44,9 @@ pub enum TrayKind {
     MicSilent,
     HoldHint,
     LastMinute,
+    /// The pinned microphone is not there, and the recording goes on with the Windows one (spec 3 §3): its names come
+    /// to the Drop just before the card.
+    MicMissing,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -125,6 +128,7 @@ mod tests {
             (TrayKind::MicSilent, "micSilent"),
             (TrayKind::HoldHint, "holdHint"),
             (TrayKind::LastMinute, "lastMinute"),
+            (TrayKind::MicMissing, "micMissing"),
         ];
         for (v, name) in trays {
             assert_eq!(json(v), format!("\"{name}\""));

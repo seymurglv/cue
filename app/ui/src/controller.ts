@@ -1,7 +1,7 @@
 import { AnswerView, type Answer, type AnswerCommand } from './answer';
 import { CUE } from './designParts';
 import { DICTS, TRAYS, type Dict, type ErrorCause, type Lang, type TrayKind } from './strings';
-import { trayHtml } from './trays';
+import { trayHtml, type MicNames } from './trays';
 
 export type Phase = 'idle' | 'start' | 'listen' | 'think' | 'done' | 'empty' | 'cancel' | 'error' | 'answer';
 /** What the dictation does with the speech. The core keeps it: the chord picks it (Shift — translate, Alt — ask),
@@ -68,6 +68,8 @@ export class DropController {
   private ttlFrom = 0;
   private ttlTimer: ReturnType<typeof setTimeout> | null = null;
   private trayHovered = false;
+  /** The names the missing microphone's card shows: the core sends them just before it. */
+  private mic: MicNames | null = null;
   /** Quiet mode: false — the frame loop is asleep. calmSince — the frame since which nothing on screen can change. */
   private awake = true;
   private calmSince: number | null = null;
@@ -249,10 +251,15 @@ export class DropController {
     this.wake();
   }
 
+  /** The pinned microphone that is not there and the one recording instead, for the card that follows. */
+  micNames(n: MicNames) {
+    this.mic = { wanted: String(n?.wanted ?? ''), used: String(n?.used ?? '') };
+  }
+
   /** One notice at a time: a new one replaces the content and starts its own countdown; null — the core removes the card. */
   tray(kind: TrayKind | null) {
     // Markup first, before touching the open card: if it throws, the old card keeps its timer and close button.
-    const html = kind == null ? null : trayHtml(kind, this.t);
+    const html = kind == null ? null : trayHtml(kind, this.t, this.mic);
     // No tray card while dragging: the drag ends first.
     if (html != null) this.endDrag(true);
     this.stopTtl();

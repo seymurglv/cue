@@ -1,9 +1,9 @@
 //! The main window (spec 3 §1): an ordinary window with the history and the settings, opened from the tray icon ("Open
 //! CUE" in its menu, or a double click). There is one at a time: opening it again brings it forward. It is created when
 //! opened and destroyed when closed (decision 6): no WebView stays in memory, and its page reads the history and the
-//! settings again each time; its channel of new history entries goes with it. Closing it never closes CUE
-//! (`RunEvent::ExitRequested` in `main`). Windows draws its frame, in the Windows theme; unlike the Drop, it takes the
-//! focus.
+//! settings again each time; its channel of new history entries and its microphone preview go with it. Closing it never
+//! closes CUE (`RunEvent::ExitRequested` in `main`). Windows draws its frame, in the Windows theme; unlike the Drop, it
+//! takes the focus.
 //!
 //! Never created on the main thread: on Windows, building a WebView inside a menu or tray icon handler there deadlocks
 //! (wry#583). A thread of its own builds it while the main thread runs on.
@@ -98,10 +98,11 @@ fn create(app: &AppHandle) -> tauri::Result<()> {
     let handle = app.clone();
     win.on_window_event(move |ev| {
         if let WindowEvent::Destroyed = ev {
-            // Its page is gone: new history entries go nowhere.
+            // Its page is gone: new history entries go nowhere, and a microphone level it showed closes.
             if let Some(feed) = handle.try_state::<HistoryFeed>() {
                 feed.stop();
             }
+            crate::micpreview::stop();
             tracing::info!("main window closed");
         }
     });

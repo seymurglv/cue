@@ -290,6 +290,50 @@ impl ViewGate {
     }
 }
 
+/// The pinned microphone was not there and a recording went on with the Windows one (spec 3 §3): the user is told once
+/// per loss. The core remembers the name it told about, and forgets it once a recording finds the device again (its
+/// first frame came with no fallback before it) or the setting changes. A fallback whose card never showed (the flow
+/// had no room for it) is told on the next one.
+#[derive(Debug, Default)]
+pub struct MicTold {
+    /// The pinned name the user was told is missing.
+    told: Option<String>,
+    /// The recording open now: it fell back, and its first frame has come.
+    fell_back: bool,
+    framed: bool,
+}
+
+impl MicTold {
+    /// A recording opens the microphone.
+    pub fn opened(&mut self) {
+        self.fell_back = false;
+        self.framed = false;
+    }
+
+    /// The pinned `wanted` is not there: `true` if the user has not been told about it yet.
+    pub fn fell_back(&mut self, wanted: &str) -> bool {
+        self.fell_back = true;
+        self.told.as_deref() != Some(wanted)
+    }
+
+    /// The card about `wanted` went out.
+    pub fn told(&mut self, wanted: &str) {
+        self.told = Some(wanted.to_owned());
+    }
+
+    /// A frame of the recording open now: the first one with no fallback before it means the device is there.
+    pub fn frame(&mut self) {
+        if !std::mem::replace(&mut self.framed, true) && !self.fell_back {
+            self.told = None;
+        }
+    }
+
+    /// The pinned microphone was changed: a new loss is told again.
+    pub fn forget(&mut self) {
+        self.told = None;
+    }
+}
+
 /// The flow hears that an answer shows (`AskOpened`) once per request: on the first step of its task that has something
 /// to show. A new task (Retry, a follow-up) is a request of its own.
 #[derive(Debug, Default)]
@@ -495,6 +539,47 @@ mod tests {
         assert!(!s.first(1), "the next steps of the same request");
         assert!(s.first(2), "Retry or a follow-up: a request of its own");
         assert!(!s.first(2));
+    }
+
+    /// A recording: whether the pinned microphone was missing (`Some(name)`), and how many frames came.
+    fn record(t: &mut MicTold, missing: Option<&str>, frames: usize) -> bool {
+        t.opened();
+        let mut tell = false;
+        if let Some(wanted) = missing
+            && t.fell_back(wanted)
+        {
+            t.told(wanted);
+            tell = true;
+        }
+        for _ in 0..frames {
+            t.frame();
+        }
+        tell
+    }
+
+    #[test]
+    fn fallback_is_told_once_until_the_device_is_back() {
+        let mut t = MicTold::default();
+        assert!(record(&mut t, Some("Headset"), 50), "the first recording without it");
+        assert!(!record(&mut t, Some("Headset"), 50), "the same loss: told already");
+        assert!(!record(&mut t, Some("Headset"), 0), "not even before any frame");
+        assert!(!record(&mut t, None, 0), "a recording that fails before its first frame proves nothing");
+        assert!(!record(&mut t, Some("Headset"), 50));
+        assert!(!record(&mut t, None, 50), "it is back");
+        assert!(record(&mut t, Some("Headset"), 50), "lost again: told again");
+
+        // Another pinned name is another loss; changing the setting forgets what was told.
+        assert!(record(&mut t, Some("Blue Yeti"), 10));
+        assert!(!record(&mut t, Some("Blue Yeti"), 10));
+        t.forget();
+        assert!(record(&mut t, Some("Blue Yeti"), 10));
+
+        // The card did not show (an "Ask" answer was open): the next fallback tells it.
+        let mut t = MicTold::default();
+        t.opened();
+        assert!(t.fell_back("Headset"));
+        t.frame();
+        assert!(record(&mut t, Some("Headset"), 10));
     }
 
     #[test]

@@ -6,6 +6,9 @@
 //! - timers: each kind has its own generation (`state::Timers`), a stale firing never reaches `Flow`;
 //! - microphone frames are tagged with the dictation id and accepted only until its `StopMic` (`state::MicGate`);
 //!   stopping the microphone itself (waiting for its thread) happens off the core thread;
+//! - a pinned microphone (spec 3 §3) is looked for on the microphone's own thread, the core never waits; when it is not
+//!   there the recording goes on with the Windows one, and the user hears it once per loss (`state::MicTold`): its
+//!   names go to the Drop alone, never to the log;
 //! - the transcription result (`SttFinal` / `SttFailed`) goes to `Flow` only after `FinishStt` / `TranscribeSaved`;
 //!   each transcription and refine task has its own generation (`state::TaskSlot`): the result of a cancelled or
 //!   replaced task is not accepted; a panic inside a task still yields a result (`tasks::guarded`);
@@ -84,7 +87,9 @@ use crate::trayicon::TrayLook;
 use attempt::{Attempt, UsageLog, log_finished, needs_row, warmup_record};
 use files::LastFiles;
 use insert::{InsertJob, first_known_app, insert_app, known_app, one_line, pasted_text, trim_edges};
-use state::{CacheWarm, InsertWatch, LevelGate, MicGate, ShownOnce, TaskSlot, Timers, ViewGate, ViewSend, WarmUp};
+use state::{
+    CacheWarm, InsertWatch, LevelGate, MicGate, MicTold, ShownOnce, TaskSlot, Timers, ViewGate, ViewSend, WarmUp,
+};
 use tasks::{ask_panicked, guarded, refine_panicked, stt_panicked};
 
 /// Timeout for each UI Automation query.
@@ -203,6 +208,12 @@ pub struct Runtime {
     timers: Timers<JoinHandle<()>>,
     mic_gate: MicGate,
     mic: Option<MicHandle>,
+    /// The pinned microphone the open recording asked for (`None` — the Windows one), whether the user was told it is
+    /// missing, and the names of the last fallback told: the pinned one and the one recording instead (its card shows
+    /// them, and a Drop loaded again gets them back).
+    mic_wanted: Option<String>,
+    mic_told: MicTold,
+    mic_missing: Option<(String, String)>,
     wav: Option<WavSink>,
     silence: SilenceDetector,
     /// The silence detector said "there is sound" at least once: if the microphone fails, what was said is processed.
@@ -294,6 +305,9 @@ impl Runtime {
             timers: Timers::default(),
             mic_gate: MicGate::default(),
             mic: None,
+            mic_wanted: None,
+            mic_told: MicTold::default(),
+            mic_missing: None,
             wav: None,
             silence: SilenceDetector::new(),
             heard: false,
@@ -435,6 +449,7 @@ impl Runtime {
                 tracing::info!("Drop window ready");
                 let s = self.flow.ui_state();
                 self.emit_state(&s);
+                self.send_mic_names(self.tray);
                 self.ui.tray(self.tray);
                 self.ui.resend_idle_hidden();
                 self.ui.resend_place();
@@ -552,6 +567,8 @@ impl Runtime {
         }
         if s.audio.device != device {
             tracing::info!(pinned = s.audio.device.is_some(), "microphone setting changed");
+            // Another choice: a microphone missing from now on is told about again.
+            self.mic_told.forget();
         }
     }
 
@@ -561,6 +578,7 @@ impl Runtime {
         }
         match ev {
             MicEvent::Frame { pcm, peak_dbfs, level } => {
+                self.mic_told.frame();
                 self.attempt.add_audio(pcm.len());
                 if let Some(w) = self.wav.as_mut() {
                     w.write(&pcm);
@@ -577,10 +595,29 @@ impl Runtime {
                     self.feed(Input::MicDead);
                 }
             }
+            // Spec 3 §3: the recording goes on, and the user hears it once per loss. No name in the log.
+            MicEvent::Fallback { used } => {
+                tracing::info!("microphone: the pinned one is not there, recording from the Windows one");
+                if let Some(wanted) = self.mic_wanted.clone()
+                    && self.mic_told.fell_back(&wanted)
+                {
+                    self.mic_missing = Some((wanted, used));
+                    self.feed(Input::MicFallback);
+                }
+            }
             MicEvent::Failed(e) => {
                 tracing::warn!(heard = self.heard, "microphone: {e}");
                 self.feed(Input::MicFailed { heard: self.heard });
             }
+        }
+    }
+
+    /// The missing microphone's names go to the Drop just before its card.
+    fn send_mic_names(&self, kind: Option<TrayKind>) {
+        if kind == Some(TrayKind::MicMissing)
+            && let Some((wanted, used)) = &self.mic_missing
+        {
+            self.ui.mic_names(wanted, used);
         }
     }
 
@@ -672,6 +709,12 @@ impl Runtime {
             Effect::Shake => self.ui.shake(),
             // The tray card only: `None` — a new recording, a follow-up's too — never closes an open answer.
             Effect::Tray(kind) => {
+                if kind == Some(TrayKind::MicMissing)
+                    && let Some((wanted, _)) = &self.mic_missing
+                {
+                    self.mic_told.told(wanted);
+                }
+                self.send_mic_names(kind);
                 self.tray = kind;
                 self.ui.tray(kind);
             }
@@ -716,6 +759,9 @@ impl Runtime {
         self.clear_ask_context();
         self.silence = SilenceDetector::new();
         self.heard = false;
+        // The pinned microphone, as the settings say now; the `cue-mic` thread looks for it, the core never waits.
+        self.mic_wanted = self.settings.audio.device.clone();
+        self.mic_told.opened();
         // The attempt's audio goes to current.wav; a file left from the previous attempt is replaced.
         self.wav = match WavSink::create(&self.paths.current_wav()) {
             Ok(w) => Some(w),
@@ -735,7 +781,7 @@ impl Runtime {
             }
         });
         match forward {
-            Ok(_) => self.mic = Some(mic::open(events)),
+            Ok(_) => self.mic = Some(mic::open(self.mic_wanted.clone(), events)),
             Err(e) => {
                 tracing::error!("microphone event thread not started: {e}");
                 let _ = self.tx.send(CoreEvent::Mic { id, ev: MicEvent::Failed("no event thread".into()) });
@@ -1499,7 +1545,7 @@ impl Runtime {
                     tracing::warn!("microphone settings did not open: {e}");
                 }
             }
-            Some(TrayKind::HoldHint | TrayKind::LastMinute) | None => {}
+            Some(TrayKind::HoldHint | TrayKind::LastMinute | TrayKind::MicMissing) | None => {}
         }
     }
 

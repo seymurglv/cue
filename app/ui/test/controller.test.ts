@@ -21,7 +21,7 @@ const shown = () =>
     .sort();
 const hover = (inside: boolean) => document.querySelector('.drop')!.dispatchEvent(new MouseEvent(inside ? 'mouseenter' : 'mouseleave'));
 const CUE = () => (window as any).CUE;
-const KINDS: TrayKind[] = ['noField', 'micSilent', 'holdHint', 'lastMinute'];
+const KINDS: TrayKind[] = ['noField', 'micSilent', 'holdHint', 'lastMinute', 'micMissing'];
 
 beforeEach(() => {
   document.body.innerHTML = '<div id="stage"></div>';
@@ -949,6 +949,30 @@ describe('Tray card', () => {
     expect(document.querySelector('.tray kbd')!.textContent).toBe('Ctrl + Win');
   });
 
+  it('micMissing card escapes device names', () => {
+    const wanted = '<img src=x onerror="alert(1)"> Headset & Co';
+    const used = 'Mic $& $1 $` <b>(Realtek)</b>';
+    ctl.micNames({ wanted, used });
+    ctl.tray('micMissing');
+    const body = document.querySelector('.tray .nbd')!;
+    expect(body.querySelector('img')).toBeNull();
+    expect([...body.querySelectorAll('b')].map((b) => b.textContent)).toEqual([wanted, used]);
+    expect(body.textContent).toBe(`${wanted} not found — recording from ${used}`);
+    expect(document.querySelector('.tray .nhd b')!.textContent).toBe(en.tray.micMissing.title);
+    expect(document.querySelector('.tray [data-act]')).toBeNull();
+
+    // In Russian, and a name Windows did not give: the Windows microphone.
+    const box = document.createElement('div');
+    box.innerHTML = trayHtml('micMissing', ru, { wanted: 'Гарнитура "Jabra"', used: '' });
+    expect(box.querySelector('.nbd')!.textContent).toBe(`Гарнитура "Jabra" не найден — пишу с ${ru.tray.micMissing.unnamed}`);
+  });
+
+  it('micMissing card: microphone icon, amber, closes by itself in 6 s, no button', () => {
+    expect(TRAYS.micMissing).toEqual({ icon: 'mic', tone: 'warn', act: null, ttl: 6000 });
+    expect(en.tray.micMissing.body).toBe('<b>{WANTED}</b> not found — recording from <b>{USED}</b>');
+    expect(ru.tray.micMissing.body).toBe('<b>{WANTED}</b> не найден — пишу с <b>{USED}</b>');
+  });
+
   it('markup: "Close" from the dictionary, the ring only on cards that close by themselves, a button where there is an action', () => {
     const box = document.createElement('div');
     box.innerHTML = trayHtml('noField', en);
@@ -968,10 +992,14 @@ describe('Tray card', () => {
       const t = DICTS[lang];
       for (const kind of KINDS) {
         const box = document.createElement('div');
-        box.innerHTML = trayHtml(kind, t);
+        box.innerHTML = trayHtml(kind, t, { wanted: 'Headset', used: 'Microphone' });
+        const body = t.tray[kind].body
+          .replace('{KEY}', `<kbd>${KEY_NAME}</kbd>`)
+          .replace('{WANTED}', 'Headset')
+          .replace('{USED}', 'Microphone');
         expect(box.querySelector('.nhd b')!.textContent, `${lang}.${kind}`).toBe(t.tray[kind].title);
         expect(box.querySelector('.xb')!.getAttribute('aria-label'), `${lang}.${kind}`).toBe(t.close);
-        expect(box.querySelector('.nbd')!.innerHTML, `${lang}.${kind}`).toBe(t.tray[kind].body.replace('{KEY}', `<kbd>${KEY_NAME}</kbd>`));
+        expect(box.querySelector('.nbd')!.innerHTML, `${lang}.${kind}`).toBe(body);
         expect(box.querySelector('.lbl')?.textContent, `${lang}.${kind}`).toBe(t.tray[kind].act);
       }
     }

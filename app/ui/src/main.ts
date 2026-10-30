@@ -11,6 +11,7 @@ import { listen } from '@tauri-apps/api/event';
 import type { Answer } from './answer';
 import { DropController, type DragPhase, type UiState, type UiAction } from './controller';
 import { pickLang, type TrayKind } from './strings';
+import type { MicNames } from './trays';
 
 /** A core command without unhandled rejections. The log gets only the command name and the error, never the call data. */
 const call = (cmd: string, args?: InvokeArgs) =>
@@ -60,6 +61,7 @@ async function start() {
   const subs = await Promise.allSettled([
     listen<UiState>('cue://state', (e) => ctl.apply(e.payload)),
     listen<number>('cue://level', (e) => ctl.level(e.payload)),
+    listen<MicNames>('cue://mic-names', (e) => ctl.micNames(e.payload)),
     listen<TrayKind | null>('cue://tray', (e) => ctl.tray(e.payload)),
     listen('cue://shake', () => ctl.shake()),
     listen<boolean>('cue://idle-hidden', (e) => ctl.idleHidden(e.payload)),
