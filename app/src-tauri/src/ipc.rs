@@ -1,18 +1,20 @@
-//! Core events → the Drop, card and main windows, and window commands → the core (names as in `app/ui/src/main.ts` and
-//! `app/ui/src/card.ts`).
-use std::sync::Arc;
+//! Core events → the Drop and card windows, new history entries → the main window's channel, and window commands → the
+//! core (names as in `app/ui/src/main.ts` and `app/ui/src/card.ts`).
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use cue_core::history;
 use cue_core::settings::{DropPosition, Keep, Settings, UiLanguage};
 use cue_core::translate;
 use cue_core::ui::{TrayKind, UiAction, UiState};
+use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::lang::Lang;
 use crate::runtime::CoreEvent;
 
-/// The main window: the only one that gets history text and settings.
+/// The main window: the only one that gets history text and settings — its commands answer it alone
+/// (`commands::guard`), and new entries come over its own channel (`HistoryFeed`).
 pub const MAIN_LABEL: &str = "main";
 
 /// Channel to the core for window commands.
@@ -103,6 +105,66 @@ impl std::fmt::Debug for EntryView {
     }
 }
 
+/// One day of the history as the main window draws it: its date `YYYY-MM-DD` and its entries, newest first. `Debug` is
+/// the entries' own: lengths, never text.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct DayView {
+    pub date: String,
+    pub entries: Vec<EntryView>,
+}
+
+impl From<&history::Day> for DayView {
+    fn from(d: &history::Day) -> Self {
+        Self { date: d.date.clone(), entries: d.entries.iter().map(EntryView::from).collect() }
+    }
+}
+
+/// Days of the history, newest first, and whether an earlier day has entries too ("Show earlier").
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct PageView {
+    pub days: Vec<DayView>,
+    pub more: bool,
+}
+
+impl From<&history::Page> for PageView {
+    fn from(p: &history::Page) -> Self {
+        Self { days: p.days.iter().map(DayView::from).collect(), more: p.more }
+    }
+}
+
+/// New history entries for the main window (spec 3 §2): a channel its page opened (`commands::history_subscribe`). A
+/// channel reaches only the webview that made it, while an event reaches any page that listens to its name, whatever
+/// window it was sent to: so no other window ever gets history text. One at a time: a new subscription (the page loaded
+/// again) replaces the old one; it goes when the window is destroyed or a send fails.
+#[derive(Clone, Default)]
+pub struct HistoryFeed(Arc<Mutex<Option<Channel<EntryView>>>>);
+
+impl HistoryFeed {
+    pub fn follow(&self, channel: Channel<EntryView>) {
+        *self.slot() = Some(channel);
+    }
+
+    pub fn stop(&self) {
+        *self.slot() = None;
+    }
+
+    /// The entry to the main window, if it follows. Sent outside the lock; a failed send ends that subscription only.
+    fn send(&self, entry: &EntryView) {
+        let Some(channel) = self.slot().clone() else { return };
+        if let Err(e) = channel.send(entry.clone()) {
+            tracing::debug!("main window: history entry not sent: {e}");
+            let mut slot = self.slot();
+            if slot.as_ref().is_some_and(|now| now.id() == channel.id()) {
+                *slot = None;
+            }
+        }
+    }
+
+    fn slot(&self) -> MutexGuard<'_, Option<Channel<EntryView>>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// Where the card's arrow points and how tall the card may grow (spec 2 §7). Positions only, no text.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -123,6 +185,8 @@ pub struct Ui {
     place: Arc<AtomicUsize>,
     /// The last card place, resent on `card_ready`.
     card: Arc<std::sync::Mutex<Option<CardPlaceView>>>,
+    /// The main window's channel for new history entries.
+    feed: HistoryFeed,
 }
 
 impl Ui {
@@ -132,7 +196,13 @@ impl Ui {
             idle_hidden: Arc::new(AtomicBool::new(false)),
             place: Arc::new(AtomicUsize::new(place_index(place))),
             card: Default::default(),
+            feed: HistoryFeed::default(),
         }
+    }
+
+    /// The main window's channel, which its commands set and its end clears.
+    pub fn history_feed(&self) -> HistoryFeed {
+        self.feed.clone()
     }
 
     /// For the tray icon (`tray::sync`).
@@ -190,12 +260,10 @@ impl Ui {
         DropPosition::ALL.get(self.place.load(Ordering::Relaxed)).copied().unwrap_or_default()
     }
 
-    /// A new history entry (spec 3 §2), to the main window alone: no other window ever gets history text. With no main
-    /// window open nobody gets it.
+    /// A new history entry (spec 3 §2), to the main window alone, over its channel (`HistoryFeed`): never an event,
+    /// which the Drop's or the card's page could listen to. With no main window open nobody gets it.
     pub fn history_added(&self, entry: &EntryView) {
-        if let Err(e) = self.app.emit_to(MAIN_LABEL, "cue://history", entry) {
-            tracing::debug!("main window: event cue://history not sent: {e}");
-        }
+        self.feed.send(entry);
     }
 
     /// The interface language changed while CUE runs (decision 5): the tray menu takes the new labels, and the Drop and
@@ -339,5 +407,57 @@ mod tests {
         assert!(!shown.contains("private") && !shown.contains("secret"), "{shown}");
         let dictation = history::Entry { mode: history::Mode::Dictation, question: None, ..e };
         assert_eq!(serde_json::to_value(EntryView::from(&dictation)).unwrap()["question"], Value::Null);
+    }
+
+    /// A channel that keeps the ids of the entries it gets, or refuses them all (a page that is gone).
+    fn channel(works: bool) -> (Channel<EntryView>, Arc<Mutex<Vec<String>>>) {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&got);
+        let channel = Channel::new(move |body| {
+            let tauri::ipc::InvokeResponseBody::Json(json) = body else { panic!("not JSON") };
+            let id = serde_json::from_str::<Value>(&json).unwrap()["id"].as_str().unwrap().to_owned();
+            seen.lock().unwrap().push(id);
+            if works { Ok(()) } else { Err(tauri::Error::WebviewNotFound) }
+        });
+        (channel, got)
+    }
+
+    fn view(id: &str) -> EntryView {
+        let ts = "2026-10-31T07:05:09.123";
+        let e = history::Entry {
+            id: id.into(),
+            ts: ts.into(),
+            mode: history::Mode::Dictation,
+            app: String::new(),
+            text: "Hello.".into(),
+            question: None,
+        };
+        EntryView::from(&e)
+    }
+
+    /// New entries go only to the channel the main window opened last; none goes once it has ended.
+    #[test]
+    fn history_entries_go_to_the_main_windows_channel_alone() {
+        let feed = HistoryFeed::default();
+        feed.send(&view("a"));
+
+        let (first, to_first) = channel(true);
+        feed.follow(first);
+        feed.send(&view("b"));
+        let (second, to_second) = channel(true);
+        feed.follow(second);
+        feed.send(&view("c"));
+        assert_eq!(*to_first.lock().unwrap(), ["b"], "a page loaded again replaces its channel");
+        assert_eq!(*to_second.lock().unwrap(), ["c"]);
+
+        feed.stop();
+        feed.send(&view("d"));
+        assert_eq!(*to_second.lock().unwrap(), ["c"], "the window was destroyed");
+
+        let (gone, to_gone) = channel(false);
+        feed.follow(gone);
+        feed.send(&view("e"));
+        feed.send(&view("f"));
+        assert_eq!(*to_gone.lock().unwrap(), ["e"], "a failed send ends the subscription");
     }
 }

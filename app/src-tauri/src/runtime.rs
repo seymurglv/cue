@@ -29,7 +29,8 @@
 //!   is written while the history is off. The new entry goes to the main window only;
 //! - the main window reads and changes the settings through the core (`CoreEvent::Settings`): the core's copy takes the
 //!   change, the whole file is written, and what depends on it follows at once (the translation pair, the interface
-//!   language, the history's period);
+//!   language, the history's period); its "Paste again" and "Copy" of a history entry go through the insert thread like
+//!   any paste (`CoreEvent::HistoryText`);
 //! - the log gets events, per-stage latencies and error codes; no text, no audio, no keys. Never `Effect` or `Input`
 //!   with `{:?}`: their `Debug` prints text.
 mod ask;
@@ -139,15 +140,16 @@ pub enum CoreEvent {
     DropMoved(DropPosition),
     /// The main window reads the settings or changes one (spec 3 §3). The answer is always the settings as the core
     /// holds them after the command.
-    #[expect(dead_code, reason = "the main window's commands send it")]
     Settings { cmd: SettingsCmd, reply: tokio::sync::oneshot::Sender<SettingsView> },
     /// "Clear history" in the main window: every day of the history goes.
-    #[expect(dead_code, reason = "the main window's commands send it")]
     HistoryClear,
+    /// A history entry's text from the main window (decision 3): "Paste again" into `target`, the window that was under
+    /// the main one and is now in front, or "Copy" (`None`) — the clipboard. Neither is a new result: the last result
+    /// (Ctrl+Win+V) and the history stay as they are.
+    HistoryText { text: String, target: Option<WindowRef> },
 }
 
 /// What the main window wants of the settings: to read them, or to change one.
-#[expect(dead_code, reason = "the main window's commands send it")]
 pub enum SettingsCmd {
     Get,
     Set(SettingChange),
@@ -506,6 +508,10 @@ impl Runtime {
                 let _ = reply.send(SettingsView::of(&self.settings, self.lang, self.can_save_settings));
             }
             CoreEvent::HistoryClear => self.history.clear(),
+            CoreEvent::HistoryText { text, target } => match history_job(text, target) {
+                HistoryJob::Paste { text, target } => self.dispatch_insert(text, None, Some(target), None),
+                HistoryJob::Leave(job) => self.send_job(job, None),
+            },
         }
     }
 
@@ -1698,6 +1704,24 @@ fn ask_entry(heard: ask::Heard, c: &ask::Conversation, at: Stamp) -> Option<hist
     Some(history::Entry { id, ts, mode: history::Mode::Ask, app, text, question: Some(turn.question.clone()) })
 }
 
+/// Where a history entry's text goes (decision 3).
+enum HistoryJob {
+    /// Into `target` alone, the way Ctrl+Win+V pastes (`dispatch_insert`): the insert thread checks right before
+    /// Ctrl+V that it is still in front, and otherwise leaves the text in the clipboard.
+    Paste { text: String, target: WindowRef },
+    /// Into the clipboard, like "Copy" on the Drop's tray card.
+    Leave(InsertJob),
+}
+
+/// "Paste again" into the window that was under the main one, or the clipboard when there is no such window (and for
+/// "Copy"). The flow waits for neither.
+fn history_job(text: String, target: Option<WindowRef>) -> HistoryJob {
+    match target {
+        Some(target) => HistoryJob::Paste { text, target },
+        None => HistoryJob::Leave(InsertJob::Leave { id: None, text }),
+    }
+}
+
 /// One change from the main window (spec 3 §3) on the core's copy of the settings; `true` if a value changed. Only then
 /// is the whole file written, and never when settings.json could not be read at startup (`can_save`): the change still
 /// holds until CUE quits. The same value again, or one the settings refuse, changes and writes nothing.
@@ -1807,8 +1831,8 @@ fn write_may_paste(window: Option<WindowRef>, terminal: bool, how: PasteHow, tex
 }
 
 /// Today's local date, `YYYY-MM-DD` (spec 2 §6.1): it grounds searches, so a user east of UTC must not get yesterday.
-/// The history's days are local days too.
-fn local_today() -> String {
+/// The history's days are local days too (the main window's first page is today and yesterday).
+pub(crate) fn local_today() -> String {
     let mut now = local_time();
     now.truncate(10);
     now
@@ -2098,6 +2122,21 @@ mod tests {
     fn dictated(ts: &str, text: &str) -> history::Entry {
         let a = attempt(Mode::Dictate, "Notepad");
         dictation_entry(&a, Some(&(DictationId(7), text.to_owned())), at(ts)).unwrap()
+    }
+
+    /// "Paste again" with no window under the main one, and "Copy": the text is left in the clipboard, and the flow
+    /// waits for nothing. With a window, it is pasted there alone.
+    #[test]
+    fn history_text_without_target_is_left_in_the_clipboard() {
+        match history_job("Hello.".into(), None) {
+            HistoryJob::Leave(InsertJob::Leave { id: None, text }) => assert_eq!(text, "Hello."),
+            _ => panic!("not left in the clipboard"),
+        }
+        let notepad = WindowRef { window: 0x10, process: 100, app_process: None };
+        match history_job("Hello.".into(), Some(notepad)) {
+            HistoryJob::Paste { text, target } => assert_eq!((text.as_str(), target), ("Hello.", notepad)),
+            HistoryJob::Leave(_) => panic!("not pasted"),
+        }
     }
 
     #[test]

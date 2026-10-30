@@ -1,10 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod card_window;
+mod commands;
 mod drop_window;
 mod ipc;
 mod lang;
 mod logging;
+mod main_window;
 mod paths;
 mod runtime;
 mod tray;
@@ -53,7 +55,20 @@ fn main() {
             ipc::drop_action,
             ipc::drop_ready,
             ipc::card_ready,
-            ipc::answer_source
+            ipc::answer_source,
+            commands::settings_get,
+            commands::settings_set,
+            commands::autostart_get,
+            commands::autostart_set,
+            commands::history_subscribe,
+            commands::history_page,
+            commands::history_search,
+            commands::history_copy,
+            commands::history_paste,
+            commands::history_clear,
+            commands::key_state,
+            commands::key_set,
+            commands::key_check
         ])
         .setup(move |app| {
             // We log the reason ourselves: Tauri turns a `setup` error into a panic, and the panic hook does not
@@ -63,11 +78,14 @@ fn main() {
         })
         .build(tauri::generate_context!());
     match built {
-        Ok(app) => app.run(|_app, event| {
-            if let tauri::RunEvent::Exit = event {
+        Ok(app) => app.run(|_app, event| match event {
+            // Closing the main window never closes CUE: only "Quit" does (`app.exit`, with a code).
+            tauri::RunEvent::ExitRequested { code: None, api, .. } => api.prevent_exit(),
+            tauri::RunEvent::Exit => {
                 tracing::info!("CUE is closing");
                 logging::flush();
             }
+            _ => {}
         }),
         Err(e) => {
             tracing::error!("CUE failed to start: {e}");
@@ -102,6 +120,8 @@ fn setup(
     let place = settings.drop.position;
     tracing::info!(place = place.code(), "Drop place");
     let ui = ipc::Ui::new(app.handle().clone(), place);
+    // New history entries reach the main window over the channel its page opens.
+    app.manage(ui.history_feed());
     let win = drop_window::create(app.handle(), lang, place)?;
     let hits = app.state::<drop_window::HitState>().inner().clone();
     drop_window::spawn_hit_test(win.clone(), hits.clone());

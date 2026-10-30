@@ -1,9 +1,10 @@
 //! Tray icon and its interim menu (until the mini tray replaces it).
 //!
-//! The core drives the icon look and the "Pause for an hour" check (`sync` from `Runtime::emit_state`). A dedicated
-//! thread re-reads the taskbar theme and icon size every 5 s; it also asks the main thread every 5 s to reconcile
-//! the autostart check with the Run key. A change of the interface language relabels the menu (`relabel`). No dictation
-//! text and no audio here.
+//! The menu opens on the right button, and "Open CUE" in it or a double click of the left button opens the main window
+//! (decision 4). The core drives the icon look and the "Pause for an hour" check (`sync` from `Runtime::emit_state`). A
+//! dedicated thread re-reads the taskbar theme and icon size every 5 s; it also asks the main thread every 5 s to
+//! reconcile the autostart check with the Run key (changed from the main window too). A change of the interface
+//! language relabels the menu (`relabel`). No dictation text and no audio here.
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
@@ -12,12 +13,13 @@ use std::time::Duration;
 use cue_core::flow::Input;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, MenuItemKind, PredefinedMenuItem};
-use tauri::tray::{TrayIcon, TrayIconBuilder};
+use tauri::tray::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Wry};
 use tauri_plugin_autostart::ManagerExt;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::lang::Lang;
+use crate::main_window;
 use crate::runtime::CoreEvent;
 use crate::trayicon::{TrayLook, icon_size, light_taskbar, rgba};
 
@@ -26,6 +28,7 @@ pub const TRAY_ID: &str = "cue";
 const WATCH_EVERY: Duration = Duration::from_secs(5);
 
 /// Menu item ids, as `on_menu` tells the items apart.
+const OPEN: &str = "open";
 const PAUSE: &str = "pause";
 const AUTOSTART: &str = "autostart";
 const LOG: &str = "log";
@@ -33,6 +36,7 @@ const QUIT: &str = "quit";
 
 /// Menu item labels in one language.
 struct MenuText {
+    open: &'static str,
     pause: &'static str,
     autostart: &'static str,
     log: &'static str,
@@ -41,16 +45,28 @@ struct MenuText {
 
 fn menu_text(lang: Lang) -> MenuText {
     match lang {
-        Lang::En => MenuText { pause: "Pause for an hour", autostart: "Start at sign-in", log: "Open log", quit: "Quit" },
-        Lang::Ru => MenuText { pause: "Пауза на час", autostart: "Запускать при входе", log: "Открыть журнал", quit: "Выход" },
+        Lang::En => MenuText {
+            open: "Open CUE",
+            pause: "Pause for an hour",
+            autostart: "Start at sign-in",
+            log: "Open log",
+            quit: "Quit",
+        },
+        Lang::Ru => MenuText {
+            open: "Открыть CUE",
+            pause: "Пауза на час",
+            autostart: "Запускать при входе",
+            log: "Открыть журнал",
+            quit: "Выход",
+        },
     }
 }
 
 /// Every item of the menu with its label in `lang`, in menu order: the menu is built from it, and `relabel` goes over
 /// it, so no item keeps the old language.
-fn labels(lang: Lang) -> [(&'static str, &'static str); 4] {
+fn labels(lang: Lang) -> [(&'static str, &'static str); 5] {
     let t = menu_text(lang);
-    [(PAUSE, t.pause), (AUTOSTART, t.autostart), (LOG, t.log), (QUIT, t.quit)]
+    [(OPEN, t.open), (PAUSE, t.pause), (AUTOSTART, t.autostart), (LOG, t.log), (QUIT, t.quit)]
 }
 
 /// What the icon should show. The redraw (on the main thread) reads everything from here when it runs:
@@ -92,19 +108,27 @@ pub fn create(app: &AppHandle, core: UnboundedSender<CoreEvent>, logs: PathBuf, 
         tracing::warn!("autostart: state not read: {e}");
         false
     });
-    let [(pause_id, pause), (autostart_id, autostart), (log_id, log), (quit_id, quit)] = labels(lang);
+    let [(open_id, open), (pause_id, pause), (autostart_id, autostart), (log_id, log), (quit_id, quit)] = labels(lang);
+    let open = MenuItem::with_id(app, open_id, open, true, None::<&str>)?;
     let pause = CheckMenuItem::with_id(app, pause_id, pause, true, false, None::<&str>)?;
     let autostart = CheckMenuItem::with_id(app, autostart_id, autostart, true, autostart_on, None::<&str>)?;
     let log = MenuItem::with_id(app, log_id, log, true, None::<&str>)?;
     let quit = MenuItem::with_id(app, quit_id, quit, true, None::<&str>)?;
-    let sep = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&pause, &autostart, &sep, &log, &quit])?;
+    let (sep, sep2) = (PredefinedMenuItem::separator(app)?, PredefinedMenuItem::separator(app)?);
+    let menu = Menu::with_items(app, &[&open, &sep, &pause, &autostart, &sep2, &log, &quit])?;
+    // The menu on the right button, the main window on a double click of the left one (decision 4): a menu on the left
+    // click would take the second click of a double click. A single left click does nothing.
     let icon = TrayIconBuilder::with_id(TRAY_ID)
         .icon(image(&shown))
         .tooltip("CUE · Ctrl + Win")
         .menu(&menu)
-        .show_menu_on_left_click(true)
+        .show_menu_on_left_click(false)
         .on_menu_event(move |app, ev| on_menu(app, &ev, &core, &logs))
+        .on_tray_icon_event(|icon, ev| {
+            if let TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } = ev {
+                main_window::open(icon.app_handle());
+            }
+        })
         .build(app)?;
     app.manage(Tray {
         icon,
@@ -174,6 +198,7 @@ pub fn relabel(app: &AppHandle, lang: Lang) {
 fn on_menu(app: &AppHandle, ev: &MenuEvent, core: &UnboundedSender<CoreEvent>, logs: &Path) {
     let Some(tray) = app.try_state::<Tray>() else { return };
     match ev.id().as_ref() {
+        OPEN => main_window::open(app),
         PAUSE => {
             // The menu has already flipped the check, but the core decides: keep the old state until its answer arrives in `sync`.
             let paused = tray.shown().paused;
@@ -275,12 +300,21 @@ mod tests {
     fn tray_menu_relabels_in_both_languages() {
         let (en, ru) = (labels(Lang::En), labels(Lang::Ru));
         let ids = |items: &[(&'static str, &'static str)]| items.iter().map(|(id, _)| *id).collect::<Vec<_>>();
-        assert_eq!(ids(&en), [PAUSE, AUTOSTART, LOG, QUIT]);
+        assert_eq!(ids(&en), [OPEN, PAUSE, AUTOSTART, LOG, QUIT]);
         assert_eq!(ids(&ru), ids(&en));
         for ((id, en), (_, ru)) in en.iter().zip(&ru) {
             assert!(!en.is_empty() && !ru.is_empty() && en != ru, "{id}: {en:?} / {ru:?}");
         }
-        assert_eq!(en.map(|(_, label)| label), ["Pause for an hour", "Start at sign-in", "Open log", "Quit"]);
-        assert_eq!(ru.map(|(_, label)| label), ["Пауза на час", "Запускать при входе", "Открыть журнал", "Выход"]);
+        let en_labels = ["Open CUE", "Pause for an hour", "Start at sign-in", "Open log", "Quit"];
+        let ru_labels = ["Открыть CUE", "Пауза на час", "Запускать при входе", "Открыть журнал", "Выход"];
+        assert_eq!(en.map(|(_, label)| label), en_labels);
+        assert_eq!(ru.map(|(_, label)| label), ru_labels);
+    }
+
+    /// The main window opens from the menu (spec 3 §1): its item comes first, in either interface language.
+    #[test]
+    fn menu_has_open_cue_in_both_languages() {
+        assert_eq!(labels(Lang::En)[0], (OPEN, "Open CUE"));
+        assert_eq!(labels(Lang::Ru)[0], (OPEN, "Открыть CUE"));
     }
 }

@@ -127,6 +127,32 @@ impl std::fmt::Debug for FocusInfo {
 /// the name of a real app: the caller compares against this constant, not against the string.
 pub const UNKNOWN_APP: &str = "unknown app";
 
+/// What "Paste again" of the main window (spec 3 §2, decision 3) reads of a top-level window below it in z-order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BelowFacts {
+    pub visible: bool,
+    pub minimized: bool,
+    /// Hidden by the window manager (`DWMWA_CLOAKED`): on another virtual desktop, a suspended Store app.
+    pub cloaked: bool,
+    /// `WS_EX_TOOLWINDOW`: a palette or a flyout, not a window one types in.
+    pub tool: bool,
+    /// One of CUE's own windows.
+    pub own: bool,
+    pub class: String,
+}
+
+/// The window "Paste again" goes to, of `below` (nearest first): the first one that is not CUE's, visible, not
+/// minimized, not cloaked, not a tool window and not the desktop. `None` — there is none: the text goes to the
+/// clipboard.
+pub fn pick_below(below: &[BelowFacts]) -> Option<usize> {
+    below.iter().position(|w| w.visible && !w.minimized && !w.cloaked && !w.tool && !w.own && !desktop(&w.class))
+}
+
+/// The desktop's windows: no field there, except the icon rename box.
+fn desktop(class: &str) -> bool {
+    class == "Progman" || class == "WorkerW"
+}
+
 /// "Don't know": there may be a field — paste anyway; no app and no text.
 fn unknown() -> FocusInfo {
     FocusInfo { app: UNKNOWN_APP.into(), ..Default::default() }
@@ -134,7 +160,7 @@ fn unknown() -> FocusInfo {
 
 pub fn classify(f: &FocusFacts) -> Editability {
     // The desktop — except the icon rename box.
-    if (f.fg_class == "Progman" || f.fg_class == "WorkerW") && f.control_type != UIA_EDIT {
+    if desktop(&f.fg_class) && f.control_type != UIA_EDIT {
         return Editability::No;
     }
     // File Explorer's file list and folder tree: the element has an editable value (the file name), but there is no field.
@@ -162,6 +188,20 @@ pub fn classify(f: &FocusFacts) -> Editability {
 #[cfg(windows)]
 pub(crate) fn window_kind(w: WindowRef) -> (String, String) {
     win::window_kind(w)
+}
+
+/// The window "Paste again" goes to: the first one under the top-level window `own` (CUE's main window) in z-order that
+/// `pick_below` takes. `None` — none. From any thread.
+#[cfg(windows)]
+pub fn window_below(own: isize) -> Option<WindowRef> {
+    win::window_below(own)
+}
+
+/// Asks Windows to put `w` in front and waits until it is, at most `timeout`; `false` — it was refused, the window is
+/// gone or it did not come in front in time. Works while CUE is in front (its main window, where the click was).
+#[cfg(windows)]
+pub fn bring_forward(w: WindowRef, timeout: Duration) -> bool {
+    win::bring_forward(w, timeout)
 }
 
 /// The executable's file name from the full path, and the same without `.exe` (in any case) — the app name
@@ -341,17 +381,20 @@ mod win {
         IUIAutomationTextRange, IUIAutomationValuePattern, TextPatternRangeEndpoint_End, TextPatternRangeEndpoint_Start,
         TextUnit_Character, TextUnit_Line, UIA_IsReadOnlyAttributeId, UIA_TextPatternId, UIA_ValuePatternId,
     };
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowLongW, GetWindowThreadProcessId,
-        RealGetWindowClassW, SendMessageTimeoutW, ES_PASSWORD, ES_READONLY, GUITHREADINFO, GWL_STYLE,
-        SMTO_ABORTIFHUNG, WM_GETTEXT,
+        GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindow, GetWindowLongPtrW, GetWindowLongW,
+        GetWindowThreadProcessId, IsIconic, IsWindowVisible, RealGetWindowClassW, SendMessageTimeoutW,
+        SetForegroundWindow, ES_PASSWORD, ES_READONLY, GUITHREADINFO, GWL_EXSTYLE, GWL_STYLE, GW_HWNDNEXT,
+        SMTO_ABORTIFHUNG, WM_GETTEXT, WS_EX_TOOLWINDOW,
     };
 
     use cue_core::ask::clip_selection;
 
     use super::{
-        classify, context_tail, file_and_stem, line_break_may_be_missing, mark_line_start, selection_head_units,
-        selection_text, unknown, Deadline, FocusFacts, FocusInfo, SelectionRead, WindowRef,
+        classify, context_tail, file_and_stem, line_break_may_be_missing, mark_line_start, pick_below,
+        selection_head_units, selection_text, unknown, BelowFacts, Deadline, FocusFacts, FocusInfo, SelectionRead,
+        WindowRef,
     };
     use crate::placement::PxRect;
     use crate::selection::px_rect;
@@ -527,6 +570,74 @@ mod win {
         // SAFETY: a buffer on the stack, the function takes its length from the slice.
         let n = unsafe { GetClassNameW(hwnd, &mut class) };
         String::from_utf16_lossy(&class[..(n.max(0) as usize).min(class.len())])
+    }
+
+    /// Stops a walk of the window list that would never end if the z-order kept changing under it.
+    const MAX_WALK: usize = 4096;
+    /// How often `bring_forward` looks whether the window has come in front.
+    const FRONT_POLL: Duration = Duration::from_millis(10);
+
+    pub(super) fn window_below(own: isize) -> Option<WindowRef> {
+        // SAFETY: no arguments.
+        let me = unsafe { GetCurrentProcessId() };
+        let (mut windows, mut facts) = (Vec::new(), Vec::new());
+        let mut cur = HWND(own as *mut _);
+        for _ in 0..MAX_WALK {
+            // SAFETY: only reads the window list; past the bottom it returns an error (a null window).
+            cur = match unsafe { GetWindow(cur, GW_HWNDNEXT) } {
+                Ok(h) if !h.is_invalid() => h,
+                _ => break,
+            };
+            let (pid, _) = window_process(cur);
+            facts.push(below_facts(cur, pid == me));
+            windows.push((cur, pid));
+        }
+        let (hwnd, process) = windows[pick_below(&facts)?];
+        Some(WindowRef { window: hwnd.0 as isize, process, app_process: None })
+    }
+
+    /// What `pick_below` reads of a window; of a hidden one, nothing more.
+    fn below_facts(hwnd: HWND, own: bool) -> BelowFacts {
+        // SAFETY: the calls only read another window's state; a window destroyed meanwhile gives "not visible", a zero
+        // style or an error, never memory corruption.
+        unsafe {
+            if !IsWindowVisible(hwnd).as_bool() {
+                return BelowFacts::default();
+            }
+            let mut cloaked = 0u32;
+            let cloaked =
+                DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, (&raw mut cloaked).cast(), size_of::<u32>() as u32)
+                    .is_ok_and(|()| cloaked != 0);
+            BelowFacts {
+                visible: true,
+                minimized: IsIconic(hwnd).as_bool(),
+                cloaked,
+                tool: GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0,
+                own,
+                class: class_name(hwnd),
+            }
+        }
+    }
+
+    pub(super) fn bring_forward(w: WindowRef, timeout: Duration) -> bool {
+        let hwnd = HWND(w.window as *mut _);
+        // SAFETY: a request about another process's window by its number; a window closed meanwhile is refused.
+        if !unsafe { SetForegroundWindow(hwnd) }.as_bool() {
+            return false;
+        }
+        let until = Instant::now() + timeout;
+        loop {
+            // SAFETY: no arguments.
+            let front = unsafe { GetForegroundWindow() };
+            // The same number in the same process: not a new window that took the number of a closed one.
+            if front == hwnd && window_process(front).0 == w.process {
+                return true;
+            }
+            if Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(FRONT_POLL);
+        }
     }
 
     /// The window's process and thread; zeros for an empty or closed window.
@@ -1001,6 +1112,42 @@ mod tests {
         assert_eq!(classify(&error_with_caret), Editability::Yes);
         let no_window = FocusFacts { has_element: false, fg_class: String::new(), process: String::new(), ..facts() };
         assert_eq!(classify(&no_window), Editability::No);
+    }
+
+    fn app_window(class: &str) -> BelowFacts {
+        BelowFacts { visible: true, class: class.into(), ..Default::default() }
+    }
+
+    /// "Paste again" goes to the window right under the main one in z-order that the user could have been typing in.
+    #[test]
+    fn pick_below_skips_own_hidden_cloaked_tool_and_desktop_windows() {
+        let below = [
+            BelowFacts { own: true, ..app_window("Chrome_WidgetWin_1") },
+            BelowFacts { visible: false, ..app_window("Notepad") },
+            BelowFacts { minimized: true, ..app_window("Notepad") },
+            BelowFacts { cloaked: true, ..app_window("ApplicationFrameWindow") },
+            BelowFacts { tool: true, ..app_window("Shell_TrayWnd") },
+            app_window("Progman"),
+            app_window("WorkerW"),
+            app_window("Notepad"),
+            app_window("Chrome_WidgetWin_1"),
+        ];
+        assert_eq!(pick_below(&below), Some(7));
+        assert_eq!(pick_below(&below[7..]), Some(0), "the nearest one");
+        assert_eq!(pick_below(&[app_window("CabinetWClass")]), Some(0), "File Explorer is a window like any other");
+    }
+
+    #[test]
+    fn pick_below_is_none_on_a_bare_desktop() {
+        assert_eq!(pick_below(&[]), None);
+        let bare = [
+            BelowFacts { own: true, ..app_window("Chrome_WidgetWin_1") },
+            BelowFacts { visible: false, ..app_window("IME") },
+            BelowFacts { minimized: true, ..app_window("Notepad") },
+            app_window("WorkerW"),
+            app_window("Progman"),
+        ];
+        assert_eq!(pick_below(&bare), None);
     }
 
     #[test]
