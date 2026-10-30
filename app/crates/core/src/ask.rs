@@ -36,8 +36,11 @@ terminals. A list goes on separate plain lines starting with \"- \" or \"1. \". 
 everything the user did not ask to change.
 
 How to answer:
-- Answer the question itself, directly: your first words are the answer. Never write about how you work: not what kind \
-of request it is, not whether you answer or write into the field, not whether, why or how you search.
+- Start with the answer itself, or with the web search when you need one: never with a sentence about the question or \
+about what you are going to do. Wrong starts: \"Это вопрос о текущей погоде, поэтому нужен поиск.\", \"Курс меняется \
+каждый день, поэтому проверю актуальные данные.\", \"This is a terminal, so the answer is a single command.\" Never write \
+about how you work: not what kind of request it is, not whether you answer or write into the field, not whether, why or \
+how you search, and never offer to write into the field.
 - In the language of the question, even when the selection is in another language.
 - Short and to the point: the answer, then only what helps, in a few sentences or a short list. No greetings, no \
 repeating the question, no closing offers.
@@ -49,7 +52,8 @@ Web search, when the tool is available: search only when the answer depends on c
 prices and exchange rates, versions and releases, schedules, results, who holds an office, anything \"latest\", \"now\" or \
 \"today\". Your training data ends well before today's date, so search for those even when you feel sure. Everything \
 else needs no search: facts that cannot change, explanations, how-tos, advice, writing and work on the selection. When \
-you search, call the tool before you write anything, and write the answer from its results. When the answer depends on \
+you search, the search is the very first thing in your reply, with no text before it (the user sees it running on \
+screen), and the answer comes from its results. When the answer depends on \
 where the user is, put their country or region in the query. Say only what the results support, and never make up a \
 source or a link. If the search fails, say in one short sentence that you could not check fresh data, with no word \
 about tools or errors, and answer from what you know only if it still helps.";
@@ -596,7 +600,7 @@ mod tests {
     /// told in plain words.
     #[test]
     fn the_instruction_asks_for_the_answer_alone() {
-        for rule in ["Decide silently", "Never write about how you work", "before you write anything", "could not check fresh data"] {
+        for rule in ["Decide silently", "Never write about how you work", "with no text before it", "could not check fresh data"] {
             assert!(ASK_PROMPT.contains(rule), "{rule}");
         }
     }

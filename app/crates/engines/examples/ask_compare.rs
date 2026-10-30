@@ -12,9 +12,10 @@
 //!   which measures the same), `cue_engines::ask::run` with its deadlines and continuations, the web search of
 //!   `ask.max_searches` = 2 (none with `--no-search`), thinking as `--thinking` says (the app's default when left out).
 //! - Runs 1..runs, each over all phrases, one call at a time. The very first call is cold (the prompt cache is empty) and
-//!   is left out of the medians; first words are split by whether the model searched. A call that wrote text before its
-//!   first web search is marked (`text_before_search`): those words, not the answer, were its first words. A search that
-//!   failed is kept with its error code (`search_errors`).
+//!   is left out of the medians; first words are split by whether the model searched. An answer's text and first words
+//!   are the ones the app shows: the words before the first web search go when it starts, so the first words are the
+//!   first ones after it. A call that wrote such words is still marked (`text_before_search`). A search that failed is
+//!   kept with its error code (`search_errors`).
 //! - Stops as soon as more than `--max-usd` has been spent. A model without a default price is refused before any call:
 //!   its tokens would count as $0, and the budget would never stop the run.
 //! - `out.json` is written before the first call (a path that cannot be written stops the run before anything is paid)
@@ -30,7 +31,7 @@ use anyhow::{anyhow, bail, Context};
 use cue_core::ask::{first_message, follow_up_message, AskContext};
 use cue_core::settings::Pricing;
 use cue_core::usage::{refine_cost, utc_timestamp};
-use cue_engines::ask::{self, AskEnd, AskResult, SearchTool, Thinking};
+use cue_engines::ask::{self, AskEnd, AskResult, SearchTool, Step, Thinking};
 use cue_engines::keys::{self, KeyName};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -139,12 +140,13 @@ struct Call {
     /// `answer`, `write`, `refused` or `failed: <kind>`.
     decision: String,
     mode: Option<WriteMode>,
-    /// The answer's Markdown or the written text (refused and failed: empty).
+    /// The answer's Markdown as the app shows it (`shown_text`) or the written text (refused and failed: empty).
     text: String,
+    /// The first words that stay on screen: after the first web search, when there is one.
     first_words_ms: Option<u64>,
     total_ms: u64,
     searches: u32,
-    /// The model wrote text before its first web search (a note that it is going to search): those words came first.
+    /// The model wrote text before its first web search (a note that it is going to search), which the app drops.
     text_before_search: bool,
     /// The error codes of the searches that failed (`unavailable`, `invalid_tool_input`, …).
     search_errors: Vec<String>,
@@ -152,12 +154,37 @@ struct Call {
     cost_usd: f64,
 }
 
+fn is_search(b: &Value) -> bool {
+    b["type"] == "server_tool_use" && b["name"] == "web_search"
+}
+
 /// Whether a text block with words comes before the first web search among a response's blocks.
 fn text_before_search(content: &[Value]) -> bool {
-    let first_search = content.iter().position(|b| b["type"] == "server_tool_use" && b["name"] == "web_search");
-    first_search.is_some_and(|i| {
+    content.iter().position(is_search).is_some_and(|i| {
         content[..i].iter().any(|b| b["type"] == "text" && b["text"].as_str().is_some_and(|t| !t.trim().is_empty()))
     })
+}
+
+/// An answer as the app shows and pastes it (`runtime::ask::Conversation`, `TurnView::text`): the text blocks after the
+/// first web search, the words before it gone; a block after a later search, with words before it, on a paragraph of
+/// its own.
+fn shown_text(content: &[Value]) -> String {
+    let start = content.iter().position(is_search).map_or(0, |i| i + 1);
+    let (mut out, mut searched) = (String::new(), false);
+    for b in &content[start..] {
+        if is_search(b) {
+            searched = true;
+        } else if let Some(t) = b["text"].as_str().filter(|_| b["type"] == "text") {
+            if std::mem::take(&mut searched) && !out.trim().is_empty() {
+                out.truncate(out.trim_end().len());
+                out.push_str("\n\n");
+                out.push_str(t.trim_start());
+            } else {
+                out.push_str(t);
+            }
+        }
+    }
+    out
 }
 
 /// The error codes of the searches that failed among a response's blocks.
@@ -175,7 +202,8 @@ struct Asked {
     total_ms: u64,
 }
 
-/// One request as the app sends it; the first words are the first non-blank text or the start of a write.
+/// One request as the app sends it; the first words are the first non-blank text or the start of a write that stay on
+/// screen: the words before the first web search go when it starts.
 async fn ask_once(
     http: &reqwest::Client,
     key: &str,
@@ -185,10 +213,12 @@ async fn ask_once(
     messages: &[Value],
 ) -> Asked {
     let t0 = Instant::now();
-    let mut first = None;
+    let (mut first, mut searched) = (None, false);
     let result = ask::run(http, Some(key), model, search, thinking, messages, |s| {
-        let words = s.is_first_words();
-        if words && first.is_none() {
+        if s == Step::Searching && !std::mem::replace(&mut searched, true) {
+            first = None;
+        }
+        if s.is_first_words() && first.is_none() {
             first = Some(t0.elapsed().as_millis() as u64);
         }
     })
@@ -205,10 +235,7 @@ fn cost(p: &Pricing, model: &str, r: &AskResult) -> f64 {
 fn scored(p: &Phrase, run: usize, cold: bool, asked: &Asked, cost_usd: f64) -> Call {
     let r = &asked.result;
     let (decision, mode, text) = match &r.end {
-        AskEnd::Answer => {
-            let text = r.content.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<String>();
-            ("answer".to_owned(), None, text)
-        }
+        AskEnd::Answer => ("answer".to_owned(), None, shown_text(&r.content)),
         AskEnd::Write { text, replace } => {
             ("write".to_owned(), Some(if *replace { WriteMode::Replace } else { WriteMode::Insert }), text.clone())
         }
@@ -437,6 +464,27 @@ mod tests {
         assert!(!text_before_search(&[blank, search.clone(), answer.clone()]), "blank text is no words");
         assert!(!text_before_search(&[search, answer.clone()]));
         assert!(!text_before_search(&[said, answer]), "no search at all");
+    }
+
+    /// The text as the app shows it: the words before the first search go; a block after a later search starts a
+    /// paragraph; blocks a citation splits run on.
+    #[test]
+    fn the_text_is_the_one_on_screen() {
+        let search = json!({ "type": "server_tool_use", "id": "s1", "name": "web_search", "input": {} });
+        let results = json!({ "type": "web_search_tool_result", "tool_use_id": "s1", "content": [] });
+        let text = |t: &str| json!({ "type": "text", "text": t });
+        let content = [
+            text("Сейчас проверю."),
+            search.clone(),
+            results.clone(),
+            text("В Баку "),
+            text("+18 °C."),
+            search.clone(),
+            results,
+            text(" Ветер слабый."),
+        ];
+        assert_eq!(shown_text(&content), "В Баку +18 °C.\n\nВетер слабый.");
+        assert_eq!(shown_text(&[text("Rust "), text("1.95.")]), "Rust 1.95.", "no search: all of it");
     }
 
     #[test]

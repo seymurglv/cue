@@ -324,8 +324,9 @@ cache) is left out of the medians. The summary counts the right decisions and mo
 words with and without a search, and the cost; the run stops once more than `--max-usd` is spent. `--model` asks
 another model (`claude-haiku-5-5` by default; one without a default price is refused, since the budget could not count
 it), `--no-search` asks without web search, and `--thinking adaptive` sends the request with the model's adaptive
-thinking, to compare with the app's default (`--thinking off`). Each call in `out.json` also says whether the model
-wrote text before its first web search (`text_before_search`).
+thinking, to compare with the app's default (`--thinking off`). An answer's text and first words are the ones the app
+shows: the words the model wrote before its first web search go when it starts. Each call in `out.json` also says
+whether the model wrote such words (`text_before_search`) and the error codes of searches that failed (`search_errors`).
 
 ## Privacy
 

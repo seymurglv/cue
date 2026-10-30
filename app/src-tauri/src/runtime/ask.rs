@@ -121,6 +121,8 @@ pub struct Conversation {
     /// A search came after the last turn's latest words: its next text block goes on a paragraph of its own, or the two
     /// would run together.
     searched: bool,
+    /// The last turn has started a search: the words before its first one are gone.
+    turn_searched: bool,
 }
 
 impl Conversation {
@@ -145,6 +147,7 @@ impl Conversation {
             shown_write: None,
             wrote: false,
             searched: false,
+            turn_searched: false,
         }
     }
 
@@ -164,6 +167,7 @@ impl Conversation {
         self.view.turns.push(TurnView::new(question));
         self.write = None;
         self.wrote = false;
+        self.turn_searched = false;
         // A refused turn took the buttons away; a new question brings them back.
         self.buttons();
     }
@@ -191,6 +195,7 @@ impl Conversation {
             *turn = TurnView::new(&turn.question);
         }
         self.wrote = false;
+        self.turn_searched = false;
     }
 
     /// The request in flight was dropped (Esc on a follow-up): its question goes, and the answer it followed is the last
@@ -247,9 +252,16 @@ impl Conversation {
         if matches!(step, Step::TextStart | Step::WriteStart) && std::mem::take(&mut self.wrote) {
             turn.segments.clear();
             turn.state = TurnState::Pending;
+            self.turn_searched = false;
         }
         match step {
             Step::Searching => {
+                // Words before the turn's first search only say that it is going to search, which the instruction asks
+                // the model not to write: the search line takes their place.
+                if !std::mem::replace(&mut self.turn_searched, true) {
+                    turn.segments.clear();
+                    turn.state = TurnState::Pending;
+                }
                 turn.step = Some(ThinkStep::Searching);
                 self.searched = true;
                 true
@@ -563,33 +575,55 @@ mod tests {
         assert!(!c.step(Step::Spent(AskUsage::default())), "the cost is the runtime's, not the view's");
     }
 
-    /// Words before a search and words after it are two text blocks with nothing between them: the later one starts a
-    /// paragraph, on screen and in a paste ("…данные.Поиск…" before). A citation splits a block too, with no search between.
+    /// Words before the turn's first search only say that it is going to search: the search line takes their place, and
+    /// they are neither shown nor pasted ("Это вопрос о текущей погоде, поэтому нужен поиск." before).
     #[test]
-    fn words_after_a_search_start_a_paragraph() {
+    fn words_before_the_first_search_go() {
         let mut c = Conversation::new(taken(SelectionKind::None, false));
         c.ask("какая погода в Баку");
+        c.open(AnswerPlace::Tray);
         c.step(Step::TextStart);
-        c.step(Step::Text("Проверю актуальные данные.".into()));
+        assert!(c.step(Step::Text("Погода меняется, поэтому проверю актуальные данные.".into())));
+        assert!(c.step(Step::Searching));
+        let turn = &c.view.turns[0];
+        assert_eq!((turn.segments.len(), turn.state, turn.step), (0, TurnState::Pending, Some(ThinkStep::Searching)));
+        c.step(Step::Reading);
+        c.step(Step::TextStart);
+        c.step(Step::Text("В Баку +18 °C.".into()));
+        assert!(!c.view.turns[0].segments[0].after_search, "no words before it are left to set apart");
+        c.end(&result(AskEnd::Answer, vec![text_block("x")]), false, anywhere);
+        assert_eq!(c.paste_text().as_deref(), Some("В Баку +18 °C."));
+    }
+
+    /// Words between two searches and words after the second one are two text blocks with nothing between them: the
+    /// later one starts a paragraph, on screen and in a paste ("…данные.Поиск…" before). A citation splits a block too,
+    /// with no search between.
+    #[test]
+    fn words_after_a_later_search_start_a_paragraph() {
+        let mut c = Conversation::new(taken(SelectionKind::None, false));
+        c.ask("какая погода в Баку");
         c.step(Step::Searching);
         c.step(Step::Reading);
         c.step(Step::TextStart);
         c.step(Step::Text("Сейчас в Баку ".into()));
         c.step(Step::TextStart);
-        c.step(Step::Text("+18 °C".into()));
+        c.step(Step::Text("+18 °C.".into()));
         c.step(Step::Cite { url: "https://a.io/x".into(), title: "A".into() });
+        c.step(Step::Searching);
+        c.step(Step::Reading);
+        c.step(Step::TextStart);
+        c.step(Step::Text("Ветер слабый.".into()));
         let flags: Vec<bool> = c.view.turns[0].segments.iter().map(|s| s.after_search).collect();
-        assert_eq!(flags, [false, true, false], "only the block after the search");
+        assert_eq!(flags, [false, false, true], "only the block after the later search");
         c.end(&result(AskEnd::Answer, vec![text_block("x")]), false, anywhere);
-        assert_eq!(c.paste_text().as_deref(), Some("Проверю актуальные данные.\n\nСейчас в Баку +18 °C"));
+        assert_eq!(c.paste_text().as_deref(), Some("Сейчас в Баку +18 °C.\n\nВетер слабый."));
 
-        // A search before any words: nothing to set apart.
-        let mut s = Conversation::new(taken(SelectionKind::None, false));
-        s.ask("курс евро");
-        s.step(Step::Searching);
-        s.step(Step::TextStart);
-        s.step(Step::Text("1,08".into()));
-        assert!(!s.view.turns[0].segments[0].after_search);
+        // A follow-up's own first search drops its own words before it, not the answer it follows.
+        c.ask("а завтра");
+        c.step(Step::TextStart);
+        c.step(Step::Text("Проверю прогноз.".into()));
+        c.step(Step::Searching);
+        assert_eq!((c.view.turns[0].text(), c.view.turns[1].segments.len()), ("Сейчас в Баку +18 °C.\n\nВетер слабый.".to_owned(), 0));
     }
 
     /// A write cut at `max_tokens` is asked again with more room, and its steps come again from the start: the turn's

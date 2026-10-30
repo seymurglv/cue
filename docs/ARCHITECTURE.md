@@ -473,8 +473,11 @@ effects need, and `cue_engines::ask` talks to the API.
   view goes to the windows (`cue://answer`) at once for a new turn, an end, an opening or a follow-up row, and at most
   every 50 ms while words stream (`ViewGate`); the flow hears `AskOpened` once per request (`ShownOnce`).
 - A turn's text is its text blocks (`Segment`s) joined as they came: a citation splits a block, and those parts run on.
-  Words before a search and words after it are two blocks with nothing between them, so a block after a search
-  (`after_search`) starts a paragraph, in the paste (`TurnView::text`) as on screen (`markedText`).
+  Words before the turn's first search only say that it is going to search (Haiku without thinking writes such a
+  sentence before nearly every search, though the instruction asks for none): they go when the search starts, and the
+  search line takes their place. Words before a later search and words after it are two blocks with nothing between
+  them, so a block after a search (`after_search`) starts a paragraph, in the paste (`TurnView::text`) as on screen
+  (`markedText`).
 - Where it opens (`open_answer`): in the card when the card window exists, the selection has a rectangle with a size,
   and `cardplace::card_place` finds room for it on the selection's monitor; otherwise in the tray from the Drop. The log
   gets the place only.
