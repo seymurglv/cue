@@ -106,8 +106,6 @@ pub struct Conversation {
     /// The failed question a new one took the place of, its turn and its message, while the new one is in flight: an
     /// abort of the new one brings it back with its Retry (the flow's `AskAgain` names it then).
     replaced: Option<(TurnView, Value)>,
-    /// The code execution container of a filtered search, sent back with the next request.
-    pub container: Option<String>,
     pub view: AnswerView,
     sources: Sources,
     /// The answer is on screen: the first step with something to show came.
@@ -120,6 +118,9 @@ pub struct Conversation {
     /// A write_to_field call began in the last turn's stream. One cut at `max_tokens` is asked again with more room, and
     /// that response's steps come from its start (`cue_engines::ask::run`): its first block starts the turn's words over.
     wrote: bool,
+    /// A search came after the last turn's latest words: its next text block goes on a paragraph of its own, or the two
+    /// would run together.
+    searched: bool,
 }
 
 impl Conversation {
@@ -129,7 +130,6 @@ impl Conversation {
             messages: Vec::new(),
             pending: None,
             replaced: None,
-            container: None,
             view: AnswerView {
                 place: AnswerPlace::Tray,
                 quote: None,
@@ -144,6 +144,7 @@ impl Conversation {
             write: None,
             shown_write: None,
             wrote: false,
+            searched: false,
         }
     }
 
@@ -250,14 +251,19 @@ impl Conversation {
         match step {
             Step::Searching => {
                 turn.step = Some(ThinkStep::Searching);
+                self.searched = true;
                 true
             }
             Step::Reading => {
                 turn.step = Some(ThinkStep::Reading);
+                self.searched = true;
                 true
             }
             Step::TextStart => {
-                turn.segments.push(Segment::default());
+                // Words before a search and words after it are two text blocks with nothing between them: the later one
+                // starts a paragraph.
+                let after_search = std::mem::take(&mut self.searched) && !turn.text().trim().is_empty();
+                turn.segments.push(Segment { after_search, ..Segment::default() });
                 if turn.step.is_some() && turn.text().trim().is_empty() {
                     turn.step = Some(ThinkStep::Writing);
                 }
@@ -334,7 +340,7 @@ impl Conversation {
                 // The turn ends with the text either way: a write that is pasted closes the answer, but should it stay
                 // on screen (a follow-up under way), the turn still shows what was written.
                 if let Some(turn) = self.view.turns.last_mut() {
-                    turn.segments = vec![Segment { text: text.clone(), cites: Vec::new() }];
+                    turn.segments = vec![Segment { text: text.clone(), ..Segment::default() }];
                 }
                 self.finish_turn(TurnState::Done, false);
                 match target {
@@ -358,9 +364,6 @@ impl Conversation {
             self.messages.push(turn);
         } else {
             self.pending = None;
-        }
-        if result.container.is_some() {
-            self.container.clone_from(&result.container);
         }
         heard
     }
@@ -426,7 +429,7 @@ mod tests {
     }
 
     fn result(end: AskEnd, content: Vec<Value>) -> AskResult {
-        AskResult { end, content, usage: AskUsage::default(), container: None }
+        AskResult { end, content, usage: AskUsage::default() }
     }
 
     /// Ruling 6b, for a write: the window the question was asked in is not in front any more (or is a terminal for a
@@ -558,6 +561,35 @@ mod tests {
         assert_eq!(c.view.sources, [SourceView { n: 1, site: "blog.rust-lang.org".into(), title: "Rust Blog".into() }]);
         assert!(!c.step(Step::WriteStart), "a write never opens the answer");
         assert!(!c.step(Step::Spent(AskUsage::default())), "the cost is the runtime's, not the view's");
+    }
+
+    /// Words before a search and words after it are two text blocks with nothing between them: the later one starts a
+    /// paragraph, on screen and in a paste ("…данные.Поиск…" before). A citation splits a block too, with no search between.
+    #[test]
+    fn words_after_a_search_start_a_paragraph() {
+        let mut c = Conversation::new(taken(SelectionKind::None, false));
+        c.ask("какая погода в Баку");
+        c.step(Step::TextStart);
+        c.step(Step::Text("Проверю актуальные данные.".into()));
+        c.step(Step::Searching);
+        c.step(Step::Reading);
+        c.step(Step::TextStart);
+        c.step(Step::Text("Сейчас в Баку ".into()));
+        c.step(Step::TextStart);
+        c.step(Step::Text("+18 °C".into()));
+        c.step(Step::Cite { url: "https://a.io/x".into(), title: "A".into() });
+        let flags: Vec<bool> = c.view.turns[0].segments.iter().map(|s| s.after_search).collect();
+        assert_eq!(flags, [false, true, false], "only the block after the search");
+        c.end(&result(AskEnd::Answer, vec![text_block("x")]), false, anywhere);
+        assert_eq!(c.paste_text().as_deref(), Some("Проверю актуальные данные.\n\nСейчас в Баку +18 °C"));
+
+        // A search before any words: nothing to set apart.
+        let mut s = Conversation::new(taken(SelectionKind::None, false));
+        s.ask("курс евро");
+        s.step(Step::Searching);
+        s.step(Step::TextStart);
+        s.step(Step::Text("1,08".into()));
+        assert!(!s.view.turns[0].segments[0].after_search);
     }
 
     /// A write cut at `max_tokens` is asked again with more room, and its steps come again from the start: the turn's

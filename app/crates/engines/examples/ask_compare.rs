@@ -13,7 +13,8 @@
 //!   `ask.max_searches` = 2 (none with `--no-search`), thinking as `--thinking` says (the app's default when left out).
 //! - Runs 1..runs, each over all phrases, one call at a time. The very first call is cold (the prompt cache is empty) and
 //!   is left out of the medians; first words are split by whether the model searched. A call that wrote text before its
-//!   first web search is marked (`text_before_search`): those words, not the answer, were its first words.
+//!   first web search is marked (`text_before_search`): those words, not the answer, were its first words. A search that
+//!   failed is kept with its error code (`search_errors`).
 //! - Stops as soon as more than `--max-usd` has been spent. A model without a default price is refused before any call:
 //!   its tokens would count as $0, and the budget would never stop the run.
 //! - `out.json` is written before the first call (a path that cannot be written stops the run before anything is paid)
@@ -145,6 +146,8 @@ struct Call {
     searches: u32,
     /// The model wrote text before its first web search (a note that it is going to search): those words came first.
     text_before_search: bool,
+    /// The error codes of the searches that failed (`unavailable`, `invalid_tool_input`, …).
+    search_errors: Vec<String>,
     /// The question and, for a follow-up phrase, the first answer too.
     cost_usd: f64,
 }
@@ -155,6 +158,15 @@ fn text_before_search(content: &[Value]) -> bool {
     first_search.is_some_and(|i| {
         content[..i].iter().any(|b| b["type"] == "text" && b["text"].as_str().is_some_and(|t| !t.trim().is_empty()))
     })
+}
+
+/// The error codes of the searches that failed among a response's blocks.
+fn search_errors(content: &[Value]) -> Vec<String> {
+    content
+        .iter()
+        .filter(|b| b["type"] == "web_search_tool_result" && b["content"]["type"] == "web_search_tool_result_error")
+        .map(|b| b["content"]["error_code"].as_str().unwrap_or("unknown").to_owned())
+        .collect()
 }
 
 struct Asked {
@@ -171,11 +183,10 @@ async fn ask_once(
     search: Option<SearchTool>,
     thinking: Thinking,
     messages: &[Value],
-    container: Option<String>,
 ) -> Asked {
     let t0 = Instant::now();
     let mut first = None;
-    let result = ask::run(http, Some(key), model, search, thinking, messages, container, |s| {
+    let result = ask::run(http, Some(key), model, search, thinking, messages, |s| {
         let words = s.is_first_words();
         if words && first.is_none() {
             first = Some(t0.elapsed().as_millis() as u64);
@@ -217,6 +228,7 @@ fn scored(p: &Phrase, run: usize, cold: bool, asked: &Asked, cost_usd: f64) -> C
         total_ms: asked.total_ms,
         searches: r.usage.web_searches,
         text_before_search: text_before_search(&r.content),
+        search_errors: search_errors(&r.content),
         cost_usd,
     }
 }
@@ -229,6 +241,8 @@ struct Summary {
     modes_scored: usize,
     first_words_ms_no_search: Option<u64>,
     first_words_ms_search: Option<u64>,
+    /// Calls with a search that failed.
+    search_errors: usize,
     cost_usd: f64,
 }
 
@@ -252,6 +266,7 @@ fn summarize(calls: &[Call]) -> Summary {
         modes_scored: calls.iter().filter(|c| c.expect_mode.is_some()).count(),
         first_words_ms_no_search: warm(false),
         first_words_ms_search: warm(true),
+        search_errors: calls.iter().filter(|c| !c.search_errors.is_empty()).count(),
         cost_usd: calls.iter().map(|c| c.cost_usd).sum(),
     }
 }
@@ -303,28 +318,28 @@ async fn main() -> anyhow::Result<()> {
                 today: today.clone(),
             };
             let mut messages = vec![ask::user_turn(&first_message(&p.question, &ctx), None)];
-            let mut asked = ask_once(&http, &key, &args.model, search, args.thinking, &messages, None).await;
+            let mut asked = ask_once(&http, &key, &args.model, search, args.thinking, &messages).await;
             let mut usd = cost(&pricing, &args.model, &asked.result);
             if let Some(then) = &p.then
                 && asked.result.end == AskEnd::Answer
             {
                 let previous = asked.result.content.clone();
-                let container = asked.result.container.clone();
                 messages.push(ask::assistant_turn(&previous));
                 messages.push(ask::user_turn(&follow_up_message(then), Some(&previous)));
-                asked = ask_once(&http, &key, &args.model, search, args.thinking, &messages, container).await;
+                asked = ask_once(&http, &key, &args.model, search, args.thinking, &messages).await;
                 usd += cost(&pricing, &args.model, &asked.result);
             }
             spent += usd;
             let c = scored(p, run, calls.is_empty(), &asked, usd);
             println!(
-                "{} run {run}: {}{} · first words {:?} ms · searches {}{} · ${usd:.4}",
+                "{} run {run}: {}{} · first words {:?} ms · searches {}{}{} · ${usd:.4}",
                 c.id,
                 c.decision,
                 c.mode.map(|m| format!(" ({m:?})")).unwrap_or_default(),
                 c.first_words_ms,
                 c.searches,
-                if c.text_before_search { " (text before)" } else { "" }
+                if c.text_before_search { " (text before)" } else { "" },
+                if c.search_errors.is_empty() { String::new() } else { format!(" (failed: {})", c.search_errors.join(", ")) }
             );
             calls.push(c);
             // After every call: a run cut short keeps what it paid for.
@@ -407,6 +422,7 @@ mod tests {
             total_ms: 0,
             searches,
             text_before_search: false,
+            search_errors: Vec::new(),
             cost_usd: 0.25,
         }
     }
@@ -421,6 +437,16 @@ mod tests {
         assert!(!text_before_search(&[blank, search.clone(), answer.clone()]), "blank text is no words");
         assert!(!text_before_search(&[search, answer.clone()]));
         assert!(!text_before_search(&[said, answer]), "no search at all");
+    }
+
+    #[test]
+    fn failed_searches_keep_their_error_codes() {
+        let failed = json!({ "type": "web_search_tool_result", "tool_use_id": "s1",
+            "content": { "type": "web_search_tool_result_error", "error_code": "invalid_tool_input" } });
+        let found = json!({ "type": "web_search_tool_result", "tool_use_id": "s2", "content": [{ "type": "web_search_result", "url": "https://a.io" }] });
+        let answer = json!({ "type": "text", "text": "Rust 1.95." });
+        assert_eq!(search_errors(&[failed, found.clone(), answer.clone()]), ["invalid_tool_input"]);
+        assert!(search_errors(&[found, answer]).is_empty());
     }
 
     #[test]

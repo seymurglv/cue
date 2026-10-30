@@ -12,42 +12,27 @@ use tokio::time::{timeout_at, Instant};
 use crate::claude::{self, messages_post, THINKING_HEADROOM};
 use crate::openrouter::Sse;
 
-/// The web search tool (spec 2 §6.2); which version — the first probe's choice (§13.1).
+/// The web search tool (spec 2 §6.2): the basic `web_search_20250305`, called by the model directly — no filtering of
+/// the results in code, so no code execution step that can fail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SearchTool {
-    /// `web_search_20250305`, called by the model directly.
-    Basic { max_uses: u32 },
-    /// `web_search_20260318`: the model filters the results in code before it reads them.
-    Filtered { max_uses: u32 },
+pub struct SearchTool {
+    /// Searches one request may run (`max_uses` applies per request, continuations included one by one).
+    pub max_uses: u32,
 }
 
 impl SearchTool {
-    /// Searches one request may run (`max_uses` applies per request, continuations included one by one).
-    pub fn max_uses(self) -> u32 {
-        match self {
-            SearchTool::Basic { max_uses } | SearchTool::Filtered { max_uses } => max_uses,
-        }
-    }
-
     pub fn json(self) -> Value {
-        match self {
-            SearchTool::Basic { max_uses } => json!({
-                "type": "web_search_20250305", "name": "web_search", "max_uses": max_uses, "allowed_callers": ["direct"]
-            }),
-            SearchTool::Filtered { max_uses } => {
-                json!({ "type": "web_search_20260318", "name": "web_search", "max_uses": max_uses })
-            }
-        }
+        json!({ "type": "web_search_20250305", "name": "web_search", "max_uses": self.max_uses, "allowed_callers": ["direct"] })
     }
 }
 
-/// The web search the app sends for `max_uses` searches a question; `None` when the model takes none. The version is the
-/// first probe's choice (spec 2 §13.1, `examples/ask_probe.rs`). On 2026-10-29 Haiku 5.5 took both versions; filtered
-/// search brought the first words of a searched question in 4.6 / 5.1 / 10.9 s (median 5.1 s, within the probe's 8 s
-/// bar; basic: 4.2 / 3.5 / 3.8 s) and answered the follow-up after a search, so the probe's rule picks it. Its cached
-/// prefix is longer: 7 263 tokens against basic's 3 981.
+/// The web search the app sends for `max_uses` searches a question; `None` when the model takes none. The basic search
+/// since 2026-10-31: the filtered one (`web_search_20260318`, the first probe's choice) failed live on Haiku 5.5 with
+/// thinking off with an invalid-input error, and the answer told the user so. On 2026-10-29 the basic one brought the
+/// first words of a searched question in 4.2 / 3.5 / 3.8 s (`examples/ask_probe.rs`), with a cached prefix of 3 981
+/// tokens against the filtered one's 7 263.
 pub fn search_tool(max_uses: u32) -> Option<SearchTool> {
-    Some(SearchTool::Filtered { max_uses })
+    Some(SearchTool { max_uses })
 }
 
 /// write_to_field (spec 2 §6.2): strict, so its input always matches the schema; buffered (no eager streaming), so the
@@ -93,14 +78,7 @@ impl Thinking {
 /// The streaming request (spec 2 §6.2): the instruction with a cache mark (it covers the tools before it), low effort,
 /// thinking as `thinking` says (adaptive gets room for it on top of the answer's budget), `tool_choice: auto`, and the
 /// conversation with a second mark on the last user message, so a follow-up reads what came before from the cache.
-/// `container` — the code execution container the API gave the conversation (filtered search), sent back.
-pub fn request_body(
-    model: &str,
-    search: Option<SearchTool>,
-    thinking: Thinking,
-    messages: &[Value],
-    container: Option<&str>,
-) -> Value {
+pub fn request_body(model: &str, search: Option<SearchTool>, thinking: Thinking, messages: &[Value]) -> Value {
     let budget = core_ask::MAX_TOKENS + if thinking == Thinking::Adaptive { THINKING_HEADROOM } else { 0 };
     let mut v = json!({
         "model": model,
@@ -114,9 +92,6 @@ pub fn request_body(
     });
     if thinking == Thinking::Off {
         v["thinking"] = json!({ "type": "disabled" });
-    }
-    if let Some(c) = container {
-        v["container"] = json!(c);
     }
     v
 }
@@ -141,7 +116,7 @@ pub const WARM_MAX_TOKENS: u32 = 0;
 /// with a one-character placeholder, no stream, no output. The mark stays only on the instruction: on the placeholder it
 /// would key the cache to it.
 pub fn warm_body(model: &str, search: Option<SearchTool>) -> Value {
-    let mut v = request_body(model, search, Thinking::DEFAULT, &[user_turn(".", None)], None);
+    let mut v = request_body(model, search, Thinking::DEFAULT, &[user_turn(".", None)]);
     if let Some(o) = v.as_object_mut() {
         o.remove("stream");
     }
@@ -252,7 +227,6 @@ pub struct StreamState {
     /// the count (`ended`), which only `message_delta` does.
     searches_seen: u32,
     ended: bool,
-    container: Option<String>,
     stopped: bool,
 }
 
@@ -262,7 +236,6 @@ pub struct StreamTurn {
     pub content: Vec<Value>,
     pub stop_reason: Option<String>,
     pub usage: AskUsage,
-    pub container: Option<String>,
 }
 
 impl StreamState {
@@ -271,10 +244,7 @@ impl StreamState {
         let v: Value = serde_json::from_str(data).map_err(|_| StreamError::Malformed)?;
         let mut steps = Vec::new();
         match v["type"].as_str().unwrap_or("") {
-            "message_start" => {
-                self.read_usage(&v["message"]["usage"]);
-                self.read_container(&v["message"]["container"]);
-            }
+            "message_start" => self.read_usage(&v["message"]["usage"]),
             "content_block_start" => {
                 let i = block_index(&v)?;
                 let block = v["content_block"].clone();
@@ -346,7 +316,6 @@ impl StreamState {
                 }
                 self.read_usage(&v["usage"]);
                 self.ended = true;
-                self.read_container(&v["delta"]["container"]);
             }
             "message_stop" => self.stopped = true,
             "error" => return Err(StreamError::Api(v["error"]["type"].as_str().unwrap_or("error").to_owned())),
@@ -377,12 +346,7 @@ impl StreamState {
 
     pub fn finish(self) -> StreamTurn {
         let usage = self.usage();
-        StreamTurn {
-            content: self.blocks.into_iter().filter(|b| !b.is_null()).collect(),
-            stop_reason: self.stop_reason,
-            usage,
-            container: self.container,
-        }
+        StreamTurn { content: self.blocks.into_iter().filter(|b| !b.is_null()).collect(), stop_reason: self.stop_reason, usage }
     }
 
     fn put(&mut self, i: usize, block: Value) {
@@ -411,13 +375,6 @@ impl StreamState {
         }
         if let Some(x) = u["server_tool_use"]["web_search_requests"].as_u64() {
             self.usage.web_searches = u32::try_from(x).unwrap_or(u32::MAX);
-        }
-    }
-
-    /// The code execution container of a filtered search, to send back with the next request of the conversation.
-    fn read_container(&mut self, c: &Value) {
-        if let Some(id) = c["id"].as_str().or_else(|| c.as_str()) {
-            self.container = Some(id.to_owned());
         }
     }
 }
@@ -516,14 +473,13 @@ pub enum AskEnd {
     Failed(AskFailure),
 }
 
-/// The end of a question, the assistant's blocks for the conversation (all continuations, one turn), the tokens and
-/// searches paid for, and the code execution container to send back when the API gave one.
+/// The end of a question, the assistant's blocks for the conversation (all continuations, one turn), and the tokens and
+/// searches paid for.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AskResult {
     pub end: AskEnd,
     pub content: Vec<Value>,
     pub usage: AskUsage,
-    pub container: Option<String>,
 }
 
 /// The deadlines of one question (spec 2 §6.2).
@@ -557,15 +513,14 @@ pub async fn run(
     search: Option<SearchTool>,
     thinking: Thinking,
     messages: &[Value],
-    container: Option<String>,
     on_step: impl FnMut(Step) + Send,
 ) -> AskResult {
-    run_at(claude::API_URL, http, key, model, search, thinking, messages, container, Limits::SPEC, on_step).await
+    run_at(claude::API_URL, http, key, model, search, thinking, messages, Limits::SPEC, on_step).await
 }
 
-fn failed(why: AskFailure, content: Vec<Value>, usage: AskUsage, container: Option<String>) -> AskResult {
+fn failed(why: AskFailure, content: Vec<Value>, usage: AskUsage) -> AskResult {
     tracing::warn!("ask: {}", why.reason());
-    AskResult { end: AskEnd::Failed(why), content, usage, container }
+    AskResult { end: AskEnd::Failed(why), content, usage }
 }
 
 /// A refusal before the stream → its kind (spec 2 §8). The body is read only for the balance reason; it never reaches
@@ -598,13 +553,12 @@ async fn run_at(
     mut search: Option<SearchTool>,
     thinking: Thinking,
     messages: &[Value],
-    mut container: Option<String>,
     limits: Limits,
     mut on_step: impl FnMut(Step) + Send,
 ) -> AskResult {
     let mut content: Vec<Value> = Vec::new();
     let mut usage = AskUsage::default();
-    let Some(key) = key else { return failed(AskFailure::NoKey, content, usage, container) };
+    let Some(key) = key else { return failed(AskFailure::NoKey, content, usage) };
     let mut t0 = Instant::now();
     let mut total = t0 + limits.total;
     let mut first_by = t0 + limits.first_words;
@@ -619,14 +573,14 @@ async fn run_at(
         if !content.is_empty() {
             msgs.push(json!({ "role": "assistant", "content": content }));
         }
-        let mut body = request_body(model, search, thinking, &msgs, container.as_deref());
+        let mut body = request_body(model, search, thinking, &msgs);
         if widened {
             body["max_tokens"] = json!(body["max_tokens"].as_u64().unwrap_or(0) + u64::from(LONG_WRITE_TOKENS));
         }
         let mut resp = match timeout_at(by(first_seen, first_by), messages_post(http, url, key).json(&body).send()).await {
-            Err(_) => return failed(AskFailure::Timeout, content, usage, container),
-            Ok(Err(e)) if e.is_timeout() => return failed(AskFailure::Timeout, content, usage, container),
-            Ok(Err(_)) => return failed(AskFailure::Network, content, usage, container),
+            Err(_) => return failed(AskFailure::Timeout, content, usage),
+            Ok(Err(e)) if e.is_timeout() => return failed(AskFailure::Timeout, content, usage),
+            Ok(Err(_)) => return failed(AskFailure::Network, content, usage),
             Ok(Ok(r)) => r,
         };
         let status = resp.status().as_u16();
@@ -639,7 +593,7 @@ async fn run_at(
                 search = None;
                 continue;
             }
-            return failed(classify(status, &text), content, usage, container);
+            return failed(classify(status, &text), content, usage);
         }
         let (mut sse, mut st) = (Sse::default(), StreamState::default());
         let broke = loop {
@@ -692,16 +646,13 @@ async fn run_at(
         if let Some(why) = broke {
             // A response that failed part-way is paid for as far as it came (spec 2 §10).
             usage.add(st.usage());
-            return failed(why, content, usage, container);
+            return failed(why, content, usage);
         }
         let turn = st.finish();
         usage.add(turn.usage);
-        if turn.container.is_some() {
-            container = turn.container;
-        }
         content.extend(turn.content);
         let reason = turn.stop_reason.as_deref();
-        let searches_left = search.is_none_or(|s| usage.web_searches < s.max_uses());
+        let searches_left = search.is_none_or(|s| usage.web_searches < s.max_uses);
         if reason == Some("pause_turn") && round < core_ask::MAX_CONTINUATIONS && searches_left {
             round += 1;
             // The next request follows at once: with the rest of this body read, it goes over the same connection.
@@ -725,14 +676,14 @@ async fn run_at(
             Decision::Answer => AskEnd::Answer,
             Decision::Write { text, replace } => AskEnd::Write { text, replace },
             Decision::Refused => AskEnd::Refused,
-            Decision::Empty => return failed(AskFailure::Malformed, content, usage, container),
+            Decision::Empty => return failed(AskFailure::Malformed, content, usage),
         };
         // A response dropped unread closes the connection, and the next request pays for a new TLS handshake: the rest of
         // the body (the final empty chunk) is read in the background, for `DRAIN` at most.
         tokio::spawn(async move {
             let _ = tokio::time::timeout(DRAIN, rest(&mut resp)).await;
         });
-        return AskResult { end, content, usage, container };
+        return AskResult { end, content, usage };
     }
 }
 
@@ -784,7 +735,7 @@ mod tests {
 
     #[test]
     fn the_request_streams_with_both_tools_and_two_cache_marks() {
-        let v = request_body("claude-haiku-5-5", Some(SearchTool::Basic { max_uses: 2 }), Thinking::DEFAULT, &[question()], None);
+        let v = request_body("claude-haiku-5-5", Some(SearchTool { max_uses: 2 }), Thinking::DEFAULT, &[question()]);
         assert_eq!(v["model"], "claude-haiku-5-5");
         assert_eq!(v["stream"], true);
         assert_eq!(v["max_tokens"], 2_000, "the answer's budget: no room kept for thinking");
@@ -810,17 +761,20 @@ mod tests {
 
     #[test]
     fn without_search_only_the_write_tool() {
-        let v = request_body("claude-haiku-5-5", None, Thinking::DEFAULT, &[question()], None);
+        let v = request_body("claude-haiku-5-5", None, Thinking::DEFAULT, &[question()]);
         assert_eq!(v["tools"].as_array().map(Vec::len), Some(1));
     }
 
+    /// The app's search is the basic one, called by the model directly: no filtering in code, no code execution.
     #[test]
-    fn filtered_search_lets_the_model_filter_in_code() {
+    fn the_app_searches_with_the_basic_search() {
+        assert_eq!(search_tool(3), Some(SearchTool { max_uses: 3 }));
+        let v = request_body("claude-haiku-5-5", search_tool(3), Thinking::DEFAULT, &[question()]);
         assert_eq!(
-            SearchTool::Filtered { max_uses: 3 }.json(),
-            json!({ "type": "web_search_20260318", "name": "web_search", "max_uses": 3 })
+            v["tools"][1],
+            json!({ "type": "web_search_20250305", "name": "web_search", "max_uses": 3, "allowed_callers": ["direct"] })
         );
-        assert_eq!((SearchTool::Filtered { max_uses: 3 }.max_uses(), SearchTool::Basic { max_uses: 2 }.max_uses()), (3, 2));
+        assert_eq!(v["tools"].as_array().map(Vec::len), Some(2), "no code execution tool");
     }
 
     /// The cache mark goes on the last user message only (four marks at most), also while a paused turn is continued;
@@ -830,13 +784,13 @@ mod tests {
         let answer = json!({ "role": "assistant", "content": [{ "type": "text", "text": "Ответ." }] });
         let follow = user_turn("<question>а подробнее</question>", None);
         let msgs = vec![question(), answer.clone(), follow];
-        let v = request_body("claude-haiku-5-5", None, Thinking::DEFAULT, &msgs, None);
+        let v = request_body("claude-haiku-5-5", None, Thinking::DEFAULT, &msgs);
         assert!(v["messages"][0]["content"][0].get("cache_control").is_none());
         assert!(v["messages"][1]["content"][0].get("cache_control").is_none());
         assert_eq!(v["messages"][2]["content"][0]["cache_control"], json!({ "type": "ephemeral" }));
         assert!(msgs[2]["content"][0].get("cache_control").is_none(), "the conversation itself is untouched");
         let paused = vec![question(), answer];
-        let v = request_body("claude-haiku-5-5", None, Thinking::DEFAULT, &paused, None);
+        let v = request_body("claude-haiku-5-5", None, Thinking::DEFAULT, &paused);
         assert_eq!(v["messages"][0]["content"][0]["cache_control"], json!({ "type": "ephemeral" }));
         assert!(v["messages"][1]["content"][0].get("cache_control").is_none());
     }
@@ -845,15 +799,9 @@ mod tests {
     /// for it on top of the answer's budget.
     #[test]
     fn adaptive_thinking_is_left_out_with_headroom() {
-        let v = request_body("claude-haiku-5-5", None, Thinking::Adaptive, &[question()], None);
+        let v = request_body("claude-haiku-5-5", None, Thinking::Adaptive, &[question()]);
         assert_eq!(v["max_tokens"], 4_048);
         assert!(v.get("thinking").is_none());
-    }
-
-    #[test]
-    fn the_container_goes_back_when_there_is_one() {
-        let v = request_body("claude-haiku-5-5", None, Thinking::DEFAULT, &[question()], Some("container_011"));
-        assert_eq!(v["container"], "container_011");
     }
 
     /// The warm-up builds the prefix the real request reads (spec 2 §6.3): the same tools, instruction, thinking, effort
@@ -861,9 +809,9 @@ mod tests {
     /// cache to it).
     #[test]
     fn the_warm_up_has_the_prefix_and_nothing_else() {
-        let search = Some(SearchTool::Basic { max_uses: 2 });
+        let search = Some(SearchTool { max_uses: 2 });
         let warm = warm_body("claude-haiku-5-5", search);
-        let real = request_body("claude-haiku-5-5", search, Thinking::DEFAULT, &[question()], None);
+        let real = request_body("claude-haiku-5-5", search, Thinking::DEFAULT, &[question()]);
         for k in ["model", "system", "tools", "tool_choice", "thinking", "output_config"] {
             assert_eq!(warm[k], real[k], "{k}");
         }
@@ -1147,13 +1095,6 @@ mod tests {
         assert_eq!(st.feed(&delta(7, json!({ "type": "text_delta", "text": "x" })).to_string()), Err(StreamError::Malformed), "a delta of a block never started");
     }
 
-    #[test]
-    fn the_container_is_remembered() {
-        let mut st = StreamState::default();
-        st.feed(&json!({ "type": "message_start", "message": { "usage": {}, "container": { "id": "container_011", "expires_at": "x" } } }).to_string()).unwrap();
-        assert_eq!(st.finish().container.as_deref(), Some("container_011"));
-    }
-
     /// The API reports a response's searches only at its end: until then each search the stream started counts, so a
     /// question closed or cut after it searched still writes the search (spec 2 §10). The end's count is the one billed.
     #[test]
@@ -1220,8 +1161,8 @@ mod tests {
         let (logs, _guard) = capture_logs();
         let url = format!("{}/v1/messages", api.base);
         let (mut steps, mut spent) = (Vec::new(), AskUsage::default());
-        let search = Some(SearchTool::Basic { max_uses: 2 });
-        let r = run_at(&url, &http, key, "claude-haiku-5-5", search, Thinking::DEFAULT, &[question()], None, limits, |s| match s {
+        let search = Some(SearchTool { max_uses: 2 });
+        let r = run_at(&url, &http, key, "claude-haiku-5-5", search, Thinking::DEFAULT, &[question()], limits, |s| match s {
             Step::Spent(u) => spent = u,
             s => steps.push(s),
         })
@@ -1252,8 +1193,8 @@ mod tests {
         assert_eq!(req.header("x-api-key"), [KEY]);
         assert_eq!(req.header("anthropic-version"), ["2026-10-21"]);
         let body: Value = serde_json::from_slice(&req.body).unwrap();
-        let search = Some(SearchTool::Basic { max_uses: 2 });
-        assert_eq!(body, request_body("claude-haiku-5-5", search, Thinking::DEFAULT, &[question()], None));
+        let search = Some(SearchTool { max_uses: 2 });
+        assert_eq!(body, request_body("claude-haiku-5-5", search, Thinking::DEFAULT, &[question()]));
     }
 
     #[tokio::test]
@@ -1274,7 +1215,7 @@ mod tests {
         let second: Value = serde_json::from_slice(&api.body(1)).unwrap();
         assert_eq!(second["messages"][1]["role"], "assistant", "the paused turn goes back as it came");
         assert_eq!(second["messages"][1]["content"][0]["id"], "srvtoolu_1");
-        assert_eq!(second["tools"], tools(Some(SearchTool::Basic { max_uses: 2 })), "the same tools");
+        assert_eq!(second["tools"], tools(Some(SearchTool { max_uses: 2 })), "the same tools");
         assert_eq!(r.content.len(), 2, "both responses' blocks: one turn");
         assert_eq!((r.usage.input_tokens, r.usage.output_tokens, r.usage.web_searches), (90, 17, 1));
         assert_eq!(steps[0], Step::Searching);
@@ -1344,7 +1285,7 @@ mod tests {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let url = format!("{}/v1/messages", api.base);
         let mut spent = Vec::new();
-        let r = run_at(&url, &http, Some(KEY), "claude-haiku-5-5", None, Thinking::DEFAULT, &[question()], None, FAST, |s| {
+        let r = run_at(&url, &http, Some(KEY), "claude-haiku-5-5", None, Thinking::DEFAULT, &[question()], FAST, |s| {
             if let Step::Spent(u) = s {
                 spent.push(u);
             }

@@ -1186,7 +1186,7 @@ impl Runtime {
     /// of this task's generation: a dropped or replaced request's never reach the conversation.
     fn spawn_ask(&mut self, id: DictationId) {
         let Some(c) = self.conversation.as_ref() else { return };
-        let (messages, container) = (c.request(), c.container.clone());
+        let messages = c.request();
         // The Ctrl+C copy of a first question, still on its way: the request task waits for it, never the core.
         let copy = match self.ask_copy.take() {
             Some((i, rx)) if i == id => c.question().map(|q| (rx, q.to_owned(), c.taken.ctx.clone())),
@@ -1220,7 +1220,7 @@ impl Runtime {
                 let steps = tx.clone();
                 let body = async {
                     let thinking = engine_ask::Thinking::DEFAULT;
-                    engine_ask::run(&http, key.as_deref(), &model, search, thinking, &messages, container, move |step| {
+                    engine_ask::run(&http, key.as_deref(), &model, search, thinking, &messages, move |step| {
                         let _ = steps.send(CoreEvent::AskStep { id, task, step });
                     })
                     .await
@@ -2019,7 +2019,7 @@ mod tests {
 
     fn ended(end: AskEnd) -> AskResult {
         let content = vec![serde_json::json!({ "type": "text", "text": "x" })];
-        AskResult { end, content, usage: AskUsage::default(), container: None }
+        AskResult { end, content, usage: AskUsage::default() }
     }
 
     /// A question and its answer as streamed, then ended with `end`; `may_paste` — the window asked in is in front.
