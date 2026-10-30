@@ -51,11 +51,16 @@ impl std::fmt::Debug for Entry {
 }
 
 impl Entry {
-    /// Whether the text or the question holds `query`, which is already lowercase.
+    /// Whether the text or the question holds `query`, which is already folded (`fold`).
     fn matches(&self, query: &str) -> bool {
-        let holds = |s: &str| s.to_lowercase().contains(query);
+        let holds = |s: &str| fold(s).contains(query);
         holds(&self.text) || self.question.as_deref().is_some_and(holds)
     }
+}
+
+/// Text as a search compares it: lowercase, with ё read as е (dictation writes ё where people type е).
+fn fold(s: &str) -> String {
+    s.to_lowercase().replace('ё', "е")
 }
 
 /// One day of the history: `date` is `YYYY-MM-DD`, the entries are newest first.
@@ -127,10 +132,10 @@ pub fn older(dir: &Path, before: &str, n_days: usize) -> Page {
     page
 }
 
-/// The entries whose text or question holds `query` (trimmed, in any case), newest first, at most `limit` of them. A
-/// blank query finds nothing.
+/// The entries whose text or question holds `query` (trimmed, in any case, ё and е alike), newest first, at most
+/// `limit` of them. A blank query finds nothing.
 pub fn search(dir: &Path, query: &str, limit: usize) -> Vec<Day> {
-    let query = query.trim().to_lowercase();
+    let query = fold(query.trim());
     let mut days = Vec::new();
     if query.is_empty() {
         return days;
@@ -507,6 +512,26 @@ mod tests {
         }
         assert_eq!(search(&dir, "absent", 10), Vec::<Day>::new());
         assert_eq!(search(&tmp("search-missing"), "x", 10), Vec::<Day>::new());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Dictation writes ё where people type е, and the other way round.
+    #[test]
+    fn search_finds_yo_and_ye_alike() {
+        let dir = tmp("search-yo");
+        add(
+            &dir,
+            &[
+                entry("2026-10-29T09:00:00.000", Mode::Dictation, "Отчёт готов"),
+                entry("2026-10-30T09:00:00.000", Mode::Dictation, "отчет отправлен"),
+                ask("2026-10-31T09:00:00.000", "Где ЁЛКА?", "Во дворе."),
+            ],
+        );
+        let both = [("2026-10-30", vec!["отчет отправлен"]), ("2026-10-29", vec!["Отчёт готов"])];
+        assert_eq!(texts(&search(&dir, "отчет", 10)), both);
+        assert_eq!(texts(&search(&dir, "ОТЧЁТ", 10)), both);
+        assert_eq!(texts(&search(&dir, "елка", 10)), [("2026-10-31", vec!["Во дворе."])]);
+        assert_eq!(texts(&search(&dir, "Ёлка", 10)), [("2026-10-31", vec!["Во дворе."])]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

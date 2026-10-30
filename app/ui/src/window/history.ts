@@ -26,10 +26,14 @@ function entryDate(e: EntryView, today: string): string {
 /** Newest first: ids start with the entry's time. */
 const newestFirst = (a: EntryView, b: EntryView) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
 
-/** `text` into `parent`, the first place that holds `query` (in any case) marked. */
+/** Text as the search compares it (as the core does): lowercase, with ё read as е. Both are one UTF-16 unit, so a
+ *  place in the folded text is the same place in the text. */
+const fold = (s: string) => s.toLowerCase().replace(/ё/g, 'е');
+
+/** `text` into `parent`, the first place that holds `query` (in any case, ё and е alike) marked. */
 function appendMarked(parent: HTMLElement, text: string, query: string): void {
-  const q = query.toLowerCase();
-  const low = text.toLowerCase();
+  const q = fold(query);
+  const low = fold(text);
   const i = q && low.length === text.length ? low.indexOf(q) : -1;
   if (i < 0) {
     parent.append(text);

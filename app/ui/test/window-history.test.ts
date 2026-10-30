@@ -143,6 +143,23 @@ describe('The history', () => {
     expect(rows()).toHaveLength(3);
   });
 
+  it('search marks ё and е alike', async () => {
+    const report = entry(`${TODAY}T11:00:00.000-1`, 'Отчёт готов, отчет отправлен.');
+    core.historySearch.mockResolvedValue([{ date: TODAY, entries: [report] }]);
+    page = await mount();
+    click($('h3 .ibt'));
+    const input = $<HTMLInputElement>('.srch input')!;
+    type(input, 'отчет');
+    await vi.advanceTimersByTimeAsync(200);
+    await settle();
+    expect($('.hr mark')!.textContent).toBe('Отчёт');
+    expect($('.hr .htx')!.textContent).toBe('Отчёт готов, отчет отправлен.');
+    type(input, 'ОТЧЁТ ОТПР');
+    await vi.advanceTimersByTimeAsync(200);
+    await settle();
+    expect($('.hr mark')!.textContent).toBe('отчет отпр');
+  });
+
   it('show earlier appends the next page and hides without more', async () => {
     core.historyPage.mockResolvedValueOnce(firstPage(true));
     const older = entry('2026-10-24T21:12:00.000-1', 'An idea for an article.');
