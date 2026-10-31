@@ -161,6 +161,33 @@ describe('The settings tray', () => {
     expect(text(soniox)).toBe('No key');
   });
 
+  it('the heading line stays from page to page, and a page is filled in where it is', async () => {
+    let listed: (v: { names: string[]; default: string | null }) => void = () => {};
+    core.micList.mockReturnValue(new Promise((r) => (listed = r)));
+    page = await mount();
+    await open();
+    const head = $('.btray .tph')!;
+    const back = $('.btray [data-tback]')!;
+    // Under the first page the chevron is out of reach.
+    expect(head.classList.contains('root')).toBe(true);
+    expect(back.tabIndex).toBe(-1);
+    expect(back.getAttribute('aria-hidden')).toBe('true');
+    click($('.btray [data-sub="mic"]'));
+    expect($('.btray .tph')).toBe(head);
+    expect(head.classList.contains('root')).toBe(false);
+    expect(back.tabIndex).toBe(0);
+    expect(title()).toBe('Microphone');
+    // The microphones come while the page slides in: it is filled in, not drawn anew.
+    const shown = $('.btray .tpb > div:last-child')!;
+    listed({ names: ['Laptop Microphone', 'USB Microphone'], default: 'Laptop Microphone' });
+    await settle();
+    expect($('.btray .tpb > div:last-child')).toBe(shown);
+    expect(shown.querySelector('[data-dd="mic"]')).not.toBeNull();
+    click(back);
+    expect($('.btray .tph')).toBe(head);
+    expect(title()).toBe('Settings');
+  });
+
   it('mic page starts the preview and leaving it stops it', async () => {
     page = await mount();
     // A preview a reloaded page left running ends at the start.

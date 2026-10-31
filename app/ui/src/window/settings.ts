@@ -2,6 +2,10 @@
 // it. Its first page lists Keys, Microphone, Translation, History (how long the history and its recordings are kept,
 // and clearing it) and General with their values; one of them at a time slides in, the chevron goes back; Esc goes
 // back, then closes. Every change goes to the core at once.
+// Going from page to page, the heading line stays: its title changes letter by letter and the chevron grows in front
+// of it; only the rows below slide. The height eases to the new page without overshooting, and nothing scrolls while
+// the pages pass (a scroll bar showing for a moment would narrow the rows). A page whose values come later (the
+// microphones, new settings) is filled in where it is, even while it is still sliding in.
 // The Keys page holds the key rows of keys.ts, the Microphone page the microphone rows of mic.ts (the welcome window
 // shows them too); the microphone's level is listened to only while that page is shown.
 import * as api from './api';
@@ -29,6 +33,8 @@ const UI_LANGUAGES: readonly UiLanguage[] = ['auto', 'en', 'ru'];
 const WIDTH = 340;
 /** How long the tray takes to fold back before it is hidden. */
 const FOLD_MS = 470;
+/** How long pages take to pass (window.css: .btray.swap — the height; the slides in `show` are shorter). */
+const SWAP_MS = 480;
 /** "Clear history" waits this long for its second press. */
 export const CLEAR_ARMED_MS = 3000;
 
@@ -54,9 +60,15 @@ export class SettingsTray {
   private el: HTMLElement | null = null;
   private bin!: HTMLElement;
   private gear!: HTMLElement;
-  /** The page shown (pages sliding out are on their way out). */
+  /** The tray's content: the heading line (it stays from page to page) over the pages' rows. */
+  private frame: HTMLElement | null = null;
+  private head!: HTMLElement;
+  private heading!: HTMLElement;
+  private pages!: HTMLElement;
+  /** The rows of the page shown (pages sliding out are on their way out). */
   private current: HTMLElement | null = null;
   private hideTimer: ReturnType<typeof setTimeout> | null = null;
+  private swapTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly keys: KeyRows;
   private readonly mic: MicRows;
   private autostart: boolean | null = null;
@@ -74,7 +86,7 @@ export class SettingsTray {
       this.fit();
     });
     this.mic = new MicRows(ctx, () => this.current, () => {
-      if (this.sub === 'mic') this.show(this.page('mic'), 0);
+      if (this.sub === 'mic') this.redraw();
     });
   }
 
@@ -83,6 +95,7 @@ export class SettingsTray {
     this.el = el;
     this.bin = el.querySelector('.bin')!;
     this.gear = gear;
+    this.frame = null;
     this.current = null;
     el.addEventListener('click', (e) => this.onClick(e));
     el.addEventListener('keydown', (e) => {
@@ -97,7 +110,7 @@ export class SettingsTray {
     el.classList.add('open');
     gear.classList.add('hid');
     this.place();
-    this.show(this.page(this.sub), 0);
+    this.show(this.sub, 0);
   }
 
   open(): void {
@@ -106,16 +119,18 @@ export class SettingsTray {
     this.isOpen = true;
     this.sub = null;
     if (this.hideTimer) clearTimeout(this.hideTimer);
+    this.swapped();
     el.style.transition = 'none';
     Object.assign(el.style, this.gearBox());
     el.hidden = false;
     el.classList.remove('open');
     this.bin.textContent = '';
+    this.frame = null;
     this.current = null;
     void el.offsetWidth;
     el.style.transition = '';
     this.place();
-    this.show(this.page(null), 1);
+    this.show(null, 0);
     el.classList.add('open');
     this.gear.classList.add('hid');
     void this.keys.readAll();
@@ -128,6 +143,7 @@ export class SettingsTray {
     if (this.sub === 'mic') this.stopPreview();
     this.sub = null;
     this.ctx.closeMenu();
+    this.swapped();
     el.classList.remove('open');
     Object.assign(el.style, this.gearBox());
     this.gear.classList.remove('hid');
@@ -162,7 +178,7 @@ export class SettingsTray {
 
   /** The settings changed: the page shown shows the new values. */
   settingsChanged(): void {
-    if (this.isOpen) this.show(this.page(this.sub), 0);
+    if (this.isOpen) this.redraw();
   }
 
   /** The microphone's level on the meter (only the microphone page has one). */
@@ -181,12 +197,12 @@ export class SettingsTray {
   }
 
   private fit(): void {
-    const pg = this.current;
-    if (!pg || !this.el) return;
+    const frame = this.frame;
+    if (!frame || !this.el) return;
     const top = parseFloat(this.el.style.top) || 0;
     const maxH = Math.max(0, this.ctx.app.offsetHeight - top - 14);
     this.bin.style.maxHeight = `${maxH}px`;
-    this.el.style.height = `${Math.min(pg.offsetHeight, maxH)}px`;
+    this.el.style.height = `${Math.min(frame.offsetHeight, maxH)}px`;
   }
 
   private gearBox(): Partial<CSSStyleDeclaration> {
@@ -194,38 +210,102 @@ export class SettingsTray {
     return { left: `${g.x}px`, top: `${g.y}px`, width: `${g.w}px`, height: `${g.h}px`, borderRadius: `${g.h / 2}px` };
   }
 
-  /** `pg` in place of the page shown: sliding in from the side of `dir` (1 — deeper, -1 — back), at once with 0. */
-  private show(pg: HTMLElement, dir: number): void {
-    const olds = [...this.bin.children] as HTMLElement[];
-    this.bin.append(pg);
+  /** The heading line — back, the title, close — and the place for the pages' rows under it, drawn anew. */
+  private build(): void {
+    const t = this.ctx.t;
+    this.frame = h('div', 'tpg');
+    this.head = h('div', 'tph');
+    const back = iconButton('ibt back', 'chev', t.back);
+    back.dataset.tback = '';
+    this.heading = h('b', 'lbl');
+    const x = iconButton('ibt', 'x', t.close);
+    x.dataset.tclose = '';
+    this.head.append(back, this.heading, x);
+    this.pages = h('div', 'tpb');
+    this.frame.append(this.head, this.pages);
+    this.bin.textContent = '';
+    this.bin.append(this.frame);
+  }
+
+  /** The heading line for `sub`: the chevron only under the first page (out of reach there), the title changed letter by
+   *  letter when `morph`, else at once. */
+  private retitle(sub: Sub | null, morph: boolean): void {
+    const name = sub ? this.title(sub) : this.ctx.t.settings;
+    this.head.classList.toggle('root', !sub);
+    const back = this.head.querySelector<HTMLElement>('[data-tback]')!;
+    back.tabIndex = sub ? 0 : -1;
+    back.setAttribute('aria-hidden', String(!sub));
+    if ((this.heading.dataset.t ?? '') === name) return;
+    if (morph) {
+      CUE().setLabel(this.heading, name);
+    } else {
+      this.heading.dataset.t = name;
+      this.heading.textContent = name;
+    }
+  }
+
+  /** The page `sub` in place of the one shown: its rows sliding in from the side of `dir` (1 — deeper, -1 — back), at
+   *  once with 0, under the heading line that stays. */
+  private show(sub: Sub | null, dir: number): void {
+    if (!this.frame) this.build();
+    const pg = this.page(sub);
+    const olds = [...this.pages.children] as HTMLElement[];
+    const slide = dir !== 0 && !this.ctx.reduced() && typeof pg.animate === 'function';
+    this.retitle(sub, slide);
+    if (slide && olds.length) this.swapping();
+    this.pages.append(pg);
     this.bin.scrollTop = 0;
     this.current = pg;
-    const slide = dir !== 0 && !this.ctx.reduced() && typeof pg.animate === 'function';
     for (const old of olds) {
       Object.assign(old.style, { position: 'absolute', left: '0', right: '0', top: '0' });
       if (!slide) {
         old.remove();
         continue;
       }
-      old.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: `translateX(${-dir * 40}px)` }], {
-        duration: 240,
+      old.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: `translateX(${-dir * 32}px)` }], {
+        duration: 200,
         easing: 'ease-in',
         fill: 'forwards',
       }).onfinish = () => old.remove();
     }
     if (slide && olds.length) {
-      pg.animate([{ opacity: 0, transform: `translateX(${dir * 40}px)` }, { opacity: 1, transform: 'none' }], {
-        duration: 440,
+      pg.animate([{ opacity: 0, transform: `translateX(${dir * 32}px)` }, { opacity: 1, transform: 'none' }], {
+        duration: 420,
+        delay: 60,
         easing: 'cubic-bezier(.22,1,.36,1)',
+        fill: 'backwards',
       });
     }
     pg.querySelectorAll<HTMLElement>('.segc').forEach(syncSeg);
     this.fit();
   }
 
+  /** The page shown drawn again where it is, with its new values: one still sliding in keeps sliding. */
+  private redraw(): void {
+    const pg = this.current;
+    if (!pg) return;
+    pg.replaceChildren(...this.page(this.sub).childNodes);
+    pg.querySelectorAll<HTMLElement>('.segc').forEach(syncSeg);
+    this.fit();
+  }
+
+  /** Pages pass: for `SWAP_MS` the tray's height eases without overshooting and its content does not scroll. */
+  private swapping(): void {
+    if (!this.el) return;
+    if (this.swapTimer) clearTimeout(this.swapTimer);
+    this.el.classList.add('swap');
+    this.swapTimer = setTimeout(() => this.swapped(), SWAP_MS);
+  }
+
+  private swapped(): void {
+    if (this.swapTimer) clearTimeout(this.swapTimer);
+    this.swapTimer = null;
+    this.el?.classList.remove('swap');
+  }
+
   private go(sub: Sub): void {
     this.sub = sub;
-    this.show(this.page(sub), 1);
+    this.show(sub, 1);
     if (sub === 'mic') {
       this.mic.startPreview();
       void this.mic.read();
@@ -238,7 +318,7 @@ export class SettingsTray {
     if (this.sub === 'mic') this.stopPreview();
     this.ctx.closeMenu();
     this.sub = null;
-    this.show(this.page(null), -1);
+    this.show(null, -1);
   }
 
   private onClick(e: Event): void {
@@ -266,18 +346,7 @@ export class SettingsTray {
     // A page drawn anew (another page, the tray opened again, new settings) never takes a first press of "Clear history"
     // with it: its new button would clear on one press.
     this.disarm();
-    const pg = h('div', 'tpg');
-    const tph = h('div', 'tph');
-    if (sub) {
-      const back = iconButton('ibt back', 'chev', t.back);
-      back.dataset.tback = '';
-      tph.append(back);
-    }
-    const title = h('b', sub ? '' : 'lbl', sub ? this.title(sub) : t.settings);
-    const x = iconButton('ibt', 'x', t.close);
-    x.dataset.tclose = '';
-    tph.append(title, x);
-    pg.append(tph);
+    const pg = h('div');
     if (!sub) {
       for (const s of SUBS) {
         const row = h('button', 'trw');
