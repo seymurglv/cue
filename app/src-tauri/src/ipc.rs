@@ -14,9 +14,11 @@ use crate::drop_window::DROP_LABEL;
 use crate::lang::Lang;
 use crate::runtime::CoreEvent;
 
-/// The main window: the only one that gets history text and settings — its commands answer it alone
-/// (`commands::guard`), and new entries come over its own channel (`HistoryFeed`).
+/// The main window: the only one that gets history text — its commands answer it, and the welcome window only those
+/// its steps need (`commands::guard`) — and new entries come over its own channel (`HistoryFeed`).
 pub const MAIN_LABEL: &str = "main";
+/// The welcome window (`welcome_window`).
+pub const WELCOME_LABEL: &str = "welcome";
 
 /// Channel to the core for window commands.
 pub struct CoreTx(pub tokio::sync::mpsc::UnboundedSender<CoreEvent>);

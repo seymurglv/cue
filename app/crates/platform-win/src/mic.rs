@@ -118,6 +118,55 @@ pub fn default_name() -> Option<String> {
     cpal::default_host().default_input_device().as_ref().and_then(name_of)
 }
 
+/// Whether Windows keeps CUE off the microphone (Settings → Privacy & security → Microphone), from the consent values
+/// it keeps: `Value` of `CapabilityAccessManager\ConsentStore\microphone` (every app) and of its `NonPackaged` key
+/// (desktop apps such as CUE), for the device and for the user. One `Deny` among them is enough; a value that is
+/// missing or could not be read denies nothing.
+pub fn denies<'a>(values: impl IntoIterator<Item = Option<&'a str>>) -> bool {
+    values.into_iter().flatten().any(|v| v.trim().eq_ignore_ascii_case("Deny"))
+}
+
+#[cfg(windows)]
+pub use consent::access_denied;
+
+#[cfg(windows)]
+mod consent {
+    use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+    use windows::core::{HSTRING, w};
+
+    /// Under `HKLM` the device's switch, under `HKCU` the user's.
+    const KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
+
+    /// `super::denies` with the four values as the registry has them now: four short reads, no device opened.
+    pub fn access_denied() -> bool {
+        let (key, desktop) = (HSTRING::from(KEY), HSTRING::from(format!(r"{KEY}\NonPackaged")));
+        let values = [
+            value(HKEY_LOCAL_MACHINE, &key),
+            value(HKEY_LOCAL_MACHINE, &desktop),
+            value(HKEY_CURRENT_USER, &key),
+            value(HKEY_CURRENT_USER, &desktop),
+        ];
+        super::denies(values.iter().map(Option::as_deref))
+    }
+
+    /// The string `Value` under `key`; `None` — missing, of another type, longer than a consent word, or not readable.
+    fn value(root: HKEY, key: &HSTRING) -> Option<String> {
+        let mut buf = [0u16; 16];
+        let mut len = size_of_val(&buf) as u32;
+        // SAFETY: the key outlives the call and the name is a `w!` constant; the data goes into our own buffer, `len`
+        // is its size in bytes, and RRF_RT_REG_SZ lets only a string be written, null-terminated, or nothing when it
+        // does not fit.
+        let read = unsafe {
+            RegGetValueW(root, key, w!("Value"), RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr().cast()), Some(&mut len))
+        };
+        if read.is_err() {
+            return None;
+        }
+        let chars = (len as usize / 2).min(buf.len());
+        Some(String::from_utf16_lossy(&buf[..chars]).trim_end_matches('\0').to_owned())
+    }
+}
+
 /// The default input device, and every input device with the name Windows shows for it. The default one is asked for
 /// first, as with nothing pinned: cpal sets up COM on this thread then, and the list needs it too.
 fn devices(host: &cpal::Host) -> (Option<cpal::Device>, Vec<(cpal::Device, String)>) {
@@ -406,5 +455,23 @@ mod tests {
         assert_eq!(pick(&list, "Headset (JABRA) 2"), None);
         assert_eq!(pick(&[], "Headset (JABRA)"), None, "no microphones at all");
         assert_eq!(pick(&names(&["", "  "]), " "), None, "a blank name is never a device");
+    }
+
+    /// The device's switch and the user's, each for every app and for desktop apps: a `Deny` in any of them keeps CUE
+    /// off the microphone; one that is missing, unreadable or anything else does not.
+    #[test]
+    fn mic_access_reads_deny_from_either_key() {
+        assert!(!denies([None, None, None, None]), "nothing set: allowed");
+        assert!(!denies([Some("Allow"); 4]));
+        for i in 0..4 {
+            let mut allowed = [Some("Allow"); 4];
+            allowed[i] = Some("Deny");
+            assert!(denies(allowed), "Deny at {i} among Allow");
+            let mut unset = [None; 4];
+            unset[i] = Some("Deny");
+            assert!(denies(unset), "Deny at {i} alone");
+        }
+        assert!(denies([Some("deny")]) && denies([Some(" Deny ")]), "as Windows writes it, give or take");
+        assert!(!denies([Some("Prompt"), Some(""), Some("Denied"), None]));
     }
 }

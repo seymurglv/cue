@@ -12,6 +12,7 @@ mod paths;
 mod runtime;
 mod tray;
 mod trayicon;
+mod welcome_window;
 
 use std::sync::mpsc::Sender;
 
@@ -42,8 +43,13 @@ fn main() {
     let (core_tx, core_rx) = tokio::sync::mpsc::unbounded_channel();
     let setup_tx = core_tx.clone();
     let built = tauri::Builder::default()
-        // A second launch opens nothing.
-        .plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}))
+        // A second launch opens nothing, but `--welcome` opens the welcome window in the CUE already running.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if welcome_window::asks_welcome(&argv) {
+                tracing::info!("welcome window asked for by a second launch");
+                welcome_window::open(app);
+            }
+        }))
         // The parameter matters only on macOS; on Windows autostart is the Run key.
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .manage(drop_window::HitState::default())
@@ -71,7 +77,11 @@ fn main() {
             commands::key_set,
             commands::key_check,
             commands::mic_list,
-            commands::mic_preview
+            commands::mic_preview,
+            commands::mic_access,
+            commands::welcome_step,
+            commands::welcome_close,
+            commands::open_link
         ])
         .setup(move |app| {
             // We log the reason ourselves: Tauri turns a `setup` error into a panic, and the panic hook does not
@@ -148,6 +158,9 @@ fn setup(
     };
     // Without the icon there is no way to quit or pause: if it is not created, CUE does not start (reason in the log).
     tray::create(app.handle(), core_tx.clone(), paths.logs.clone(), lang).context("tray icon not created")?;
+    // A key missing, or `--welcome`: the welcome window. Before the hook: the core hears that it holds the hotkey ahead
+    // of any chord.
+    welcome_window::open_at_start(app.handle(), welcome_window::asks_welcome(std::env::args_os()));
 
     let (hk_tx, hk_rx) = std::sync::mpsc::channel::<HotkeyEvent>();
     start_hook(&hk_tx);

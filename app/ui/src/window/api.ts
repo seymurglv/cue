@@ -1,8 +1,10 @@
 // The main window's commands (app/src-tauri/src/commands.rs) and its two feeds: new history entries over its own
-// channel, and a microphone's level while the settings show it. Every command answers this window alone; an error is a
-// short code (notMain, core, notFound, badValue, badName, emptyKey, store, autostart, failed), never text.
+// channel, and a microphone's level while the settings show it. The welcome window calls those its steps need — the
+// settings (it changes the microphone alone), the keys, the microphone — and its own (welcomeStep, welcomeClose,
+// openLink); any other answers it notMain. An error is a short code (notMain, core, notFound, badValue, badName,
+// emptyKey, store, autostart, failed), never text.
 import { Channel, invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 
 export type Mode = 'dictation' | 'translation' | 'ask';
 /** One history entry: the time of day `HH:MM`, the app the result went to (empty when not known), the text, and for
@@ -62,6 +64,10 @@ export interface MicList {
   default: string | null;
 }
 export type PasteAgain = 'pasted' | 'clipboard';
+/** Whether Windows lets CUE use the microphone. */
+export type MicAccess = 'allowed' | 'denied';
+/** The welcome window's links, by name. */
+export type LinkTarget = 'soniox' | 'anthropic' | 'micPrivacy';
 
 export const settingsGet = () => invoke<SettingsView>('settings_get');
 export const settingsSet = (change: SettingChange) => invoke<SettingsView>('settings_set', { change });
@@ -86,9 +92,25 @@ export const keySet = (name: KeyName, value: string) => invoke<KeyView>('key_set
 export const keyCheck = (name: KeyName) => invoke<KeyCheck>('key_check', { name });
 
 export const micList = () => invoke<MicList>('mic_list');
-/** `device` null — the Windows microphone. */
+/** `device` null — the Windows microphone. The preview is this window's: its level comes here, and only this window's
+ *  "off" or close ends it. */
 export const micPreview = (on: boolean, device: string | null = null) => invoke<void>('mic_preview', { on, device });
-/** A microphone's level, 0..1, while a preview runs. */
+/** Whether Windows lets CUE use the microphone (its privacy settings), read without opening one. */
+export const micAccess = () => invoke<MicAccess>('mic_access');
+/** A microphone's level, 0..1, while this window's preview runs. */
 export async function onMicLevel(cb: (level: number) => void): Promise<void> {
-  await listen<number>('cue://mic-level', (e) => cb(e.payload));
+  await getCurrentWebviewWindow().listen<number>('cue://mic-level', (e) => cb(e.payload));
 }
+/** This window's preview failed: the microphone did not open (Windows may keep apps off it), or it stopped. A level of
+ *  0 comes just before. */
+export async function onMicFailed(cb: () => void): Promise<void> {
+  await getCurrentWebviewWindow().listen<null>('cue://mic-failed', () => cb());
+}
+
+/** The welcome window's step: on the first dictation's (`dictation`) the hotkey works; on any other — and from the
+ *  window's creation until this says otherwise — it starts nothing. Call it on every step change and on load. */
+export const welcomeStep = (dictation: boolean) => invoke<void>('welcome_step', { dictation });
+/** "Done": the welcome window closes. */
+export const welcomeClose = () => invoke<void>('welcome_close');
+/** Opens where to get a key, or the Windows microphone settings; CUE holds the addresses. */
+export const openLink = (target: LinkTarget) => invoke<void>('open_link', { target });

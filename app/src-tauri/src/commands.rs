@@ -1,6 +1,7 @@
-//! The main window's commands (spec 3 §2–3). Each one answers the main window alone (`guard`): the Drop and the card
-//! draw a model's answer, and no page of theirs may read the history, change a setting or touch a key. An error is a
-//! short code, never text.
+//! The main window's commands (spec 3 §2–3), and the welcome window's (spec 4a §1). Each one answers the main window,
+//! and the welcome window only those its steps need (`guard`): the Drop and the card draw a model's answer, and no page
+//! of theirs may read the history, change a setting or touch a key; the welcome window never reads the history, and of
+//! the settings changes the microphone alone. An error is a short code, never text.
 //!
 //! The history is read here, off the async threads; only the core writes it, and its new entries come over the main
 //! window's own channel (`history_subscribe`). The settings are read and changed through the core, which owns them
@@ -8,10 +9,12 @@
 //! within 5 s. Keys are read and saved in Windows Credential Manager, where `cue-cli keys` keeps them: a key never
 //! leaves this module — not in a reply, an error or the log — only its mask does; a check is a free probe request
 //! (`cue_engines::check`), never a paid one. The microphones are listed as Windows names them, and a preview sends the
-//! page a microphone's level alone (`micpreview`).
+//! page that started it a microphone's level alone (`micpreview`). The welcome window opens its links by name, never by
+//! an address of its page's (`open_link`).
 use std::path::Path;
 use std::time::Duration;
 
+use cue_core::flow::Input;
 use cue_core::history;
 use cue_core::settings::SettingChange;
 use cue_engines::EngineError;
@@ -21,10 +24,10 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, State, WebviewWindow};
 use tauri_plugin_autostart::ManagerExt;
 
-use crate::ipc::{CoreTx, DayView, EntryView, HistoryFeed, MAIN_LABEL, PageView, SettingsView};
+use crate::ipc::{CoreTx, DayView, EntryView, HistoryFeed, MAIN_LABEL, PageView, SettingsView, WELCOME_LABEL};
 use crate::micpreview;
 use crate::paths::Paths;
-use crate::runtime::{CoreEvent, SettingsCmd, local_today};
+use crate::runtime::{CoreEvent, MIC_SETTINGS, SettingsCmd, local_today, open_url};
 
 /// How long a command waits for the core's answer about the settings.
 const CORE_WAIT: Duration = Duration::from_secs(3);
@@ -36,18 +39,35 @@ const SEARCH_LIMIT: usize = 200;
 const KEY_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long "Paste again" waits for the window under the main one to come in front.
 const BRING_TIMEOUT: Duration = Duration::from_millis(500);
+/// The commands the welcome window's page may call: what its steps need — the language, the keys, the microphone (of
+/// the settings it changes the microphone alone: `may_change`) — and its own (`WELCOME_ONLY`).
+const WELCOME_COMMANDS: [&str; 11] = [
+    "settings_get",
+    "settings_set",
+    "key_state",
+    "key_set",
+    "key_check",
+    "mic_list",
+    "mic_preview",
+    "mic_access",
+    "welcome_step",
+    "welcome_close",
+    "open_link",
+];
+/// The welcome window's own commands: no other window calls them.
+const WELCOME_ONLY: [&str; 3] = ["welcome_step", "welcome_close", "open_link"];
 
 /// What went wrong, as a code (camelCase in JSON).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CmdError {
-    /// Not the main window.
+    /// Not the main window, or the welcome window asking for what is not its own.
     NotMain,
     /// The core did not answer in time (or is not running).
     Core,
     /// No such history entry: cleared, or past the history's period, since the window showed it.
     NotFound,
-    /// A setting change the settings do not know.
+    /// A setting change the settings do not know, or a link CUE does not have.
     BadValue,
     /// A key other than `soniox` and `anthropic`.
     BadName,
@@ -97,32 +117,69 @@ pub enum KeyCheck {
     Store,
 }
 
-/// Every command starts here: only the main window's page is answered.
-fn guard(window: &WebviewWindow) -> Result<(), CmdError> {
-    guard_label(window.label()).inspect_err(|_| tracing::warn!(window = window.label(), "main window command refused"))
+/// Where the welcome window's links go, by the names its page gives (`open_link`): where to get each key, and the
+/// Windows microphone settings.
+fn link(target: &str) -> Option<&'static str> {
+    match target {
+        "soniox" => Some("https://console.soniox.com"),
+        "anthropic" => Some("https://console.anthropic.com"),
+        "micPrivacy" => Some(MIC_SETTINGS),
+        _ => None,
+    }
 }
 
-fn guard_label(label: &str) -> Result<(), CmdError> {
-    if label == MAIN_LABEL { Ok(()) } else { Err(CmdError::NotMain) }
+/// Whether Windows lets CUE use the microphone (camelCase in JSON): the welcome window tells a refusal before any
+/// level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MicAccess {
+    Allowed,
+    Denied,
+}
+
+/// Every command starts here, with its name: the main window's page is answered for all but the welcome window's own,
+/// the welcome window's for `WELCOME_COMMANDS`, no other.
+fn guard(window: &WebviewWindow, command: &str) -> Result<(), CmdError> {
+    guard_label(window.label(), command)
+        .inspect_err(|_| tracing::warn!(window = window.label(), command, "window command refused"))
+}
+
+fn guard_label(label: &str, command: &str) -> Result<(), CmdError> {
+    let answered = match label {
+        MAIN_LABEL => !WELCOME_ONLY.contains(&command),
+        WELCOME_LABEL => WELCOME_COMMANDS.contains(&command),
+        _ => false,
+    };
+    if answered { Ok(()) } else { Err(CmdError::NotMain) }
+}
+
+/// The main window changes any setting; the welcome window, the microphone alone.
+fn may_change(label: &str, change: &SettingChange) -> bool {
+    label == MAIN_LABEL || (label == WELCOME_LABEL && matches!(change, SettingChange::MicDevice(_)))
 }
 
 /// The settings as the core holds them (spec 3 §3).
 #[tauri::command]
 pub async fn settings_get(window: WebviewWindow, core: State<'_, CoreTx>) -> Result<SettingsView, CmdError> {
-    guard(&window)?;
+    guard(&window, "settings_get")?;
     ask_core(&core, SettingsCmd::Get).await
 }
 
 /// One setting changed (`{"kind": "micDevice", "value": "…"}`, as `SettingChange` reads it): the core takes it and
-/// writes settings.json, and answers with the settings as they are now — unchanged when it refused the value.
+/// writes settings.json, and answers with the settings as they are now — unchanged when it refused the value. From the
+/// welcome window, the microphone alone (`may_change`).
 #[tauri::command]
 pub async fn settings_set(
     window: WebviewWindow,
     change: serde_json::Value,
     core: State<'_, CoreTx>,
 ) -> Result<SettingsView, CmdError> {
-    guard(&window)?;
+    guard(&window, "settings_set")?;
     let change: SettingChange = serde_json::from_value(change).map_err(|_| CmdError::BadValue)?;
+    if !may_change(window.label(), &change) {
+        tracing::warn!(window = window.label(), "setting change refused");
+        return Err(CmdError::NotMain);
+    }
     ask_core(&core, SettingsCmd::Set(change)).await
 }
 
@@ -138,7 +195,7 @@ async fn ask_core(core: &CoreTx, cmd: SettingsCmd) -> Result<SettingsView, CmdEr
 /// Whether CUE starts at sign-in: the Run key as it is.
 #[tauri::command]
 pub async fn autostart_get(window: WebviewWindow, app: AppHandle) -> Result<bool, CmdError> {
-    guard(&window)?;
+    guard(&window, "autostart_get")?;
     app.autolaunch().is_enabled().map_err(|e| {
         tracing::warn!("autostart: state not read: {e}");
         CmdError::Autostart
@@ -149,7 +206,7 @@ pub async fn autostart_get(window: WebviewWindow, app: AppHandle) -> Result<bool
 /// shows the key unchanged. The tray menu's check follows within 5 s.
 #[tauri::command]
 pub async fn autostart_set(window: WebviewWindow, on: bool, app: AppHandle) -> Result<bool, CmdError> {
-    guard(&window)?;
+    guard(&window, "autostart_set")?;
     let m = app.autolaunch();
     // Only a change: removing a value that is not there is an error.
     let set = m.is_enabled().and_then(|now| match (now, on) {
@@ -172,7 +229,7 @@ pub async fn history_page(
     before: Option<String>,
     paths: State<'_, Paths>,
 ) -> Result<PageView, CmdError> {
-    guard(&window)?;
+    guard(&window, "history_page")?;
     let dir = paths.history.clone();
     blocking(move || page(&dir, before.as_deref(), &local_today())).await
 }
@@ -185,7 +242,7 @@ pub async fn history_subscribe(
     channel: Channel<EntryView>,
     feed: State<'_, HistoryFeed>,
 ) -> Result<(), CmdError> {
-    guard(&window)?;
+    guard(&window, "history_subscribe")?;
     feed.follow(channel);
     Ok(())
 }
@@ -207,7 +264,7 @@ pub async fn history_search(
     query: String,
     paths: State<'_, Paths>,
 ) -> Result<Vec<DayView>, CmdError> {
-    guard(&window)?;
+    guard(&window, "history_search")?;
     let dir = paths.history.clone();
     blocking(move || history::search(&dir, &query, SEARCH_LIMIT).iter().map(DayView::from).collect()).await
 }
@@ -220,7 +277,7 @@ pub async fn history_copy(
     paths: State<'_, Paths>,
     core: State<'_, CoreTx>,
 ) -> Result<(), CmdError> {
-    guard(&window)?;
+    guard(&window, "history_copy")?;
     let text = entry_text(&paths.history, id).await?;
     send(&core, CoreEvent::HistoryText { text, target: None })
 }
@@ -235,7 +292,7 @@ pub async fn history_paste(
     paths: State<'_, Paths>,
     core: State<'_, CoreTx>,
 ) -> Result<PasteAgain, CmdError> {
-    guard(&window)?;
+    guard(&window, "history_paste")?;
     let text = entry_text(&paths.history, id).await?;
     // An HWND is not `Send`: its number goes to the walk.
     let own = window.hwnd().map(|h| h.0 as isize);
@@ -258,7 +315,7 @@ pub async fn history_paste(
 /// "Clear history" (the window asks twice): the core deletes every day.
 #[tauri::command]
 pub async fn history_clear(window: WebviewWindow, core: State<'_, CoreTx>) -> Result<(), CmdError> {
-    guard(&window)?;
+    guard(&window, "history_clear")?;
     send(&core, CoreEvent::HistoryClear)
 }
 
@@ -285,14 +342,16 @@ impl std::fmt::Debug for MicList {
 /// The microphone list for the settings: the devices are listed off the async threads.
 #[tauri::command]
 pub async fn mic_list(window: WebviewWindow) -> Result<MicList, CmdError> {
-    guard(&window)?;
+    guard(&window, "mic_list")?;
     blocking(|| MicList { names: mic::input_names(), default: mic::default_name() }).await
 }
 
-/// The live level of a microphone (`device`, by its name; `None` or blank — the Windows one) while the settings show it
-/// (`on`), as `cue://mic-level`; `on: false` ends it. The level only: the audio goes nowhere. Not `async` on purpose:
-/// Tauri runs it on the main thread, in the order the page sent them and in turn with the window's end
-/// (`main_window`), so an "on" and an "off" never cross and no preview outlives the window. It only starts threads.
+/// The live level of a microphone (`device`, by its name; `None` or blank — the Windows one) while the page shows it
+/// (`on`), as `cue://mic-level` to this window alone, and `cue://mic-failed` when the microphone fails; `on: false`
+/// ends it. The level only: the audio goes nowhere. The preview is this window's: another window's "off" or end leaves
+/// it (`micpreview`). Not `async` on purpose: Tauri runs it on the main thread, in the order the page sent them and in
+/// turn with the window's end (`main_window`, `welcome_window`), so an "on" and an "off" never cross and no preview
+/// outlives the window. It only starts threads.
 #[tauri::command]
 pub fn mic_preview(
     window: WebviewWindow,
@@ -300,19 +359,28 @@ pub fn mic_preview(
     device: Option<String>,
     app: AppHandle,
 ) -> Result<(), CmdError> {
-    guard(&window)?;
+    guard(&window, "mic_preview")?;
     if on {
-        micpreview::start(&app, device.filter(|d| !d.trim().is_empty()));
+        micpreview::start(&app, window.label(), device.filter(|d| !d.trim().is_empty()));
     } else {
-        micpreview::stop();
+        micpreview::stop(window.label());
     }
     Ok(())
+}
+
+/// Whether Windows lets CUE use the microphone, from its privacy settings (`mic::access_denied`): read, nothing opened.
+#[tauri::command]
+pub async fn mic_access(window: WebviewWindow) -> Result<MicAccess, CmdError> {
+    guard(&window, "mic_access")?;
+    let access = if blocking(mic::access_denied).await? { MicAccess::Denied } else { MicAccess::Allowed };
+    tracing::info!(?access, "microphone access");
+    Ok(access)
 }
 
 /// Whether a key is saved, and its mask.
 #[tauri::command]
 pub async fn key_state(window: WebviewWindow, name: String) -> Result<KeyView, CmdError> {
-    guard(&window)?;
+    guard(&window, "key_state")?;
     let name = key_name(&name)?;
     match blocking(move || keys::lookup(name)).await? {
         Ok(key) => Ok(KeyView::of(key.as_deref())),
@@ -326,12 +394,12 @@ pub async fn key_state(window: WebviewWindow, name: String) -> Result<KeyView, C
 /// Saves a key pasted in the window (`keys::set` trims it and refuses an empty one); the answer is its mask.
 #[tauri::command]
 pub async fn key_set(window: WebviewWindow, name: String, value: String) -> Result<KeyView, CmdError> {
-    guard(&window)?;
+    guard(&window, "key_set")?;
     let name = key_name(&name)?;
     let saved = blocking(move || keys::set(name, &value).map(|()| KeyView::of(Some(value.trim())))).await?;
     match saved {
         Ok(view) => {
-            tracing::info!(key = name.as_str(), "key saved from the main window");
+            tracing::info!(key = name.as_str(), window = window.label(), "key saved");
             Ok(view)
         }
         Err(EngineError::KeyProblem(_)) => Err(CmdError::EmptyKey),
@@ -345,7 +413,7 @@ pub async fn key_set(window: WebviewWindow, name: String, value: String) -> Resu
 /// Checks a saved key with a free probe request, as `cue-cli keys check` does.
 #[tauri::command]
 pub async fn key_check(window: WebviewWindow, name: String) -> Result<KeyCheck, CmdError> {
-    guard(&window)?;
+    guard(&window, "key_check")?;
     let name = key_name(&name)?;
     let probed = match blocking(move || keys::lookup(name)).await? {
         Ok(Some(key)) => Ok(Some(probe(name, &key).await)),
@@ -356,8 +424,48 @@ pub async fn key_check(window: WebviewWindow, name: String) -> Result<KeyCheck, 
         }
     };
     let check = key_check_of(&probed);
-    tracing::info!(key = name.as_str(), ?check, "key checked from the main window");
+    tracing::info!(key = name.as_str(), ?check, window = window.label(), "key checked");
     Ok(check)
+}
+
+/// The welcome window's step (spec 4a §1), told on every change and when its page loads: on its first dictation's
+/// step (`dictation`) the hotkey works, on any other it starts nothing (`Input::WelcomeGate`). Not `async` on purpose,
+/// as `mic_preview`: the steps reach the core in the order the page took them.
+#[tauri::command]
+pub fn welcome_step(window: WebviewWindow, dictation: bool, core: State<'_, CoreTx>) -> Result<(), CmdError> {
+    guard(&window, "welcome_step")?;
+    tracing::info!(dictation, "welcome window step");
+    send(&core, CoreEvent::Input(Input::WelcomeGate(!dictation)))
+}
+
+/// "Done": the welcome window closes, and the hotkey works again as it goes (`welcome_window`).
+#[tauri::command]
+pub async fn welcome_close(window: WebviewWindow) -> Result<(), CmdError> {
+    guard(&window, "welcome_close")?;
+    window.close().map_err(|e| {
+        tracing::warn!("welcome window not closed: {e}");
+        CmdError::Failed
+    })
+}
+
+/// One of the welcome window's links (`link`): the page names it, the address is CUE's own. It opens in the default
+/// browser or in Windows Settings, from a short thread of its own, so the shell never holds a command.
+#[tauri::command]
+pub async fn open_link(window: WebviewWindow, target: String) -> Result<(), CmdError> {
+    guard(&window, "open_link")?;
+    let url = link(&target).ok_or(CmdError::BadValue)?;
+    let spawned = std::thread::Builder::new().name("cue-open-link".into()).spawn(move || {
+        if let Err(e) = open_url(url) {
+            tracing::warn!(link = target.as_str(), "link did not open: {e}");
+        }
+    });
+    match spawned {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            tracing::warn!("link not opened: {e}");
+            Err(CmdError::Failed)
+        }
+    }
 }
 
 /// The probe of `name`'s service with `key`; the error never holds the key (`cue_engines::check`).
@@ -407,18 +515,108 @@ mod tests {
     use cue_core::history::{Entry, Mode};
     use serde_json::json;
 
-    /// Only the main window's page gets an answer: the Drop's and the card's draw what a model wrote.
+    /// Every command a window's page calls (`main`'s handler list, but for the Drop's and the card's own).
+    const COMMANDS: [&str; 19] = [
+        "settings_get",
+        "settings_set",
+        "autostart_get",
+        "autostart_set",
+        "history_subscribe",
+        "history_page",
+        "history_search",
+        "history_copy",
+        "history_paste",
+        "history_clear",
+        "key_state",
+        "key_set",
+        "key_check",
+        "mic_list",
+        "mic_preview",
+        "mic_access",
+        "welcome_step",
+        "welcome_close",
+        "open_link",
+    ];
+
+    /// No other window's page gets an answer: the Drop's and the card's draw what a model wrote.
     #[test]
     fn guard_refuses_other_windows() {
-        assert_eq!(guard_label(MAIN_LABEL), Ok(()));
-        for label in ["drop", "card", "Main", "", "main "] {
-            assert_eq!(guard_label(label), Err(CmdError::NotMain), "{label:?}");
+        assert_eq!(guard_label(MAIN_LABEL, "settings_get"), Ok(()));
+        for label in ["drop", "card", "Main", "", "main ", "Welcome", "welcome "] {
+            for command in COMMANDS {
+                assert_eq!(guard_label(label, command), Err(CmdError::NotMain), "{label:?} {command}");
+            }
         }
         // Errors and answers are short codes.
         assert_eq!(serde_json::to_value(CmdError::NotMain).unwrap(), json!("notMain"));
         assert_eq!(serde_json::to_value(CmdError::EmptyKey).unwrap(), json!("emptyKey"));
         assert_eq!(serde_json::to_value(PasteAgain::Pasted).unwrap(), json!("pasted"));
         assert_eq!(serde_json::to_value(PasteAgain::Clipboard).unwrap(), json!("clipboard"));
+        let access = [MicAccess::Allowed, MicAccess::Denied];
+        assert_eq!(serde_json::to_value(access).unwrap(), json!(["allowed", "denied"]));
+    }
+
+    /// The welcome window gets what its steps need — the language, the keys, the microphone — and its own commands,
+    /// never the history or start at sign-in; its own are no other window's.
+    #[test]
+    fn welcome_label_may_call_only_its_commands() {
+        let settings_and_keys = ["settings_get", "settings_set", "key_state", "key_set", "key_check"];
+        let microphone = ["mic_list", "mic_preview", "mic_access"];
+        let own = ["welcome_step", "welcome_close", "open_link"];
+        for command in COMMANDS {
+            let welcome = [&settings_and_keys[..], &microphone, &own].iter().any(|its| its.contains(&command));
+            assert_eq!(guard_label(WELCOME_LABEL, command).is_ok(), welcome, "{command}");
+            assert_eq!(guard_label(MAIN_LABEL, command).is_ok(), !own.contains(&command), "{command}");
+        }
+        for command in ["history_page", "history_subscribe", "history_paste", "autostart_set", "drop_action", ""] {
+            assert_eq!(guard_label(WELCOME_LABEL, command), Err(CmdError::NotMain), "{command:?}");
+        }
+    }
+
+    /// Of the settings, as its page sends a change, the welcome window changes the microphone alone; the main window,
+    /// any.
+    #[test]
+    fn welcome_may_set_only_the_microphone() {
+        let change = |v: serde_json::Value| serde_json::from_value::<SettingChange>(v).unwrap();
+        let mic = [
+            change(json!({ "kind": "micDevice", "value": "USB Microphone" })),
+            change(json!({ "kind": "micDevice", "value": null })),
+        ];
+        let others = [
+            change(json!({ "kind": "historyKeep", "value": "off" })),
+            change(json!({ "kind": "translateTarget", "value": "de" })),
+            change(json!({ "kind": "uiLanguage", "value": "ru" })),
+        ];
+        for c in &mic {
+            assert!(may_change(WELCOME_LABEL, c) && may_change(MAIN_LABEL, c));
+        }
+        for (i, c) in others.iter().enumerate() {
+            assert!(!may_change(WELCOME_LABEL, c), "change {i}");
+            assert!(may_change(MAIN_LABEL, c), "change {i}");
+        }
+        assert!(mic.iter().chain(&others).all(|c| !may_change("drop", c)));
+    }
+
+    /// The page names a link, CUE has the address — where the README sends for each key, and the Windows microphone
+    /// settings; nothing else opens, an address least of all.
+    #[test]
+    fn open_link_accepts_only_known_targets() {
+        assert_eq!(link("soniox"), Some("https://console.soniox.com"));
+        assert_eq!(link("anthropic"), Some("https://console.anthropic.com"));
+        assert_eq!(link("micPrivacy"), Some("ms-settings:privacy-microphone"));
+        for other in [
+            "https://console.soniox.com",
+            "ms-settings:privacy-microphone",
+            "Soniox",
+            "soniox ",
+            "micprivacy",
+            "openrouter",
+            "calc.exe",
+            "javascript:alert(1)",
+            "",
+        ] {
+            assert_eq!(link(other), None, "{other:?}");
+        }
     }
 
     fn tmp(name: &str) -> std::path::PathBuf {

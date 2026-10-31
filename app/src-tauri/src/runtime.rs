@@ -111,7 +111,8 @@ const INSERT_WATCHDOG: Duration = Duration::from_secs(10);
 /// (a refusal) is not needed. The API address, not the site root: the root could redirect to another host.
 const WARM_URL: &str = claude::API_URL;
 const WARM_TIMEOUT: Duration = Duration::from_secs(5);
-const MIC_SETTINGS: &str = "ms-settings:privacy-microphone";
+/// The Windows microphone privacy settings: the "microphone is silent" card opens them, and the welcome window.
+pub(crate) const MIC_SETTINGS: &str = "ms-settings:privacy-microphone";
 
 pub enum CoreEvent {
     Input(Input),
@@ -1919,9 +1920,10 @@ fn follow_up_rows(answer_open: bool, recording: bool, phase: UiPhase) -> (bool, 
     (answer_open && recording, answer_open && phase == UiPhase::Error)
 }
 
-/// A web page in the default browser (spec 2 §7). `ShellExecuteW` with the "open" verb takes the URL as one string: no
-/// command line of another program parses it.
-fn open_url(url: &str) -> Result<(), String> {
+/// A web page in the default browser (spec 2 §7), or a page of Windows Settings (`ms-settings:`, the welcome window's).
+/// `ShellExecuteW` with the "open" verb takes the URL as one string: no command line of another program parses it.
+/// Called on a thread of the caller's own: it sets up COM there.
+pub(crate) fn open_url(url: &str) -> Result<(), String> {
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx};
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;

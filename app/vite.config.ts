@@ -10,9 +10,15 @@ export default defineConfig({
   build: {
     outDir: '../dist',
     emptyOutDir: true,
-    // The Drop, the card and the main window ship; the dev server still serves ui/preview.html for side-by-side checks.
+    // The Drop, the card, the main window and the welcome window ship; the dev server still serves ui/preview.html for
+    // side-by-side checks.
     rolldownOptions: {
-      input: { drop: here('./ui/drop.html'), card: here('./ui/card.html'), window: here('./ui/window.html') },
+      input: {
+        drop: here('./ui/drop.html'),
+        card: here('./ui/card.html'),
+        window: here('./ui/window.html'),
+        welcome: here('./ui/welcome.html'),
+      },
     },
   },
   test: { environment: 'jsdom', include: ['test/**/*.test.ts'], setupFiles: ['test/setup.ts'] },

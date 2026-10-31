@@ -21,9 +21,9 @@ const MIN_HEIGHT: f64 = 480.0;
 /// The window is being created: a second open meanwhile creates no second one.
 static CREATING: Mutex<bool> = Mutex::new(false);
 
-/// What an open does.
+/// What an open does (the welcome window's too).
 #[derive(Debug, PartialEq, Eq)]
-enum Open {
+pub(crate) enum Open {
     /// The window is there: it comes forward.
     Bring,
     /// There is none: it is created, and `creating` is set until that ends.
@@ -34,7 +34,7 @@ enum Open {
 
 /// The step of an open, from whether the window is being created (`creating`, set here for a `Create`) and whether it
 /// exists.
-fn decide(creating: &mut bool, exists: bool) -> Open {
+pub(crate) fn decide(creating: &mut bool, exists: bool) -> Open {
     if *creating {
         Open::Wait
     } else if exists {
@@ -60,18 +60,18 @@ pub fn open(app: &AppHandle) {
     }
 }
 
-/// The creation under way: `CREATING` is cleared when it is dropped — when the creating thread ends however it ends, or
-/// with that thread's closure when the thread did not start.
-struct Creating;
+/// The creation under way: its window's `CREATING` is cleared when it is dropped — when the creating thread ends
+/// however it ends, or with that thread's closure when the thread did not start.
+pub(crate) struct Creating(pub(crate) &'static Mutex<bool>);
 
 impl Drop for Creating {
     fn drop(&mut self) {
-        *CREATING.lock().unwrap_or_else(PoisonError::into_inner) = false;
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = false;
     }
 }
 
 fn spawn_create(app: AppHandle) {
-    let creating = Creating;
+    let creating = Creating(&CREATING);
     let spawned = std::thread::Builder::new().name("cue-main-window".into()).spawn(move || {
         let _creating = creating;
         match create(&app) {
@@ -98,11 +98,12 @@ fn create(app: &AppHandle) -> tauri::Result<()> {
     let handle = app.clone();
     win.on_window_event(move |ev| {
         if let WindowEvent::Destroyed = ev {
-            // Its page is gone: new history entries go nowhere, and a microphone level it showed closes.
+            // Its page is gone: new history entries go nowhere, and a microphone level it showed closes (not the
+            // welcome window's).
             if let Some(feed) = handle.try_state::<HistoryFeed>() {
                 feed.stop();
             }
-            crate::micpreview::stop();
+            crate::micpreview::stop(MAIN_LABEL);
             tracing::info!("main window closed");
         }
     });
