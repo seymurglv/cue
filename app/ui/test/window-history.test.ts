@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { $, $$, NOW, TODAY, YESTERDAY, click, core, entry, feeds, key, mount, oggFile, settle, stub, text, type, view } from './windowFixture';
+import { $, $$, NOW, TODAY, YESTERDAY, click, core, entry, feeds, key, mount, oggFile, settle, stub, text, type } from './windowFixture';
 import type { WindowPage } from '../src/window/page';
 
 vi.mock('../src/window/api', async (importOriginal) => {
@@ -77,6 +77,10 @@ describe('The history', () => {
     expect(text($('.bmore button'))).toBe('Show earlier');
     expect($('.bmore button')!.hidden).toBe(true);
     expect($('.hempty')!.hidden).toBe(true);
+    // Under the list only "Show earlier": the period and Clear history are on the tray's History page.
+    expect($$('.bsec .bmore')).toHaveLength(1);
+    expect($$('.bsec .bmore > *')).toHaveLength(1);
+    expect($('.bsec [data-dd="hkeep"], .bsec [data-hclear]')).toBeNull();
   });
 
   it('says so when there is nothing yet', async () => {
@@ -218,26 +222,6 @@ describe('The history', () => {
     expect(core.historyPage).toHaveBeenLastCalledWith('2026-10-20');
   });
 
-  it('clear needs a second press within 3 s', async () => {
-    page = await mount();
-    const clear = $('[data-hclear]')!;
-    expect(text(clear)).toBe('Clear history');
-    click(clear);
-    expect(text(clear)).toBe('Clear history? Press again');
-    expect(core.historyClear).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(3000);
-    expect(text(clear)).toBe('Clear history');
-    // A first press again, then a second one in time.
-    click(clear);
-    await vi.advanceTimersByTimeAsync(2000);
-    click(clear);
-    await settle();
-    expect(core.historyClear).toHaveBeenCalledTimes(1);
-    expect(text(clear)).toBe('Clear history');
-    expect(rows()).toHaveLength(0);
-    expect($('.hempty')!.hidden).toBe(false);
-  });
-
   it('copy and paste again call their commands', async () => {
     page = await mount();
     const row = rows()[0];
@@ -340,37 +324,6 @@ describe('The history', () => {
     type(input, '');
     expect(rowTexts()[0]).toBe('Typed during a search.');
     expect(rows()).toHaveLength(4);
-  });
-
-  it('keep menu sends historyKeep', async () => {
-    page = await mount();
-    const dd = $('[data-dd="hkeep"]')!;
-    expect(text(dd)).toBe('A month');
-    click(dd);
-    const items = $$('.menu [data-i]');
-    expect(items.map((b) => b.querySelector('.mlb')!.textContent)).toEqual(['Forever', 'A year', 'A month', 'A week', "Don't keep"]);
-    expect(items.map((b) => b.getAttribute('aria-checked'))).toEqual(['false', 'false', 'true', 'false', 'false']);
-    expect(text($('.menu .mnote'))).toBe('A shorter period deletes older days at once.');
-    click(items[3]);
-    await settle();
-    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'historyKeep', value: 'week' });
-    expect($('.menu')).toBeNull();
-    expect(text(dd)).toBe('A week');
-    // Older days may be gone: the list is read again.
-    expect(core.historyPage).toHaveBeenCalledTimes(2);
-  });
-
-  it('an unknown period shows unset, with nothing chosen', async () => {
-    stub(view({ historyKeep: null }));
-    core.historyPage.mockResolvedValue(firstPage());
-    page = await mount();
-    const dd = $('[data-dd="hkeep"]')!;
-    expect(text(dd)).toBe('Not set');
-    click(dd);
-    expect($$('.menu [data-i]').every((b) => b.getAttribute('aria-checked') === 'false')).toBe(true);
-    // A second press on it closes the menu.
-    click(dd);
-    expect($('.menu')).toBeNull();
   });
 });
 
@@ -493,12 +446,17 @@ describe('The search', () => {
     click($('.hsbt'));
     const input = $<HTMLInputElement>('.hsf input')!;
     type(input, 'standup');
+    click($('.gear'));
+    click($('.btray [data-sub="history"]'));
+    await settle();
     click($('[data-dd="hkeep"]'));
     expect($('.menu')).not.toBeNull();
     key('Escape');
     expect($('.menu')).toBeNull();
     expect($('.hsb')!.classList.contains('open')).toBe(true);
-    click($('.gear'));
+    expect(text($('.btray .tph b'))).toBe('History');
+    key('Escape');
+    expect(text($('.btray .tph b'))).toBe('Settings');
     expect($('.btray')!.classList.contains('open')).toBe(true);
     key('Escape');
     expect($('.btray')!.classList.contains('open')).toBe(false);

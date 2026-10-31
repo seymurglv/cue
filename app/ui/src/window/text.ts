@@ -16,13 +16,18 @@ export interface WinText {
   today: string;
   yesterday: string;
   earlier: string;
-  keep: string;
+  /** The tray's History page: how long the history is kept (also the History row's value on the tray's first page). */
+  keepHistory: string;
+  keepHistoryHint: string;
   keeps: Record<Keep, string>;
   /** The period is unknown: nothing is chosen. */
   keepUnset: string;
   /** Next to the periods: a shorter period deletes older days at once. */
   keepNote: string;
+  /** The History page's last row: its label, the line under it, its button and the button waiting for a second press. */
   clear: string;
+  clearHint: string;
+  clearButton: string;
   clearAgain: string;
   empty: string;
   nothing: string;
@@ -69,9 +74,6 @@ export interface WinText {
   keepAudioHint: string;
   audioKeeps: Record<AudioKeep, string>;
   audioNote: string;
-  /** The History row's value on the tray's first page. */
-  audioShort: Record<AudioKeep, string>;
-  audioShortUnset: string;
 }
 
 export const en: WinText = {
@@ -82,12 +84,15 @@ export const en: WinText = {
   today: 'Today',
   yesterday: 'Yesterday',
   earlier: 'Show earlier',
-  keep: 'Keep',
+  keepHistory: 'Keep history',
+  keepHistoryHint: 'Older entries go by themselves',
   keeps: { forever: 'Forever', year: 'A year', month: 'A month', week: 'A week', off: "Don't keep" },
   keepUnset: 'Not set',
   keepNote: 'A shorter period deletes older days at once.',
   clear: 'Clear history',
-  clearAgain: 'Clear history? Press again',
+  clearHint: 'Takes a second press',
+  clearButton: 'Clear',
+  clearAgain: 'Press again',
   empty: 'Nothing yet. What CUE writes for you will show here.',
   nothing: 'Nothing found',
   copy: 'Copy',
@@ -133,8 +138,6 @@ export const en: WinText = {
   keepAudioHint: 'Never longer than the history',
   audioKeeps: { day: 'A day', week: 'A week', month: 'A month', off: "Don't keep" },
   audioNote: 'A shorter period deletes older recordings at once.',
-  audioShort: { day: 'Recordings: a day', week: 'Recordings: a week', month: 'Recordings: a month', off: 'No recordings' },
-  audioShortUnset: 'Recordings: not set',
 };
 
 export const ru: WinText = {
@@ -145,12 +148,15 @@ export const ru: WinText = {
   today: 'Сегодня',
   yesterday: 'Вчера',
   earlier: 'Показать раньше',
-  keep: 'Хранить',
+  keepHistory: 'Хранить историю',
+  keepHistoryHint: 'Старое удаляется само',
   keeps: { forever: 'Всегда', year: 'Год', month: 'Месяц', week: 'Неделю', off: 'Не хранить' },
   keepUnset: 'Не задано',
   keepNote: 'Более короткий срок сразу удаляет старые дни.',
   clear: 'Очистить историю',
-  clearAgain: 'Очистить историю? Нажмите ещё раз',
+  clearHint: 'Со второго нажатия',
+  clearButton: 'Очистить',
+  clearAgain: 'Нажмите ещё раз',
   empty: 'Пока пусто. Здесь появится всё, что CUE напишет за вас.',
   nothing: 'Ничего не найдено',
   copy: 'Копировать',
@@ -196,8 +202,6 @@ export const ru: WinText = {
   keepAudioHint: 'Не дольше самой истории',
   audioKeeps: { day: 'День', week: 'Неделю', month: 'Месяц', off: 'Не хранить' },
   audioNote: 'Более короткий срок сразу удаляет старые записи.',
-  audioShort: { day: 'Записи: день', week: 'Записи: неделя', month: 'Записи: месяц', off: 'Без записей' },
-  audioShortUnset: 'Записи: не задано',
 };
 
 export const TEXTS: Record<Lang, WinText> = { en, ru };

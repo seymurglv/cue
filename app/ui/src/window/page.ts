@@ -220,7 +220,7 @@ export class WindowPage implements Ctx {
     app.classList.add('app');
     this.menus = new Menus(app);
     this.history = new HistoryView(this);
-    this.tray = new SettingsTray(this);
+    this.tray = new SettingsTray(this, () => this.history.clear());
     const signal = this.off.signal;
     const dark = window.matchMedia?.(DARK);
     const theme = () => (document.documentElement.dataset.theme = dark?.matches ? 'dark' : 'light');
@@ -327,7 +327,6 @@ export class WindowPage implements Ctx {
       this.closeMenu();
       this.build();
     } else {
-      this.history.settingsChanged();
       this.tray.settingsChanged();
     }
     if (audioChanged) this.history.release();

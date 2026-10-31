@@ -161,15 +161,14 @@ from source.
     they were said; an entry found only in how it was said opens by itself. Hover over a row for **Copy** and **Paste
     again**: the text goes into the window right under the main window (usually the one you were in before opening
     it), or into the clipboard when there is none. `Ctrl + Win + V`, a paste with an answer's button, a refusal and a
-    failure add no entry, and **Paste again** does not change the last result. **Keep**: Forever, A year, A month (the
-    default), A week or Don't keep; older days are deleted on their own, a shorter period deletes them at once, and
-    **Clear history** needs a second press.
+    failure add no entry, and **Paste again** does not change the last result.
   - **Settings** (the gear): **Keys** (Soniox and Anthropic: paste a key and press **Check**, which saves it and sends
     a free test request; the window shows only its mask), **Microphone** (As in Windows, or a device of your own, with
-    a live level), **Translation** (the target language of `Ctrl + Win + Shift`, any of the 60), **History** (how long
-    recordings are kept: A day, A week (the default), A month or Don't keep, never longer than the history itself;
-    a shorter period deletes the older ones at once), **General** (Start at sign-in, the interface language). A change
-    takes effect at once, without a restart, and is written to `settings.json`.
+    a live level), **Translation** (the target language of `Ctrl + Win + Shift`, any of the 60), **History** (**Keep
+    history**: Forever, A year, A month (the default), A week or Don't keep, older days deleted on their own; **Keep
+    recordings**: A day, A week (the default), A month or Don't keep, never longer than the history itself; a shorter
+    period deletes the older ones at once; **Clear history** needs a second press), **General** (Start at sign-in, the
+    interface language). A change takes effect at once, without a restart, and is written to `settings.json`.
 - **A pinned microphone.** A microphone chosen in the settings stays CUE's even when Windows changes its default (a
   headset plugged in, say). When it is not connected, CUE records from the Windows microphone, and a card says so once:
   "*name* not found — recording from *name*".

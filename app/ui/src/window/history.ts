@@ -1,6 +1,7 @@
-// The History section (spec 3 §2): results by day — today and yesterday, earlier days on request — with search, copy,
-// paste again, the period the history keeps and clearing it. New entries come over the window's channel and appear at
-// the top of their day; one already shown (the channel and the first page can both bring it) is not shown twice.
+// The History section (spec 3 §2): results by day — today and yesterday, earlier days on request — with search, copy
+// and paste again; how long it is kept, and clearing it, are on the settings tray's History page. New entries come over
+// the window's channel and appear at the top of their day; one already shown (the channel and the first page can both
+// bring it) is not shown twice.
 // A run of entries from one app, each a few minutes after the one before, is one stack: its newest entry on top, a chip
 // "Telegram 5" and two sheet edges under it; the chip and the edges open it in place. A click on an entry (not on its
 // buttons), or Enter or Space on it, opens how it was said and its recording (said.ts). The search grows out of the
@@ -9,17 +10,14 @@
 // pauses when CUE starts recording: what plays aloud would go into it.
 // Text goes in as text: an entry may hold anything a model wrote.
 import * as api from './api';
-import { KEEPS, type DayView, type EntryView, type Keep } from './api';
+import type { DayView, EntryView } from './api';
 import { icon, type IconName } from './icons';
 import { flash, h, iconButton, logFailed, type Ctx } from './page';
-import { CUE } from '../designParts';
 import { Player, appendDiff, appendHeard, findHit } from './said';
 import { dayLabel, daysBefore } from './text';
 
 /** A search runs this long after the last key. */
 export const SEARCH_PAUSE_MS = 150;
-/** "Clear history" waits this long for its second press. */
-export const CLEAR_ARMED_MS = 3000;
 /** Entries of one app make a stack from this many on, */
 export const STACK_MIN = 3;
 /** each at most this long after the one before it (by the time in their ids). */
@@ -111,7 +109,6 @@ export class HistoryView {
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   /** The local date the day headings were drawn for ("Today", "Yesterday"). */
   private drawnFor = '';
-  private clearTimer: ReturnType<typeof setTimeout> | null = null;
   /** Stacks opened, by their oldest entry (a new entry on top keeps a stack open). */
   private readonly openStacks = new Set<string>();
   /** Entries opened to show how they were said. */
@@ -128,11 +125,9 @@ export class HistoryView {
   private list!: HTMLElement;
   private emptyEl!: HTMLElement;
   private earlierBtn!: HTMLButtonElement;
-  private keepDd!: HTMLButtonElement;
   private bsr!: HTMLElement;
   private find!: HTMLButtonElement;
   private input!: HTMLInputElement;
-  private clearLbl!: HTMLElement;
 
   constructor(private readonly ctx: Ctx) {}
 
@@ -172,29 +167,9 @@ export class HistoryView {
     this.earlierBtn = h('button', '', t.earlier);
     this.earlierBtn.type = 'button';
     this.earlierBtn.addEventListener('click', () => void this.earlier());
-    this.keepDd = h('button', 'dd');
-    this.keepDd.type = 'button';
-    this.keepDd.dataset.dd = 'hkeep';
-    this.keepDd.append(h('span', 'ddv'));
-    this.keepDd.insertAdjacentHTML('beforeend', icon('chev'));
-    this.keepDd.addEventListener('click', () => this.keepMenu());
-    more.append(this.earlierBtn, h('span', 'sp'), h('span', '', t.keep), this.keepDd);
+    more.append(this.earlierBtn);
 
-    const clearRow = h('div', 'bmore');
-    const clear = h('button');
-    clear.type = 'button';
-    clear.dataset.hclear = '';
-    this.clearLbl = h('span', 'lbl', t.clear);
-    clear.append(this.clearLbl);
-    clear.addEventListener('click', () => this.clearPressed());
-    clearRow.append(clear);
-    if (this.clearTimer) {
-      clearTimeout(this.clearTimer);
-      this.clearTimer = null;
-    }
-
-    sec.append(h3, this.list, this.emptyEl, more, clearRow);
-    this.settingsChanged();
+    sec.append(h3, this.list, this.emptyEl, more);
     this.render();
   }
 
@@ -254,12 +229,6 @@ export class HistoryView {
   /** The day headings follow the date: the list is drawn again when the date changed since it was drawn. */
   followDate(): void {
     if (this.sec && this.ctx.today() !== this.drawnFor) this.render();
-  }
-
-  /** The period shown next to "Keep": unset when the core does not know it. */
-  settingsChanged(): void {
-    const keep = this.ctx.settings?.historyKeep ?? null;
-    this.keepDd.querySelector('.ddv')!.textContent = keep ? this.ctx.t.keeps[keep] : this.ctx.t.keepUnset;
   }
 
   /** Esc: the search closes; false — it is not open. */
@@ -714,36 +683,8 @@ export class HistoryView {
     }
   }
 
-  private keepMenu(): void {
-    const t = this.ctx.t;
-    const cur = this.ctx.settings?.historyKeep ?? null;
-    this.ctx.menu(
-      this.keepDd,
-      KEEPS.map((k) => ({ value: k, label: t.keeps[k], on: k === cur })),
-      (v) => void this.ctx.change({ kind: 'historyKeep', value: v as Keep }),
-      t.keepNote,
-    );
-  }
-
-  /** "Clear history" works on the second press within 3 s, as "Forget all" in the design. */
-  private clearPressed(): void {
-    const t = this.ctx.t;
-    const l = this.clearLbl;
-    if (!this.clearTimer) {
-      this.clearTimer = setTimeout(() => {
-        this.clearTimer = null;
-        if (l.isConnected) CUE().setLabel(l, t.clear);
-      }, CLEAR_ARMED_MS);
-      CUE().setLabel(l, t.clearAgain);
-      return;
-    }
-    clearTimeout(this.clearTimer);
-    this.clearTimer = null;
-    CUE().setLabel(l, t.clear);
-    void this.clearAll();
-  }
-
-  private async clearAll(): Promise<void> {
+  /** Clear history (the tray's History page asks twice): the core deletes every day, and the list is empty. */
+  async clear(): Promise<void> {
     try {
       await api.historyClear();
     } catch (e) {

@@ -899,8 +899,10 @@ again.
   the other window starts replaces it, sending the window it was taken from a level of 0. The Microphone page starts
   its preview again when the main window has the focus again.
 - **Translation**: the target language, any of the 60 Soniox knows; the core decides the home language again.
-- **History**: how long recordings are kept (`historyAudio`: A day, A week, A month, Don't keep; not set while
-  unknown). A shorter period deletes the older ones at once; the page stops what plays and reads the list again.
+- **History**: how long the history is kept (`historyKeep`, see Retention; also the History row's value on the first
+  page), how long recordings are kept (`historyAudio`: A day, A week, A month, Don't keep), each not set while
+  unknown, and Clear history. A shorter period deletes the older ones at once; the page stops what plays and reads the
+  list again.
 - **General**: Start at sign-in, and the interface language (Auto, English, Русский), which switches every window at
   once (see The Drop and tray cards).
 

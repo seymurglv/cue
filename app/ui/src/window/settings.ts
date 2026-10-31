@@ -1,11 +1,12 @@
 // The settings tray (spec 3 §3): it grows out of the gear (the gear turns into its close button) and folds back into
-// it. Its first page lists Keys, Microphone, Translation, History (how long recordings are kept) and General with their
-// values; one of them at a time slides in, the chevron goes back; Esc goes back, then closes. Every change goes to the
-// core at once.
+// it. Its first page lists Keys, Microphone, Translation, History (how long the history and its recordings are kept,
+// and clearing it) and General with their values; one of them at a time slides in, the chevron goes back; Esc goes
+// back, then closes. Every change goes to the core at once.
 // The Keys page holds the key rows of keys.ts, the Microphone page the microphone rows of mic.ts (the welcome window
 // shows them too); the microphone's level is listened to only while that page is shown.
 import * as api from './api';
-import { AUDIO_KEEPS, type AudioKeep, type KeyName, type UiLanguage } from './api';
+import { AUDIO_KEEPS, KEEPS, type AudioKeep, type Keep, type KeyName, type UiLanguage } from './api';
+import { CUE } from '../designParts';
 import { icon, type IconName } from './icons';
 import { KEYS, KEY_TITLE, KeyRows } from './keys';
 import { MicRows } from './mic';
@@ -28,6 +29,8 @@ const UI_LANGUAGES: readonly UiLanguage[] = ['auto', 'en', 'ru'];
 const WIDTH = 340;
 /** How long the tray takes to fold back before it is hidden. */
 const FOLD_MS = 470;
+/** "Clear history" waits this long for its second press. */
+export const CLEAR_ARMED_MS = 3000;
 
 /** The design's segment thumb: under the pressed button, without sliding the first time. */
 function syncSeg(sg: HTMLElement): void {
@@ -57,8 +60,14 @@ export class SettingsTray {
   private readonly keys: KeyRows;
   private readonly mic: MicRows;
   private autostart: boolean | null = null;
+  /** "Clear history" was pressed once and waits for the second press. */
+  private clearTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(private readonly ctx: Ctx) {
+  /** `clearHistory` — the history's own clearing (the list empties with it). */
+  constructor(
+    private readonly ctx: Ctx,
+    private readonly clearHistory: () => Promise<void>,
+  ) {
     this.keys = new KeyRows(ctx, () => this.current, () => {
       const em = this.current?.querySelector('em[data-val="keys"]');
       if (em) em.textContent = this.value('keys');
@@ -241,7 +250,9 @@ export class SettingsTray {
     else if ((b = t.closest<HTMLElement>('[data-check]'))) void this.keys.check(b.dataset.check as KeyName);
     else if ((b = t.closest<HTMLElement>('[data-dd="mic"]'))) this.mic.menu(b);
     else if ((b = t.closest<HTMLElement>('[data-dd="target"]'))) this.targetMenu(b);
+    else if ((b = t.closest<HTMLElement>('[data-dd="hkeep"]'))) this.keepMenu(b);
     else if ((b = t.closest<HTMLElement>('[data-dd="haudio"]'))) this.audioMenu(b);
+    else if ((b = t.closest<HTMLElement>('[data-hclear]'))) this.clearPressed(b);
     else if (t.closest('[data-sw="autostart"]')) void this.toggleAutostart();
     else if ((b = t.closest<HTMLElement>('.segc button')) && b.getAttribute('aria-pressed') !== 'true') {
       void this.ctx.change({ kind: 'uiLanguage', value: b.dataset.v as UiLanguage });
@@ -252,6 +263,9 @@ export class SettingsTray {
 
   private page(sub: Sub | null): HTMLElement {
     const t = this.ctx.t;
+    // A page drawn anew (another page, the tray opened again, new settings) never takes a first press of "Clear history"
+    // with it: its new button would clear on one press.
+    this.disarm();
     const pg = h('div', 'tpg');
     const tph = h('div', 'tph');
     if (sub) {
@@ -284,7 +298,7 @@ export class SettingsTray {
     if (sub === 'keys') g.append(...KEYS.map((k) => this.keys.row(k)));
     else if (sub === 'mic') g.append(...this.mic.rows());
     else if (sub === 'translate') g.append(srow(t.translateTo, null, dropDown('target', this.value('translate'))).row);
-    else if (sub === 'history') g.append(srow(t.keepAudio, t.keepAudioHint, dropDown('haudio', this.audioLabel())).row);
+    else if (sub === 'history') g.append(...this.historyRows());
     else g.append(...this.generalRows());
     pg.append(g);
     return pg;
@@ -315,13 +329,66 @@ export class SettingsTray {
         return languageName(s.translateTarget, english, this.ctx.lang);
       }
       case 'history':
-        return s ? (s.historyAudio ? t.audioShort[s.historyAudio] ?? '' : t.audioShortUnset) : '';
+        return s ? this.keepLabel() : '';
       case 'general':
         return s ? t.uiLanguages[s.uiLanguage] ?? '' : '';
     }
   }
 
   /* ---------- history ---------- */
+
+  /** How long the history is kept, how long its recordings are, and clearing it. */
+  private historyRows(): HTMLElement[] {
+    const t = this.ctx.t;
+    const clear = h('button', 'btn2 ck warn');
+    clear.type = 'button';
+    clear.dataset.hclear = '';
+    clear.append(h('span', 'lbl', t.clearButton));
+    return [
+      srow(t.keepHistory, t.keepHistoryHint, dropDown('hkeep', this.keepLabel())).row,
+      srow(t.keepAudio, t.keepAudioHint, dropDown('haudio', this.audioLabel())).row,
+      srow(t.clear, t.clearHint, clear).row,
+    ];
+  }
+
+  /** How long the history is kept; unset while the core does not know it. */
+  private keepLabel(): string {
+    const v = this.ctx.settings?.historyKeep ?? null;
+    return v ? this.ctx.t.keeps[v] ?? '' : this.ctx.t.keepUnset;
+  }
+
+  private keepMenu(b: HTMLElement): void {
+    const t = this.ctx.t;
+    const cur = this.ctx.settings?.historyKeep ?? null;
+    this.ctx.menu(
+      b,
+      KEEPS.map((k) => ({ value: k, label: t.keeps[k], on: k === cur })),
+      (v) => void this.ctx.change({ kind: 'historyKeep', value: v as Keep }),
+      t.keepNote,
+    );
+  }
+
+  /** "Clear history" works on the second press within 3 s, as "Forget all" in the design. */
+  private clearPressed(b: HTMLElement): void {
+    const t = this.ctx.t;
+    const l = b.querySelector<HTMLElement>('.lbl')!;
+    if (!this.clearTimer) {
+      this.clearTimer = setTimeout(() => {
+        this.clearTimer = null;
+        if (l.isConnected) CUE().setLabel(l, t.clearButton);
+      }, CLEAR_ARMED_MS);
+      CUE().setLabel(l, t.clearAgain);
+      return;
+    }
+    this.disarm();
+    CUE().setLabel(l, t.clearButton);
+    void this.clearHistory();
+  }
+
+  private disarm(): void {
+    if (this.clearTimer) clearTimeout(this.clearTimer);
+    this.clearTimer = null;
+  }
 
   /** How long recordings are kept; unset while the core does not know it. */
   private audioLabel(): string {

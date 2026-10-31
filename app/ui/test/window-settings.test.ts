@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { $, $$, NOW, TODAY, click, core, entry, feeds, key, mount, settle, stub, text, view } from './windowFixture';
 import type { WindowPage } from '../src/window/page';
-import { matchMic } from '../src/window/settings';
+import { CLEAR_ARMED_MS, matchMic } from '../src/window/settings';
 
 vi.mock('../src/window/api', async (importOriginal) => {
   const real = await importOriginal<typeof import('../src/window/api')>();
@@ -56,7 +56,7 @@ describe('The settings tray', () => {
       'No keys',
       'As in Windows',
       'English',
-      'Recordings: a week',
+      'A month',
       'Auto',
     ]);
     await sub('translate');
@@ -366,13 +366,143 @@ describe('The settings tray', () => {
     expect(title()).toBe('Настройки');
   });
 
-  it('the History page keeps recordings for the period chosen', async () => {
+  it('the History page keeps the history, then its recordings, then clears it', async () => {
     page = await mount();
     await open();
     await sub('history');
     expect(title()).toBe('History');
-    expect(text($('.btray .srow .stx b'))).toBe('Keep recordings');
-    expect(text($('.btray .srow .stx small'))).toBe('Never longer than the history');
+    const rows = $$('.btray .srow');
+    expect(rows.map((r) => text(r.querySelector('.stx b')))).toEqual(['Keep history', 'Keep recordings', 'Clear history']);
+    expect(rows.map((r) => text(r.querySelector('.stx small')))).toEqual([
+      'Older entries go by themselves',
+      'Never longer than the history',
+      'Takes a second press',
+    ]);
+    expect(rows[0].querySelector('[data-dd="hkeep"]')).not.toBeNull();
+    expect(rows[1].querySelector('[data-dd="haudio"]')).not.toBeNull();
+    expect(text(rows[2].querySelector('[data-hclear]'))).toBe('Clear');
+    // In Russian too.
+    page.dispose();
+    stub(view({ lang: 'ru', uiLanguage: 'ru' }));
+    page = await mount();
+    await open();
+    expect(text($('.btray em[data-val="history"]'))).toBe('Месяц');
+    await sub('history');
+    expect($$('.btray .srow .stx b').map(text)).toEqual(['Хранить историю', 'Хранить записи', 'Очистить историю']);
+    expect($$('.btray .srow .stx small').map(text)).toEqual(['Старое удаляется само', 'Не дольше самой истории', 'Со второго нажатия']);
+    expect(text($('[data-hclear]'))).toBe('Очистить');
+    click($('[data-hclear]'));
+    expect(text($('[data-hclear]'))).toBe('Нажмите ещё раз');
+  });
+
+  it('the History page keeps the history for the period chosen, and the History row shows it', async () => {
+    page = await mount();
+    await open();
+    await sub('history');
+    const dd = $('[data-dd="hkeep"]')!;
+    expect(text(dd.querySelector('.ddv'))).toBe('A month');
+    click(dd);
+    const items = $$('.menu [data-i]');
+    expect(items.map((b) => b.querySelector('.mlb')!.textContent)).toEqual(['Forever', 'A year', 'A month', 'A week', "Don't keep"]);
+    expect(items.map((b) => b.getAttribute('aria-checked'))).toEqual(['false', 'false', 'true', 'false', 'false']);
+    expect(text($('.menu .mnote'))).toBe('A shorter period deletes older days at once.');
+    click(items[3]);
+    await settle();
+    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'historyKeep', value: 'week' });
+    expect($('.menu')).toBeNull();
+    expect(text($('[data-dd="hkeep"] .ddv'))).toBe('A week');
+    // Older days may be gone: the list is read again.
+    expect(core.historyPage).toHaveBeenCalledTimes(2);
+    key('Escape');
+    expect(text($('.btray em[data-val="history"]'))).toBe('A week');
+  });
+
+  it('an unknown history period shows unset, with nothing chosen', async () => {
+    stub(view({ historyKeep: null }));
+    page = await mount();
+    await open();
+    expect(text($('.btray em[data-val="history"]'))).toBe('Not set');
+    await sub('history');
+    const dd = $('[data-dd="hkeep"]')!;
+    expect(text(dd.querySelector('.ddv'))).toBe('Not set');
+    click(dd);
+    expect($$('.menu [data-i]').every((b) => b.getAttribute('aria-checked') === 'false')).toBe(true);
+    // A second press on it closes the menu.
+    click(dd);
+    expect($('.menu')).toBeNull();
+    // Esc closes a menu before it goes back.
+    click(dd);
+    key('Escape');
+    expect($('.menu')).toBeNull();
+    expect(title()).toBe('History');
+  });
+
+  it('clear history needs a second press within 3 s, and empties the list', async () => {
+    core.historyPage.mockResolvedValue({ days: [{ date: TODAY, entries: [entry(`${TODAY}T09:15:00.000-1`, 'Kept.')] }], more: false });
+    page = await mount();
+    expect($$('.hr')).toHaveLength(1);
+    await open();
+    await sub('history');
+    const clear = $('[data-hclear]')!;
+    expect(text(clear)).toBe('Clear');
+    click(clear);
+    expect(text(clear)).toBe('Press again');
+    expect(core.historyClear).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(CLEAR_ARMED_MS);
+    expect(text(clear)).toBe('Clear');
+    // A first press again, then a second one in time.
+    click(clear);
+    await vi.advanceTimersByTimeAsync(2000);
+    click(clear);
+    await settle();
+    expect(core.historyClear).toHaveBeenCalledTimes(1);
+    expect(text(clear)).toBe('Clear');
+    expect($$('.hr')).toHaveLength(0);
+    expect($('.hempty')!.hidden).toBe(false);
+    // The tray stays open on its page.
+    expect(tray().classList.contains('open')).toBe(true);
+    expect(title()).toBe('History');
+  });
+
+  it('a first press of clear history does not outlive its page', async () => {
+    page = await mount();
+    await open();
+    await sub('history');
+    click($('[data-hclear]'));
+    expect(text($('[data-hclear]'))).toBe('Press again');
+    // Back and in again within the 3 s: one press only asks again.
+    key('Escape');
+    await sub('history');
+    expect(text($('[data-hclear]'))).toBe('Clear');
+    click($('[data-hclear]'));
+    await settle();
+    expect(core.historyClear).not.toHaveBeenCalled();
+    expect(text($('[data-hclear]'))).toBe('Press again');
+    // Closed and opened again: the same.
+    key('Escape');
+    key('Escape');
+    await open();
+    await sub('history');
+    click($('[data-hclear]'));
+    await settle();
+    expect(core.historyClear).not.toHaveBeenCalled();
+    // New settings draw the page anew: the same.
+    click($('[data-dd="haudio"]'));
+    click($$('.menu [data-i]')[0]);
+    await settle();
+    expect(text($('[data-hclear]'))).toBe('Clear');
+    click($('[data-hclear]'));
+    await settle();
+    expect(core.historyClear).not.toHaveBeenCalled();
+    // The timer of the press before does not reset the label of the new button.
+    await vi.advanceTimersByTimeAsync(CLEAR_ARMED_MS - 500);
+    expect(text($('[data-hclear]'))).toBe('Press again');
+  });
+
+  it('the History page keeps recordings for the period chosen', async () => {
+    page = await mount();
+    await open();
+    await sub('history');
     const dd = $('[data-dd="haudio"]')!;
     expect(text(dd.querySelector('.ddv'))).toBe('A week');
     click(dd);
@@ -387,16 +517,14 @@ describe('The settings tray', () => {
     expect(text($('[data-dd="haudio"] .ddv'))).toBe('A day');
     // The history is read again: its entries say anew which have a recording to play.
     expect(core.historyPage).toHaveBeenCalledTimes(2);
-    key('Escape');
-    expect(text($('.btray em[data-val="history"]'))).toBe('Recordings: a day');
-    click($('.btray [data-sub="history"]'));
-    await settle();
     click($('[data-dd="haudio"]'));
     click($$('.menu [data-i]')[3]);
     await settle();
     expect(core.settingsSet).toHaveBeenLastCalledWith({ kind: 'historyAudio', value: 'off' });
+    expect(text($('[data-dd="haudio"] .ddv'))).toBe("Don't keep");
+    // The History row shows how long the history is kept, not its recordings.
     key('Escape');
-    expect(text($('.btray em[data-val="history"]'))).toBe('No recordings');
+    expect(text($('.btray em[data-val="history"]'))).toBe('A month');
   });
 
   it('an unknown recordings period shows unset, with nothing chosen, in Russian too', async () => {
@@ -404,9 +532,8 @@ describe('The settings tray', () => {
     page = await mount();
     await open();
     expect($$('.btray .trw span:not(.si)').map((e) => e.textContent)).toContain('История');
-    expect(text($('.btray em[data-val="history"]'))).toBe('Записи: не задано');
     await sub('history');
-    expect(text($('.btray .srow .stx b'))).toBe('Хранить записи');
+    expect(text($('[data-dd="haudio"]')!.closest('.srow')!.querySelector('.stx b'))).toBe('Хранить записи');
     const dd = $('[data-dd="haudio"]')!;
     expect(text(dd.querySelector('.ddv'))).toBe('Не задано');
     click(dd);
