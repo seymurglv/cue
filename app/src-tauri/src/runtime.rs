@@ -149,7 +149,7 @@ pub enum CoreEvent {
     /// The main window reads the settings or changes one (spec 3 §3). The answer is always the settings as the core
     /// holds them after the command.
     Settings { cmd: SettingsCmd, reply: tokio::sync::oneshot::Sender<SettingsView> },
-    /// "Clear history" in the main window: every day of the history goes.
+    /// "Clear history" in the main window: every day of the history goes, with every recording.
     HistoryClear,
     /// A history entry's text from the main window (decision 3): "Paste again" into `target`, the window that was under
     /// the main one and is now in front, or "Copy" (`None`) — the clipboard. Neither is a new result: the last result
@@ -284,7 +284,7 @@ impl Runtime {
             }
         };
         let translate_home = pair_now(&settings);
-        let history = HistoryLog::new(paths.history.clone());
+        let history = HistoryLog::new(paths.history.clone(), paths.history_audio.clone());
         // Alt picks "Ask" only when it is on (spec 2 §9); the hook reads the switch on every key.
         hook::ASK_ENABLED.store(settings.ask.enabled(), Ordering::Relaxed);
         tracing::info!(ask = settings.ask.enabled(), web_search = settings.ask.web_search(), "ask");
@@ -1674,16 +1674,18 @@ struct Stamp {
 }
 
 /// The history's writer (spec 3 §2): only the core writes. It counts this run's entries for their ids and remembers
-/// the day it last deleted old days for, so the first entry of a new day deletes them first.
+/// the day it last deleted old days for, so the first entry of a new day deletes them first. `audio` is the folder of
+/// the entries' recordings, which never outlive them.
 struct HistoryLog {
     dir: PathBuf,
+    audio: PathBuf,
     count: u64,
     pruned: Option<String>,
 }
 
 impl HistoryLog {
-    fn new(dir: PathBuf) -> Self {
-        Self { dir, count: 0, pruned: None }
+    fn new(dir: PathBuf, audio: PathBuf) -> Self {
+        Self { dir, audio, count: 0, pruned: None }
     }
 
     /// The time and the id of the next entry, at the local time `ts`.
@@ -1722,11 +1724,14 @@ impl HistoryLog {
         }
     }
 
-    /// "Clear history": every day goes.
+    /// "Clear history": every day goes, and every recording with them, whatever the periods say.
     fn clear(&self) {
         match history::clear(&self.dir) {
             Ok(()) => tracing::info!("history cleared"),
             Err(e) => tracing::warn!("history: not cleared: {e}"),
+        }
+        if let Err(e) = history::clear_audio(&self.audio) {
+            tracing::warn!("history: recordings not cleared: {e}");
         }
     }
 }
@@ -2051,7 +2056,7 @@ mod tests {
     }
 
     fn at(ts: &str) -> Stamp {
-        HistoryLog::new(PathBuf::new()).stamp(ts.into())
+        HistoryLog::new(PathBuf::new(), PathBuf::new()).stamp(ts.into())
     }
 
     fn attempt(mode: Mode, app: &str) -> Attempt {
@@ -2063,7 +2068,7 @@ mod tests {
 
     #[test]
     fn stamps_count_this_runs_entries() {
-        let mut log = HistoryLog::new(PathBuf::new());
+        let mut log = HistoryLog::new(PathBuf::new(), PathBuf::new());
         let first = log.stamp("2026-10-31T07:30:00.123".into());
         let second = log.stamp("2026-10-31T07:30:00.123".into());
         assert_eq!((first.ts.as_str(), first.id.as_str()), ("2026-10-31T07:30:00.123", "2026-10-31T07:30:00.123-1"));
@@ -2211,12 +2216,31 @@ mod tests {
     #[test]
     fn keep_off_writes_nothing() {
         let dir = tmp("keep-off");
-        let mut log = HistoryLog::new(dir.clone());
+        let mut log = HistoryLog::new(dir.clone(), dir.join("audio"));
         let e = dictated("2026-10-31T07:30:00.123", "Hello.");
         assert!(!log.write(Some(Keep::Off), &e));
         assert!(!dir.exists(), "not even the directory");
         assert!(log.write(Some(Keep::Month), &e));
         assert_eq!(history::find(&dir, &e.id), Some(e));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// "Clear history" takes the recordings with the days, the whole folder, whatever is in it.
+    #[test]
+    fn clearing_the_history_clears_its_recordings() {
+        let dir = tmp("clear");
+        let audio = dir.join("audio");
+        let mut log = HistoryLog::new(dir.clone(), audio.clone());
+        let e = dictated("2026-10-31T07:30:00.123", "Hello.");
+        assert!(log.write(Some(Keep::Month), &e));
+        std::fs::create_dir_all(&audio).unwrap();
+        for name in [history::audio_file(&e.id).unwrap(), "notes.txt".into()] {
+            std::fs::write(audio.join(name), b"OggS").unwrap();
+        }
+        log.clear();
+        assert_eq!(history::find(&dir, &e.id), None);
+        assert!(!audio.exists(), "the recordings folder is gone");
+        log.clear();
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2227,7 +2251,7 @@ mod tests {
         for ts in ["2026-10-22T09:00:00.000", "2026-10-23T09:00:00.000"] {
             history::append(&dir, &dictated(ts, "old")).unwrap();
         }
-        let mut log = HistoryLog::new(dir.clone());
+        let mut log = HistoryLog::new(dir.clone(), dir.join("audio"));
         log.prune(Some(Keep::Week), "2026-10-30");
         let days = |dir: &Path| -> Vec<String> {
             history::older(dir, "2026-11-01", 10).days.into_iter().map(|d| d.date).collect()
@@ -2256,7 +2280,7 @@ mod tests {
         for s in [unreadable, typo] {
             let keep = s.history.keep.known();
             assert_eq!(keep, None);
-            let mut log = HistoryLog::new(dir.clone());
+            let mut log = HistoryLog::new(dir.clone(), dir.join("audio"));
             log.prune(keep, "2026-10-30");
             assert!(!log.write(keep, &dictated("2026-10-30T10:00:00.000", "Not kept.")));
             assert!(!log.write(keep, &dictated("2026-10-31T00:00:01.000", "A new day.")));
@@ -2270,7 +2294,7 @@ mod tests {
         assert!(apply_setting(&mut s, SettingChange::HistoryKeep(Keep::Week), &dir.join("settings.json"), false));
         let keep = s.history.keep.known();
         assert_eq!(keep, Some(Keep::Week));
-        let mut log = HistoryLog::new(dir.clone());
+        let mut log = HistoryLog::new(dir.clone(), dir.join("audio"));
         log.prune(keep, "2026-10-31");
         assert_eq!(history::find(&dir, &old.id), None, "cleaned up with the period the user chose");
         let new = dictated("2026-10-31T10:00:00.000", "Kept now.");

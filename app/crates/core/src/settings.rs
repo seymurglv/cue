@@ -396,9 +396,10 @@ impl PeriodName for AudioKeep {
 
 /// `history.keep` (a [`Keep`]) or `history.audio` (an [`AudioKeep`]) as settings.json has it: one of the periods, or a
 /// value CUE does not know — a typo, a later version's name, `null` — which leaves the period unknown. While `keep` is
-/// unknown the history is neither written nor cleaned up, and while either is unknown no recording is written or
-/// deleted (`HistorySettings::audio_period`), until the user picks a period in the main window: a guess could delete
-/// days or recordings the user keeps, or keep ones the user turned off. Such a value is written back as it was, so
+/// unknown the history is neither written nor cleaned up and no recording is written or deleted; while `audio` is, no
+/// recording is written and only the history's own period deletes any (`HistorySettings::audio_period`,
+/// `audio_limit`) — until the user picks a period in the main window: a guess could delete days or recordings the user
+/// keeps, or keep ones the user turned off. Such a value is written back as it was, so
 /// saving the file never turns it into a period the user did not choose, and it never makes the file unreadable. A
 /// missing value is the default (`Default`): a month for the history, a week for its recordings.
 #[derive(Clone, Debug, PartialEq)]
@@ -462,21 +463,38 @@ pub struct HistorySettings {
 
 impl HistorySettings {
     /// How long recordings are kept for real: the shorter of `audio` and `keep`, so a recording never outlives its
-    /// entry — `Off` while the history is off. `None` while either period is unknown: then no recording is written or
-    /// deleted.
+    /// entry — `Off` while the history is off, whatever `audio` says. Otherwise `None` while either period is unknown:
+    /// then no recording is written, and only `audio_limit` deletes any.
     pub fn audio_period(&self) -> Option<AudioKeep> {
-        let (keep, audio) = (self.keep.known()?, self.audio.known()?);
-        let longest = match keep {
-            Keep::Forever | Keep::Year => return Some(audio),
-            Keep::Month => AudioKeep::Month,
-            Keep::Week => AudioKeep::Week,
-            Keep::Off => AudioKeep::Off,
-        };
-        Some(audio.min(longest))
+        let keep = self.keep.known()?;
+        if keep == Keep::Off {
+            return Some(AudioKeep::Off);
+        }
+        let audio = self.audio.known()?;
+        Some(audio_cap(keep).map_or(audio, |cap| audio.min(cap)))
+    }
+
+    /// How long a recording may stay before it is deleted: `audio_period`, and while the recordings' own period is
+    /// unknown, the history's, so a recording still never outlives its entry — a week or a month. A year or forever
+    /// is longer than any period recordings have: then none is deleted until the user picks one. `None` while the
+    /// history's period is unknown: nothing is deleted.
+    pub fn audio_limit(&self) -> Option<AudioKeep> {
+        self.audio_period().or_else(|| audio_cap(self.keep.known()?))
     }
 
     fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+}
+
+/// The longest a recording may be kept while the history keeps its entries for `keep`; `None` — a period longer than
+/// any recordings have.
+fn audio_cap(keep: Keep) -> Option<AudioKeep> {
+    match keep {
+        Keep::Forever | Keep::Year => None,
+        Keep::Month => Some(AudioKeep::Month),
+        Keep::Week => Some(AudioKeep::Week),
+        Keep::Off => Some(AudioKeep::Off),
     }
 }
 
@@ -1435,9 +1453,9 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// A recording period CUE does not know is unknown, like the history's: no recording is written or deleted
-    /// (`audio_period`), and it is written back as it was until the main window sets a period. The history's own
-    /// names that recordings do not have (`forever`, `year`) are unknown too.
+    /// A recording period CUE does not know is unknown, like the history's: no recording is written (`audio_period`)
+    /// and only the history's period deletes any (`audio_limit`), and it is written back as it was until the main
+    /// window sets a period. The history's own names that recordings do not have (`forever`, `year`) are unknown too.
     #[test]
     fn history_audio_unknown_is_unknown_and_written_back() {
         for audio in [r#""fortnight""#, r#""forever""#, r#""year""#, r#""""#, "7", "null", "true", r#"["day"]"#] {
@@ -1446,6 +1464,7 @@ mod tests {
             let value: serde_json::Value = serde_json::from_str(audio).unwrap();
             assert_eq!(s.history.audio, Period::Unknown(value), "{audio}");
             assert_eq!((s.history.keep.known(), s.history.audio_period()), (Some(Keep::Month), None), "{audio}");
+            assert_eq!(s.history.audio_limit(), Some(AudioKeep::Month), "{audio}: the history's month");
             assert_eq!(s.hold_hints_left, 0, "{audio}");
         }
 
@@ -1467,7 +1486,9 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// A recording never outlives its entry: the shorter of the two periods holds, and none while either is unknown.
+    /// A recording never outlives its entry: the shorter of the two periods holds, and off while the history is off
+    /// whatever the recordings' period. Otherwise none while either is unknown — but while the recordings' own is, the
+    /// history's still deletes them.
     #[test]
     fn audio_period_is_never_longer_than_the_history() {
         use AudioKeep::{Day, Month, Off, Week};
@@ -1481,18 +1502,28 @@ mod tests {
             for (audio, expected) in AudioKeep::ALL.into_iter().zip(expected) {
                 let history = HistorySettings { keep: Period::Set(keep), audio: Period::Set(audio) };
                 assert_eq!(history.audio_period(), Some(expected), "{keep:?} {audio:?}");
+                assert_eq!(history.audio_limit(), Some(expected), "{keep:?} {audio:?}: a known period is the limit");
             }
         }
         let unknown = serde_json::json!("forver");
         for audio in AudioKeep::ALL {
             let history = HistorySettings { keep: Period::Unknown(unknown.clone()), audio: Period::Set(audio) };
-            assert_eq!(history.audio_period(), None, "{audio:?}");
+            assert_eq!((history.audio_period(), history.audio_limit()), (None, None), "{audio:?}");
         }
-        for keep in Keep::ALL {
+        for (keep, period, limit) in [
+            (Keep::Forever, None, None),
+            (Keep::Year, None, None),
+            (Keep::Month, None, Some(Month)),
+            (Keep::Week, None, Some(Week)),
+            (Keep::Off, Some(Off), Some(Off)),
+        ] {
             let history = HistorySettings { keep: Period::Set(keep), audio: Period::Unknown(unknown.clone()) };
-            assert_eq!(history.audio_period(), None, "{keep:?}");
+            assert_eq!((history.audio_period(), history.audio_limit()), (period, limit), "{keep:?}");
         }
+        let both = HistorySettings { keep: Period::Unknown(unknown.clone()), audio: Period::Unknown(unknown) };
+        assert_eq!((both.audio_period(), both.audio_limit()), (None, None));
         assert_eq!(HistorySettings::default().audio_period(), Some(Week));
+        assert_eq!(HistorySettings::default().audio_limit(), Some(Week));
     }
 
     #[test]

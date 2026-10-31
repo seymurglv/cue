@@ -12,9 +12,9 @@
 //!
 //! The recordings of the entries live in the folder `history\audio`, one file per entry named by its id
 //! (`audio_file`), for a period of their own that is never longer than the history's
-//! (`settings::HistorySettings::audio_period`); `prune_audio` deletes the older ones. There too only names of
-//! recordings count, and those of files still being written (`.tmp`), so nothing else in the folder is ever deleted
-//! one by one.
+//! (`settings::HistorySettings::audio_period`); `prune_audio` deletes the older ones, and at startup, before anything
+//! is recorded, `sweep_audio_temps` deletes what a crash left half written. There too only CUE's own names count —
+//! recordings, and recordings still being written — so nothing else in the folder is ever deleted one by one.
 use crate::settings::{AudioKeep, Keep};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -205,9 +205,11 @@ pub fn date_minus(date: &str, days: u32) -> Option<String> {
 
 /// The extension of a recording.
 const AUDIO_EXTENSION: &str = ".ogg";
-/// The end of the name of a file still being written in the recordings folder: the snapshot of an entry's sound
-/// (`audio_snapshot`), an encoding.
-const TEMP_EXTENSION: &str = ".tmp";
+/// The end of the name of the snapshot of an entry's sound, waiting to be encoded into its recording
+/// (`audio_snapshot`).
+const SNAPSHOT_EXTENSION: &str = ".wav.tmp";
+/// The end of the name of a recording being encoded: the encoder writes it under its name with `.tmp` added.
+const ENCODING_EXTENSION: &str = ".ogg.tmp";
 
 /// The file of the recording of the entry `id` in the recordings folder: the id with the `:` of its time as `-`
 /// (Windows allows no `:` in a file name; the bench names its recordings the same way), then `.ogg`. `None` for
@@ -218,16 +220,16 @@ pub fn audio_file(id: &str) -> Option<String> {
 }
 
 /// The snapshot of the sound of the entry `id`, encoded into its recording, next to it: `audio_file` with `.wav.tmp`
-/// for `.ogg`. Like any file still being written, `prune_audio` deletes one that was left over.
+/// for `.ogg`. Like a recording still being encoded, `sweep_audio_temps` deletes one that was left over.
 pub fn audio_snapshot(id: &str) -> Option<String> {
-    audio_name(id).map(|name| name + ".wav" + TEMP_EXTENSION)
+    audio_name(id).map(|name| name + SNAPSHOT_EXTENSION)
 }
 
 /// Which of the files `names` of the recordings folder go when recordings are kept for `keep`, counted back from
 /// `today` (`YYYY-MM-DD`) by the date of their entry, like the history's days: a day keeps today's recordings, a week
 /// the 7 days before today too, a month 31, `Off` none. A recording of a day after today (the clock was moved back) is
-/// kept, and with `today` not a date none goes. Every file still being written (`.tmp`) goes too — what a crash cut
-/// off — so this is for when nothing is being written. Any other name is never picked.
+/// kept, and with `today` not a date none goes. Any other name is never picked — a file still being written neither,
+/// so recordings may be pruned while one is.
 pub fn audio_to_delete<'a>(names: impl IntoIterator<Item = &'a str>, keep: AudioKeep, today: &str) -> Vec<&'a str> {
     let back = match keep {
         AudioKeep::Off => None,
@@ -238,7 +240,18 @@ pub fn audio_to_delete<'a>(names: impl IntoIterator<Item = &'a str>, keep: Audio
     // The first date kept; no date comes before "", so with `today` not a date nothing is old.
     let first_kept = back.map(|days| date_minus(today, days).unwrap_or_default());
     let old = |date: &str| first_kept.as_deref().is_none_or(|first| date < first);
-    names.into_iter().filter(|name| name.ends_with(TEMP_EXTENSION) || recording_date(name).is_some_and(old)).collect()
+    names.into_iter().filter(|name| recording_date(name).is_some_and(old)).collect()
+}
+
+/// Which of the files `names` of the recordings folder were left half written by a crash: the snapshot of an entry's
+/// sound (`audio_snapshot`) and a recording being encoded (`audio_file` with `.tmp` added). Only CUE's own names: any
+/// other `.tmp` file is never picked.
+pub fn audio_temps<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    let ours = |name: &str| {
+        let stem = name.strip_suffix(SNAPSHOT_EXTENSION).or_else(|| name.strip_suffix(ENCODING_EXTENSION));
+        stem.and_then(stem_date).is_some()
+    };
+    names.into_iter().filter(|name| ours(name)).collect()
 }
 
 /// Deletes from the recordings folder `dir` what `audio_to_delete` picks; returns how many. No folder: nothing to
@@ -246,6 +259,14 @@ pub fn audio_to_delete<'a>(names: impl IntoIterator<Item = &'a str>, keep: Audio
 pub fn prune_audio(dir: &Path, keep: AudioKeep, today: &str) -> io::Result<usize> {
     let names = file_names(dir)?;
     remove_files(audio_to_delete(names.iter().map(String::as_str), keep, today).into_iter().map(|name| dir.join(name)))
+}
+
+/// Deletes from the recordings folder `dir` what `audio_temps` picks; returns how many. Only at startup, before
+/// anything is recorded: a snapshot or an encoding still under way would lose its recording. No folder: nothing to
+/// delete.
+pub fn sweep_audio_temps(dir: &Path) -> io::Result<usize> {
+    let names = file_names(dir)?;
+    remove_files(audio_temps(names.iter().map(String::as_str)).into_iter().map(|name| dir.join(name)))
 }
 
 /// Deletes the recordings folder `dir` with all in it: "Clear history", or the recordings turned off. No folder: done.
@@ -263,7 +284,11 @@ fn audio_name(id: &str) -> Option<String> {
 
 /// The date of the entry whose recording `name` is (`audio_file`); `None` for any other name.
 fn recording_date(name: &str) -> Option<&str> {
-    let stem = name.strip_suffix(AUDIO_EXTENSION)?;
+    stem_date(name.strip_suffix(AUDIO_EXTENSION)?)
+}
+
+/// The date of the entry whose recording is named `stem` and an extension (`audio_name`); `None` for any other stem.
+fn stem_date(stem: &str) -> Option<&str> {
     // Back to the id: `audio_file` wrote the two `:` of the time as `-`.
     let id: String = stem.char_indices().map(|(at, c)| if at == 13 || at == 16 { ':' } else { c }).collect();
     (audio_name(&id).as_deref() == Some(stem)).then(|| &stem[..10])
@@ -762,16 +787,18 @@ mod tests {
         }
     }
 
-    /// Recordings go by the date of their entry, counted back like the days; the files left being written go
-    /// whatever the period; no other name is ever picked.
+    /// Recordings go by the date of their entry, counted back like the days; a file still being written, and any
+    /// other name, is never picked.
     #[test]
-    fn audio_to_delete_keeps_the_period_and_sweeps_leftovers() {
+    fn audio_to_delete_keeps_the_period() {
         let dates = ["2026-09-29", "2026-09-30", "2026-10-23", "2026-10-24", "2026-10-30", "2026-10-31", "2026-11-02"];
         let recording = |date: &str| audio_file(&format!("{date}T12:00:00.000-1")).unwrap();
         let recordings: Vec<String> = dates.iter().map(|d| recording(d)).collect();
-        let snapshot = audio_snapshot("2026-10-31T12:00:00.000-2").unwrap();
-        let leftovers = [snapshot, "2026-10-31T12-00-00.000-3.ogg.tmp".to_owned(), "x.tmp".to_owned()];
+        let snapshot = audio_snapshot("2026-09-01T12:00:00.000-2").unwrap();
         let foreign = [
+            snapshot.as_str(),
+            "2026-09-01T12-00-00.000-3.ogg.tmp",
+            "x.tmp",
             "notes.txt",
             "2026-10-30.jsonl",
             ".ogg",
@@ -785,12 +812,10 @@ mod tests {
             "2026-10-01T12-00-00.000-1-1.ogg",
             "2026-02-30T12-00-00.000-1.ogg",
         ];
-        let names: Vec<&str> = recordings.iter().chain(&leftovers).map(String::as_str).chain(foreign).collect();
+        let names: Vec<&str> = recordings.iter().map(String::as_str).chain(foreign).collect();
         let pick = |keep, today| audio_to_delete(names.iter().copied(), keep, today);
-        // The recordings before `first_kept`, then every leftover.
-        let gone = |first_kept: usize| -> Vec<&str> {
-            recordings[..first_kept].iter().chain(&leftovers).map(String::as_str).collect()
-        };
+        // The recordings before `first_kept`.
+        let gone = |first_kept: usize| -> Vec<&str> { recordings[..first_kept].iter().map(String::as_str).collect() };
         let today = "2026-10-31";
         assert_eq!(pick(AudioKeep::Off, today), gone(dates.len()), "off: every recording, also one after today");
         // A month keeps 31 days back: 2026-09-30 stays.
@@ -806,13 +831,48 @@ mod tests {
         assert_eq!(audio_to_delete(foreign, AudioKeep::Off, today), Vec::<&str>::new());
     }
 
-    /// On disk: recordings and leftovers go, other files and folders stay; clearing removes the whole folder. The
-    /// history's own deletions never touch the recordings folder inside it.
+    /// Only CUE's own half-written files are swept: the snapshot of an entry's sound and a recording being encoded,
+    /// named by an entry id. Any other `.tmp`, and every recording, stays.
+    #[test]
+    fn audio_temps_are_only_cues_own() {
+        let id = "2026-10-31T12:00:00.000-2";
+        let (snapshot, recording) = (audio_snapshot(id).unwrap(), audio_file(id).unwrap());
+        let encoding = format!("{recording}.tmp");
+        assert_eq!(snapshot, "2026-10-31T12-00-00.000-2.wav.tmp");
+        assert_eq!(encoding, "2026-10-31T12-00-00.000-2.ogg.tmp", "the encoder's name for its file");
+        let others = [
+            recording.as_str(),
+            "x.tmp",
+            "notes.tmp",
+            ".tmp",
+            ".wav.tmp",
+            ".ogg.tmp",
+            "2026-10-31T12-00-00.000-2.tmp",
+            "2026-10-31T12-00-00.000-2.mp3.tmp",
+            "2026-10-31T12-00-00.000-2.wav",
+            "2026-10-31T12-00-00.000-2.WAV.TMP",
+            "2026-10-31T12-00-00.000-2.ogg.tmp.bak",
+            "2026-10-31T12-00-00.000-2.wav.wav.tmp",
+            "2026-10-31T12:00:00.000-2.wav.tmp",
+            "2026-10-31T12-00-00.000-0.wav.tmp",
+            "2026-02-30T12-00-00.000-2.ogg.tmp",
+            "x2026-10-31T12-00-00.000-2.wav.tmp",
+            "2026-10-31T12-00-00.000-2 .ogg.tmp",
+        ];
+        let names: Vec<&str> = [snapshot.as_str(), &encoding].into_iter().chain(others).collect();
+        assert_eq!(audio_temps(names.iter().copied()), [snapshot.as_str(), &encoding]);
+        assert_eq!(audio_temps(others), Vec::<&str>::new());
+    }
+
+    /// On disk: a prune deletes old recordings alone, the sweep CUE's half-written files alone; other files and
+    /// folders stay; clearing removes the whole folder. The history's own deletions never touch the recordings folder
+    /// inside it.
     #[test]
     fn prune_audio_and_clear_audio_on_disk() {
         let history = tmp("audio");
         let dir = history.join("audio");
         assert_eq!(prune_audio(&dir, AudioKeep::Day, "2026-10-31").unwrap(), 0, "no folder: nothing to delete");
+        assert_eq!(sweep_audio_temps(&dir).unwrap(), 0);
         clear_audio(&dir).unwrap();
 
         add(&history, &[entry("2026-10-30T12:00:00.000", Mode::Dictation, "yesterday")]);
@@ -820,23 +880,34 @@ mod tests {
         let old = audio_file("2026-10-30T12:00:00.000-1").unwrap();
         let kept = audio_file("2026-10-31T08:00:00.000-2").unwrap();
         let left = audio_snapshot("2026-10-31T08:00:00.000-3").unwrap();
-        for name in [old.as_str(), &kept, &left, "notes.txt"] {
+        let encoding = audio_file("2026-10-31T08:00:00.000-4").unwrap() + ".tmp";
+        for name in [old.as_str(), &kept, &left, &encoding, "notes.txt", "notes.tmp"] {
             std::fs::write(dir.join(name), b"OggS").unwrap();
         }
         let folder = audio_file("2026-10-01T12:00:00.000-1").unwrap();
-        std::fs::create_dir_all(dir.join(&folder)).unwrap();
+        let temp_folder = audio_snapshot("2026-10-01T12:00:00.000-1").unwrap();
+        for name in [&folder, &temp_folder] {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+        }
 
-        assert_eq!(prune_audio(&dir, AudioKeep::Day, "2026-10-31").unwrap(), 2);
-        assert_eq!(names(&dir), [folder.as_str(), &kept, "notes.txt"], "a folder named like a recording stays");
+        assert_eq!(prune_audio(&dir, AudioKeep::Day, "2026-10-31").unwrap(), 1, "not the files being written");
+        let folders = [folder.as_str(), &temp_folder];
+        let notes = ["notes.tmp", "notes.txt"];
+        let left_over = [&kept, &left, &encoding].map(String::as_str);
+        assert_eq!(names(&dir), [&folders[..], &left_over, &notes].concat());
         assert_eq!(prune_audio(&dir, AudioKeep::Day, "2026-10-31").unwrap(), 0, "nothing more to delete");
+        assert_eq!(sweep_audio_temps(&dir).unwrap(), 2);
+        let swept = [&folders[..], &[kept.as_str()], &notes].concat();
+        assert_eq!(names(&dir), swept, "folders named like ours stay");
+        assert_eq!(sweep_audio_temps(&dir).unwrap(), 0);
 
         assert_eq!(prune(&history, Keep::Off, "2026-10-31").unwrap(), 1);
         clear(&history).unwrap();
         assert_eq!(names(&history), ["audio"]);
-        assert_eq!(names(&dir), [folder.as_str(), &kept, "notes.txt"], "the days are gone, the recordings are not");
+        assert_eq!(names(&dir), swept, "the days are gone, the recordings are not");
 
         assert_eq!(prune_audio(&dir, AudioKeep::Off, "2026-10-31").unwrap(), 1);
-        assert_eq!(names(&dir), [folder.as_str(), "notes.txt"]);
+        assert_eq!(names(&dir), [&folders[..], &notes].concat());
         clear_audio(&dir).unwrap();
         assert!(!dir.exists());
         clear_audio(&dir).unwrap();
