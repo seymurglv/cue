@@ -9,7 +9,10 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 export type Mode = 'dictation' | 'translation' | 'ask';
 /** One history entry: the time of day `HH:MM`, the app the result went to (empty when not known), the text, and for
  *  "Ask" the question (`text` is then the answer or the text the model wrote). `id` starts with the entry's local time,
- *  `YYYY-MM-DDTHH:MM:SS.mmm`. */
+ *  `YYYY-MM-DDTHH:MM:SS.mmm`. `raw` — the text as it was heard, before CUE cleaned it up (for a translation, the speech
+ *  before it was translated); null for "Ask" (its question is that) and for entries of earlier versions. `hasAudio` —
+ *  its recording is there to play (`historyAudio`); a new entry comes with false while its recording is encoded, so
+ *  ask when the entry opens. */
 export interface EntryView {
   id: string;
   time: string;
@@ -17,6 +20,8 @@ export interface EntryView {
   app: string;
   text: string;
   question: string | null;
+  raw: string | null;
+  hasAudio: boolean;
 }
 /** One day, `YYYY-MM-DD`, entries newest first. */
 export interface DayView {
@@ -31,13 +36,18 @@ export interface PageView {
 
 export type Keep = 'forever' | 'year' | 'month' | 'week' | 'off';
 export const KEEPS: readonly Keep[] = ['forever', 'year', 'month', 'week', 'off'];
+/** How long recordings are kept: a day keeps today's; never longer than the history itself. */
+export type AudioKeep = 'day' | 'week' | 'month' | 'off';
+export const AUDIO_KEEPS: readonly AudioKeep[] = ['day', 'week', 'month', 'off'];
 export type UiLanguage = 'auto' | 'en' | 'ru';
 /** The settings as the core holds them. `historyKeep` is null while the period is unknown (nothing is written to the
- *  history or deleted from it until the user picks one); `micDevice` null — the Windows microphone; `lang` — the
- *  interface language now; `languages` — the translation targets, code and English name; `saved` — changes reach
- *  settings.json (it was read at startup). */
+ *  history or deleted from it until the user picks one); `historyAudio` — how long recordings are kept, as the user
+ *  chose it, null while unknown (none is recorded until the user picks one); `micDevice` null — the Windows microphone;
+ *  `lang` — the interface language now; `languages` — the translation targets, code and English name; `saved` —
+ *  changes reach settings.json (it was read at startup). */
 export interface SettingsView {
   historyKeep: Keep | null;
+  historyAudio: AudioKeep | null;
   micDevice: string | null;
   translateTarget: string;
   uiLanguage: UiLanguage;
@@ -47,6 +57,7 @@ export interface SettingsView {
 }
 export type SettingChange =
   | { kind: 'historyKeep'; value: Keep }
+  | { kind: 'historyAudio'; value: AudioKeep }
   | { kind: 'micDevice'; value: string | null }
   | { kind: 'translateTarget'; value: string }
   | { kind: 'uiLanguage'; value: UiLanguage };
@@ -85,6 +96,17 @@ export const historySearch = (query: string) => invoke<DayView[]>('history_searc
 export const historyCopy = (id: string) => invoke<void>('history_copy', { id });
 export const historyPaste = (id: string) => invoke<PasteAgain>('history_paste', { id });
 export const historyClear = () => invoke<void>('history_clear');
+/** The recording of the entry `id`, the bytes of an Ogg Opus file (play it as a `Blob` of type
+ *  `audio/ogg; codecs=opus`); null when there is none to play — never made, still being encoded, cleared, or past its
+ *  period. Any other failure throws its code. */
+export async function historyAudio(id: string): Promise<ArrayBuffer | null> {
+  try {
+    return await invoke<ArrayBuffer>('history_audio', { id });
+  } catch (e) {
+    if (e === 'notFound') return null;
+    throw e;
+  }
+}
 
 export const keyState = (name: KeyName) => invoke<KeyView>('key_state', { name });
 /** The value goes to Windows Credential Manager; the answer is its mask. */

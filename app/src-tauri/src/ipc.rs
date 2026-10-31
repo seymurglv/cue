@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use cue_core::history;
-use cue_core::settings::{DropPosition, Keep, Settings, UiLanguage};
+use cue_core::settings::{AudioKeep, DropPosition, Keep, Settings, UiLanguage};
 use cue_core::translate;
 use cue_core::ui::{TrayKind, UiAction, UiState};
 use tauri::ipc::Channel;
@@ -27,7 +27,8 @@ pub struct CoreTx(pub tokio::sync::mpsc::UnboundedSender<CoreEvent>);
 
 /// The settings the main window shows (spec 3 §3), as the core holds them: the history's period (`None` — unknown, so
 /// nothing is written to the history or deleted from it until the user picks one: settings.json was not read, or its
-/// value is not one CUE knows), the pinned microphone (`None` — the one Windows uses), the translation language, the
+/// value is not one CUE knows), how long recordings are kept as the user chose it (`None` — unknown: none is recorded
+/// until the user picks one), the pinned microphone (`None` — the one Windows uses), the translation language, the
 /// interface language as set and as it is now (`lang`), the languages a translation can go to (code and English name),
 /// and whether changes reach settings.json (`saved`: it was read at startup). `Debug` shows the microphone's name only
 /// by its length.
@@ -35,6 +36,7 @@ pub struct CoreTx(pub tokio::sync::mpsc::UnboundedSender<CoreEvent>);
 #[serde(rename_all = "camelCase")]
 pub struct SettingsView {
     pub history_keep: Option<Keep>,
+    pub history_audio: Option<AudioKeep>,
     pub mic_device: Option<String>,
     pub translate_target: &'static str,
     pub ui_language: UiLanguage,
@@ -47,6 +49,7 @@ impl SettingsView {
     pub fn of(s: &Settings, lang: Lang, saved: bool) -> Self {
         Self {
             history_keep: s.history.keep.known(),
+            history_audio: s.history.audio.known(),
             mic_device: s.audio.device.clone(),
             translate_target: s.translate.target(),
             ui_language: s.ui.language,
@@ -61,6 +64,7 @@ impl std::fmt::Debug for SettingsView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SettingsView")
             .field("history_keep", &self.history_keep)
+            .field("history_audio", &self.history_audio)
             .field("mic_device_chars", &self.mic_device.as_ref().map(|d| d.chars().count()))
             .field("translate_target", &self.translate_target)
             .field("ui_language", &self.ui_language)
@@ -72,8 +76,10 @@ impl std::fmt::Debug for SettingsView {
 }
 
 /// One history entry as the main window draws it (spec 3 §2): its time of day `HH:MM`, the mode, the app (empty when
-/// not known), the text and an "Ask" question. Only the main window gets it; `Debug` shows the lengths of the text and
-/// the question, never them.
+/// not known), the text, an "Ask" question, the text as it was heard before CUE cleaned it up (`raw`: a dictation's, a
+/// translation's speech; `None` for "Ask" and for entries of earlier versions), and whether its recording is there to
+/// play (`has_audio`: false for a new entry, whose recording is still being encoded — the window asks when the entry
+/// opens). Only the main window gets it; `Debug` shows the lengths of the texts, never them.
 #[derive(Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryView {
@@ -83,10 +89,12 @@ pub struct EntryView {
     pub app: String,
     pub text: String,
     pub question: Option<String>,
+    pub raw: Option<String>,
+    pub has_audio: bool,
 }
 
-impl From<&history::Entry> for EntryView {
-    fn from(e: &history::Entry) -> Self {
+impl EntryView {
+    pub fn of(e: &history::Entry, has_audio: bool) -> Self {
         Self {
             id: e.id.clone(),
             // `YYYY-MM-DDTHH:MM:SS.mmm`: hours and minutes.
@@ -95,6 +103,8 @@ impl From<&history::Entry> for EntryView {
             app: e.app.clone(),
             text: e.text.clone(),
             question: e.question.clone(),
+            raw: e.raw.clone(),
+            has_audio,
         }
     }
 }
@@ -108,6 +118,8 @@ impl std::fmt::Debug for EntryView {
             .field("app", &self.app)
             .field("text_chars", &self.text.chars().count())
             .field("question_chars", &self.question.as_ref().map(|q| q.chars().count()))
+            .field("raw_chars", &self.raw.as_ref().map(|r| r.chars().count()))
+            .field("has_audio", &self.has_audio)
             .finish()
     }
 }
@@ -120,9 +132,11 @@ pub struct DayView {
     pub entries: Vec<EntryView>,
 }
 
-impl From<&history::Day> for DayView {
-    fn from(d: &history::Day) -> Self {
-        Self { date: d.date.clone(), entries: d.entries.iter().map(EntryView::from).collect() }
+impl DayView {
+    /// `has_audio`: whether the entry of this id has a recording to play.
+    pub fn of(d: &history::Day, has_audio: &impl Fn(&str) -> bool) -> Self {
+        let entries = d.entries.iter().map(|e| EntryView::of(e, has_audio(&e.id))).collect();
+        Self { date: d.date.clone(), entries }
     }
 }
 
@@ -133,9 +147,10 @@ pub struct PageView {
     pub more: bool,
 }
 
-impl From<&history::Page> for PageView {
-    fn from(p: &history::Page) -> Self {
-        Self { days: p.days.iter().map(DayView::from).collect(), more: p.more }
+impl PageView {
+    /// `has_audio`: whether the entry of this id has a recording to play.
+    pub fn of(p: &history::Page, has_audio: &impl Fn(&str) -> bool) -> Self {
+        Self { days: p.days.iter().map(|d| DayView::of(d, has_audio)).collect(), more: p.more }
     }
 }
 
@@ -392,9 +407,12 @@ mod tests {
         let view = serde_json::to_value(SettingsView::of(&s, Lang::En, true)).unwrap();
         let mut names: Vec<&str> = view.as_object().unwrap().keys().map(String::as_str).collect();
         names.sort_unstable();
-        assert_eq!(names, ["historyKeep", "lang", "languages", "micDevice", "saved", "translateTarget", "uiLanguage"]);
+        let expected =
+            ["historyAudio", "historyKeep", "lang", "languages", "micDevice", "saved", "translateTarget", "uiLanguage"];
+        assert_eq!(names, expected);
         let defaults = [
             ("historyKeep", json!("month")),
+            ("historyAudio", json!("week")),
             ("micDevice", Value::Null),
             ("translateTarget", json!("en")),
             ("uiLanguage", json!("auto")),
@@ -411,6 +429,7 @@ mod tests {
 
         for change in [
             SettingChange::HistoryKeep(Keep::Off),
+            SettingChange::HistoryAudio(AudioKeep::Day),
             SettingChange::MicDevice(Some("USB Microphone".into())),
             SettingChange::TranslateTarget("de".into()),
             SettingChange::UiLanguage(UiLanguage::Ru),
@@ -420,6 +439,7 @@ mod tests {
         let view = serde_json::to_value(SettingsView::of(&s, Lang::Ru, false)).unwrap();
         let set = [
             ("historyKeep", json!("off")),
+            ("historyAudio", json!("day")),
             ("micDevice", json!("USB Microphone")),
             ("translateTarget", json!("de")),
             ("uiLanguage", json!("ru")),
@@ -433,8 +453,9 @@ mod tests {
 
         // A period CUE does not know shows unset.
         s.history.keep = Period::Unknown(json!("forver"));
+        s.history.audio = Period::Unknown(json!("fortnight"));
         let view = serde_json::to_value(SettingsView::of(&s, Lang::Ru, false)).unwrap();
-        assert_eq!(view["historyKeep"], Value::Null);
+        assert_eq!((&view["historyKeep"], &view["historyAudio"]), (&Value::Null, &Value::Null));
     }
 
     #[test]
@@ -448,7 +469,7 @@ mod tests {
             question: Some("secret question".into()),
             raw: None,
         };
-        let view = EntryView::from(&e);
+        let view = EntryView::of(&e, false);
         let expected = json!({
             "id": "2026-10-31T07:05:09.123-4",
             "time": "07:05",
@@ -456,12 +477,41 @@ mod tests {
             "app": "Notepad",
             "text": "private answer",
             "question": "secret question",
+            "raw": null,
+            "hasAudio": false,
         });
         assert_eq!(serde_json::to_value(&view).unwrap(), expected);
         let shown = format!("{view:?}");
         assert!(!shown.contains("private") && !shown.contains("secret"), "{shown}");
         let dictation = history::Entry { mode: history::Mode::Dictation, question: None, ..e };
-        assert_eq!(serde_json::to_value(EntryView::from(&dictation)).unwrap()["question"], Value::Null);
+        assert_eq!(serde_json::to_value(EntryView::of(&dictation, false)).unwrap()["question"], Value::Null);
+    }
+
+    /// A dictation's text as it was heard goes to the main window with it, and whether its recording plays; a log
+    /// shows only its length.
+    #[test]
+    fn entry_view_has_the_text_as_heard_and_the_recording() {
+        let e = history::Entry {
+            id: "2026-10-31T07:05:09.123-5".into(),
+            ts: "2026-10-31T07:05:09.123".into(),
+            mode: history::Mode::Dictation,
+            app: String::new(),
+            text: "Clean words.".into(),
+            question: None,
+            raw: Some("uh secret words".into()),
+        };
+        let view = serde_json::to_value(EntryView::of(&e, true)).unwrap();
+        assert_eq!((&view["raw"], &view["hasAudio"]), (&json!("uh secret words"), &json!(true)));
+        let shown = format!("{:?}", EntryView::of(&e, true));
+        assert!(!shown.contains("secret") && !shown.contains("Clean"), "{shown}");
+        assert!(shown.contains("raw_chars: Some(15)") && shown.contains("has_audio: true"), "{shown}");
+
+        // A page asks per entry whether its recording plays.
+        let entries = vec![e.clone(), history::Entry { id: "x".into(), ..e }];
+        let day = history::Day { date: "2026-10-31".into(), entries };
+        let page = PageView::of(&history::Page { days: vec![day], more: true }, &|id: &str| id != "x");
+        let played: Vec<bool> = page.days[0].entries.iter().map(|e| e.has_audio).collect();
+        assert_eq!((played, page.more), (vec![true, false], true));
     }
 
     /// The Drop's and the card's commands answer their own pages: the main and welcome windows', which show text of
@@ -504,7 +554,7 @@ mod tests {
             question: None,
             raw: None,
         };
-        EntryView::from(&e)
+        EntryView::of(&e, false)
     }
 
     /// New entries go only to the channel the main window opened last; none goes once it has ended.

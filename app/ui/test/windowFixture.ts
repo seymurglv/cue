@@ -25,6 +25,7 @@ export const LANGUAGES: [string, string][] = [
 export function view(over: Partial<api.SettingsView> = {}): api.SettingsView {
   return {
     historyKeep: 'month',
+    historyAudio: 'week',
     micDevice: null,
     translateTarget: 'en',
     uiLanguage: 'auto',
@@ -36,7 +37,8 @@ export function view(over: Partial<api.SettingsView> = {}): api.SettingsView {
 }
 
 export function entry(id: string, text: string, over: Partial<api.EntryView> = {}): api.EntryView {
-  return { id, time: id.slice(11, 16), mode: 'dictation', app: '', text, question: null, ...over };
+  const time = id.slice(11, 16);
+  return { id, time, mode: 'dictation', app: '', text, question: null, raw: null, hasAudio: false, ...over };
 }
 
 export const core = vi.mocked(api);

@@ -4,13 +4,14 @@
 //! the settings changes the microphone alone. An error is a short code, never text.
 //!
 //! The history is read here, off the async threads; only the core writes it, and its new entries come over the main
-//! window's own channel (`history_subscribe`). The settings are read and changed through the core, which owns them
-//! (`CoreEvent::Settings`). Start at sign-in is the autostart plugin's Run key, as in the tray menu, whose check follows
-//! within 5 s. Keys are read and saved in Windows Credential Manager, where `cue-cli keys` keeps them: a key never
-//! leaves this module — not in a reply, an error or the log — only its mask does; a check is a free probe request
-//! (`cue_engines::check`), never a paid one. The microphones are listed as Windows names them, and a preview sends the
-//! page that started it a microphone's level alone (`micpreview`). The welcome window opens its links by name, never by
-//! an address of its page's (`open_link`).
+//! window's own channel (`history_subscribe`). An entry's recording is read by its id alone, checked to be an entry
+//! id, never a path from the page, and comes as bytes (`history_audio`). The settings are read and changed through the
+//! core, which owns them (`CoreEvent::Settings`). Start at sign-in is the autostart plugin's Run key, as in the tray
+//! menu, whose check follows within 5 s. Keys are read and saved in Windows Credential Manager, where `cue-cli keys`
+//! keeps them: a key never leaves this module — not in a reply, an error or the log — only its mask does; a check is a
+//! free probe request (`cue_engines::check`), never a paid one. The microphones are listed as Windows names them, and a
+//! preview sends the page that started it a microphone's level alone (`micpreview`). The welcome window opens its links
+//! by name, never by an address of its page's (`open_link`).
 use std::path::Path;
 use std::time::Duration;
 
@@ -27,6 +28,7 @@ use tauri_plugin_autostart::ManagerExt;
 use crate::ipc::{CoreTx, DayView, EntryView, HistoryFeed, MAIN_LABEL, PageView, SettingsView, WELCOME_LABEL};
 use crate::micpreview;
 use crate::paths::Paths;
+use crate::runtime::recordings::{self, AudioLimit, Playable};
 use crate::runtime::{CoreEvent, MIC_SETTINGS, SettingsCmd, local_today, open_url};
 
 /// How long a command waits for the core's answer about the settings.
@@ -65,9 +67,11 @@ pub enum CmdError {
     NotMain,
     /// The core did not answer in time (or is not running).
     Core,
-    /// No such history entry: cleared, or past the history's period, since the window showed it.
+    /// No such history entry: cleared, or past the history's period, since the window showed it. For a recording: none
+    /// to play — never made, cleared, or past its period.
     NotFound,
-    /// A setting change the settings do not know, or a link CUE does not have.
+    /// A setting change the settings do not know, a link CUE does not have, or a recording asked for by a name that is
+    /// no entry id.
     BadValue,
     /// A key other than `soniox` and `anthropic`.
     BadName,
@@ -228,10 +232,16 @@ pub async fn history_page(
     window: WebviewWindow,
     before: Option<String>,
     paths: State<'_, Paths>,
+    limit: State<'_, AudioLimit>,
 ) -> Result<PageView, CmdError> {
     guard(&window, "history_page")?;
-    let dir = paths.history.clone();
-    blocking(move || page(&dir, before.as_deref(), &local_today())).await
+    let (dir, audio, limit) = (paths.history.clone(), paths.history_audio.clone(), limit.get());
+    blocking(move || {
+        let today = local_today();
+        let playable = Playable::read(&audio, limit, &today);
+        page(&dir, before.as_deref(), &today, &|id: &str| playable.has(id))
+    })
+    .await
 }
 
 /// New history entries, as they come, over `channel` (spec 3 §2): only the page that opened it gets them. A new
@@ -248,25 +258,64 @@ pub async fn history_subscribe(
 }
 
 /// The first page (`before` is `None`) is today and yesterday (`today` is `YYYY-MM-DD`); any other, up to
-/// `EARLIER_DAYS` days with entries before the day `before`.
-fn page(dir: &Path, before: Option<&str>, today: &str) -> PageView {
+/// `EARLIER_DAYS` days with entries before the day `before`. `has_audio`: whether an entry's recording plays.
+fn page(dir: &Path, before: Option<&str>, today: &str, has_audio: &impl Fn(&str) -> bool) -> PageView {
     let page = match before {
         None => history::recent(dir, today),
         Some(before) => history::older(dir, before, EARLIER_DAYS),
     };
-    PageView::from(&page)
+    PageView::of(&page, has_audio)
 }
 
-/// The entries whose text or question holds `query`, newest first, at most `SEARCH_LIMIT`.
+/// The entries whose text, question or text as it was heard holds `query`, newest first, at most `SEARCH_LIMIT`.
 #[tauri::command]
 pub async fn history_search(
     window: WebviewWindow,
     query: String,
     paths: State<'_, Paths>,
+    limit: State<'_, AudioLimit>,
 ) -> Result<Vec<DayView>, CmdError> {
     guard(&window, "history_search")?;
-    let dir = paths.history.clone();
-    blocking(move || history::search(&dir, &query, SEARCH_LIMIT).iter().map(DayView::from).collect()).await
+    let (dir, audio, limit) = (paths.history.clone(), paths.history_audio.clone(), limit.get());
+    blocking(move || {
+        let playable = Playable::read(&audio, limit, &local_today());
+        let has_audio = |id: &str| playable.has(id);
+        history::search(&dir, &query, SEARCH_LIMIT).iter().map(|d| DayView::of(d, &has_audio)).collect()
+    })
+    .await
+}
+
+/// The recording of the entry `id`, as the bytes of its Ogg Opus file (an `ArrayBuffer` in the page, not JSON), for
+/// the page to play: `NotFound` when there is none to play — never made (an "Ask" question whose follow-up was already
+/// recording, an entry of an earlier version, recordings off), still being encoded, cleared, or past its period even
+/// before the next prune deletes it. `id` must be an entry id (`history::audio_file`): never a path from the page.
+#[tauri::command]
+pub async fn history_audio(
+    window: WebviewWindow,
+    id: String,
+    paths: State<'_, Paths>,
+    limit: State<'_, AudioLimit>,
+) -> Result<tauri::ipc::Response, CmdError> {
+    guard(&window, "history_audio")?;
+    let file = recording_file(&id)?;
+    let (dir, limit) = (paths.history_audio.clone(), limit.get());
+    match blocking(move || recordings::read(&dir, &file, limit, &local_today())).await? {
+        Ok(Some(bytes)) => Ok(tauri::ipc::Response::new(bytes)),
+        Ok(None) => Err(CmdError::NotFound),
+        Err(e) => {
+            tracing::warn!("history: recording not read: {e}");
+            Err(CmdError::Failed)
+        }
+    }
+}
+
+/// The name of the recording of the entry `id` in the recordings folder; anything but an entry id is refused, and the
+/// log never gets what the page sent.
+fn recording_file(id: &str) -> Result<String, CmdError> {
+    history::audio_file(id).ok_or_else(|| {
+        tracing::warn!(chars = id.chars().count(), "history: a recording asked for by a name that is no entry id");
+        CmdError::BadValue
+    })
 }
 
 /// "Copy": the entry's text into the clipboard.
@@ -516,7 +565,7 @@ mod tests {
     use serde_json::json;
 
     /// Every command a window's page calls (`main`'s handler list, but for the Drop's and the card's own).
-    const COMMANDS: [&str; 19] = [
+    const COMMANDS: [&str; 20] = [
         "settings_get",
         "settings_set",
         "autostart_get",
@@ -527,6 +576,7 @@ mod tests {
         "history_copy",
         "history_paste",
         "history_clear",
+        "history_audio",
         "key_state",
         "key_set",
         "key_check",
@@ -573,6 +623,30 @@ mod tests {
         }
     }
 
+    /// A recording plays in the main window alone, and only by an entry id: anything else — a path, a recording's own
+    /// file name — is refused before the folder is looked at.
+    #[test]
+    fn history_audio_answers_the_main_window_and_entry_ids_alone() {
+        assert_eq!(guard_label(MAIN_LABEL, "history_audio"), Ok(()));
+        for label in [WELCOME_LABEL, "drop", "card", "Main", ""] {
+            assert_eq!(guard_label(label, "history_audio"), Err(CmdError::NotMain), "{label:?}");
+        }
+        assert_eq!(recording_file("2026-10-31T07:30:00.123-4").as_deref(), Ok("2026-10-31T07-30-00.123-4.ogg"));
+        for id in [
+            "",
+            "..",
+            r"..\..\settings.json",
+            r"C:\Windows\win.ini",
+            "2026-10-31T07-30-00.123-4.ogg",
+            "2026-10-31T07:30:00.123-4/../x",
+            "2026-10-31T07:30:00.123-0",
+            "2026-10-31T07:30:00.123",
+        ] {
+            assert_eq!(recording_file(id), Err(CmdError::BadValue), "{id:?}");
+        }
+        assert_eq!(serde_json::to_value(CmdError::NotFound).unwrap(), json!("notFound"));
+    }
+
     /// Of the settings, as its page sends a change, the welcome window changes the microphone alone; the main window,
     /// any.
     #[test]
@@ -584,6 +658,8 @@ mod tests {
         ];
         let others = [
             change(json!({ "kind": "historyKeep", "value": "off" })),
+            change(json!({ "kind": "historyAudio", "value": "off" })),
+            change(json!({ "kind": "historyAudio", "value": "day" })),
             change(json!({ "kind": "translateTarget", "value": "de" })),
             change(json!({ "kind": "uiLanguage", "value": "ru" })),
         ];
@@ -640,26 +716,31 @@ mod tests {
         for date in ["2026-10-16", "2026-10-15", "2026-10-01"] {
             history::append(&dir, &entry(&format!("{date}T09:15:00.000"), "Earlier.")).unwrap();
         }
-        let first = page(&dir, None, "2026-10-31");
+        // Today's entry has a recording to play.
+        let none = |_: &str| false;
+        let today = |id: &str| id.starts_with("2026-10-31");
+        let first = page(&dir, None, "2026-10-31", &today);
         assert_eq!(first.days.iter().map(|d| d.date.as_str()).collect::<Vec<_>>(), ["2026-10-31", "2026-10-30"]);
         assert!(first.more);
         let shown = serde_json::to_value(&first).unwrap();
         assert_eq!(shown["days"][0]["entries"][0]["time"], json!("09:15"));
         assert_eq!(shown["days"][0]["entries"][0]["text"], json!("Hello."));
+        assert_eq!(shown["days"][0]["entries"][0]["hasAudio"], json!(true));
+        assert_eq!(shown["days"][1]["entries"][0]["hasAudio"], json!(false));
 
-        let earlier = page(&dir, Some("2026-10-30"), "2026-10-31");
+        let earlier = page(&dir, Some("2026-10-30"), "2026-10-31", &none);
         let dates: Vec<&str> = earlier.days.iter().map(|d| d.date.as_str()).collect();
         let week = ["2026-10-28", "2026-10-20", "2026-10-19", "2026-10-18", "2026-10-17", "2026-10-16", "2026-10-15"];
         assert_eq!(dates, week);
         assert!(earlier.more, "2026-10-01 is still there");
-        let last = page(&dir, Some("2026-10-15"), "2026-10-31");
+        let last = page(&dir, Some("2026-10-15"), "2026-10-31", &none);
         assert_eq!(last.days.len(), 1);
         assert!(!last.more);
 
         // Neither today nor yesterday has entries: none on the first page, the rest behind "Show earlier".
-        let quiet = page(&dir, None, "2026-11-05");
+        let quiet = page(&dir, None, "2026-11-05", &none);
         assert!(quiet.days.is_empty() && quiet.more);
-        let empty = page(&tmp("pages-none"), None, "2026-10-31");
+        let empty = page(&tmp("pages-none"), None, "2026-10-31", &none);
         assert!(empty.days.is_empty() && !empty.more);
         std::fs::remove_dir_all(dir).unwrap();
     }

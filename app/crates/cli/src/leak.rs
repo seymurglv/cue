@@ -10,10 +10,10 @@
 //!   `/c/Users/<name>`), an email address, and an Anthropic or OpenRouter key (`sk-ant-` or `sk-or-` and 40 characters
 //!   more: the made-up keys of the tests are shorter);
 //! - exact matches with what this computer holds, read into memory for the scan only: the keys saved in Credential
-//!   Manager, the history texts and questions of the last 31 days (12 characters or longer), the dictionary terms and
-//!   the microphone names (4 or longer), the Windows user name, computer name and profile path, the git user name and
-//!   email, and the private folders the repository's `.git/info/exclude` names (its folder lines, 4 characters or
-//!   longer);
+//!   Manager, the history texts, questions and texts as heard of the last 31 days (12 characters or longer), the
+//!   dictionary terms and the microphone names (4 or longer), the Windows user name, computer name and profile path,
+//!   the git user name and email, and the private folders the repository's `.git/info/exclude` names (its folder
+//!   lines, 4 characters or longer);
 //! - in text files only, long random-looking strings: a key of a kind no pattern knows, also one split by `-` or
 //!   `_` (a UUID). Hashes of known kinds (npm integrity, `Cargo.lock` checksums, base64 data URLs, a commit or hash in
 //!   a URL path, a Windows GUID in braces) are passed over. Binaries (the program, fonts, installers) get the first two
@@ -254,9 +254,9 @@ fn git_config(key: &str) -> std::io::Result<Option<String>> {
     Ok(Some(value).filter(|v| out.status.success() && !v.is_empty()))
 }
 
-/// The texts and questions of the history days from `HISTORY_DAYS` days before `today` (UTC, `YYYY-MM-DD`) on, and
-/// every line of those with several. One day more is read: the day files are named by the local date. No folder is no
-/// history; a folder or a day file that cannot be read is an error.
+/// The texts, questions and texts as heard (before CUE cleaned them up) of the history days from `HISTORY_DAYS` days
+/// before `today` (UTC, `YYYY-MM-DD`) on, and every line of those with several. One day more is read: the day files are
+/// named by the local date. No folder is no history; a folder or a day file that cannot be read is an error.
 fn history_texts(dir: &Path, today: &str) -> Result<Vec<String>> {
     let Some(first) = history::date_minus(today, HISTORY_DAYS + 1) else { return Ok(Vec::new()) };
     readable_days(dir, &first)?;
@@ -266,7 +266,7 @@ fn history_texts(dir: &Path, today: &str) -> Result<Vec<String>> {
             continue;
         }
         for entry in day.entries {
-            for text in [Some(entry.text), entry.question].into_iter().flatten() {
+            for text in [Some(entry.text), entry.question, entry.raw].into_iter().flatten() {
                 if text.contains('\n') {
                     texts.extend(text.lines().map(str::to_owned));
                 }
@@ -942,11 +942,14 @@ mod tests {
             question: question.map(str::to_owned),
             raw: None,
         };
+        let heard =
+            |date: &str, text: &str, raw: &str| history::Entry { raw: Some(raw.into()), ..entry(date, text, None) };
         for e in [
             entry("2026-10-31", "first line\nsecond line", None),
+            heard("2026-10-30", "Cleaned up.", "uh as it was\nheard"),
             entry("2026-09-29", "32 days back: one day more for the time zone", None),
             entry("2026-10-15", "the answer", Some("the question")),
-            entry("2026-09-28", "too old to look for", None),
+            heard("2026-09-28", "too old to look for", "too old as heard"),
         ] {
             history::append(&dir, &e).unwrap();
         }
@@ -958,6 +961,10 @@ mod tests {
                 "first line",
                 "second line",
                 "first line\nsecond line",
+                "Cleaned up.",
+                "uh as it was",
+                "heard",
+                "uh as it was\nheard",
                 "the answer",
                 "the question",
                 "32 days back: one day more for the time zone"

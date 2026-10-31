@@ -73,6 +73,7 @@ fn main() {
             commands::history_copy,
             commands::history_paste,
             commands::history_clear,
+            commands::history_audio,
             commands::key_state,
             commands::key_set,
             commands::key_check,
@@ -192,6 +193,8 @@ fn setup(
     // The main window's commands find CUE's files (the history) here.
     app.manage(paths.clone());
     let rt = runtime::Runtime::new(ui, card, settings, can_save_settings, lang, paths, core_tx);
+    // The main window's commands play no recording past the period the core holds.
+    app.manage(rt.audio_limit());
     // The core blocks its thread on short Windows calls (UI Automation, microphone), so it gets its own thread;
     // tasks (network, timers) run on the shared tokio runtime.
     std::thread::Builder::new()
