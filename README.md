@@ -21,8 +21,8 @@ main window, with the history of everything CUE wrote and the settings.
 
 On its first start, and on every start while one of its two keys is missing, CUE opens a welcome window: Hello,
 Keys, Microphone, First dictation and Done. While it is open, `Ctrl + Win` works only at the First dictation step. If
-you close it before both keys are saved, it comes back at the next start. Running `cue.exe --welcome` (in
-`%LOCALAPPDATA%\Programs\CUE`) opens it again at any time, even while CUE is running.
+you close it before both keys are saved, it comes back at the next start. To open it again at any time, even while
+CUE is running, press `Win + R` and run `"%LOCALAPPDATA%\Programs\CUE\cue.exe" --welcome`.
 
 ## Keys
 
@@ -37,13 +37,14 @@ Paste each key into the welcome window, or later into the main window's settings
 saves the key and sends a free test request. The keys are kept in Windows Credential Manager; CUE's windows show only
 a mask of them.
 
-Dictation and translation cost roughly $3 a month for an hour of dictating a day. Questions asked with
+Dictation and translation cost roughly $4–5 a month for an hour of speech a day. Questions asked with
 `Ctrl + Win + Alt` cost more, and each web search one of them runs adds $0.01. CUE writes down what every dictation and
 question cost, on your computer only (`usage.csv`, see [Costs](#costs)).
 
 ## Privacy
 
-- **Soniox** receives the sound of each dictation and the name of the app you are dictating into.
+- **Soniox** receives the sound of each dictation, translation and question, and the name of the app you are dictating
+  into. When the live connection fails, or you press **Retry**, the saved recording is sent to it again.
 - **Anthropic** receives the text: what Soniox heard, the app name and up to 500 characters before the caret, and for a
   question also the text you selected. Nothing is read from password fields.
 - The microphone is open only while CUE records, and while a window shows its level for you to check it.
@@ -57,7 +58,8 @@ Each service has its own policy on how long it keeps what it receives. Every det
 
 Quit CUE from the menu of its icon next to the clock, then open Windows **Settings → Apps → Installed apps**, find
 **CUE** and choose **Uninstall**. This removes the program, its Start menu entry and Start at sign-in. Your history,
-settings and keys stay, so installing CUE again picks up where you left off. To remove them as well:
+settings and keys stay, so installing CUE again picks up where you left off. The uninstaller's **Delete the
+application data** box removes only the cache of CUE's windows (the last folder below). To remove everything:
 
 - the folder `%LOCALAPPDATA%\CUE`: the history, the last dictation, the logs and the cost records;
 - the folder `%APPDATA%\CUE`: the settings;
