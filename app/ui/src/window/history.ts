@@ -3,8 +3,10 @@
 // the top of their day; one already shown (the channel and the first page can both bring it) is not shown twice.
 // A run of entries from one app, each a few minutes after the one before, is one stack: its newest entry on top, a chip
 // "Telegram 5" and two sheet edges under it; the chip and the edges open it in place. A click on an entry (not on its
-// buttons) opens how it was said and its recording (said.ts). The search grows out of the magnifier on the "History"
-// line; what it finds is never stacked. Stacks and entries opened stay open when the list is drawn again.
+// buttons), or Enter or Space on it, opens how it was said and its recording (said.ts). The search grows out of the
+// magnifier on the "History" line; what it finds is never stacked, and an entry it found only in how it was said opens
+// by itself, the place marked. Stacks and entries opened stay open when the list is drawn again. Every recording
+// pauses when CUE starts recording: what plays aloud would go into it.
 // Text goes in as text: an entry may hold anything a model wrote.
 import * as api from './api';
 import { KEEPS, type DayView, type EntryView, type Keep } from './api';
@@ -24,6 +26,8 @@ export const STACK_MIN = 3;
 export const STACK_GAP_MS = 10 * 60 * 1000;
 /** How long an entry takes to close (window.css: .hdet, .htx). */
 const SHUT_MS = 460;
+/** A new entry opened before its recording was encoded asks for it once more this much later. */
+export const AUDIO_AGAIN_MS = 2000;
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const ID_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})/;
@@ -85,6 +89,12 @@ function appendMarked(parent: HTMLElement, text: string, query: string): void {
   parent.append(text.slice(0, i), h('mark', '', text.slice(i, i + q.length)), text.slice(i + q.length));
 }
 
+/** Whether a search for `q` found `e` only in how it was said: its row shows nothing that matches. */
+function foundOnlyAsSaid(e: EntryView, q: string): boolean {
+  const shows = findHit(e.text, q) !== null || (!!e.question && findHit(e.question, q) !== null);
+  return !!e.raw && !shows && findHit(e.raw, q) !== null;
+}
+
 export class HistoryView {
   /** The ordinary list: days newest first, as far back as shown. */
   private days: DayView[] = [];
@@ -106,6 +116,8 @@ export class HistoryView {
   private readonly openStacks = new Set<string>();
   /** Entries opened to show how they were said. */
   private readonly opened = new Set<string>();
+  /** Those of them the search opened (found only in how they were said): they close with it. */
+  private readonly found = new Set<string>();
   /** Entries that came over the channel: their recording may still be on its way, so it is asked for anyway. */
   private readonly live = new Set<string>();
   /** The recordings of the entries opened, by entry; one plays at a time. */
@@ -153,6 +165,7 @@ export class HistoryView {
 
     this.list = h('div', 'bhist');
     this.list.addEventListener('click', (e) => this.onListClick(e));
+    this.list.addEventListener('keydown', (e) => this.onListKey(e));
     this.emptyEl = h('p', 'hempty');
 
     const more = h('div', 'bmore');
@@ -229,7 +242,9 @@ export class HistoryView {
       this.render();
     } else {
       // The day is drawn again: the entry may join a stack, or make one.
+      const focused = this.focusedRow();
       group.replaceWith(this.group(day));
+      this.refocus(focused);
       this.releaseDropped();
       this.emptyEl.hidden = true;
     }
@@ -254,10 +269,16 @@ export class HistoryView {
     return true;
   }
 
-  /** Every recording stops and gives back its object URL (the page is going, or drawn anew). */
+  /** Every recording stops and gives back its object URL (the page is going, or drawn anew, or the recordings' period
+   *  changed). */
   release(): void {
     for (const p of this.players.values()) p.release();
     this.players.clear();
+  }
+
+  /** CUE starts recording: every recording pauses, so none plays into it. */
+  recordingStarts(): void {
+    for (const p of this.players.values()) p.pause();
   }
 
   /** Days into the ordinary list (merged by date, an entry shown once); whether anything was new. */
@@ -287,12 +308,25 @@ export class HistoryView {
     this.drawnFor = this.ctx.today();
     const days = this.results ?? this.days;
     const q = this.results !== null ? this.query.trim() : '';
+    const focused = this.focusedRow();
     this.list.textContent = '';
     for (const d of days) this.list.append(this.group(d, q));
+    this.refocus(focused);
     this.releaseDropped();
     this.earlierBtn.hidden = this.results !== null || !this.more;
     this.emptyEl.hidden = days.length > 0 || (this.results === null && this.more);
     this.emptyEl.textContent = this.results !== null ? this.ctx.t.nothing : this.ctx.t.empty;
+  }
+
+  /** The entry whose row has the keyboard's focus, if one has. */
+  private focusedRow(): string | undefined {
+    const a = document.activeElement;
+    return a instanceof HTMLElement && a.classList.contains('hr') && this.list.contains(a) ? a.dataset.id : undefined;
+  }
+
+  /** The list drawn again: the entry that had the focus has it again in its new row. */
+  private refocus(id: string | undefined): void {
+    if (id) this.rowOf(id)?.focus({ preventScroll: true });
   }
 
   /** Recordings whose entries are no longer drawn stop and give back their object URLs. */
@@ -385,10 +419,16 @@ export class HistoryView {
     paste.dataset.paste = '';
     act.append(copy, paste);
     r.append(h('span', 'ht', e.time), ha, hx, act);
-    if (this.opens(e)) r.classList.add('hmore');
-    if (this.opens(e) && this.opened.has(e.id)) {
-      r.classList.add('open');
-      hx.append(this.details(e, q));
+    if (this.opens(e)) {
+      // The keyboard and screen readers reach it too: Enter or Space opens it (`onListKey`).
+      const open = this.opened.has(e.id);
+      r.classList.add('hmore');
+      r.tabIndex = 0;
+      r.setAttribute('aria-expanded', String(open));
+      if (open) {
+        r.classList.add('open');
+        hx.append(this.details(e, q));
+      }
     }
     return r;
   }
@@ -417,7 +457,8 @@ export class HistoryView {
   }
 
   /** The entry's player: the one it has (it keeps playing when the list is drawn again), or a new one that asks the
-   *  core for the recording — shown at once when the entry has one, else once it comes; none to play — no player. */
+   *  core for the recording — shown at once when the entry has one, else once it comes; none to play — no player. A new
+   *  entry's recording may still be encoded (a few seconds at most): it is asked for once more `AUDIO_AGAIN_MS` later. */
   private player(e: EntryView): Player {
     const have = this.players.get(e.id);
     if (have) return have;
@@ -426,27 +467,32 @@ export class HistoryView {
     });
     p.el.hidden = !e.hasAudio;
     this.players.set(e.id, p);
+    const mine = () => this.players.get(e.id) === p;
     const gone = () => {
-      if (this.players.get(e.id) !== p) return;
+      if (!mine()) return;
       this.players.delete(e.id);
       p.release();
       p.el.remove();
     };
-    api.historyAudio(e.id).then(
-      (bytes) => {
-        if (this.players.get(e.id) !== p) return;
-        if (!bytes || !bytes.byteLength) {
+    const ask = (first: boolean) =>
+      api.historyAudio(e.id).then(
+        (bytes) => {
+          if (!mine()) return;
+          if (bytes && bytes.byteLength) {
+            p.load(bytes);
+            p.el.hidden = false;
+          } else if (first && this.live.has(e.id)) {
+            setTimeout(() => void (mine() && ask(false)), AUDIO_AGAIN_MS);
+          } else {
+            gone();
+          }
+        },
+        (err) => {
+          logFailed('reading a recording', err);
           gone();
-          return;
-        }
-        p.load(bytes);
-        p.el.hidden = false;
-      },
-      (err) => {
-        logFailed('reading a recording', err);
-        gone();
-      },
-    );
+        },
+      );
+    void ask(true);
     return p;
   }
 
@@ -479,6 +525,15 @@ export class HistoryView {
     const r = t.closest<HTMLElement>('.hr.hmore');
     // A drag that selected the entry's text is not a click on it.
     if (!r || (window.getSelection?.()?.toString() ?? '') !== '') return;
+    this.toggleEntry(r);
+  }
+
+  /** Enter or Space on an entry that opens (on the row itself: its buttons and its player take the keys as buttons). */
+  private onListKey(ev: KeyboardEvent): void {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    const r = ev.target;
+    if (!(r instanceof HTMLElement) || !r.matches('.hr.hmore')) return;
+    ev.preventDefault();
     this.toggleEntry(r);
   }
 
@@ -526,15 +581,18 @@ export class HistoryView {
     void det.offsetHeight;
     this.unshut(r);
     r.classList.add('open');
+    r.setAttribute('aria-expanded', 'true');
   }
 
   /** Closed: its recording stops and gives back its object URL; how it was said folds away. */
   private closeEntry(r: HTMLElement): void {
     const id = r.dataset.id ?? '';
     this.opened.delete(id);
+    this.found.delete(id);
     this.unshut(r);
     r.classList.add('shut');
     r.classList.remove('open');
+    r.setAttribute('aria-expanded', 'false');
     this.shutting.set(r, setTimeout(() => this.unshut(r), this.ctx.reduced() ? 0 : SHUT_MS));
     const p = this.players.get(id);
     if (p) {
@@ -581,6 +639,7 @@ export class HistoryView {
       this.searchSeq++;
       if (this.results !== null) {
         this.results = null;
+        this.closeFound();
         this.render();
       }
       return;
@@ -599,10 +658,30 @@ export class HistoryView {
       (days) => {
         if (seq !== this.searchSeq) return;
         this.results = days.filter((d) => DATE.test(d.date));
+        this.openFound(q);
         this.render();
       },
       (e) => logFailed('searching the history', e),
     );
+  }
+
+  /** What the search found only in how it was said opens by itself (its place is marked there); what the last search
+   *  opened so closes first. */
+  private openFound(q: string): void {
+    this.closeFound();
+    for (const d of this.results ?? []) {
+      for (const e of d.entries) {
+        if (this.opened.has(e.id) || !foundOnlyAsSaid(e, q)) continue;
+        this.opened.add(e.id);
+        this.found.add(e.id);
+      }
+    }
+  }
+
+  /** The entries the search opened close again. */
+  private closeFound(): void {
+    for (const id of this.found) this.opened.delete(id);
+    this.found.clear();
   }
 
   /** "Show earlier": the days before the last one shown (before yesterday when today and yesterday are empty). */
@@ -675,6 +754,7 @@ export class HistoryView {
     this.more = false;
     this.ids.clear();
     this.opened.clear();
+    this.found.clear();
     this.openStacks.clear();
     this.live.clear();
     if (this.results !== null) this.results = [];

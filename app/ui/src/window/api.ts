@@ -129,6 +129,17 @@ export async function onMicFailed(cb: () => void): Promise<void> {
   await getCurrentWebviewWindow().listen<null>('cue://mic-failed', () => cb());
 }
 
+/** What the core is doing, as every window hears it: `start` and `listen` — a recording is on. */
+export type CorePhase = 'idle' | 'start' | 'listen' | 'think' | 'done' | 'empty' | 'cancel' | 'error' | 'answer';
+/** The core's state (`cue://state`, the one the Drop draws): its phase, and whether CUE is paused. No text in it. */
+export interface CoreState {
+  phase: CorePhase;
+  paused: boolean;
+}
+export async function onCoreState(cb: (s: CoreState) => void): Promise<void> {
+  await getCurrentWebviewWindow().listen<CoreState>('cue://state', (e) => cb(e.payload));
+}
+
 /** The welcome window's step: on the first dictation's (`dictation`) the hotkey works; on any other — and from the
  *  window's creation until this says otherwise — it starts nothing. Call it on every step change and on load. */
 export const welcomeStep = (dictation: boolean) => invoke<void>('welcome_step', { dictation });

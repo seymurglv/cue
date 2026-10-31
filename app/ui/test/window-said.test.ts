@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { STACK_GAP_MS, STACK_MIN, stackRuns } from '../src/window/history';
-import { appendDiff, appendHeard, clock, diffWords, findHit, oggDuration, wordKey } from '../src/window/said';
+import { MAX_SECONDS, Player, appendDiff, appendHeard, clock, diffWords, findHit, oggDuration, wordKey } from '../src/window/said';
+import { TEXTS } from '../src/window/text';
 import { TODAY, entry, oggFile } from './windowFixture';
 
 const at = (hms: string, app: string, text = hms) => entry(`${TODAY}T${hms}.000-1`, text, { app });
@@ -139,6 +140,32 @@ describe('The recording', () => {
     const cut = new Uint8Array(oggFile(2));
     cut[cut.length - 31 + 5] = 0;
     expect(oggDuration(cut.buffer)).toBeNull();
+    // A last position of all ones is none, and one past three hours no length of a recording of CUE's.
+    const none = new Uint8Array(oggFile(2));
+    none.fill(0xff, none.length - 31 + 6, none.length - 31 + 14);
+    expect(oggDuration(none.buffer)).toBeNull();
+    expect(MAX_SECONDS).toBe(10_800);
+    expect(oggDuration(oggFile(10_800))).toBeCloseTo(10_800, 3);
+    expect(oggDuration(oggFile(10_801))).toBeNull();
+  });
+
+  it('a recording whose pages give no length takes the one the player reads', () => {
+    const none = new Uint8Array(oggFile(2));
+    none.fill(0xff, none.length - 31 + 6, none.length - 31 + 14);
+    const p = new Player(TEXTS.en, () => {});
+    URL.createObjectURL = () => 'blob:cue/1';
+    p.load(none.buffer);
+    const audio = (p as unknown as { audio: HTMLAudioElement }).audio;
+    expect(audio.preload).toBe('metadata');
+    expect(p.el.querySelector('.hdur')!.textContent).toBe('');
+    Object.defineProperty(audio, 'duration', { value: 7.4 });
+    audio.dispatchEvent(new Event('durationchange'));
+    expect(p.el.querySelector('.hdur')!.textContent).toBe('0:07');
+    // With a length from its pages, the file is not read ahead of a press.
+    const q = new Player(TEXTS.en, () => {});
+    q.load(oggFile(3));
+    expect((q as unknown as { audio: HTMLAudioElement }).audio.preload).toBe('none');
+    expect(q.el.querySelector('.hdur')!.textContent).toBe('0:03');
   });
 
   it('shows as m:ss', () => {

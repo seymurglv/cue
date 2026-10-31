@@ -102,6 +102,12 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 /* an opened row: its whole text, then how it was said and its recording (the question of an "Ask" moves down there);
    both grow in one motion, and while it closes (.shut) the text stays whole until it is one line again */
 .hr.hmore{cursor:pointer}
+/* the keyboard's focus: rings drawn inside, so nothing clips them (.htx and .hdet hide what overflows) */
+.hr.hmore:focus-visible{outline:0;box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--text) 40%,transparent)}
+.hchip:focus-visible{outline:0}
+.hchip:focus-visible .happ{color:var(--text)}
+.hchip:focus-visible .hcnt{box-shadow:inset 0 0 0 1px var(--text);color:var(--text)}
+.hpb:focus-visible{outline:1.5px solid var(--bg);outline-offset:-4px}
 .hr.open{background:color-mix(in srgb,var(--text) 5%,transparent)}
 .hr.open .htx,.hr.shut .htx{display:block}
 .hr.open .htx{height:auto}

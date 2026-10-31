@@ -191,8 +191,12 @@ export function appendDiff(parent: HTMLElement, heard: string, written: string, 
   });
 }
 
+/** No recording of CUE's plays longer: a position past it is no length. */
+export const MAX_SECONDS = 3 * 3600;
+
 /** How long an Ogg Opus recording plays, in seconds: the last page's position less the pre-skip, at 48 kHz (RFC 7845);
- *  null — not one CUE wrote (no OpusHead first, no last page). */
+ *  null — not one CUE wrote (no OpusHead first, no last page), or its last position is none (all ones, RFC 3533) or
+ *  past `MAX_SECONDS`. */
 export function oggDuration(bytes: ArrayBuffer): number | null {
   const b = new Uint8Array(bytes);
   const at = (o: number, s: string) => [...s].every((c, k) => b[o + k] === c.charCodeAt(0));
@@ -204,12 +208,16 @@ export function oggDuration(bytes: ArrayBuffer): number | null {
   for (let o = b.length - 27; o > 0; o--) {
     // The last page: "OggS", version 0, the end-of-stream flag.
     if (b[o] !== 0x4f || !at(o, 'OggS') || b[o + 4] !== 0 || !(b[o + 5] & 4)) continue;
-    const pos = view.getUint32(o + 6, true) + view.getUint32(o + 10, true) * 2 ** 32;
-    const s = (pos - preSkip) / 48_000;
-    return Number.isFinite(s) && s > 0 ? s : null;
+    const [lo, hi] = [view.getUint32(o + 6, true), view.getUint32(o + 10, true)];
+    if (lo === 0xffffffff && hi === 0xffffffff) return null;
+    const s = (lo + hi * 2 ** 32 - preSkip) / 48_000;
+    return Number.isFinite(s) && s > 0 && s <= MAX_SECONDS ? s : null;
   }
   return null;
 }
+
+/** A play() cut short by a pause or by the source going away: no failure. */
+const cutShort = (e: unknown) => (e as { name?: unknown } | null)?.name === 'AbortError';
 
 /** Seconds as the player shows them, m:ss. */
 export function clock(seconds: number): string {
@@ -253,12 +261,14 @@ export class Player {
     return this.on;
   }
 
-  /** The recording's bytes (an Ogg Opus file): it can play from now on. */
+  /** The recording's bytes (an Ogg Opus file): it can play from now on. Its length is read from its pages; only when
+   *  they do not say it does the element read the file ahead of a press (`durationchange`). */
   load(bytes: ArrayBuffer): void {
     if (this.audio) return;
     this.url = URL.createObjectURL(new Blob([bytes], { type: AUDIO_TYPE }));
+    const s = oggDuration(bytes);
     const audio = new Audio();
-    audio.preload = 'metadata';
+    audio.preload = s ? 'none' : 'metadata';
     const stopped = () => {
       this.on = false;
       this.paint();
@@ -278,7 +288,6 @@ export class Player {
     });
     audio.src = this.url;
     this.audio = audio;
-    const s = oggDuration(bytes);
     if (s) this.length(s);
     this.btn.disabled = false;
   }
@@ -294,6 +303,7 @@ export class Player {
     this.on = true;
     this.paint();
     Promise.resolve(audio.play()).catch((e) => {
+      if (this.audio !== audio || cutShort(e)) return;
       this.on = false;
       this.paint();
       logFailed('playing a recording', e);
@@ -312,6 +322,8 @@ export class Player {
     if (audio) {
       audio.pause();
       audio.removeAttribute('src');
+      // Without a source, a load makes the element let go of the file and what it decoded.
+      audio.load();
     }
     if (this.url) URL.revokeObjectURL(this.url);
     this.url = '';

@@ -271,6 +271,10 @@ export class WindowPage implements Ctx {
     this.setLang(view?.lang);
     this.build();
     api.onMicLevel((level) => this.tray.level(level)).catch((e) => logFailed('following the microphone level', e));
+    // A recording CUE starts must not take in a recording of the history playing aloud.
+    api.onCoreState((s) => {
+      if (s.phase === 'start' || s.phase === 'listen') this.history.recordingStarts();
+    }).catch((e) => logFailed('following the recording state', e));
     await this.history.load();
   }
 
@@ -311,10 +315,11 @@ export class WindowPage implements Ctx {
     document.documentElement.lang = this.lang;
   }
 
-  /** New settings from the core: the language may have changed (the whole page in it), the period too (the history
-   *  shows what is left of it). */
+  /** New settings from the core: the language may have changed (the whole page in it), a period too (the history
+   *  shows what is left of it; a recording playing stops, and the entries say anew which have one). */
   private took(view: SettingsView): void {
     const keepChanged = this.settings?.historyKeep !== view.historyKeep;
+    const audioChanged = this.settings?.historyAudio !== view.historyAudio;
     const relang = pickLang(view.lang) !== this.lang;
     this.settings = view;
     if (relang) {
@@ -325,7 +330,8 @@ export class WindowPage implements Ctx {
       this.history.settingsChanged();
       this.tray.settingsChanged();
     }
-    if (keepChanged) void this.history.reload();
+    if (audioChanged) this.history.release();
+    if (keepChanged || audioChanged) void this.history.reload();
   }
 
   /** The window's content in the current language; the History section and the tray keep their state. */

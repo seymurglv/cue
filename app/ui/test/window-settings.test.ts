@@ -358,8 +358,8 @@ describe('The settings tray', () => {
     expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'historyAudio', value: 'day' });
     expect($('.menu')).toBeNull();
     expect(text($('[data-dd="haudio"] .ddv'))).toBe('A day');
-    // The history itself is not read again: its period did not change.
-    expect(core.historyPage).toHaveBeenCalledTimes(1);
+    // The history is read again: its entries say anew which have a recording to play.
+    expect(core.historyPage).toHaveBeenCalledTimes(2);
     key('Escape');
     expect(text($('.btray em[data-val="history"]'))).toBe('Recordings: a day');
     click($('.btray [data-sub="history"]'));

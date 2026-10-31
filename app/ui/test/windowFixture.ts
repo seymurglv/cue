@@ -43,11 +43,17 @@ export function entry(id: string, text: string, over: Partial<api.EntryView> = {
 
 export const core = vi.mocked(api);
 
-/** What the page subscribed with: new history entries, the microphone's level, a failed microphone. */
-export const feeds: { entry: (e: api.EntryView) => void; level: (l: number) => void; failed: () => void } = {
+/** What the page subscribed with: new history entries, the microphone's level, a failed microphone, the core's state. */
+export const feeds: {
+  entry: (e: api.EntryView) => void;
+  level: (l: number) => void;
+  failed: () => void;
+  state: (s: api.CoreState) => void;
+} = {
   entry: () => {},
   level: () => {},
   failed: () => {},
+  state: () => {},
 };
 
 /** Answers of a core that holds `settings` and changes them as asked. */
@@ -82,6 +88,9 @@ export function stub(settings: api.SettingsView = view()): void {
   core.micAccess.mockResolvedValue('allowed');
   core.onMicFailed.mockImplementation(async (cb) => {
     feeds.failed = cb;
+  });
+  core.onCoreState.mockImplementation(async (cb) => {
+    feeds.state = cb;
   });
   core.welcomeStep.mockResolvedValue(undefined);
   core.welcomeClose.mockResolvedValue(undefined);

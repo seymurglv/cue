@@ -46,6 +46,7 @@ beforeEach(() => {
   vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(function (this: HTMLMediaElement) {
     this.dispatchEvent(new Event('pause'));
   });
+  vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
 });
 
 afterEach(() => {
@@ -574,12 +575,14 @@ describe('How it was said', () => {
     expect(a.querySelector('.hraw s, .hraw ins')).toBeNull();
   });
 
-  it('a search hit only in how it was said is marked there', async () => {
+  it('an entry found only in how it was said opens by itself, the place marked, and closes with the search', async () => {
     const found = entry(`${TODAY}T10:00:00.000-1`, 'Could you confirm the delivery location?', {
       app: 'Mail',
       raw: 'could you confirm the delivery address',
     });
-    core.historySearch.mockResolvedValue([{ date: TODAY, entries: [found] }]);
+    const shown = entry(`${TODAY}T09:00:00.000-1`, 'The address is on the card.', { raw: 'the address is on the card' });
+    core.historyPage.mockResolvedValue(pageOf(found, shown));
+    core.historySearch.mockResolvedValue([{ date: TODAY, entries: [found, shown] }]);
     page = await mount();
     click($('.hsbt'));
     type($<HTMLInputElement>('.hsf input')!, 'ADDRESS');
@@ -587,9 +590,56 @@ describe('How it was said', () => {
     await settle();
     const r = rowOf(found.id);
     expect(r.querySelector('.htx mark')).toBeNull();
-    openRow(found.id);
+    expect(r.classList.contains('open')).toBe(true);
+    expect(r.getAttribute('aria-expanded')).toBe('true');
     expect(r.querySelector('.hraw mark')!.textContent).toBe('address');
     expect(r.querySelector('.hraw s mark')!.textContent).toBe('address');
+    // A hit its row shows opens nothing.
+    expect(rowOf(shown.id).querySelector('.htx mark')!.textContent).toBe('address');
+    expect(rowOf(shown.id).classList.contains('open')).toBe(false);
+    // The search closes: so does what it opened.
+    key('Escape');
+    await settle();
+    expect(rowOf(found.id).classList.contains('open')).toBe(false);
+    // One the user opened stays open, and a search that finds it again leaves it so.
+    openRow(shown.id);
+    click($('.hsbt'));
+    type($<HTMLInputElement>('.hsf input')!, 'card');
+    await vi.advanceTimersByTimeAsync(200);
+    await settle();
+    key('Escape');
+    await settle();
+    expect(rowOf(shown.id).classList.contains('open')).toBe(true);
+  });
+
+  it('Enter or Space on an entry opens and closes it; its buttons keep their keys', async () => {
+    core.historyPage.mockResolvedValue(pageOf(said, morning));
+    page = await mount();
+    const r = rowOf(said.id);
+    expect(r.tabIndex).toBe(0);
+    expect(r.getAttribute('aria-expanded')).toBe('false');
+    // An entry with nothing more to show is no stop for the keyboard.
+    expect(rowOf(morning.id).hasAttribute('tabindex')).toBe(false);
+    expect(rowOf(morning.id).hasAttribute('aria-expanded')).toBe(false);
+    const press = (target: Element, k: string) => {
+      const ev = new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true });
+      target.dispatchEvent(ev);
+      return ev.defaultPrevented;
+    };
+    r.focus();
+    expect(press(r, 'Enter')).toBe(true);
+    expect(r.classList.contains('open')).toBe(true);
+    expect(r.getAttribute('aria-expanded')).toBe('true');
+    expect(press(r, ' ')).toBe(true);
+    expect(r.classList.contains('open')).toBe(false);
+    expect(r.getAttribute('aria-expanded')).toBe('false');
+    expect(press(r.querySelector('[data-copy]')!, 'Enter')).toBe(false);
+    expect(press(r, 'a')).toBe(false);
+    expect(r.classList.contains('open')).toBe(false);
+    // Drawn again (a new entry), the entry keeps the focus in its new row.
+    feeds.entry(entry(`${TODAY}T11:00:00.000-1`, 'Later.'));
+    expect(document.activeElement).toBe(rowOf(said.id));
+    expect(rowOf(said.id)).not.toBe(r);
   });
 
   it('an opened entry stays open when the list is drawn again', async () => {
@@ -704,6 +754,105 @@ describe('The recording', () => {
     expect(rowOf(other.id).querySelector('.hplay')).toBeNull();
     expect(err).toHaveBeenCalledWith('CUE: reading a recording failed:', 'failed');
     expect(JSON.stringify(err.mock.calls)).not.toContain('other text heard');
+    err.mockRestore();
+  });
+
+  it('a new entry opened while its recording is encoded asks once more a moment later', async () => {
+    page = await mount();
+    const fresh = entry(`${TODAY}T11:30:00.000-1`, 'Fresh.', { raw: 'fresh' });
+    feeds.entry(fresh);
+    core.historyAudio.mockResolvedValueOnce(null).mockResolvedValueOnce(oggFile(2));
+    openRow(fresh.id);
+    await settle();
+    expect(core.historyAudio).toHaveBeenCalledTimes(1);
+    expect(player(fresh.id).hidden).toBe(true);
+    await vi.advanceTimersByTimeAsync(2000);
+    await settle();
+    expect(core.historyAudio).toHaveBeenCalledTimes(2);
+    expect(player(fresh.id).hidden).toBe(false);
+    expect(player(fresh.id).querySelector('.hdur')!.textContent).toBe('0:02');
+    // None the second time either: no player, and no third ask.
+    const other = entry(`${TODAY}T11:40:00.000-1`, 'Other.', { raw: 'other' });
+    feeds.entry(other);
+    core.historyAudio.mockResolvedValue(null);
+    openRow(other.id);
+    await settle();
+    await vi.advanceTimersByTimeAsync(5000);
+    await settle();
+    expect(core.historyAudio).toHaveBeenCalledTimes(4);
+    expect(rowOf(other.id).querySelector('.hplay')).toBeNull();
+    // An entry of the first page is not asked for again.
+    const old = entry(`${TODAY}T10:00:00.000-1`, 'Older.', { raw: 'older' });
+    core.historyPage.mockResolvedValue(pageOf(old));
+    await page.history.reload();
+    openRow(old.id);
+    await settle();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(core.historyAudio).toHaveBeenCalledTimes(5);
+  });
+
+  it('every recording pauses when CUE starts recording', async () => {
+    core.historyPage.mockResolvedValue(pageOf(one));
+    core.historyAudio.mockImplementation(async (id) => bytes(id));
+    page = await mount();
+    openRow(one.id);
+    await settle();
+    click(button(one.id));
+    expect(button(one.id).getAttribute('aria-label')).toBe('Pause');
+    feeds.state({ phase: 'think', paused: false });
+    expect(button(one.id).getAttribute('aria-label')).toBe('Pause');
+    feeds.state({ phase: 'start', paused: false });
+    expect(button(one.id).getAttribute('aria-label')).toBe('Play');
+    click(button(one.id));
+    feeds.state({ phase: 'listen', paused: false });
+    expect(button(one.id).getAttribute('aria-label')).toBe('Play');
+  });
+
+  it('a new recordings period stops what plays and reads the list again', async () => {
+    core.historyPage.mockResolvedValue(pageOf(one));
+    core.historyAudio.mockImplementation(async (id) => bytes(id));
+    page = await mount();
+    openRow(one.id);
+    await settle();
+    click(button(one.id));
+    // "Don't keep": the recording stops and gives back its URL; the entry says it has none, and its player goes.
+    core.historyPage.mockResolvedValue(pageOf({ ...one, hasAudio: false }));
+    core.historyAudio.mockResolvedValue(null);
+    await page.change({ kind: 'historyAudio', value: 'off' });
+    expect(urls.revoked).toEqual(urls.made);
+    await settle();
+    expect(core.historyPage).toHaveBeenCalledTimes(2);
+    expect(rowOf(one.id).classList.contains('open')).toBe(true);
+    expect(rowOf(one.id).querySelector('.hplay')).toBeNull();
+    // The same period again changes nothing.
+    await page.change({ kind: 'historyAudio', value: 'off' });
+    await settle();
+    expect(core.historyPage).toHaveBeenCalledTimes(2);
+  });
+
+  it('a recording given back lets go of its file, and a start cut short by it is no failure', async () => {
+    core.historyPage.mockResolvedValue(pageOf(one));
+    core.historyAudio.mockImplementation(async (id) => bytes(id));
+    page = await mount();
+    openRow(one.id);
+    await settle();
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(HTMLMediaElement.prototype.play).mockImplementationOnce(() =>
+      Promise.reject(new DOMException('The play() request was interrupted', 'AbortError')),
+    );
+    click(button(one.id));
+    openRow(one.id);
+    await settle();
+    expect(HTMLMediaElement.prototype.load).toHaveBeenCalledTimes(1);
+    expect(err).not.toHaveBeenCalled();
+    // Any other failure is told, by its code only.
+    openRow(one.id);
+    await settle();
+    vi.mocked(HTMLMediaElement.prototype.play).mockImplementationOnce(() => Promise.reject(new Error('decode')));
+    click(button(one.id));
+    await settle();
+    expect(err).toHaveBeenCalledWith('CUE: playing a recording failed:', 'failed');
+    expect(button(one.id).getAttribute('aria-label')).toBe('Play');
     err.mockRestore();
   });
 
