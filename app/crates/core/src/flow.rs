@@ -94,9 +94,9 @@ pub enum Input {
     PasteLast,
     TogglePause,
     /// The welcome window holds the hotkey (`true`, spec 4a §1): from its creation until its first dictation's step,
-    /// and again on any other step. A chord then starts no recording and Ctrl+Win+V pastes nothing, but a recording
-    /// already running ends as usual (a chord, a release, Esc). Unlike a pause the keyboard hook still swallows the
-    /// chord, so the Start menu does not open.
+    /// and again on any other step. A chord then starts no recording but brings the window forward
+    /// (`BringWelcome`), and Ctrl+Win+V pastes nothing, but a recording already running ends as usual (a chord, a
+    /// release, Esc). Unlike a pause the keyboard hook still swallows the chord, so the Start menu does not open.
     WelcomeGate(bool),
     Ui(UiAction),
     MicFailed { heard: bool },
@@ -154,6 +154,9 @@ pub enum Effect {
     CancelTimer(TimerKind),
     HoldHintShown,
     Finished { id: DictationId, outcome: Outcome },
+    /// A chord the welcome window's hold ignored: the window comes forward, so one opened behind others shows why the
+    /// keys did nothing.
+    BringWelcome,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -653,8 +656,13 @@ impl Flow {
     }
 
     fn on_chord_down(&mut self, mode: Mode, now: Ms, fx: &mut Vec<Effect>) {
-        // The welcome window holds the key: only the press that ends a running recording counts.
-        if self.paused || (self.welcome && !self.recording_now()) {
+        if self.paused {
+            return;
+        }
+        // The welcome window holds the key: only the press that ends a running recording counts; any other brings the
+        // window forward.
+        if self.welcome && !self.recording_now() {
+            fx.push(Effect::BringWelcome);
             return;
         }
         if let Some(t) = self.last_chord_down
@@ -918,7 +926,7 @@ impl Flow {
     }
 
     fn on_paste_last(&mut self, fx: &mut Vec<Effect>) {
-        if self.paused || self.welcome {
+        if self.paused {
             return;
         }
         match self.phase {
@@ -926,6 +934,10 @@ impl Flow {
             // Ctrl+Win+V is not dictation: the dictation's start-up is dropped even if there is nothing to paste.
             Phase::Starting => self.discard(fx),
             _ => {}
+        }
+        // The welcome window holds the key: nothing is pasted, though a start-up begun before it is still dropped.
+        if self.welcome {
+            return;
         }
         if self.has_last {
             fx.push(Effect::PasteLast);
@@ -1468,8 +1480,9 @@ mod tests {
     }
 
     /// While the welcome window holds the key (spec 4a §1) a chord starts nothing — no dictation, no follow-up, no
-    /// recording in place of a "restore" — and Ctrl+Win+V pastes nothing. It is no pause: the hook keeps swallowing the
-    /// chord (`hook::PAUSED` follows `paused` alone), so the Start menu does not open.
+    /// recording in place of a "restore" — but brings the window forward, and Ctrl+Win+V pastes nothing. It is no
+    /// pause: the hook keeps swallowing the chord (`hook::PAUSED` follows `paused` alone), so the Start menu does not
+    /// open.
     #[test]
     fn gate_ignores_a_new_chord_and_the_hook_still_swallows_it() {
         let mut f = Flow::new(2, true);
@@ -1477,7 +1490,7 @@ mod tests {
         let idle = f.ui_state();
         for (i, mode) in [Mode::Dictate, Mode::Translate, Mode::Ask].into_iter().enumerate() {
             let t = 1_000 * (i as Ms + 1);
-            assert!(f.handle(I::ChordDown(mode), t).is_empty(), "{mode:?}");
+            assert_eq!(f.handle(I::ChordDown(mode), t), [E::BringWelcome], "{mode:?}");
             assert!(f.handle(I::ChordUp, t + 100).is_empty());
         }
         assert!(f.handle(I::PasteLast, 4_000).is_empty());
@@ -1485,7 +1498,7 @@ mod tests {
         assert!(!f.ui_state().paused, "the hook still swallows Ctrl+Win");
         assert!(!f.esc_active() && !f.recording_now());
         // The dictation's step lets it go; the press it ignored counted for nothing, not even for the debounce.
-        assert!(f.handle(I::ChordDown(Mode::Dictate), 5_000).is_empty());
+        assert_eq!(f.handle(I::ChordDown(Mode::Dictate), 5_000), [E::BringWelcome]);
         f.handle(I::WelcomeGate(false), 5_050);
         let fx = f.handle(I::ChordDown(Mode::Dictate), 5_100);
         assert!(has(&fx, &E::OpenMic { id: f.current_id() }));
@@ -1494,7 +1507,7 @@ mod tests {
         let mut f = Flow::new(2, true);
         answer_open(&mut f, 0);
         f.handle(I::WelcomeGate(true), 7_000);
-        assert!(f.handle(I::ChordDown(Mode::Dictate), 8_000).is_empty());
+        assert_eq!(f.handle(I::ChordDown(Mode::Dictate), 8_000), [E::BringWelcome]);
         assert_eq!(f.ui_state().phase, UiPhase::Answer);
         // Esc still closes it.
         assert_eq!(phase(&f.handle(I::Esc, 9_000)), Some(UiPhase::Idle));
@@ -1515,7 +1528,7 @@ mod tests {
         assert!(has(&fx, &E::Insert { id, text: "Привет.".into() }));
         let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 6_000);
         assert!(has(&fx, &E::Finished { id, outcome: Outcome::Inserted }));
-        assert!(f.handle(I::ChordDown(Mode::Dictate), 7_000).is_empty(), "done: a new chord starts nothing");
+        assert_eq!(f.handle(I::ChordDown(Mode::Dictate), 7_000), [E::BringWelcome], "done: a new chord starts nothing");
 
         // Held: the release ends it.
         let mut f = Flow::new(2, false);
@@ -1536,8 +1549,18 @@ mod tests {
         let fx = f.handle(I::Esc, 2_000);
         assert!(has(&fx, &E::StopMic { id, keep: true }));
         assert_eq!(phase(&fx), Some(UiPhase::Cancel));
-        assert!(f.handle(I::ChordDown(Mode::Dictate), 3_000).is_empty());
+        assert_eq!(f.handle(I::ChordDown(Mode::Dictate), 3_000), [E::BringWelcome]);
         assert_eq!(f.ui_state().phase, UiPhase::Cancel);
+
+        // Ctrl+Win+V still throws away a start-up begun before the window took the key, and pastes nothing.
+        let mut f = Flow::new(2, true);
+        f.handle(I::ChordDown(Mode::Dictate), 0);
+        let id = f.current_id();
+        f.handle(I::WelcomeGate(true), 20);
+        let fx = f.handle(I::PasteLast, 50);
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::Discarded }));
+        assert!(!has(&fx, &E::PasteLast));
+        assert_eq!(phase(&fx), Some(UiPhase::Idle));
     }
 
     #[test]

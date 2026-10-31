@@ -48,12 +48,12 @@ impl Preview {
 pub fn start(app: &AppHandle, owner: &str, device: Option<String>) {
     // One at a time: the one running ends, whichever window started it.
     let running = slot().take();
-    end(running);
+    take_over(app, owner, running);
     let live = Arc::new(AtomicBool::new(true));
     let (events, rx) = std::sync::mpsc::channel();
-    let (app, to, on) = (app.clone(), owner.to_owned(), Arc::clone(&live));
+    let (handle, to, on) = (app.clone(), owner.to_owned(), Arc::clone(&live));
     let forward =
-        std::thread::Builder::new().name("cue-mic-preview".into()).spawn(move || forward(&app, &to, &rx, &on));
+        std::thread::Builder::new().name("cue-mic-preview".into()).spawn(move || forward(&handle, &to, &rx, &on));
     if let Err(e) = forward {
         tracing::warn!("microphone preview not started: {e}");
         return;
@@ -61,9 +61,23 @@ pub fn start(app: &AppHandle, owner: &str, device: Option<String>) {
     tracing::info!(pinned = device.is_some(), window = owner, "microphone preview started");
     let mic = mic::open(device, events);
     // Another start in between (each page asks one at a time, so only in a race): the last one stays.
-    if let Some(other) = slot().replace(Owned { owner: owner.to_owned(), preview: Preview { mic, live } }) {
-        other.preview.end();
+    let other = slot().replace(Owned { owner: owner.to_owned(), preview: Preview { mic, live } });
+    take_over(app, owner, other);
+}
+
+/// Ends `ended`, which a preview of the window `owner` replaces. If another window started it, that window gets a
+/// level of 0, so its meter drops rather than freezing at its last level.
+fn take_over(app: &AppHandle, owner: &str, ended: Option<Owned<Preview>>) {
+    let other = taken_from(ended.as_ref(), owner).map(str::to_owned);
+    end(ended);
+    if let Some(other) = other {
+        send(app, &other, "cue://mic-level", 0.0);
     }
+}
+
+/// The window whose preview `owner` takes over, if it is another one.
+fn taken_from<'a, P>(ended: Option<&'a Owned<P>>, owner: &str) -> Option<&'a str> {
+    ended.map(|p| p.owner.as_str()).filter(|&other| other != owner)
 }
 
 /// The preview ends, if one runs and the window `owner` started it.
@@ -138,12 +152,15 @@ mod tests {
         assert_eq!(slot.as_ref().map(|p| p.preview), Some(1));
         assert_eq!(take_owned(&mut slot, WELCOME_LABEL).map(|p| p.preview), Some(1));
         assert!(slot.is_none() && take_owned(&mut slot, WELCOME_LABEL).is_none(), "ended once");
+    }
 
-        // A start replaces the one running, whoever started it; from then on it is the new window's.
-        let mut slot = Some(Owned { owner: MAIN_LABEL.to_owned(), preview: 2 });
-        let replaced = slot.replace(Owned { owner: WELCOME_LABEL.to_owned(), preview: 3 });
-        assert_eq!(replaced.map(|p| p.owner), Some(MAIN_LABEL.to_owned()));
-        assert!(take_owned(&mut slot, MAIN_LABEL).is_none());
-        assert_eq!(take_owned(&mut slot, WELCOME_LABEL).map(|p| p.preview), Some(3));
+    /// A start replaces the one running, whoever started it: the window it is taken from is told its level is 0, the
+    /// window that starts it again (another microphone chosen) is not.
+    #[test]
+    fn a_preview_taken_over_is_told_to_the_window_it_was_taken_from() {
+        let main = Owned { owner: MAIN_LABEL.to_owned(), preview: 2 };
+        assert_eq!(taken_from(Some(&main), WELCOME_LABEL), Some(MAIN_LABEL));
+        assert_eq!(taken_from(Some(&main), MAIN_LABEL), None);
+        assert_eq!(taken_from::<u8>(None, WELCOME_LABEL), None);
     }
 }

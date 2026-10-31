@@ -1,5 +1,6 @@
 //! Core events → the Drop and card windows, new history entries → the main window's channel, and window commands → the
-//! core (names as in `app/ui/src/main.ts` and `app/ui/src/card.ts`).
+//! core (names as in `app/ui/src/main.ts` and `app/ui/src/card.ts`). The Drop's and the card's commands answer those
+//! windows alone (`guard`).
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -8,8 +9,9 @@ use cue_core::settings::{DropPosition, Keep, Settings, UiLanguage};
 use cue_core::translate;
 use cue_core::ui::{TrayKind, UiAction, UiState};
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, State, WebviewWindow};
 
+use crate::card_window::CARD_LABEL;
 use crate::drop_window::DROP_LABEL;
 use crate::lang::Lang;
 use crate::runtime::CoreEvent;
@@ -322,15 +324,39 @@ impl Ui {
     }
 }
 
+/// Every Drop and card command starts here, with its name: `drop_action` and `answer_source` answer the Drop's page
+/// and the card's, the others their own window's alone, and none the main or the welcome window's (they have their
+/// own commands, `commands`). A refused command does nothing.
+pub fn guard(window: &WebviewWindow, command: &str) -> bool {
+    let answered = guard_label(window.label(), command);
+    if !answered {
+        tracing::warn!(window = window.label(), command, "window command refused");
+    }
+    answered
+}
+
+fn guard_label(label: &str, command: &str) -> bool {
+    match command {
+        "drop_action" | "answer_source" => label == DROP_LABEL || label == CARD_LABEL,
+        "drop_ready" | "drop_drag" | "drop_hit_rects" => label == DROP_LABEL,
+        "card_ready" | "card_hit_rects" => label == CARD_LABEL,
+        _ => false,
+    }
+}
+
 #[tauri::command]
-pub fn drop_action(action: UiAction, core: State<'_, CoreTx>) {
-    let _ = core.0.send(CoreEvent::UiAction(action));
+pub fn drop_action(window: WebviewWindow, action: UiAction, core: State<'_, CoreTx>) {
+    if guard(&window, "drop_action") {
+        let _ = core.0.send(CoreEvent::UiAction(action));
+    }
 }
 
 /// A source chip of the answer was clicked: the core opens its page.
 #[tauri::command]
-pub fn answer_source(n: u32, core: State<'_, CoreTx>) {
-    let _ = core.0.send(CoreEvent::AnswerSource(n));
+pub fn answer_source(window: WebviewWindow, n: u32, core: State<'_, CoreTx>) {
+    if guard(&window, "answer_source") {
+        let _ = core.0.send(CoreEvent::AnswerSource(n));
+    }
 }
 
 fn place_index(place: DropPosition) -> usize {
@@ -339,14 +365,18 @@ fn place_index(place: DropPosition) -> usize {
 
 /// The window has subscribed to events: the core sends the current state, the tray card, `idle-hidden` and the place.
 #[tauri::command]
-pub fn drop_ready(core: State<'_, CoreTx>) {
-    let _ = core.0.send(CoreEvent::UiReady);
+pub fn drop_ready(window: WebviewWindow, core: State<'_, CoreTx>) {
+    if guard(&window, "drop_ready") {
+        let _ = core.0.send(CoreEvent::UiReady);
+    }
 }
 
 /// The card window has subscribed to events: the core sends the current state, the card's place and the open answer.
 #[tauri::command]
-pub fn card_ready(core: State<'_, CoreTx>) {
-    let _ = core.0.send(CoreEvent::CardReady);
+pub fn card_ready(window: WebviewWindow, core: State<'_, CoreTx>) {
+    if guard(&window, "card_ready") {
+        let _ = core.0.send(CoreEvent::CardReady);
+    }
 }
 
 #[cfg(test)]
@@ -431,6 +461,22 @@ mod tests {
         assert!(!shown.contains("private") && !shown.contains("secret"), "{shown}");
         let dictation = history::Entry { mode: history::Mode::Dictation, question: None, ..e };
         assert_eq!(serde_json::to_value(EntryView::from(&dictation)).unwrap()["question"], Value::Null);
+    }
+
+    /// The Drop's and the card's commands answer their own pages: the main and welcome windows', which show text of
+    /// their own, never drive the Drop or the card.
+    #[test]
+    fn drop_and_card_commands_answer_their_windows_alone() {
+        let drop = ["drop_action", "answer_source", "drop_ready", "drop_drag", "drop_hit_rects"];
+        let card = ["drop_action", "answer_source", "card_ready", "card_hit_rects"];
+        for &command in drop.iter().chain(&card) {
+            assert_eq!(guard_label(DROP_LABEL, command), drop.contains(&command), "drop {command}");
+            assert_eq!(guard_label(CARD_LABEL, command), card.contains(&command), "card {command}");
+            for label in [MAIN_LABEL, WELCOME_LABEL, "Drop", "drop ", "card ", ""] {
+                assert!(!guard_label(label, command), "{label:?} {command}");
+            }
+        }
+        assert!(!guard_label(DROP_LABEL, "settings_get") && !guard_label(CARD_LABEL, ""));
     }
 
     /// A channel that keeps the ids of the entries it gets, or refuses them all (a page that is gone).

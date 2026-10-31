@@ -6,8 +6,8 @@
 //!
 //! While it is open the hotkey starts nothing except on its first dictation's step (`Input::WelcomeGate`): it is held
 //! from before the window is created and let go when the window is destroyed or could not be created (`Hold`); in
-//! between its page moves it with its steps (`commands::welcome_step`). Its microphone preview goes with it; the main
-//! window's stays.
+//! between its page moves it with its steps (`commands::welcome_step`). A chord it holds brings it forward
+//! (`bring_forward`). Its microphone preview goes with it; the main window's stays.
 use std::ffi::OsStr;
 use std::sync::{Mutex, PoisonError};
 
@@ -84,6 +84,15 @@ pub fn open(app: &AppHandle) {
         (Open::Bring, Some(win)) => bring(&win),
         (Open::Create, _) => spawn_create(app.clone()),
         _ => {}
+    }
+}
+
+/// A chord the window holds: the window comes forward if it is there. It is never created for that: a hold without a
+/// window is one being created, or one whose end is on its way.
+pub fn bring_forward(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window(WELCOME_LABEL) {
+        tracing::info!("welcome window brought forward: it holds the hotkey");
+        bring(&win);
     }
 }
 

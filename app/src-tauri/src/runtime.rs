@@ -727,6 +727,7 @@ impl Runtime {
             }
             Effect::HoldHintShown => self.hold_hint_shown(),
             Effect::Finished { id, outcome } => self.on_finished(id, outcome),
+            Effect::BringWelcome => crate::welcome_window::bring_forward(self.ui.app()),
         }
     }
 

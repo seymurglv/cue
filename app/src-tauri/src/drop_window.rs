@@ -108,8 +108,10 @@ impl Placer {
 }
 
 #[tauri::command]
-pub fn drop_drag(phase: DragPhase, placer: tauri::State<'_, Placer>) {
-    let _ = placer.0.send(phase);
+pub fn drop_drag(window: WebviewWindow, phase: DragPhase, placer: tauri::State<'_, Placer>) {
+    if crate::ipc::guard(&window, "drop_drag") {
+        let _ = placer.0.send(phase);
+    }
 }
 
 pub fn create(app: &AppHandle, lang: Lang, place: DropPosition) -> anyhow::Result<WebviewWindow> {
@@ -580,8 +582,10 @@ fn rest_rect(mon: Monitor, place: DropPosition, rect: PxRect, scale: f64) -> PxR
 }
 
 #[tauri::command]
-pub fn drop_hit_rects(rects: Vec<HitRect>, state: tauri::State<'_, HitState>) {
-    state.set(rects);
+pub fn drop_hit_rects(window: WebviewWindow, rects: Vec<HitRect>, state: tauri::State<'_, HitState>) {
+    if crate::ipc::guard(&window, "drop_hit_rects") {
+        state.set(rects);
+    }
 }
 
 #[cfg(test)]

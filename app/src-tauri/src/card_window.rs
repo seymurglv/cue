@@ -28,8 +28,10 @@ const HIDE_AFTER: Duration = Duration::from_millis(260);
 pub struct CardHits(pub HitState);
 
 #[tauri::command]
-pub fn card_hit_rects(rects: Vec<HitRect>, state: tauri::State<'_, CardHits>) {
-    state.0.set(rects);
+pub fn card_hit_rects(window: WebviewWindow, rects: Vec<HitRect>, state: tauri::State<'_, CardHits>) {
+    if crate::ipc::guard(&window, "card_hit_rects") {
+        state.0.set(rects);
+    }
 }
 
 pub fn create(app: &AppHandle, lang: Lang) -> anyhow::Result<WebviewWindow> {
