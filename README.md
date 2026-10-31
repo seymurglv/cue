@@ -18,13 +18,15 @@ main window, with the history of everything CUE wrote and the settings.
    WebView2 runtime that CUE's windows use comes with Windows 11.
 3. Its last page starts CUE and offers a desktop shortcut: both boxes are ticked, so untick **Create desktop
    shortcut** if you do not want one. A first install also turns on **Start at sign-in**; installing CUE again, or a
-   newer version, keeps your choice. You can turn it off in the menu of the icon next to the clock, or in the main
-   window's General settings.
+   newer version, keeps your choice. The one exception: when the installer removes the version already there first
+   and you tick **Delete the application data** in that uninstaller, the install counts as a first one. You can turn
+   Start at sign-in off in the menu of the icon next to the clock, or in the main window's General settings.
 
-On its first start, and on every start while one of its two keys is missing, CUE opens a welcome window: Hello,
-Keys, Microphone, First dictation and Done. While it is open, `Ctrl + Win` works only at the First dictation step. If
-you close it before both keys are saved, it comes back at the next start. To open it again at any time, even while
-CUE is running, press `Win + R` and run `"%LOCALAPPDATA%\Programs\CUE\cue.exe" --welcome`.
+On its first start, and on every start while one of its two keys is missing, CUE opens a welcome window: Hello, Keys,
+Microphone, First dictation and Done. While it is open, `Ctrl + Win` works only at the First dictation step; at the
+others it brings the window forward. If you close it before both keys are saved, it comes back at the next start. To
+open it again at any time, even while CUE is running, press `Win + R` and run
+`"%LOCALAPPDATA%\Programs\CUE\cue.exe" --welcome`.
 
 ## Keys
 
@@ -59,10 +61,10 @@ Each service has its own policy on how long it keeps what it receives. Every det
 ## Uninstall
 
 Quit CUE from the menu of its icon next to the clock, then open Windows **Settings → Apps → Installed apps**, find
-**CUE** and choose **Uninstall**. This removes the program, its Start menu entry and Start at sign-in. Your history,
-settings and keys stay, so installing CUE again picks up where you left off. The uninstaller's **Delete the
-application data** box removes only the cache of CUE's windows (the last folder below) and the installer's registry
-key (the last line). To remove everything:
+**CUE** and choose **Uninstall**. This removes the program, its Start menu entry, its desktop shortcut and Start at
+sign-in. Your history, settings and keys stay, so installing CUE again picks up where you left off. The uninstaller's
+**Delete the application data** box removes only the cache of CUE's windows (the last folder below) and the installer's
+registry key (the last line). To remove everything:
 
 - the folder `%LOCALAPPDATA%\CUE`: the history, the last dictation, the logs and the cost records;
 - the folder `%APPDATA%\CUE`: the settings;
@@ -222,7 +224,11 @@ npx tauri build --no-bundle
 ```
 
 The result is `target\release\cue.exe` at the repository root. Run it directly; use **Start at sign-in** in the tray
-menu to launch it with Windows. A second launch does nothing: only one instance runs.
+menu to launch it with Windows. Only one CUE runs at a time: a second launch hands its `--welcome`, if any, to the
+one running and exits. This build and an installed CUE are one app to Windows (one identifier), so they share that
+single instance, the data folders and keys, the cache of the windows and the Start at sign-in value. While this build
+runs, the installer's **Run CUE** and an installed `cue.exe --welcome` reach it instead, without a word: to try an
+installed CUE, quit this one first, and check which program runs with `(Get-Process cue).Path`.
 
 The installer is built into `target\dist`, so `target\release` is left alone. Before an installer leaves this
 computer, build it twice, the uncompressed one for the scan first, and look through both and the program for anything
@@ -506,11 +512,12 @@ whether the model wrote such words (`text_before_search`) and the error codes of
 - **Inside CUE:** the Drop and the card windows get the text of the question and the answer, the card's short quote of
   the selection (40 characters at most), and the titles and sites of the sources, to draw them; never the addresses. A
   click on a source asks the core to open it, and the core opens only `http` and `https` pages, in the default browser.
-  The history's text goes to the main window alone; the Drop and the card cannot read the history, the settings or
-  the keys. A key pasted in the main window goes straight to Credential Manager, and the window gets back only its
-  mask.
-- The microphone is open only while CUE is recording, and while the main window's Microphone settings show its level
-  (only the level reaches the window; that audio is never kept).
+  The history's text goes to the main window alone. The welcome window cannot read the history, and of the settings
+  it changes only the microphone; the Drop and the card cannot read the history, the settings or the keys. A key
+  pasted in the main window or the welcome window goes straight to Credential Manager, and the window gets back only
+  its mask.
+- The microphone is open only while CUE is recording, and while the main window's Microphone settings or the welcome
+  window's Microphone step show its level (only the level reaches that window; that audio is never kept).
 - **Stays on this computer:** the history, the last dictation's audio and text, recordings saved for the bench,
   settings, logs and usage rows. Logs and `usage.csv` never contain dictation text, questions, answers, selected text,
   sources, the history or microphone names; a crash records only the thread and code location, not the panic message.
@@ -584,10 +591,10 @@ app/
                           pinned one by its name), Drop window styles and placement, card placement, sleep and lock
                           events
   crates/cli/             cue-cli: API keys, monthly usage and the leak scan of a build
-  src-tauri/              the cue app: runtime, Drop, card and main windows, the main window's commands, tray icon,
-                          logging; nsis/ holds the installer's script and hooks
-  ui/                     the Drop, its tray cards, the "Ask" answer and card, and the main window (history and
-                          settings): TypeScript + Vite, no framework
+  src-tauri/              the cue app: runtime, Drop, card, main and welcome windows, the main and welcome windows'
+                          commands, tray icon, logging; nsis/ holds the installer's script and hooks
+  ui/                     the Drop, its tray cards, the "Ask" answer and card, the main window (history and
+                          settings) and the welcome window: TypeScript + Vite, no framework
 bench/                    cue-bench: comparison bench
 docs/ARCHITECTURE.md      how CUE works inside
 scripts/build-release.ps1 the installer build

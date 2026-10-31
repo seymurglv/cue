@@ -1,11 +1,12 @@
 # How CUE works
 
-CUE is a Tauri 2 app: a Rust core that runs in the background and makes every decision, and a small TypeScript UI
-(the Drop with its tray cards, the "Ask" card at the selection, and the main window with the history and the
-settings) rendered by WebView2. The Drop and the card only draw the state the core sends and report button clicks
-back; the main window reads the history and changes the settings through commands, and the core stays the only one
-that writes either. The dictation logic is a pure state machine, so it is tested without windows, a microphone, a
-network or a real clock.
+CUE is a Tauri 2 app: a Rust core that runs in the background and makes every decision, and a small TypeScript UI (the
+Drop with its tray cards, the "Ask" card at the selection, the main window with the history and the settings, and the
+welcome window of the first start) rendered by WebView2. The Drop and the card only draw the state the core sends and
+report button clicks back; the main window reads the history and changes the settings through commands, the welcome
+window saves the keys and picks the microphone the same way, and the core stays the only one that writes the history and
+the settings. The dictation logic is a pure state machine, so it is tested without windows, a microphone, a network or a
+real clock.
 
 ## Crates
 
@@ -33,27 +34,34 @@ network or a real clock.
   switched the mode is held), `input` (`SendInput`, modifier state), `clipboard` (paste, and the `Ctrl + C` fallback
   of "Ask"), `focus` (UI Automation: the field, the text before the caret, the selection; and the window under the
   main window, for Paste again), `selection` (when to copy the selection, where it is on screen), `cardplace` (where
-  the "Ask" card goes), `mic` (cpal; a pinned microphone found by its name), `wav`, `dropwin` (window styles, moves,
+  the "Ask" card goes), `mic` (cpal; a pinned microphone found by its name; whether Windows denies CUE the
+  microphone), `wav`, `dropwin` (window styles, moves,
   the z-order guard), `placement` (the four places, the nearest place, monitors), `power`.
 - **`cue`** (`app/src-tauri`): startup, the `runtime` actor (with `runtime::ask`, the conversation of an open answer),
-  `ipc`, `drop_window`, `card_window`, `main_window` and `commands` (the main window and its commands), `micpreview`
-  (the microphone level of the settings), `tray` and `trayicon`, `logging`.
+  `ipc`, `drop_window`, `card_window`, `main_window`, `welcome_window` and `commands` (the main and welcome windows and
+  their commands), `micpreview` (the microphone level of the settings and of the welcome window), `tray` and
+  `trayicon`, `logging`; `nsis/` holds the installer's script and hooks.
 - **`app/ui`**: `main.ts` (events, commands, frame loop), `controller.ts` (`DropController`), `trays.ts`,
   `answer.ts` (the "Ask" answer, one view for the tray and the card), `markdown.ts` (its safe Markdown), `card.ts` and
   `cardPage.ts` (the card window), `strings.ts`, `window.html` with `window/` (the main window: `page.ts`,
-  `history.ts`, `settings.ts`, `text.ts`, `icons.ts`, `api.ts`), and `design/` (Drop, tray card, answer and animation
-  code, styles including the main window's `window.css`, the Bebas Neue font).
-- **`cue-cli`** (`app/crates/cli`) and **`cue-bench`** (`bench`): developer tools.
+  `history.ts`, `settings.ts`, `text.ts`, `icons.ts`, `api.ts`, and `keys.ts` and `mic.ts`, the key and microphone
+  rows the welcome window shares), `welcome.html` with `welcome/` (`page.ts`, `steps.ts`, `text.ts`, `welcome.css`),
+  and `design/` (Drop, tray card, answer and animation code, styles including the main and welcome windows'
+  `window.css`, the Bebas Neue and Montserrat ExtraBold fonts).
+- **`cue-cli`** (`app/crates/cli`: keys, usage and `leak-scan`, see Installer and release build) and **`cue-bench`**
+  (`bench`): developer tools. `scripts/build-release.ps1` builds the installer.
 
 ## Threads
 
-- **Main thread** (Tauri event loop): windows, the tray menu, tray icon redraws, and the main window's `mic_preview`
-  command (so a preview's start and stop run in order with the window's end).
-- **`cue-core`**: the core actor, `Runtime::run`. All events arrive as `CoreEvent`s on one unbounded channel:
-  hotkeys, Drop actions, microphone frames, engine results, timers, sleep and lock, and the main window's settings and
-  history requests. It runs on its own thread (`block_on`) because it makes short blocking Windows calls (UI
-  Automation up to 150 ms, Credential Manager). Network calls and timers are tokio tasks that send their results back
-  as events. A panic while handling one event is caught and logged, and the core keeps running.
+- **Main thread** (Tauri event loop): windows, the tray menu, tray icon redraws, the `mic_preview` command (so a
+  preview's start and stop run in order with its window's end) and the welcome window's `welcome_step` (so its steps
+  reach the core in order).
+- **`cue-core`**: the core actor, `Runtime::run`. All events arrive as `CoreEvent`s on one unbounded channel: hotkeys,
+  Drop actions, microphone frames, engine results, timers, sleep and lock, the main and welcome windows' settings
+  requests, the main window's history requests and the welcome window's hold of the hotkey. It runs on its own thread
+  (`block_on`) because it makes short blocking Windows calls (UI Automation up to 150 ms, Credential Manager). Network
+  calls and timers are tokio tasks that send their results back as events. A panic while handling one event is caught
+  and logged, and the core keeps running.
 - **`cue-keyboard`**: the `WH_KEYBOARD_LL` hook (and, while a Shift that toggled the mode is held, `WH_MOUSE_LL`: see
   Hotkey chord) with its own message loop at time-critical priority. The handler only classifies the key and sends a
   `HotkeyEvent`; `cue-hotkeys` forwards it to the core. The hook reads three atomics
@@ -68,15 +76,16 @@ network or a real clock.
 - **`cue-card`**: moves, shows and hides the "Ask" card window.
 - **`cue-mic`** (cpal; it also lists the devices to find a pinned microphone) with `cue-mic-events` forwarding
   frames; `cue-mic-stop` closes a microphone off the core thread (and off the main thread for the preview).
-- **`cue-mic-preview`**: while the main window's Microphone settings are shown, sends the window the level of the
-  preview's own `cue-mic` (see Main window).
-- **`cue-main-window`**: builds the main window and ends; a WebView built on the main thread from a tray or menu
-  handler deadlocks (wry#583). The main window's other commands are async: their file, device-list and Credential
-  Manager work runs on tokio's blocking threads.
+- **`cue-mic-preview`**: while the main window's Microphone settings or the welcome window's Microphone step are
+  shown, sends that window the level of the preview's own `cue-mic` (see Main window).
+- **`cue-main-window`** and **`cue-welcome-window`**: each builds its window and ends; a WebView built on the main
+  thread from a tray or menu handler deadlocks (wry#583). The windows' other commands are async: their file,
+  device-list, registry and Credential Manager work runs on tokio's blocking threads.
 - **`cue-power`**: a hidden top-level window for `WM_POWERBROADCAST` and session lock notifications.
 - **`cue-hit-test`** (one for the Drop and one for the card, ~60 Hz while the window is shown), **`cue-placement`**
   (every 0.5 s; every 8 ms while the Drop is dragged or snapping into place), **`cue-tray-watch`** (every 5 s),
-  **`cue-log-prune`** (daily), **`cue-open-source`** (a short thread for each click on a source).
+  **`cue-log-prune`** (daily), **`cue-open-source`** (a short thread for each click on a source),
+  **`cue-open-link`** (a short thread for each link of the welcome window).
 
 ## Dictation flow
 
@@ -208,6 +217,12 @@ keeps the answer open with the error and Retry, and the question is kept.
   app unmasked and open its menu). The check before the next key-down drops a modifier whose key-up was lost.
 - The hook is installed again after resume from sleep and after unlock, since Windows may remove it.
 - Pause for an hour sets `PAUSED`: the hook swallows and masks nothing and sends no events.
+- While the welcome window holds the hotkey (`Input::WelcomeGate`, see Welcome window), a chord starts nothing: no
+  recording, no follow-up over an open answer, no new recording in place of a "restore". It brings the welcome
+  window forward instead (`Effect::BringWelcome`), and does not count for the 0.3 s debounce. Only a press that ends
+  a recording already starting or running counts as usual; Esc, the release of a held chord and the Drop's buttons
+  are untouched. `Ctrl + Win + V` pastes nothing, though it still drops a start-up begun before the hold. The hold is
+  no pause: `PAUSED` stays clear, so the hook still swallows the chord and Start does not open.
 
 ### Recording
 
@@ -739,16 +754,23 @@ destroyed when closed, so no WebView stays in memory and the page reads the hist
 It is built on `cue-main-window`, never on the main thread (see Threads). Windows draws its frame, in the Windows theme
 (`theme(None)`; the page follows `prefers-color-scheme`); it is 700 × 760 logical px, at least 700 × 480, centered,
 and unlike the Drop it takes the focus. Closing it never quits CUE: an exit request without a code is prevented, and
-Quit exits with one. When it is destroyed, its history channel is dropped and the microphone preview stops.
+Quit exits with one. When it is destroyed, its history channel is dropped and a microphone preview it started stops.
 
 ### Commands and permissions
 
-The page talks to the core through the app's own commands (`commands.rs`), and every one starts with `guard`: a
-window other than `main` gets `notMain` and a log line with its label. The Drop and the card draw what a model wrote,
-so no page of theirs may read the history, change a setting or touch a key. Errors are short codes (`core`,
-`notFound`, `badValue`, `badName`, `emptyKey`, `store`, `autostart`, `failed`), never text. The main window has a
-capability of its own (`capabilities/main.json`) with `core:event:allow-listen` alone, for `cue://mic-level`; the
-Drop's and the card's `core:default` (`default.json`) does not cover it. The commands:
+The main and welcome windows' pages talk to the core through the app's own commands (`commands.rs`), and every one
+starts with `guard` and its own name. The main window is answered for every command but the welcome window's own
+(`welcome_step`, `welcome_close`, `open_link`); the welcome window only for what its steps need (`WELCOME_COMMANDS`:
+`settings_get`, `settings_set` with a microphone change alone, `key_state`, `key_set`, `key_check`, `mic_list`,
+`mic_preview`, `mic_access`, and its own); any other window gets `notMain` and a log line with its label and the
+command. The Drop's and the card's commands (`drop_action`, `answer_source`, `drop_ready`, `drop_drag`,
+`drop_hit_rects`, `card_ready`, `card_hit_rects`) answer those windows alone in the same way (`ipc::guard`) and do
+nothing for another. The Drop and the card draw what a model wrote, so no page of theirs may read the history, change
+a setting or touch a key. Errors are short codes (`core`, `notFound`, `badValue`, `badName`, `emptyKey`, `store`,
+`autostart`, `failed`), never text. The main and welcome windows have capabilities of their own
+(`capabilities/main.json`, `welcome.json`) with `core:event:allow-listen` alone, for `cue://mic-level` (and the
+welcome window's `cue://mic-failed`); the Drop's and the card's `core:default` (`default.json`) does not cover them.
+The commands:
 
 - `settings_get`, `settings_set` (one `SettingChange`, `{kind, value}`), answered by the core within 3 s with
   `SettingsView` (the period, `null` while unknown; the microphone; the translation target; the interface language
@@ -757,7 +779,8 @@ Drop's and the card's `core:default` (`default.json`) does not cover it. The com
   check follows within 5 s);
 - `history_subscribe`, `history_page`, `history_search`, `history_copy`, `history_paste`, `history_clear`;
 - `key_state`, `key_set`, `key_check` (Soniox and Anthropic only);
-- `mic_list`, `mic_preview`.
+- `mic_list`, `mic_preview`, `mic_access`;
+- the welcome window's `welcome_step`, `welcome_close`, `open_link` (see Welcome window).
 
 ### History
 
@@ -812,10 +835,47 @@ and answers with the settings as they are now (see Settings). After a `core` err
   microphone (`micpreview`): it opens the device in shared mode, as a recording does, so a dictation meanwhile records
   as usual, and `cue-mic-preview` sends the window only the level, at most ~30 times a second, as `cue://mic-level`;
   the samples are dropped there. One preview at a time; it stops when the Microphone page is left or the tray closes,
-  when the window's page unloads or loads again, and when the window is destroyed.
+  when the window's page unloads or loads again, and when the window is destroyed. It belongs to the window that
+  started it (`micpreview::start(app, owner, device)`): its level and a failure go to that window alone
+  (`emit_to`; the page listens on its own webview window), only that window's "off" or end stops it, and a preview
+  the other window starts replaces it, sending the window it was taken from a level of 0. The Microphone page starts
+  its preview again when the main window has the focus again.
 - **Translation**: the target language, any of the 60 Soniox knows; the core decides the home language again.
 - **General**: Start at sign-in, and the interface language (Auto, English, Русский), which switches every window at
   once (see The Drop and tray cards).
+
+## Welcome window
+
+An ordinary window that walks through Hello, Keys, Microphone, First dictation and Done (`welcome_window`, label
+`welcome`, the page `welcome.html`). It opens at startup when the Soniox or the Anthropic key is missing from
+Credential Manager (a store that cannot be read is no missing key: a log line names the key), and with `--welcome`,
+matched exactly among the program's arguments (`args_os`). The check runs in `setup` right after the tray and before
+the hook starts, so the core holds the hotkey before any chord comes. As with the main window there is one at a time
+(its own `CREATING`, with `main_window::decide`), created when opened, destroyed when closed and built on
+`cue-welcome-window`. Windows draws its frame in the Windows theme with the close button alone; it is 560 × 430
+logical px, centered, not resizable, and it takes the focus, so its first dictation is pasted into its own field.
+
+- **The hold.** `Hold::new` sends `Input::WelcomeGate(true)` before the creating thread starts; its `Drop` sends
+  `WelcomeGate(false)` and stops the welcome window's microphone preview. It lives in the window's `Destroyed`
+  handler, taken once, so the window's end lets the hotkey go, and so does a failed `build()` or a thread that did not
+  start. In between the page moves the gate with its steps (`welcome_step`): held from its load, let go on First
+  dictation, held again on any other step. A chord the hold ignores brings the window forward (`bring_forward`, which
+  never creates one; see Hotkey chord).
+- **Keys**: the settings tray's key rows (`window/keys.ts`), read again on each entry. Next waits until both keys are
+  saved, none failed its check or waits for one, and no typed key waits in a field; leaving the step empties the
+  fields.
+- **Microphone**: the settings tray's microphone rows (`window/mic.ts`), with the level of a preview of this window's
+  own from entering the step to leaving it. `mic_access` reads whether Windows denies the microphone: `Value` of
+  `CapabilityAccessManager\ConsentStore\microphone` and of its `NonPackaged` key, under HKLM and HKCU, where one
+  `Deny` is enough (group policy is not read). A refusal, a `cue://mic-failed` or no microphone at all shows a hint
+  with a button to the Windows privacy settings; when the window has the focus again the step reads both again with
+  a new preview.
+- **First dictation**: a text field kept in focus takes the paste of an ordinary dictation; the first text in it
+  leads to Done 1.5 s later, with the number of words.
+- **Links** go by name (`open_link`: `soniox`, `anthropic`, `micPrivacy`, exact), each to a fixed address, opened with
+  `ShellExecuteW` on `cue-open-link`, so no address of the page reaches the shell. `welcome_close` closes the window.
+- The page takes its language from `settings_get` (English or Russian, `welcome/text.ts`) and changes no setting but
+  the microphone. Its headings use Montserrat ExtraBold, its keycaps Bebas Neue.
 
 ## Tray icon
 
@@ -832,21 +892,25 @@ second click of a double click). The menu:
 - **Open log**: opens the log folder.
 - **Quit**.
 
-A second launch of `cue.exe` does nothing.
+Only one CUE runs (`tauri_plugin_single_instance`): a second launch hands its arguments to the one running and
+exits, and only `--welcome` does anything there, opening the welcome window or bringing it forward. An installed CUE
+and a build of the repository are one app to Windows (the identifier `app.cue.dictation`): they share that single
+instance, the data folders, the keys, the WebView profile and the Run value, so while one runs, launching the other
+reaches the one running.
 
 ## Settings
 
-`%APPDATA%\CUE\settings.json` is read once at startup; after that the core owns its copy, and the main window changes it
-only through the core (`CoreEvent::Settings`, one `SettingChange` at a time, answered over a `oneshot` with the settings
-as they are then). Missing fields take defaults, unknown fields are ignored, a UTF-8 BOM is accepted, and any engine
-name reads as `soniox`. If the file cannot be read, CUE runs on defaults and never writes it during that session: the
-window's changes hold until CUE quits, and the history's period is unknown (see Main window). Writes (the hold-hint
-counter, the Drop's place, the main window's changes) always write the whole file from the core's copy, so they never
-undo each other, and are atomic: a temp file in the same folder, then a rename. A change from the window takes effect
-at once: a new translation target decides the home language again, a new interface language relabels the tray menu
-and reloads the Drop and the card, a new period deletes the days it no longer keeps, and a new microphone is opened by
-the next recording. The value already set, or one the settings refuse (a microphone name of more than 200 characters,
-a translation code Soniox does not know, a period that is not one of the five), changes and writes nothing.
+`%APPDATA%\CUE\settings.json` is read once at startup; after that the core owns its copy, and the main and welcome
+windows change it only through the core (`CoreEvent::Settings`, one `SettingChange` at a time, answered over a `oneshot`
+with the settings as they are then). Missing fields take defaults, unknown fields are ignored, a UTF-8 BOM is accepted,
+and any engine name reads as `soniox`. If the file cannot be read, CUE runs on defaults and never writes it during that
+session: the window's changes hold until CUE quits, and the history's period is unknown (see Main window). Writes (the
+hold-hint counter, the Drop's place, the main window's changes) always write the whole file from the core's copy, so
+they never undo each other, and are atomic: a temp file in the same folder, then a rename. A change from the window
+takes effect at once: a new translation target decides the home language again, a new interface language relabels the
+tray menu and reloads the Drop and the card, a new period deletes the days it no longer keeps, and a new microphone is
+opened by the next recording. The value already set, or one the settings refuse (a microphone name of more than 200
+characters, a translation code Soniox does not know, a period that is not one of the five), changes and writes nothing.
 
 Default prices are not written to the file, so price fixes in code reach existing installs; once any price is edited,
 the whole block is written. `ui.language` (`auto`, `en`, `ru`, in any case and with spaces trimmed; any other value
@@ -901,6 +965,49 @@ an answer without a search is 2.5 s), and to Ctrl+V for a written text. A follow
 the Retry of a failed question (no audio). An answer still printing when a follow-up starts waits aside (`answering`)
 and gets its own row when it ends. Pasting a complete answer with its button adds no row.
 
+## Installer and release build
+
+`scripts/build-release.ps1` builds the release program and the installer into `target\dist` (`CARGO_TARGET_DIR`), never
+into `target\release`. Paths of the build computer are cut out of the program: `--remap-path-prefix` writes the user
+profile as `~` and the repository as `.`, passed in `CARGO_ENCODED_RUSTFLAGS` (cargo reads it before `RUSTFLAGS`); the
+program refers to its PDB by the file name alone (rustc's default). Vite builds no source maps, and the script stops if
+`app\dist` holds one. The shell's `CARGO_TARGET_DIR`, `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS` are put back afterwards.
+`-ScanBuild` builds the same installer without compression (a config file merged over `tauri.conf.json`) and moves it to
+`target\dist\scan`; an installer already in `bundle\nsis` is moved aside for that build and put back.
+
+The installer is NSIS, for the current user, in English and Russian, with no license page and no WebView2 download
+(`webviewInstallMode: skip`: Windows 11 has the runtime). Its script, `app/src-tauri/nsis/installer.nsi`, is the
+template of Tauri CLI 2.12.4 (pinned in `app/package.json`) with one line changed: the default folder is
+`%LOCALAPPDATA%\Programs\CUE`, since Tauri's `%LOCALAPPDATA%\CUE` is CUE's data folder. `LICENSE`, `NOTICE` and both
+OFL files go to the install folder's root. The publisher, `seymurglv`, names the registry key that keeps the install
+folder, `HKCU\Software\seymurglv\CUE`; the installer and the uninstaller carry CUE's icon. `hooks.nsh` handles Start
+at sign-in, the `Run` value `CUE`:
+
+- an install with no install folder in that key (a first one) writes it, `"<folder>\cue.exe"`, and deletes the
+  "turned off" mark Windows may keep under `Explorer\StartupApproved\Run`; a later install keeps the user's choice,
+  and an update (`/UPDATE`) leaves the value alone;
+- an uninstall reads the value before the running-app check, which may stop it; one that went through, with no
+  `/UPDATE` and the data box clear, notes in that key whether the value was there (`StartAtSignIn`). An upgrade by
+  hand runs the old uninstaller first (the installer's default choice), which deletes the value; the next install
+  puts it back from the note, and deletes the note.
+
+The uninstaller removes the program and, unless updating, its shortcuts and the `Run` value; its "Delete the application
+data" box removes the WebView data (`%LOCALAPPDATA%\app.cue.dictation`) and the registry key, never
+`%LOCALAPPDATA%\CUE` or `%APPDATA%\CUE`. The running-app check of both looks only at `<folder>\cue.exe`.
+
+`cue-cli leak-scan <file or folder>...` looks through what is to leave the computer for anything private and prints
+the file, the byte offset and the kind of each finding, never the finding. It reads what to look for into memory: the
+saved keys, the history texts and questions of the last 31 days, the dictionary terms, the microphone names (the
+pinned one and every one Windows lists), the Windows user name, computer name and profile path (also with `/`, `\\`
+or URL-encoded), the git name and email, and the private folders that the repository's `.git/info/exclude` names.
+Patterns add any user profile path, email addresses and `sk-ant-` / `sk-or-` keys; text files also get a check for
+long random-looking strings, joined across `-` and `_`, with hashes of known kinds and Windows GUIDs in braces passed
+over. Text is looked for as UTF-8 and UTF-16LE. The public name is a finding only in a path or an address, and not as
+the publisher's registry key. The exit code is 0, 1 for findings, and 2 when something to look for or a given path
+cannot be read, or a given path holds no file. Its panic hook prints the location alone. The installer script Tauri
+renders for a build (`target\dist\release\nsis\x64\installer.nsi`) names build paths on its compile-time lines
+(`File`, `!include`, the icon and path `!define`s); makensis stores none of them.
+
 ## Logging and privacy rules
 
 - Logs go to `%LOCALAPPDATA%\CUE\logs\cue.log.YYYY-MM-DD` through a non-blocking writer at `info` level; old files are
@@ -910,10 +1017,14 @@ and gets its own row when it ends. Pasting a complete answer with its button add
   target code of each translation; the token counts of each cache warm-up; for "Ask", the kind and length of the
   selection read, whether the `Ctrl + C` fallback ran and what became of its Win+V copy (a kind), the number of turns
   of a request, where the answer opened (tray or card), how a request ended and its number of web searches; for the
-  main window, its opening and closing, a command refused to another window (its label), a setting change as codes and
-  states (the period's code, whether a microphone is pinned, the interface language), how many old days of history were
-  deleted, where Paste again went (`pasted` or `clipboard`), which key was saved or checked and the check's result,
-  and that a pinned microphone was not there. Never logged: dictation text, text before the caret, translations,
+  main window, its opening and closing, a command refused to another window (its label and the command), a setting
+  change as codes and states (the period's code, whether a microphone is pinned, the interface language), how many old
+  days of history were deleted, where Paste again went (`pasted` or `clipboard`), which key was saved or checked, from
+  which window, and the check's result, a microphone preview started or stopped (the window, whether a microphone is
+  pinned), and that a pinned microphone was not there; for the welcome window, at startup whether each key is saved,
+  missing or unreadable, whether `--welcome` asked for it and whether it opens, its opening, closing and coming
+  forward, each step's hold of the hotkey, whether Windows allows the microphone, and the name of a link that did not
+  open. Never logged: dictation text, text before the caret, translations,
   dictionary terms, questions, answers, selected text, written texts, history entries, microphone names, the addresses
   and titles of sources, where the selection is on screen, audio, API keys, response bodies. `Effect` and `Input` are
   never logged with `{:?}`, since their `Debug` prints text.
@@ -922,11 +1033,11 @@ and gets its own row when it ends. Pasting a complete answer with its button add
   contain dictated text. Debug output of focus results, of the selection read and copied, of the "Ask" context, of
   microphone frames and events, of history entries and their views, and of the microphone setting and its changes
   shows only lengths and counts.
-- Keys are read from Credential Manager on use, appear in the CLI and the main window only masked, and are cut out of
-  engine error texts.
+- Keys are read from Credential Manager on use, appear in the CLI and the main and welcome windows only masked, and are
+  cut out of engine error texts.
 - The history's text goes to the main window alone: its commands read the files, and new entries come over its own
   channel (see Main window). The microphone names of the "Another microphone" card go to the Drop alone, and the main
-  window gets the device list.
+  and welcome windows get the device list.
 - Soniox uploads are deleted after use. The last dictation (`last\`), the history (`history\`) and bench recordings
   stay on this computer only.
 
