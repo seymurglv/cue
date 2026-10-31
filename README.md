@@ -1,16 +1,76 @@
 # CUE
 
-CUE is a voice-dictation app for Windows 11. Press `Ctrl + Win`, speak, and the cleaned-up text appears at the caret
-in whatever app you are typing in. Speech is transcribed in real time by Soniox, then lightly edited by Claude Haiku 5.5
-(filler words, self-corrections, punctuation, lists, numbers) while keeping your own words, tone and mix of languages.
-Add `Shift` (`Ctrl + Win + Shift`, or press `Shift` while you speak) and the text is pasted translated: into English,
-and English into your home language (Russian, say); any pair of the languages Soniox recognizes can be set. Add `Alt`
-instead (`Ctrl + Win + Alt`) and ask a question out loud: the answer appears next to your work, at the text you selected
-or by the Drop, and a request to write, fix, reply or translate puts the text straight into the field. It runs
-quietly in the background: a small indicator at the bottom of the screen (the Drop; drag it to the top or to either
-side if you prefer) shows what CUE is doing, and a tray icon next to the clock opens the main window, with the history
-of everything CUE wrote and the settings, and holds a short menu. This first version is built for personal use with
-your own Soniox and Anthropic API keys.
+CUE is a voice-dictation app for Windows 11. Press `Ctrl + Win`, speak, press the keys again (or hold them while you
+speak), and the text appears at the caret in whatever app you are typing in: fillers and false starts removed,
+punctuation added, your own words kept, in Russian, English or both mixed. Speech is transcribed by Soniox and tidied
+up by Claude, from Anthropic, with your own keys for both. Add `Shift` and the text comes out translated; add `Alt`
+instead and ask a question out loud, and the answer appears next to your work. CUE runs quietly in the background: a
+small indicator at the bottom of the screen (the Drop) shows what it is doing, and an icon next to the clock opens the
+main window, with the history of everything CUE wrote and the settings.
+
+## Install
+
+1. Run the installer, `CUE_<version>_x64-setup.exe`. CUE is not code-signed, so Windows shows "Windows protected your
+   PC": click **More info**, then **Run anyway**. Windows asks this again for every new version of CUE. If Smart App
+   Control is on (Windows Security → App & browser control), it blocks unsigned apps like CUE, and CUE will not run.
+2. The installer, in English or Russian, needs no administrator rights and asks for no license agreement. It installs
+   CUE for you alone, into `%LOCALAPPDATA%\Programs\CUE`, adds it to the Start menu and downloads nothing: the
+   WebView2 runtime that CUE's windows use comes with Windows 11.
+3. When it finishes, CUE starts. The first install also turns on **Start at sign-in**; you can turn it off in the menu
+   of the icon next to the clock, or in the main window's General settings.
+
+On its first start, and on every start while one of its two keys is missing, CUE opens a welcome window: Hello,
+Keys, Microphone, First dictation and Done. While it is open, `Ctrl + Win` works only at the First dictation step. If
+you close it before both keys are saved, it comes back at the next start. Running `cue.exe --welcome` (in
+`%LOCALAPPDATA%\Programs\CUE`) opens it again at any time, even while CUE is running.
+
+## Keys
+
+CUE uses your own accounts at two services, and each bills you directly for what you use:
+
+- **Soniox** turns your speech into text. Sign in at the [Soniox Console](https://console.soniox.com), set up billing
+  and create an API key.
+- **Anthropic** cleans the text up, translates it and answers your questions, with Claude. Sign in at the
+  [Anthropic Console](https://console.anthropic.com), set up billing and create an API key.
+
+Paste each key into the welcome window, or later into the main window's settings (**Keys**), and press **Check**: it
+saves the key and sends a free test request. The keys are kept in Windows Credential Manager; CUE's windows show only
+a mask of them.
+
+Dictation and translation cost roughly $3 a month for an hour of dictating a day. Questions asked with
+`Ctrl + Win + Alt` cost more, and each web search one of them runs adds $0.01. CUE writes down what every dictation and
+question cost, on your computer only (`usage.csv`, see [Costs](#costs)).
+
+## Privacy
+
+- **Soniox** receives the sound of each dictation and the name of the app you are dictating into.
+- **Anthropic** receives the text: what Soniox heard, the app name and up to 500 characters before the caret, and for a
+  question also the text you selected. Nothing is read from password fields.
+- The microphone is open only while CUE records, and while a window shows its level for you to check it.
+- Your history, settings, logs and the copy of your last dictation stay on this computer. CUE has no telemetry: it
+  connects only to Soniox and Anthropic, and the installer sends nothing.
+
+Each service has its own policy on how long it keeps what it receives. Every detail is in
+[Privacy in detail](#privacy-in-detail).
+
+## Uninstall
+
+Quit CUE from the menu of its icon next to the clock, then open Windows **Settings → Apps → Installed apps**, find
+**CUE** and choose **Uninstall**. This removes the program, its Start menu entry and Start at sign-in. Your history,
+settings and keys stay, so installing CUE again picks up where you left off. To remove them as well:
+
+- the folder `%LOCALAPPDATA%\CUE`: the history, the last dictation, the logs and the cost records;
+- the folder `%APPDATA%\CUE`: the settings;
+- the folder `%LOCALAPPDATA%\app.cue.dictation`: the cache of CUE's windows;
+- the keys: in **Control Panel → Credential Manager → Windows Credentials**, remove `soniox.CUE` and `anthropic.CUE`
+  under Generic Credentials.
+
+To open a folder, paste its path into the address bar of File Explorer.
+
+---
+
+The rest of this file describes CUE in detail: every feature and setting, what is sent where, and how to build CUE
+from source.
 
 ## Features
 
@@ -109,9 +169,9 @@ your own Soniox and Anthropic API keys.
 
 Not in this version: changing the hotkeys, editing the dictionary in the window (`dictionary.terms` is set in
 `settings.json`), a vocabulary for speech recognition itself (`dictionary.terms` guides only the cleanup, see
-Settings), an installer, macOS.
+Settings), macOS.
 
-## Requirements
+## Requirements for building
 
 - Windows 11 (x64).
 - Rust stable with the MSVC toolchain, 1.90 or newer (edition 2024):
@@ -124,8 +184,8 @@ Settings), an installer, macOS.
 ## API keys
 
 Keys live in Windows Credential Manager under the service name `CUE`. They are never written to files, never
-printed in full and never logged. Enter them once in the main window (Settings → Keys: paste the key and press
-**Check**), or with the command-line tool (input is hidden):
+printed in full and never logged. Enter them once in the welcome window or the main window (Settings → Keys: paste
+the key and press **Check**), or with the command-line tool (input is hidden):
 
 ```powershell
 cargo run -p cue-cli -- keys set soniox
@@ -303,8 +363,8 @@ The last three columns of `usage.csv` are `mode`, `web_searches` and `search_usd
   the Retry of a failed question (without audio). Pasting an answer with its button adds no row: the answer was counted
   when it was complete. A shown answer has the outcome `answered`, and its latency runs from the second key press to
   the first words; a text written into the field is `inserted` (or `no_field`), with the latency to the paste.
-- A `warmup` row is a cache warm-up (see Privacy), of the cleanup or of "Ask" (then with `ask.model`): paid tokens, no
-  audio, outcome `discarded`; it counts in the cost, not as a dictation.
+- A `warmup` row is a cache warm-up (see Privacy in detail), of the cleanup or of "Ask" (then with `ask.model`): paid
+  tokens, no audio, outcome `discarded`; it counts in the cost, not as a dictation.
 
 Rows written before these columns existed read as dictation, and the header of an existing file is not rewritten: it
 keeps the 13 old names while new rows have 16 fields.
@@ -368,7 +428,7 @@ thinking, to compare with the app's default (`--thinking off`). An answer's text
 shows: the words the model wrote before its first web search go when it starts. Each call in `out.json` also says
 whether the model wrote such words (`text_before_search`) and the error codes of searches that failed (`search_errors`).
 
-## Privacy
+## Privacy in detail
 
 - **Soniox** receives the audio of each dictation while you record, plus the name of the app you are dictating into
   as context. On fallback or Retry, the saved WAV is uploaded to the batch API; CUE deletes the uploaded file and its
@@ -468,6 +528,7 @@ whether the model wrote such words (`text_before_search`) and the error codes of
 
 ```
 Cargo.toml                Cargo workspace
+LICENSE, NOTICE           Apache License 2.0, and the copyright notice
 app/
   package.json            front-end tooling: Vite, TypeScript, Vitest, Tauri CLI
   crates/core/            cue-core: dictation state machine, settings, refine, translation and "Ask" rules, audio
@@ -498,6 +559,6 @@ and what the `Ctrl + C` fallback does there, never the text.
 
 ## License
 
-All rights reserved. No license has been chosen yet.
+CUE is licensed under the Apache License, Version 2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 The Bebas Neue font in `app/ui/src/design/fonts` is distributed under the SIL Open Font License 1.1 (see `OFL.txt`).
