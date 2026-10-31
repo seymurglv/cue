@@ -262,16 +262,17 @@ export class SettingsTray {
         old.remove();
         continue;
       }
-      old.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: `translateX(${-dir * 32}px)` }], {
-        duration: 200,
-        easing: 'ease-in',
+      // The rows going fade at once and are nearly gone when the new ones start: the two pages never read over each other.
+      old.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: `translateX(${-dir * 24}px)` }], {
+        duration: 160,
+        easing: 'cubic-bezier(.33,1,.68,1)',
         fill: 'forwards',
       }).onfinish = () => old.remove();
     }
     if (slide && olds.length) {
       pg.animate([{ opacity: 0, transform: `translateX(${dir * 32}px)` }, { opacity: 1, transform: 'none' }], {
-        duration: 420,
-        delay: 60,
+        duration: 400,
+        delay: 110,
         easing: 'cubic-bezier(.22,1,.36,1)',
         fill: 'backwards',
       });
