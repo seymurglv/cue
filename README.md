@@ -18,9 +18,9 @@ main window, with the history of everything CUE wrote and the settings.
    WebView2 runtime that CUE's windows use comes with Windows 11.
 3. Its last page starts CUE and offers a desktop shortcut: both boxes are ticked, so untick **Create desktop
    shortcut** if you do not want one. A first install also turns on **Start at sign-in**; installing CUE again, or a
-   newer version, keeps your choice. The one exception: when the installer removes the version already there first
-   and you tick **Delete the application data** in that uninstaller, the install counts as a first one. You can turn
-   Start at sign-in off in the menu of the icon next to the clock, or in the main window's General settings.
+   newer version, keeps your choice. Ticking **Delete the application data** in any uninstall, including the one an
+   upgrade runs first, makes the next install a first one. You can turn Start at sign-in off in the menu of the icon
+   next to the clock, or in the main window's General settings.
 
 On its first start, and on every start while one of its two keys is missing, CUE opens a welcome window: Hello, Keys,
 Microphone, First dictation and Done. While it is open, `Ctrl + Win` works only at the First dictation step; at the
@@ -52,8 +52,9 @@ question cost, on your computer only (`usage.csv`, see [Costs](#costs)).
 - **Anthropic** receives the text: what Soniox heard, the app name and up to 500 characters before the caret, and for a
   question also the text you selected. Nothing is read from password fields.
 - The microphone is open only while CUE records, and while a window shows its level for you to check it.
-- Your history, settings, logs and the copy of your last dictation stay on this computer. CUE has no telemetry: it
-  connects only to Soniox and Anthropic, and the installer sends nothing.
+- Your history, with the recordings of what you said for the period you choose, settings, logs and the copy of your
+  last dictation stay on this computer. CUE has no telemetry: it connects only to Soniox and Anthropic, and the
+  installer sends nothing.
 
 Each service has its own policy on how long it keeps what it receives. Every detail is in
 [Privacy in detail](#privacy-in-detail).
@@ -66,7 +67,7 @@ sign-in. Your history, settings and keys stay, so installing CUE again picks up 
 **Delete the application data** box removes only the cache of CUE's windows (the last folder below) and the installer's
 registry key (the last line). To remove everything:
 
-- the folder `%LOCALAPPDATA%\CUE`: the history, the last dictation, the logs and the cost records;
+- the folder `%LOCALAPPDATA%\CUE`: the history and its recordings, the last dictation, the logs and the cost records;
 - the folder `%APPDATA%\CUE`: the settings;
 - the folder `%LOCALAPPDATA%\app.cue.dictation`: the cache of CUE's windows;
 - the keys: in **Control Panel → Credential Manager → Windows Credentials**, remove `soniox.CUE` and `anthropic.CUE`
@@ -151,17 +152,24 @@ from source.
   in the Windows theme; opening it again brings it forward, and closing it leaves CUE running.
   - **History:** every result of CUE, newest first, with its time, mode and app: dictations, translations, "Ask"
     answers (the question and the answer) and texts "Ask" wrote into a field. Today and yesterday first, earlier days
-    with **Show earlier**, and a search over the texts and the questions. Hover over a row for **Copy** and **Paste
-    again**: the text goes into the window right under the main window (usually the one you were in before opening it),
-    or into the clipboard when there is none. `Ctrl + Win + V`, a paste with an answer's button, a refusal and a
+    with **Show earlier**. Three or more entries in a row from one app, each within 10 minutes of the one before, make
+    a stack: its newest entry on top, the app and the count on a chip that opens it. A click on an entry (or `Enter`)
+    shows how you said it: a dictation as Soniox heard it, the words CUE removed struck out and the ones it added or
+    changed in green; a translation's speech; an "Ask" question; and its recording, with play and pause, while it is
+    kept (an entry from before this version has nothing more to show). A recording plays only when you press it, and
+    pauses when CUE starts recording. The search, out of the magnifier, looks through the texts, the questions and how
+    they were said; an entry found only in how it was said opens by itself. Hover over a row for **Copy** and **Paste
+    again**: the text goes into the window right under the main window (usually the one you were in before opening
+    it), or into the clipboard when there is none. `Ctrl + Win + V`, a paste with an answer's button, a refusal and a
     failure add no entry, and **Paste again** does not change the last result. **Keep**: Forever, A year, A month (the
     default), A week or Don't keep; older days are deleted on their own, a shorter period deletes them at once, and
     **Clear history** needs a second press.
   - **Settings** (the gear): **Keys** (Soniox and Anthropic: paste a key and press **Check**, which saves it and sends
     a free test request; the window shows only its mask), **Microphone** (As in Windows, or a device of your own, with
-    a live level), **Translation** (the target language of `Ctrl + Win + Shift`, any of the 60), **General** (Start at
-    sign-in, the interface language). A change takes effect at once, without a restart, and is written to
-    `settings.json`.
+    a live level), **Translation** (the target language of `Ctrl + Win + Shift`, any of the 60), **History** (how long
+    recordings are kept: A day, A week (the default), A month or Don't keep, never longer than the history itself;
+    a shorter period deletes the older ones at once), **General** (Start at sign-in, the interface language). A change
+    takes effect at once, without a restart, and is written to `settings.json`.
 - **A pinned microphone.** A microphone chosen in the settings stays CUE's even when Windows changes its default (a
   headset plugged in, say). When it is not connected, CUE records from the Windows microphone, and a card says so once:
   "*name* not found — recording from *name*".
@@ -237,7 +245,7 @@ private:
 ```powershell
 scripts\build-release.ps1 -ScanBuild
 scripts\build-release.ps1
-cargo run -p cue-cli -- leak-scan target\dist\release\cue.exe target\dist\release\bundle\nsis target\dist\scan app\dist
+cargo run -p cue-cli -- leak-scan target\dist\release\cue.exe target\dist\scan app\dist
 ```
 
 The script prints the installer's path, `target\dist\release\bundle\nsis\CUE_<version>_x64-setup.exe`. It cuts this
@@ -251,21 +259,22 @@ afterwards. The first installer build downloads NSIS and Tauri's plugin for it f
 
 `-ScanBuild` makes the same installer without compression, in `target\dist\scan`, so that the scan reads the files
 inside it as they are. Both builds write the installer to the same place: an installer already there is moved aside
-for the scan build and put back, so either order keeps both. The programs inside the two differ only in the time
-stamps of the build and the id of its debug-symbol file. The shipped installer is compressed, so the scan cannot read
-inside it, and a few bytes of its compressed data can look like an email address by chance: the leak review before an
-installer leaves this computer unpacks it by hand and scans what it holds.
+for the scan build and put back, so either order keeps both. The program, `target\dist\release\cue.exe`, is the last
+build's: build the shipped installer last, as above, and the program scanned is the one it holds. The programs inside
+the two installers differ only in the time stamps of the build and the id of its debug-symbol file. The shipped
+installer is compressed, so the scan cannot read inside it, and a few bytes of its compressed data can look like an
+email address by chance: before it leaves this computer, unpack it by hand and scan what it holds.
 
 `leak-scan` looks for paths into a user profile (also URL-encoded), the Windows user name and computer name, email
 addresses and API keys, for exact copies of the keys saved in Credential Manager, the history of the last 31 days, the
 dictionary terms, the microphone names, the git name and email and the private folders that `.git/info/exclude` names
-(its lines ending with `/`), and, in text files, for long random-looking strings. It prints the file, the offset and
-the kind of each finding, never the finding itself. It exits with 1 when it found anything, and with 2 when it could
-not read what to look for (a key, the settings, the history, the microphone list, git) or a given path, or a given
-path holds no file. The installer script that Tauri writes for the build
-(`target\dist\release\nsis\x64\installer.nsi`) names files of this computer in its `File`, `!include`, icon and path
-`!define` lines: makensis reads them and stores none of those paths, which the scan of the uncompressed installer
-confirms.
+(its lines ending with `/`), for recordings (Ogg Opus and WAV, also stored inside an installer), and, in text files,
+for long random-looking strings. It prints the file, the offset and the kind of each finding, never the finding
+itself. It exits with 1 when it found anything, and with 2 when it could not read what to look for (a key, the
+settings, the history, the microphone list, git) or a given path, or a given path holds no file. The installer script
+that Tauri writes for the build (`target\dist\release\nsis\x64\installer.nsi`) names files of this computer in its
+`File`, `!include`, icon and path `!define` lines: makensis reads them and stores none of those paths, which the scan
+of the uncompressed installer confirms.
 
 Tests and lints:
 
@@ -327,6 +336,11 @@ history is neither written nor cleaned up until a period is chosen in the window
   other value leaves the period unknown: CUE then neither writes nor deletes history until a period is chosen in the
   main window, and keeps the value in the file as it was. The value is kept in the file only when it is not
   `"month"`. Example: `"history": { "keep": "forever" }`.
+- `history.audio`: how long the recordings of the history's entries are kept: `"day"` (today's), `"week"` (the
+  default), `"month"` or `"off"` (none is made, and those kept are deleted). They never outlive their entries: the
+  shorter of this and `history.keep` holds, and none is made while the history is off. Any other value leaves the
+  period unknown: no recording is made until one is chosen in the main window, and only the history's own period
+  deletes them. The value is kept in the file only when it is not `"week"`. Example: `"history": { "audio": "day" }`.
 - `drop.position`: where the Drop sits: `"bottom"` (the default; centered, 12 px above the taskbar), `"top"`
   (centered, 12 px below the top of the screen), `"left"` or `"right"` (halfway up, 12 px from the edge). Dragging the
   Drop sets it. Case and surrounding spaces do not matter; any other value means `"bottom"`. The value is kept in the
@@ -383,7 +397,8 @@ Everything else lives in `%LOCALAPPDATA%\CUE`:
 |---|---|
 | `last\audio.wav`, `last\result.txt` | The last successful dictation (16 kHz mono WAV and the final text), for `Ctrl + Win + V` and Copy. Replaced by the next one, and by an "Ask" result: a text written into a field keeps its question's recording as `audio.wav`; an answer pasted with its button has no audio, so the old `audio.wav` is deleted. |
 | `last\current.wav` | Audio of the dictation in progress; after a failure it waits there for Retry. Deleted when a dictation is cancelled or comes out empty, and when a question has been answered. |
-| `history\YYYY-MM-DD.jsonl` | The history the main window shows: one file per local day, one line of JSON per result (its time, mode, app and text, and for "Ask" the question). Days older than `history.keep` are deleted on their own, and **Clear history** deletes them all. |
+| `history\YYYY-MM-DD.jsonl` | The history the main window shows: one file per local day, one line of JSON per result (its time, mode, app and text, for "Ask" the question, and for a dictation or a translation the text as Soniox heard it, `raw`). Days older than `history.keep` are deleted on their own, and **Clear history** deletes them all. |
+| `history\audio\` | The recordings of the history's entries, one Ogg Opus file per entry (speech at 16 kbit/s, about 6 MB an hour), named by the entry's id. Older than `history.audio` (and never older than the history) they are deleted on their own; **Clear history**, Don't keep and the history turned off delete them all. A clear first renames the folder `audio.cleared-<n>`, then deletes it. |
 | `logs\cue.log.YYYY-MM-DD` | Daily log: events, per-stage timings, error kinds. No dictation text, no questions, answers or selected text, no history, no microphone names, no audio, no keys. Kept 7 days and 10 MB at most. **Open log** in the tray menu opens this folder. |
 | `usage.csv` | One row per attempt: time (UTC), audio length, transcription path, cost, model, tokens, latency, outcome, mode, web searches. A cache warm-up gets a row of its own. No text. |
 | `bench\recordings\` | Recordings for the bench, only when `bench.save_recordings` is `true`. |
@@ -518,9 +533,11 @@ whether the model wrote such words (`text_before_search`) and the error codes of
   its mask.
 - The microphone is open only while CUE is recording, and while the main window's Microphone settings or the welcome
   window's Microphone step show its level (only the level reaches that window; that audio is never kept).
-- **Stays on this computer:** the history, the last dictation's audio and text, recordings saved for the bench,
-  settings, logs and usage rows. Logs and `usage.csv` never contain dictation text, questions, answers, selected text,
-  sources, the history or microphone names; a crash records only the thread and code location, not the panic message.
+- **Stays on this computer:** the history with its recordings, the last dictation's audio and text, recordings saved
+  for the bench, settings, logs and usage rows. Logs and `usage.csv` never contain dictation text, questions, answers,
+  selected text, sources, the history or microphone names, nor any sound: a recording's line has its length and size
+  alone; a crash records only the thread and code location, not the panic message. A recording reaches the main window
+  alone, as the bytes of its file, and plays there from memory.
 - Check each provider's own data-retention policy for the audio and text they receive.
 
 ## Known limitations
@@ -589,7 +606,7 @@ app/
   crates/platform-win/    cue-platform-win: keyboard hook (and a mouse hook while a Shift that switched the mode is
                           held), clipboard paste and copy, focus and selection via UI Automation, microphone (a
                           pinned one by its name), Drop window styles and placement, card placement, sleep and lock
-                          events
+                          events, the Ogg Opus encoding of the history's recordings
   crates/cli/             cue-cli: API keys, monthly usage and the leak scan of a build
   src-tauri/              the cue app: runtime, Drop, card, main and welcome windows, the main and welcome windows'
                           commands, tray icon, logging; nsis/ holds the installer's script and hooks
@@ -615,6 +632,9 @@ CUE is licensed under the Apache License, Version 2.0: see [LICENSE](LICENSE) an
 
 The Bebas Neue and Montserrat ExtraBold fonts in `app/ui/src/design/fonts` are distributed under the SIL Open Font
 License 1.1 (see `OFL.txt` and `OFL-Montserrat.txt`).
+
+The program includes the Opus audio codec, libopus 1.3.1 in its Rust translation `unsafe-libopus` (BSD-3-Clause), and
+`arrayref` (BSD-2-Clause), which it uses: their licenses are in [NOTICE](NOTICE).
 
 `app/src-tauri/nsis/installer.nsi` is the installer template of the Tauri CLI (Apache-2.0 OR MIT, by the Tauri
 contributors) with the default install folder changed, as its comment on that line says.

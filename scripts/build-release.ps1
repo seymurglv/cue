@@ -15,7 +15,9 @@ The first installer build downloads NSIS and its Tauri plugin into %LOCALAPPDATA
 they are. The setting reaches the Tauri CLI through a config file written for the build into target\dist, which the
 CLI merges over tauri.conf.json; tauri.conf.json is left as it is. That installer is moved to target\dist\scan. Both
 builds write the installer to the same place, so an installer already there is moved aside to target\dist\aside for
-the scan build and put back afterwards, whether the build succeeds or not: both installers stay, in either order.
+the scan build and put back afterwards, whether the build succeeds or not: both installers stay, in either order. The
+program, target\dist\release\cue.exe, is the last build's: build the shipped installer last, and the program the scan
+reads is the one it holds.
 
 .EXAMPLE
 scripts\build-release.ps1

@@ -22,7 +22,8 @@ real clock.
     answer, its sources, the plain text for pasting, and `AnswerView`, the answer as the windows draw it.
   - `audio`: resampling to 16 kHz mono, voice level, the "microphone is silent" detector.
   - `history`: the history's day files (`Entry`, `append`, the pages, `search`, `find`, `prune` by the retention
-    period, `clear`).
+    period, `clear`) and the names and deletions of its recordings folder (`audio_file`, `audio_snapshot`,
+    `audio_to_delete`, `prune_audio`, `sweep_audio_temps`, `clear_audio`).
   - `settings` (with `SettingChange`, one change from the main window), `usage` (CSV rows, costs, monthly summary),
     `paths`.
 - **`cue-engines`** (`app/crates/engines`): `stt` (session facade, ~100 ms chunks, batch fallback), `soniox`
@@ -35,16 +36,19 @@ real clock.
   of "Ask"), `focus` (UI Automation: the field, the text before the caret, the selection; and the window under the
   main window, for Paste again), `selection` (when to copy the selection, where it is on screen), `cardplace` (where
   the "Ask" card goes), `mic` (cpal; a pinned microphone found by its name; whether Windows denies CUE the
-  microphone), `wav`, `dropwin` (window styles, moves,
+  microphone), `wav`, `opus` and `ogg` (a WAV into Ogg Opus: libopus 1.3.1 in its Rust translation `unsafe-libopus`,
+  the pages written here), `dropwin` (window styles, moves,
   the z-order guard), `placement` (the four places, the nearest place, monitors), `power`.
-- **`cue`** (`app/src-tauri`): startup, the `runtime` actor (with `runtime::ask`, the conversation of an open answer),
+- **`cue`** (`app/src-tauri`): startup, the `runtime` actor (with `runtime::ask`, the conversation of an open answer,
+  and `runtime::recordings`, the history's recordings),
   `ipc`, `drop_window`, `card_window`, `main_window`, `welcome_window` and `commands` (the main and welcome windows and
   their commands), `micpreview` (the microphone level of the settings and of the welcome window), `tray` and
   `trayicon`, `logging`; `nsis/` holds the installer's script and hooks.
 - **`app/ui`**: `main.ts` (events, commands, frame loop), `controller.ts` (`DropController`), `trays.ts`,
   `answer.ts` (the "Ask" answer, one view for the tray and the card), `markdown.ts` (its safe Markdown), `card.ts` and
   `cardPage.ts` (the card window), `strings.ts`, `window.html` with `window/` (the main window: `page.ts`,
-  `history.ts`, `settings.ts`, `text.ts`, `icons.ts`, `api.ts`, and `keys.ts` and `mic.ts`, the key and microphone
+  `history.ts`, `said.ts` (how an entry was said, and its player), `settings.ts`, `text.ts`, `icons.ts`, `api.ts`, and
+  `keys.ts` and `mic.ts`, the key and microphone
   rows the welcome window shares), `welcome.html` with `welcome/` (`page.ts`, `steps.ts`, `text.ts`, `welcome.css`),
   and `design/` (Drop, tray card, answer and animation code, styles including the main and welcome windows'
   `window.css`, the Bebas Neue and Montserrat ExtraBold fonts).
@@ -78,6 +82,8 @@ real clock.
   frames; `cue-mic-stop` closes a microphone off the core thread (and off the main thread for the preview).
 - **`cue-mic-preview`**: while the main window's Microphone settings or the welcome window's Microphone step are
   shown, sends that window the level of the preview's own `cue-mic` (see Main window).
+- **`cue-recordings`**: encodes the history's recordings, one at a time, and in the same queue deletes those past
+  their period and the folders a clear set aside (see Recordings).
 - **`cue-main-window`** and **`cue-welcome-window`**: each builds its window and ends; a WebView built on the main
   thread from a tray or menu handler deadlocks (wry#583). The windows' other commands are async: their file,
   device-list, registry and Credential Manager work runs on tokio's blocking threads.
@@ -769,15 +775,17 @@ nothing for another. The Drop and the card draw what a model wrote, so no page o
 a setting or touch a key. Errors are short codes (`core`, `notFound`, `badValue`, `badName`, `emptyKey`, `store`,
 `autostart`, `failed`), never text. The main and welcome windows have capabilities of their own
 (`capabilities/main.json`, `welcome.json`) with `core:event:allow-listen` alone, for `cue://mic-level` (and the
-welcome window's `cue://mic-failed`); the Drop's and the card's `core:default` (`default.json`) does not cover them.
-The commands:
+welcome window's `cue://mic-failed`, and the main window's `cue://state`, which holds no text); the Drop's and the
+card's `core:default` (`default.json`) does not cover them. The commands:
 
 - `settings_get`, `settings_set` (one `SettingChange`, `{kind, value}`), answered by the core within 3 s with
-  `SettingsView` (the period, `null` while unknown; the microphone; the translation target; the interface language
-  and the language it resolves to; the 60 languages; whether the file is written);
+  `SettingsView` (the history's period and its recordings', each `null` while unknown; the microphone; the
+  translation target; the interface language and the language it resolves to; the 60 languages; whether the file is
+  written);
 - `autostart_get`, `autostart_set` (the autostart plugin's Run key, changed only when it differs; the tray menu's
   check follows within 5 s);
-- `history_subscribe`, `history_page`, `history_search`, `history_copy`, `history_paste`, `history_clear`;
+- `history_subscribe`, `history_page`, `history_search`, `history_copy`, `history_paste`, `history_clear`,
+  `history_audio` (see Recordings);
 - `key_state`, `key_set`, `key_check` (Soniox and Anthropic only);
 - `mic_list`, `mic_preview`, `mic_access`;
 - the welcome window's `welcome_step`, `welcome_close`, `open_link` (see Welcome window).
@@ -785,7 +793,9 @@ The commands:
 ### History
 
 `cue_core::history` keeps one file per local day in `%LOCALAPPDATA%\CUE\history`, `YYYY-MM-DD.jsonl`, one line of
-JSON per entry (`id`, `ts`, `mode`: `dictation`, `translation` or `ask`, `app`, `text`, and `question` for "Ask"),
+JSON per entry (`id`, `ts`, `mode`: `dictation`, `translation` or `ask`, `app`, `text`, `question` for "Ask", and
+`raw` for a dictation or a translation: the text as Soniox heard it, before cleanup or translation, taken at the top of
+`refine()` and with each attempt's end, so a retry keeps the one heard anew; its `Debug` shows lengths alone),
 appended in one write, so a day is never rewritten. `ts` is the local time to the millisecond; the id is `ts-n`, `n`
 counting the run's entries. A line that does not read as an entry is skipped, and only files named for a real date
 count, so nothing else in the folder is read or deleted. There is no database: a search reads the files.
@@ -797,18 +807,26 @@ count, so nothing else in the folder is read or deleted. There is no database: a
   `Ctrl + Win + V`, an answer pasted with its button, Copy and Paste again from the window, a refusal, a failure, a
   cancelled or empty dictation. A disk error is one log line.
 - **Read** by the commands on blocking threads: the first page is today and yesterday (`recent`), Show earlier the next
-  7 days that have entries (`older`); a search finds the entries whose text or question holds the query in any case,
-  newest first, 200 at most. New entries reach the page over a `tauri::ipc::Channel` the page registers with
-  `history_subscribe` before its first page (one at a time; a new one replaces it, and the window's end or a failed
-  send drops it): only the webview that made a channel gets its messages, and no event carries history text. The page
-  merges what comes before its first page and drops an entry it already shows (by id).
+  7 days that have entries (`older`); a search finds the entries whose text, question or `raw` holds the query in any
+  case (ё read as е), newest first, 200 at most. Each entry goes to the page with `hasAudio`, whether its recording
+  plays (one listing of the recordings folder per command). New entries reach the page over a `tauri::ipc::Channel`
+  the page registers with `history_subscribe` before its first page (one at a time; a new one replaces it, and the
+  window's end or a failed send drops it): only the webview that made a channel gets its messages, and no event
+  carries history text. The page merges what comes before its first page and drops an entry it already shows (by id).
+- **Drawn** by `history.ts`: three or more entries of a day in a row from one known app, each at most 10 minutes after
+  the one before by the time in its id, are a stack (`stackRuns`), keyed by its oldest entry so a new one on top keeps
+  it open; search results are never stacked. An entry with `raw`, a question, a recording, or one that came over the
+  channel opens (a click, or `Enter`/`Space` on the focused row, `aria-expanded`): a dictation's words as heard
+  against its text (`said.ts`: Myers' comparison on words without case or punctuation, at most 1000 words dropped and
+  added, else shown unmarked), a translation's speech, an "Ask" question, and the player. A search marks its hit
+  there too, and an entry it found only in `raw` opens by itself and closes with the search.
 - **Retention** (`history.keep`): `forever`, `year` (366 days back from today), `month` (31, the default), `week` (7)
   or `off`. Older days are deleted at startup, on the first entry of a new local day and when the period changes in the
   window (the page then reads its first page again); `off` writes nothing and deletes every day, and a day after today
   (the clock was moved back) is kept. While the period is unknown (`settings::Period::Unknown`: settings.json was not
   read, or `history.keep` holds a value CUE does not know) nothing is written or deleted, until the window sets a
   period; the window shows it as not set. Clear history (a second press within 3 s) sends `CoreEvent::HistoryClear`,
-  and the core deletes every day.
+  and the core deletes every day and every recording.
 - **Copy and Paste again** look the entry up by id (`history::find`) and send its text to the core
   (`CoreEvent::HistoryText`). Copy leaves it in the clipboard. Paste again takes the window right under the main window
   in z-order (`focus::window_below`: visible, not minimized or cloaked, not a tool window, not CUE's, not the desktop),
@@ -818,11 +836,51 @@ count, so nothing else in the folder is read or deleted. There is no database: a
   and the page shows the check on Paste again or on Copy. Neither changes the last result or adds an entry. Paste again
   works while CUE is paused too: it is a click in the window, and the pause is about the chord.
 
+### Recordings
+
+Each entry's sound is kept in `history\audio` as Ogg Opus (`cue_platform_win::opus`: 16 kHz mono, VOIP, 16 kbit/s,
+20 ms frames, about 1.6 KB a second; the pages and their end trim per RFC 7845, vendor `CUE, libopus 1.3.1`), one file
+per entry named by its id with `-` for `:` (`history::audio_file`; no other name is ever made from a page). Only the
+core writes and deletes there (`runtime::recordings`).
+
+- **Period** (`history.audio`: `day`, `week` by default, `month`, `off`): the shorter of it and the history's own
+  (`HistorySettings::audio_period`), `off` while the history is off; none is recorded while either is unknown. What
+  deletes them (`audio_limit`, a cut-off in days back from today, like the days') is that period, or while the
+  recordings' own is unknown the history's (a year: 366 days; forever: none).
+- **Taken** on the core thread as a snapshot, `<name>.wav.tmp` in the folder: a hard link to the WAV (a copy where no
+  link can be made), so the WAV may be replaced or deleted at once. A dictation's or a translation's is `last\audio.wav`
+  once its text was committed and its entry written; an "Ask" question's is `current.wav` as the question goes out
+  (`Runtime::ask`), since a follow-up may start recording before the answer ends: under an id of its own that no entry
+  gets (the startup sweep knows its name), kept while its request may be asked again, and given to the turn's entry
+  when it ends (`encode_as`), or deleted when no entry is written. Only an attempt's own recording counts
+  (`Runtime::wav_of`): an attempt whose WAV could not be made takes none, and its commit deletes what an earlier attempt
+  left in `current.wav` rather than taking it. `open_mic` deletes `current.wav` before creating it, since a truncating
+  create would change a snapshot linked to it.
+- **Encoded** on `cue-recordings`, one at a time, into `<name>.ogg.tmp` next to the recording, then renamed; the
+  snapshot is deleted whatever came of it. Clear history, `off` and the history turned off move a generation on and
+  take the folder away at once on the core thread: renamed to `audio.cleared-<n>` and deleted on the worker (deleted in
+  place when a file in it is open, which Windows refuses to rename), so an encoding of an earlier generation is not
+  started, or is dropped right before its rename, which then finds no folder; the folder is never made again by one.
+  Prunes go to the same queue after the encodings: at startup, on the first entry of a new day and when a period
+  changes. At startup alone, before anything is recorded, CUE's own half-written `.wav.tmp`/`.ogg.tmp` and the folders
+  left set aside are deleted.
+- **Played** in the main window only: `history_audio(id)` checks the id's grammar before any file access (`badValue`),
+  then answers the bytes of the file (`tauri::ipc::Response`, an `ArrayBuffer` in the page) when it is a file of the
+  folder itself (not a link), 32 MB at most, and not past the cut-off even before a prune deletes it; else `notFound`.
+  The page asks on every opening, and once more 2 s later for an entry that came over the channel (its recording may
+  still be encoding); it makes a `Blob` of type `audio/ogg; codecs=opus` and an object URL, which the CSP allows
+  (`media-src 'self' blob:` in `tauri.conf.json`), and gives the URL back when the entry closes, its row is no longer
+  drawn, a new recordings period reloads the list, or the page goes. The length comes from the last Ogg page (all ones
+  or over 3 h: the player's own). One plays at a time, only on a press, and every one pauses when `cue://state` says a
+  recording starts (`start`, `listen`).
+- **Logged** as lengths, sizes, counts and error codes; never a path, a file name, an id or the sound.
+
 ### Settings tray
 
-The gear opens a tray with four pages: Keys, Microphone, Translation and General. Every change goes to the core at
-once (`settings_set` → `CoreEvent::Settings`), which applies it to its copy (`Settings::apply`), writes the whole file
-and answers with the settings as they are now (see Settings). After a `core` error the page reads them again.
+The gear opens a tray with five pages: Keys, Microphone, Translation, History and General. Every change goes to the
+core at once (`settings_set` → `CoreEvent::Settings`), which applies it to its copy (`Settings::apply`), writes the
+whole file and answers with the settings as they are now (see Settings). After a `core` error the page reads them
+again.
 
 - **Keys**: a password field and Check for each. Check saves a typed key (`key_set`: Credential Manager, the service
   `CUE`, where `cue-cli keys` keeps them; trimmed, an empty one refused) and empties the field, then checks the saved
@@ -841,6 +899,8 @@ and answers with the settings as they are now (see Settings). After a `core` err
   the other window starts replaces it, sending the window it was taken from a level of 0. The Microphone page starts
   its preview again when the main window has the focus again.
 - **Translation**: the target language, any of the 60 Soniox knows; the core decides the home language again.
+- **History**: how long recordings are kept (`historyAudio`: A day, A week, A month, Don't keep; not set while
+  unknown). A shorter period deletes the older ones at once; the page stops what plays and reads the list again.
 - **General**: Start at sign-in, and the interface language (Auto, English, Русский), which switches every window at
   once (see The Drop and tray cards).
 
@@ -908,7 +968,8 @@ session: the window's changes hold until CUE quits, and the history's period is 
 hold-hint counter, the Drop's place, the main window's changes) always write the whole file from the core's copy, so
 they never undo each other, and are atomic: a temp file in the same folder, then a rename. A change from the window
 takes effect at once: a new translation target decides the home language again, a new interface language relabels the
-tray menu and reloads the Drop and the card, a new period deletes the days it no longer keeps, and a new microphone is
+tray menu and reloads the Drop and the card, a new period deletes the days and recordings it no longer keeps (all
+recordings when they are turned off), and a new microphone is
 opened by the next recording. The value already set, or one the settings refuse (a microphone name of more than 200
 characters, a translation code Soniox does not know, a period that is not one of the five), changes and writes nothing.
 
@@ -933,7 +994,9 @@ Windows microphone), and the block is written only with a device. `history.keep`
 `year`, `month`, `week` and `off`, in any case and with spaces trimmed; a missing value is `month`, which is not
 written; any other value (a typo, a later version's name, `null`, a number) leaves the period unknown and is written
 back exactly as it was, so no save turns it into a period the user did not choose; a `history` that is not an object
-reads as the default.
+reads as the default. `history.audio` reads `day`, `week`, `month` and `off` the same way (`Period<AudioKeep>`); a
+missing value is `week`, which is not written; any other value, `forever` and `year` among them, is unknown and
+written back as it was.
 
 ## Usage accounting
 
@@ -973,7 +1036,9 @@ profile as `~` and the repository as `.`, passed in `CARGO_ENCODED_RUSTFLAGS` (c
 program refers to its PDB by the file name alone (rustc's default). Vite builds no source maps, and the script stops if
 `app\dist` holds one. The shell's `CARGO_TARGET_DIR`, `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS` are put back afterwards.
 `-ScanBuild` builds the same installer without compression (a config file merged over `tauri.conf.json`) and moves it to
-`target\dist\scan`; an installer already in `bundle\nsis` is moved aside for that build and put back.
+`target\dist\scan`; an installer already in `bundle\nsis` is moved aside for that build and put back. Both builds write
+the program to `target\dist\release\cue.exe`, so the one there is the last build's: the shipped installer is built
+last, and the program scanned is the one it holds.
 
 The installer is NSIS, for the current user, in English and Russian, with no license page and no WebView2 download
 (`webviewInstallMode: skip`: Windows 11 has the runtime). Its script, `app/src-tauri/nsis/installer.nsi`, is the
@@ -997,16 +1062,20 @@ data" box removes the WebView data (`%LOCALAPPDATA%\app.cue.dictation`) and the 
 
 `cue-cli leak-scan <file or folder>...` looks through what is to leave the computer for anything private and prints
 the file, the byte offset and the kind of each finding, never the finding. It reads what to look for into memory: the
-saved keys, the history texts and questions of the last 31 days, the dictionary terms, the microphone names (the
-pinned one and every one Windows lists), the Windows user name, computer name and profile path (also with `/`, `\\`
-or URL-encoded), the git name and email, and the private folders that the repository's `.git/info/exclude` names.
-Patterns add any user profile path, email addresses and `sk-ant-` / `sk-or-` keys; text files also get a check for
-long random-looking strings, joined across `-` and `_`, with hashes of known kinds and Windows GUIDs in braces passed
-over. Text is looked for as UTF-8 and UTF-16LE. The public name is a finding only in a path or an address, and not as
-the publisher's registry key. The exit code is 0, 1 for findings, and 2 when something to look for or a given path
-cannot be read, or a given path holds no file. Its panic hook prints the location alone. The installer script Tauri
-renders for a build (`target\dist\release\nsis\x64\installer.nsi`) names build paths on its compile-time lines
-(`File`, `!include`, the icon and path `!define`s); makensis stores none of them.
+saved keys, the history texts, questions and texts as heard of the last 31 days, the dictionary terms, the microphone
+names (the pinned one and every one Windows lists), the Windows user name, computer name and profile path (also with
+`/`, `\\` or URL-encoded), the git name and email, and the private folders that the repository's `.git/info/exclude`
+names. Patterns add any user profile path, email addresses, `sk-ant-` / `sk-or-` keys, and recordings anywhere in a
+file (an installer stores its members as they are): an Ogg page whose first packet is `OpusHead`, and `RIFF`, `WAVE`
+and a format chunk that reads as one (a program's table of those names is none). Text files also get a check for long
+random-looking strings, joined across `-` and `_`, and across `+` and `/` from 32 characters on, with hashes of known
+kinds and Windows GUIDs in braces passed over; text is UTF-8, UTF-16LE (a closing NUL unit allowed) or mostly
+printable ASCII. Text is looked for as UTF-8 and UTF-16LE. The public name is a finding only in a path or an address,
+and not as the publisher's registry key (`Software\<name>`, then `\CUE` or a character no path holds). The exit code
+is 0, 1 for findings, and 2 when something to look for or a given path cannot be read, or a given path holds no file.
+Its panic hook prints the location alone. The installer script Tauri renders for a build
+(`target\dist\release\nsis\x64\installer.nsi`) names build paths on its compile-time lines (`File`, `!include`, the
+icon and path `!define`s); makensis stores none of them.
 
 ## Logging and privacy rules
 
@@ -1018,10 +1087,12 @@ renders for a build (`target\dist\release\nsis\x64\installer.nsi`) names build p
   selection read, whether the `Ctrl + C` fallback ran and what became of its Win+V copy (a kind), the number of turns
   of a request, where the answer opened (tray or card), how a request ended and its number of web searches; for the
   main window, its opening and closing, a command refused to another window (its label and the command), a setting
-  change as codes and states (the period's code, whether a microphone is pinned, the interface language), how many old
-  days of history were deleted, where Paste again went (`pasted` or `clipboard`), which key was saved or checked, from
-  which window, and the check's result, a microphone preview started or stopped (the window, whether a microphone is
-  pinned), and that a pinned microphone was not there; for the welcome window, at startup whether each key is saved,
+  change as codes and states (the periods' codes, whether a microphone is pinned, the interface language), how many old
+  days of history and recordings were deleted, a recording kept (its length and size), dropped, or not kept (the
+  error, no path), the length of an id a recording was asked for by when it is no entry id, where Paste again went
+  (`pasted` or `clipboard`), which key was saved or checked, from which window, and the check's result, a microphone
+  preview started or stopped (the window, whether a microphone is pinned), and that a pinned microphone was not there;
+  for the welcome window, at startup whether each key is saved,
   missing or unreadable, whether `--welcome` asked for it and whether it opens, its opening, closing and coming
   forward, each step's hold of the hotkey, whether Windows allows the microphone, and the name of a link that did not
   open. Never logged: dictation text, text before the caret, translations,
@@ -1031,15 +1102,15 @@ renders for a build (`target\dist\release\nsis\x64\installer.nsi`) names build p
 - WebSocket handshake tracing is switched off by a fixed filter, since it would include the `Authorization` header.
 - The panic hook is installed first and records only the thread and code location, never the message, which could
   contain dictated text. Debug output of focus results, of the selection read and copied, of the "Ask" context, of
-  microphone frames and events, of history entries and their views, and of the microphone setting and its changes
-  shows only lengths and counts.
+  microphone frames and events, of history entries (their `raw` too) and their views, and of the microphone setting
+  and its changes shows only lengths and counts; a recording's snapshot has no `Debug` at all.
 - Keys are read from Credential Manager on use, appear in the CLI and the main and welcome windows only masked, and are
   cut out of engine error texts.
-- The history's text goes to the main window alone: its commands read the files, and new entries come over its own
-  channel (see Main window). The microphone names of the "Another microphone" card go to the Drop alone, and the main
-  and welcome windows get the device list.
-- Soniox uploads are deleted after use. The last dictation (`last\`), the history (`history\`) and bench recordings
-  stay on this computer only.
+- The history's text and its recordings go to the main window alone: its commands read the files, and new entries come
+  over its own channel (see Main window). The microphone names of the "Another microphone" card go to the Drop alone,
+  and the main and welcome windows get the device list.
+- Soniox uploads are deleted after use. The last dictation (`last\`), the history (`history\`, with its recordings in
+  `history\audio`) and bench recordings stay on this computer only.
 
 ## Bench
 
