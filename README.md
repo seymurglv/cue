@@ -563,4 +563,5 @@ and what the `Ctrl + C` fallback does there, never the text.
 
 CUE is licensed under the Apache License, Version 2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-The Bebas Neue font in `app/ui/src/design/fonts` is distributed under the SIL Open Font License 1.1 (see `OFL.txt`).
+The Bebas Neue and Montserrat ExtraBold fonts in `app/ui/src/design/fonts` are distributed under the SIL Open Font
+License 1.1 (see `OFL.txt` and `OFL-Montserrat.txt`).
