@@ -8,6 +8,9 @@ license.workspace = true
 [dependencies]
 cue-core.workspace = true
 cue-engines.workspace = true
+cue-platform-win.workspace = true
+aho-corasick.workspace = true
+regex.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 rpassword.workspace = true

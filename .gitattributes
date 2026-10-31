@@ -3,3 +3,5 @@
 *.png binary
 *.ico binary
 *.wav binary
+*.nsi text eol=crlf
+*.nsh text eol=crlf

@@ -16,8 +16,9 @@ main window, with the history of everything CUE wrote and the settings.
 2. The installer, in English or Russian, needs no administrator rights and asks for no license agreement. It installs
    CUE for you alone, into `%LOCALAPPDATA%\Programs\CUE`, adds it to the Start menu and downloads nothing: the
    WebView2 runtime that CUE's windows use comes with Windows 11.
-3. When it finishes, CUE starts. The first install also turns on **Start at sign-in**; you can turn it off in the menu
-   of the icon next to the clock, or in the main window's General settings.
+3. When it finishes, CUE starts. A first install also turns on **Start at sign-in**; installing CUE again, or a newer
+   version, keeps your choice. You can turn it off in the menu of the icon next to the clock, or in the main window's
+   General settings.
 
 On its first start, and on every start while one of its two keys is missing, CUE opens a welcome window: Hello,
 Keys, Microphone, First dictation and Done. While it is open, `Ctrl + Win` works only at the First dictation step. If
@@ -59,13 +60,16 @@ Each service has its own policy on how long it keeps what it receives. Every det
 Quit CUE from the menu of its icon next to the clock, then open Windows **Settings → Apps → Installed apps**, find
 **CUE** and choose **Uninstall**. This removes the program, its Start menu entry and Start at sign-in. Your history,
 settings and keys stay, so installing CUE again picks up where you left off. The uninstaller's **Delete the
-application data** box removes only the cache of CUE's windows (the last folder below). To remove everything:
+application data** box removes only the cache of CUE's windows (the last folder below) and the installer's registry
+key (the last line). To remove everything:
 
 - the folder `%LOCALAPPDATA%\CUE`: the history, the last dictation, the logs and the cost records;
 - the folder `%APPDATA%\CUE`: the settings;
 - the folder `%LOCALAPPDATA%\app.cue.dictation`: the cache of CUE's windows;
 - the keys: in **Control Panel → Credential Manager → Windows Credentials**, remove `soniox.CUE` and `anthropic.CUE`
-  under Generic Credentials.
+  under Generic Credentials;
+- the registry key `HKEY_CURRENT_USER\Software\cue`, where the installer remembers the folder CUE was installed in
+  and whether Start at sign-in was on: in Registry Editor.
 
 To open a folder, paste its path into the address bar of File Explorer.
 
@@ -218,6 +222,38 @@ npx tauri build --no-bundle
 
 The result is `target\release\cue.exe` at the repository root. Run it directly; use **Start at sign-in** in the tray
 menu to launch it with Windows. A second launch does nothing: only one instance runs.
+
+The installer is built into `target\dist`, so `target\release` is left alone:
+
+```powershell
+scripts\build-release.ps1
+```
+
+The script prints the installer's path, `target\dist\release\bundle\nsis\CUE_<version>_x64-setup.exe`. It cuts this
+computer's paths out of the program (rustc writes the user profile as `~` and the repository as `.`, by flags passed
+in `CARGO_ENCODED_RUSTFLAGS`) and puts the shell's `CARGO_TARGET_DIR`, `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS` back
+afterwards. The first installer build downloads NSIS and Tauri's plugin for it from Tauri's releases on GitHub into
+`%LOCALAPPDATA%\tauri`, once. The installer script, `app/src-tauri/nsis/installer.nsi`, is the template of Tauri CLI
+2.12.4 with one line changed, the default folder (Tauri's own is `%LOCALAPPDATA%\CUE`, CUE's data folder), and
+`hooks.nsh` next to it turns on Start at sign-in at the first install. The CLI is pinned to that version in
+`app/package.json`: after updating it, compare its template with this one again.
+
+Before an installer leaves this computer, look through it and the program for anything private:
+
+```powershell
+scripts\build-release.ps1 -ScanBuild
+cargo run -p cue-cli -- leak-scan target\dist\release\cue.exe target\dist\release\bundle\nsis target\dist\scan app\dist
+```
+
+`-ScanBuild` makes the same installer without compression, in `target\dist\scan`, so that the scan reads the files
+inside it as they are; its program differs from the other installer's only in the time stamps of the build.
+`leak-scan` looks for paths into a user profile, the Windows user name, email addresses and API keys, for exact copies
+of the keys saved in Credential Manager, the history of the last 31 days, the dictionary terms, the microphone names
+and the git name and email, and, in text files, for long random-looking strings. It prints the file, the offset and
+the kind of each finding, never the finding itself, and exits with 1 when it found anything. The installer script
+that Tauri writes for the build (`target\dist\release\nsis\x64\installer.nsi`) names files of this computer in its
+`File`, `!include` and path `!define` lines: makensis reads them and stores none of those paths, which the scan of the
+uncompressed installer confirms.
 
 Tests and lints:
 
@@ -541,13 +577,14 @@ app/
                           held), clipboard paste and copy, focus and selection via UI Automation, microphone (a
                           pinned one by its name), Drop window styles and placement, card placement, sleep and lock
                           events
-  crates/cli/             cue-cli: API keys and monthly usage
+  crates/cli/             cue-cli: API keys, monthly usage and the leak scan of a build
   src-tauri/              the cue app: runtime, Drop, card and main windows, the main window's commands, tray icon,
-                          logging
+                          logging; nsis/ holds the installer's script and hooks
   ui/                     the Drop, its tray cards, the "Ask" answer and card, and the main window (history and
                           settings): TypeScript + Vite, no framework
 bench/                    cue-bench: comparison bench
 docs/ARCHITECTURE.md      how CUE works inside
+scripts/build-release.ps1 the installer build
 ```
 
 `app/crates/platform-win/examples` and `app/crates/engines/examples` hold small probes for checking the keyboard
@@ -565,3 +602,6 @@ CUE is licensed under the Apache License, Version 2.0: see [LICENSE](LICENSE) an
 
 The Bebas Neue and Montserrat ExtraBold fonts in `app/ui/src/design/fonts` are distributed under the SIL Open Font
 License 1.1 (see `OFL.txt` and `OFL-Montserrat.txt`).
+
+`app/src-tauri/nsis/installer.nsi` is the installer template of the Tauri CLI (Apache-2.0 OR MIT, by the Tauri
+contributors) with the default install folder changed, as its comment on that line says.

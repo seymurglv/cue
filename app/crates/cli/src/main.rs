@@ -1,15 +1,17 @@
-//! CUE helper command: API keys and the usage summary. Not part of the product.
+//! CUE helper command: API keys, the usage summary and the leak scan of a build. Not part of the product.
 //!
 //! A key's value is never printed — only its mask.
 use std::io::Write;
+
+mod leak;
 
 use anyhow::{Context, Result, bail};
 use cue_core::usage::Summary;
 use cue_engines::EngineError;
 use cue_engines::keys::{self, KeyName};
 
-const USAGE: &str =
-    "cue-cli keys set <soniox|anthropic|openrouter>\ncue-cli keys show\ncue-cli keys check\ncue-cli usage [YYYY-MM]";
+const USAGE: &str = "cue-cli keys set <soniox|anthropic|openrouter>\ncue-cli keys show\ncue-cli keys check\n\
+                     cue-cli usage [YYYY-MM]\ncue-cli leak-scan <file or folder>...";
 
 fn usage() -> ! {
     eprintln!("{USAGE}");
@@ -158,6 +160,7 @@ async fn main() -> Result<()> {
             show_usage(&cue_core::usage::utc_timestamp(now)[..7])?;
         }
         ["usage", month] if valid_month(month) => show_usage(month)?,
+        ["leak-scan", paths @ ..] if !paths.is_empty() => std::process::exit(leak::run(paths)),
         _ => usage(),
     }
     Ok(())

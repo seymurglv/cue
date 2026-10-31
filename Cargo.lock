@@ -858,9 +858,12 @@ dependencies = [
 name = "cue-cli"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "cue-core",
  "cue-engines",
+ "cue-platform-win",
+ "regex",
  "reqwest",
  "rpassword",
  "tokio",

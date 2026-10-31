@@ -31,6 +31,9 @@ keyring = "4.2"
 rpassword = "7"
 hound = "3.5"
 cpal = "0.18"
+# The leak scan of a build (cue-cli): exact texts and fixed patterns over bytes.
+aho-corasick = "1"
+regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
