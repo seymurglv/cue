@@ -4,7 +4,9 @@
 // bring it) is not shown twice.
 // A run of entries from one app, each a few minutes after the one before, is one stack: its newest entry on top, a chip
 // "Telegram 5" and two sheet edges under it; the chip and the edges open it in place. A click on an entry (not on its
-// buttons), or Enter or Space on it, opens how it was said and its recording (said.ts). The search grows out of the
+// buttons), or Enter or Space on it, opens it: its whole text, how it was said and its recording (said.ts). Every entry
+// opens, so each can be checked: one kept before CUE kept how it was said says so, and one CUE left as it was heard
+// says that. The search grows out of the
 // magnifier on the "History" line; what it finds is never stacked, and an entry it found only in how it was said opens
 // by itself, the place marked. Stacks and entries opened stay open when the list is drawn again. Every recording
 // pauses when CUE starts recording: what plays aloud would go into it.
@@ -350,8 +352,7 @@ export class HistoryView {
 
   /** time · mode · [app] [question] text, in one line (a dictation's mode is an empty place, so the texts line up);
    *  the whole of it in the tooltip; copy and paste again on hover.
-   *  `count` — the top of a stack of so many: its app is the stack's chip. An entry that has how it was said, or may
-   *  have a recording, opens. */
+   *  `count` — the top of a stack of so many: its app is the stack's chip. Every entry opens. */
   private row(e: EntryView, q: string, count = 0): HTMLElement {
     const t = this.ctx.t;
     const r = h('div', 'hr');
@@ -392,37 +393,36 @@ export class HistoryView {
     paste.dataset.paste = '';
     act.append(copy, paste);
     r.append(h('span', 'ht', e.time), ha, hx, act);
-    if (this.opens(e)) {
-      // The keyboard and screen readers reach it too: Enter or Space opens it (`onListKey`).
-      const open = this.opened.has(e.id);
-      r.classList.add('hmore');
-      r.tabIndex = 0;
-      r.setAttribute('aria-expanded', String(open));
-      if (open) {
-        r.classList.add('open');
-        hx.append(this.details(e, q));
-      }
+    // The keyboard and screen readers reach it too: Enter or Space opens it (`onListKey`).
+    const open = this.opened.has(e.id);
+    r.classList.add('hmore');
+    r.tabIndex = 0;
+    r.setAttribute('aria-expanded', String(open));
+    if (open) {
+      r.classList.add('open');
+      hx.append(this.details(e, q));
     }
     return r;
   }
 
-  /** Whether an entry has more to show: how it was said, a question, a recording (a new entry's may be on its way). */
-  private opens(e: EntryView): boolean {
-    return !!e.raw || !!e.question || e.hasAudio || this.live.has(e.id);
-  }
-
-  /** How it was said — a dictation against its text, a translation's speech, the question — and the recording. */
+  /** How it was said — a dictation against its text, a translation's speech, the question — and the recording. Not
+   *  kept (an entry from before CUE kept it): the heading says so; a dictation CUE left as it was heard says that. */
   private details(e: EntryView, q: string): HTMLElement {
+    const t = this.ctx.t;
     const det = h('div', 'hdet');
     const inner = h('div');
     const heard = e.mode === 'ask' ? e.question : e.raw;
+    const lab = h('div', 'hlab', t.saidAs[e.mode] ?? '');
+    inner.append(lab);
     if (heard) {
-      inner.append(h('div', 'hlab', this.ctx.t.saidAs[e.mode] ?? ''));
       const box = h('div', 'hraw');
       const hit = q ? findHit(heard, q) : null;
       if (e.mode === 'dictation') appendDiff(box, heard, e.text, hit);
       else appendHeard(box, heard, hit);
+      if (e.mode === 'dictation' && heard.trim() === e.text.trim()) lab.append(h('span', 'hnote', t.unchanged));
       inner.append(box);
+    } else {
+      lab.append(h('span', 'hnote', t.notKept));
     }
     inner.append(this.player(e).el);
     det.append(inner);

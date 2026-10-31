@@ -505,14 +505,35 @@ describe('How it was said', () => {
     expect(r.classList.contains('open')).toBe(false);
   });
 
-  it('an entry with nothing more to show does not open', async () => {
+  it('an entry kept without how it was said opens too, its whole text, and says it was not kept', async () => {
     page = await mount();
     const r = rowOf(morning.id);
-    expect(r.classList.contains('hmore')).toBe(false);
+    expect(r.classList.contains('hmore')).toBe(true);
+    expect(r.tabIndex).toBe(0);
+    openRow(morning.id);
+    expect(r.classList.contains('open')).toBe(true);
+    expect(r.getAttribute('aria-expanded')).toBe('true');
+    expect(text(r.querySelector('.hdet .hlab'))).toBe('How you said itnot kept');
+    expect(text(r.querySelector('.hdet .hlab .hnote'))).toBe('not kept');
+    expect(r.querySelector('.hdet .hraw')).toBeNull();
+    // No recording either: no player is left.
+    await settle();
+    expect(r.querySelector('.hplay')).toBeNull();
     openRow(morning.id);
     expect(r.classList.contains('open')).toBe(false);
-    expect(r.querySelector('.hdet')).toBeNull();
-    expect(core.historyAudio).not.toHaveBeenCalled();
+  });
+
+  it('a dictation CUE wrote just as it was heard says so', async () => {
+    const same = entry(`${TODAY}T10:40:00.000-1`, 'Call me back.', { raw: 'Call me back.' });
+    const punct = entry(`${TODAY}T10:30:00.000-1`, 'Call me back.', { raw: 'call me back' });
+    core.historyPage.mockResolvedValue(pageOf(same, punct));
+    page = await mount();
+    openRow(same.id);
+    openRow(punct.id);
+    expect(text(rowOf(same.id).querySelector('.hlab .hnote'))).toBe('CUE changed nothing');
+    expect(rowOf(same.id).querySelector('.hraw')!.textContent).toBe('Call me back.');
+    // Its words are the same, but CUE wrote its case and its stop.
+    expect(rowOf(punct.id).querySelector('.hlab .hnote')).toBeNull();
   });
 
   it('a translation shows the speech as it was, an Ask its question', async () => {
@@ -579,9 +600,9 @@ describe('How it was said', () => {
     const r = rowOf(said.id);
     expect(r.tabIndex).toBe(0);
     expect(r.getAttribute('aria-expanded')).toBe('false');
-    // An entry with nothing more to show is no stop for the keyboard.
-    expect(rowOf(morning.id).hasAttribute('tabindex')).toBe(false);
-    expect(rowOf(morning.id).hasAttribute('aria-expanded')).toBe(false);
+    // Every entry is a stop for the keyboard, one kept without how it was said too.
+    expect(rowOf(morning.id).tabIndex).toBe(0);
+    expect(rowOf(morning.id).getAttribute('aria-expanded')).toBe('false');
     const press = (target: Element, k: string) => {
       const ev = new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true });
       target.dispatchEvent(ev);

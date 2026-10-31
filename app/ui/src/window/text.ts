@@ -39,6 +39,10 @@ export interface WinText {
   /** Over an opened entry: the text as it was heard (a dictation, its cleanup marked), the speech before it was
    *  translated, the question as it was heard. */
   saidAs: Record<Mode, string>;
+  /** After that heading: how it was said was not kept (an entry from before CUE kept it); CUE wrote the dictation just
+   *  as it was heard. */
+  notKept: string;
+  unchanged: string;
   play: string;
   pause: string;
   settings: string;
@@ -100,6 +104,8 @@ export const en: WinText = {
   modes: { dictation: 'Dictation', translation: 'Translation', ask: 'Ask' },
   stack: '{APP}, {N} entries',
   saidAs: { dictation: 'How you said it', translation: 'What you said', ask: 'Your question' },
+  notKept: 'not kept',
+  unchanged: 'CUE changed nothing',
   play: 'Play',
   pause: 'Pause',
   settings: 'Settings',
@@ -164,6 +170,8 @@ export const ru: WinText = {
   modes: { dictation: 'Диктовка', translation: 'Перевод', ask: 'Спросить' },
   stack: '{APP}, записей: {N}',
   saidAs: { dictation: 'Как вы сказали', translation: 'Что вы сказали', ask: 'Ваш вопрос' },
+  notKept: 'не сохранилось',
+  unchanged: 'CUE ничего не менял',
   play: 'Слушать',
   pause: 'Пауза',
   settings: 'Настройки',

@@ -157,7 +157,8 @@ from source.
     a stack: its newest entry on top, the app and the count on a chip that opens it. A click on an entry (or `Enter`)
     shows how you said it: a dictation as Soniox heard it, the words CUE removed struck out and the ones it added or
     changed in green; a translation's speech; an "Ask" question; and its recording, with play and pause, while it is
-    kept (an entry from before this version has nothing more to show). A recording plays only when you press it, and
+    kept. Every entry opens to its whole text: one from before CUE kept how it was said says *not kept*, and a
+    dictation CUE wrote just as it was heard says so. A recording plays only when you press it, and
     pauses when CUE starts recording. The search, out of the magnifier, looks through the texts, the questions and how
     they were said; an entry found only in how it was said opens by itself. Hover over a row for **Copy** and **Paste
     again**: the text goes into the window right under the main window (usually the one you were in before opening

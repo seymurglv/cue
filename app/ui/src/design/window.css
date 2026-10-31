@@ -120,6 +120,9 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .hr.open .hdet{height:auto;visibility:visible;transition:height .45s var(--e-sm)}
 .hdet>div{padding-bottom:2px}
 .hlab{font-size:11px;font-weight:600;color:var(--muted);margin-top:10px}
+/* after the heading: "not kept", "CUE changed nothing" */
+.hlab .hnote{font-weight:400}
+.hlab .hnote::before{content:"·";margin:0 6px}
 .hraw{margin-top:2px;font-size:12px;line-height:1.55;color:var(--muted);overflow-wrap:anywhere}
 .hraw s{color:var(--faint);text-decoration-thickness:1px}
 .hraw mark{color:var(--text)}
