@@ -4,6 +4,7 @@
 // no language set before its script runs). It follows new history entries over its own channel, opened before the
 // first page is asked for.
 // User text — history text, app and device names — goes into the page as text (textContent, title), never as HTML.
+// The helpers and the menu here serve the welcome window's page too.
 import '../design/cue.css';
 import '../design/window.css';
 import '../design/cue.js';
@@ -81,6 +82,28 @@ export function iconButton(cls: string, name: Parameters<typeof icon>[0], label:
   return b;
 }
 
+/** A settings row: its label and an optional line under it on the left, its controls on the right. */
+export function srow(label: string, desc: string | null, ...ctrls: HTMLElement[]): { row: HTMLElement; small: HTMLElement } {
+  const row = h('div', 'srow');
+  const stx = h('div', 'stx');
+  const small = h('small', '', desc ?? '');
+  small.hidden = !desc;
+  stx.append(h('b', '', label), small);
+  const sc = h('div', 'sc');
+  sc.append(...ctrls);
+  row.append(stx, sc);
+  return { row, small };
+}
+
+export function dropDown(kind: string, value: string): HTMLButtonElement {
+  const b = h('button', 'dd');
+  b.type = 'button';
+  b.dataset.dd = kind;
+  b.append(h('span', 'ddv', value));
+  b.insertAdjacentHTML('beforeend', icon('chev'));
+  return b;
+}
+
 /** The button shows a check for a moment (the design's flash). */
 export function flash(b: HTMLElement): void {
   if (b.dataset.flash) return;
@@ -102,6 +125,82 @@ export function relRect(app: HTMLElement, el: Element): { x: number; y: number; 
   return { x: r.left - ar.left, y: r.top - ar.top, w: r.width, h: r.height };
 }
 
+/** The window's one open menu: under its button, inside the window's box `app`. */
+export class Menus {
+  private open: { m: HTMLElement; b: HTMLElement } | null = null;
+
+  constructor(private readonly app: HTMLElement) {}
+
+  get isOpen(): boolean {
+    return this.open !== null;
+  }
+
+  /** A menu under `button` (a second press on the same button closes it); `pick` gets the value chosen. */
+  show(button: HTMLElement, items: MenuItem[], pick: (value: string) => void, note?: string): void {
+    if (this.open?.b === button) {
+      this.close();
+      return;
+    }
+    this.close();
+    if (!items.length) return;
+    const m = h('div', 'menu');
+    m.setAttribute('role', 'menu');
+    let current: HTMLElement | null = null;
+    items.forEach((it, i) => {
+      const b = h('button');
+      b.type = 'button';
+      b.dataset.i = String(i);
+      b.setAttribute('role', 'menuitemradio');
+      b.setAttribute('aria-checked', String(it.on));
+      b.append(h('span', 'mlb', it.label));
+      if (it.note) b.append(h('span', 'mnc', it.note));
+      if (it.on) {
+        b.insertAdjacentHTML('beforeend', icon('ok'));
+        current = b;
+      }
+      m.append(b);
+    });
+    if (note) m.append(h('div', 'mnote', note));
+    m.addEventListener('click', (e) => {
+      const b = (e.target as Element).closest<HTMLElement>('[data-i]');
+      if (!b) return;
+      const it = items[Number(b.dataset.i)];
+      this.close();
+      if (it) pick(it.value);
+    });
+    this.app.append(m);
+    this.open = { m, b: button };
+    this.place(m, button, current);
+  }
+
+  close(): void {
+    this.open?.m.remove();
+    this.open = null;
+  }
+
+  /** Under the button, its right edge on the button's; above it when there is no room below; scrolled to the current
+   *  choice when it is taller than the room. */
+  private place(m: HTMLElement, b: HTMLElement, current: HTMLElement | null): void {
+    const p = relRect(this.app, b);
+    const H = this.app.offsetHeight;
+    const below = H - (p.y + p.h + 4) - 8;
+    const above = p.y - 4 - 8;
+    const tall = m.offsetHeight;
+    const down = tall <= below || below >= above;
+    m.style.maxHeight = `${Math.max(120, down ? below : above)}px`;
+    m.style.left = `${Math.max(8, Math.min(p.x + p.w - m.offsetWidth, this.app.offsetWidth - m.offsetWidth - 8))}px`;
+    if (down) {
+      m.style.top = `${p.y + p.h + 4}px`;
+    } else {
+      m.style.top = `${p.y - Math.min(tall, above) - 4}px`;
+      m.style.transformOrigin = '50% 100%';
+    }
+    if (current && m.scrollHeight > m.clientHeight) {
+      m.scrollTop = Math.max(0, current.offsetTop - (m.clientHeight - current.offsetHeight) / 2);
+    }
+  }
+}
+
 export class WindowPage implements Ctx {
   t: WinText = TEXTS.en;
   lang: Lang = 'en';
@@ -110,7 +209,7 @@ export class WindowPage implements Ctx {
   readonly tray: SettingsTray;
   readonly reduced: () => boolean;
   private readonly now: () => Date;
-  private openMenu: { m: HTMLElement; b: HTMLElement } | null = null;
+  private readonly menus: Menus;
   private logo: any = null;
   private looping = false;
   private readonly off = new AbortController();
@@ -119,6 +218,7 @@ export class WindowPage implements Ctx {
     this.reduced = opts.reduced ?? (() => !!window.matchMedia?.(REDUCED_MOTION)?.matches);
     this.now = opts.now ?? (() => new Date());
     app.classList.add('app');
+    this.menus = new Menus(app);
     this.history = new HistoryView(this);
     this.tray = new SettingsTray(this);
     const signal = this.off.signal;
@@ -132,7 +232,7 @@ export class WindowPage implements Ctx {
     // the element it hit (a tray page, a menu that closed).
     const within = (e: Event, sel: string) => e.composedPath().some((n) => n instanceof Element && n.matches(sel));
     document.addEventListener('pointerdown', (e) => {
-      if (this.openMenu && !within(e, '.menu, [data-dd]')) this.closeMenu();
+      if (this.menus.isOpen && !within(e, '.menu, [data-dd]')) this.closeMenu();
     }, { signal });
     document.addEventListener('click', (e) => {
       if (this.tray.isOpen && !within(e, '.btray, .menu, .gear')) this.tray.close();
@@ -190,67 +290,11 @@ export class WindowPage implements Ctx {
   }
 
   menu(button: HTMLElement, items: MenuItem[], pick: (value: string) => void, note?: string): void {
-    if (this.openMenu?.b === button) {
-      this.closeMenu();
-      return;
-    }
-    this.closeMenu();
-    if (!items.length) return;
-    const m = h('div', 'menu');
-    m.setAttribute('role', 'menu');
-    let current: HTMLElement | null = null;
-    items.forEach((it, i) => {
-      const b = h('button');
-      b.type = 'button';
-      b.dataset.i = String(i);
-      b.setAttribute('role', 'menuitemradio');
-      b.setAttribute('aria-checked', String(it.on));
-      b.append(h('span', 'mlb', it.label));
-      if (it.note) b.append(h('span', 'mnc', it.note));
-      if (it.on) {
-        b.insertAdjacentHTML('beforeend', icon('ok'));
-        current = b;
-      }
-      m.append(b);
-    });
-    if (note) m.append(h('div', 'mnote', note));
-    m.addEventListener('click', (e) => {
-      const b = (e.target as Element).closest<HTMLElement>('[data-i]');
-      if (!b) return;
-      const it = items[Number(b.dataset.i)];
-      this.closeMenu();
-      if (it) pick(it.value);
-    });
-    this.app.append(m);
-    this.openMenu = { m, b: button };
-    this.placeMenu(m, button, current);
+    this.menus.show(button, items, pick, note);
   }
 
   closeMenu(): void {
-    this.openMenu?.m.remove();
-    this.openMenu = null;
-  }
-
-  /** Under the button, its right edge on the button's; above it when there is no room below; scrolled to the current
-   *  choice when it is taller than the room. */
-  private placeMenu(m: HTMLElement, b: HTMLElement, current: HTMLElement | null): void {
-    const p = relRect(this.app, b);
-    const H = this.app.offsetHeight;
-    const below = H - (p.y + p.h + 4) - 8;
-    const above = p.y - 4 - 8;
-    const tall = m.offsetHeight;
-    const down = tall <= below || below >= above;
-    m.style.maxHeight = `${Math.max(120, down ? below : above)}px`;
-    m.style.left = `${Math.max(8, Math.min(p.x + p.w - m.offsetWidth, this.app.offsetWidth - m.offsetWidth - 8))}px`;
-    if (down) {
-      m.style.top = `${p.y + p.h + 4}px`;
-    } else {
-      m.style.top = `${p.y - Math.min(tall, above) - 4}px`;
-      m.style.transformOrigin = '50% 100%';
-    }
-    if (current && m.scrollHeight > m.clientHeight) {
-      m.scrollTop = Math.max(0, current.offsetTop - (m.clientHeight - current.offsetHeight) / 2);
-    }
+    this.menus.close();
   }
 
   private setLang(v: unknown): void {
@@ -296,7 +340,7 @@ export class WindowPage implements Ctx {
     bsc.addEventListener('scroll', () => {
       bh.classList.toggle('sc', bsc.scrollTop > 4);
       // A menu would stay where its button was.
-      if (this.openMenu && !this.tray.isOpen) this.closeMenu();
+      if (this.menus.isOpen && !this.tray.isOpen) this.closeMenu();
     });
     const tray = h('div', 'btray');
     tray.hidden = true;
@@ -327,7 +371,7 @@ export class WindowPage implements Ctx {
   /** Esc: an open menu closes; in the tray, back to its first page, then closed. */
   private onKey(e: KeyboardEvent): void {
     if (e.key !== 'Escape') return;
-    if (this.openMenu) {
+    if (this.menus.isOpen) {
       this.closeMenu();
       e.preventDefault();
       return;

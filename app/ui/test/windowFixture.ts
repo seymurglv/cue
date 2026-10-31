@@ -1,5 +1,5 @@
-// The main window's page over a stand-in core: each test file mocks '../src/window/api' (every command a vi.fn) and
-// sets the answers here. The clock is fake: today is Saturday 31 October 2026.
+// The main window's page, and the welcome window's, over a stand-in core: each test file mocks '../src/window/api'
+// (every command a vi.fn) and sets the answers here. The clock is fake: today is Saturday 31 October 2026.
 import { vi } from 'vitest';
 import * as api from '../src/window/api';
 import { mountWindow, type WindowPage } from '../src/window/page';
@@ -41,10 +41,11 @@ export function entry(id: string, text: string, over: Partial<api.EntryView> = {
 
 export const core = vi.mocked(api);
 
-/** What the page subscribed with: new history entries, the microphone's level. */
-export const feeds: { entry: (e: api.EntryView) => void; level: (l: number) => void } = {
+/** What the page subscribed with: new history entries, the microphone's level, a failed microphone. */
+export const feeds: { entry: (e: api.EntryView) => void; level: (l: number) => void; failed: () => void } = {
   entry: () => {},
   level: () => {},
+  failed: () => {},
 };
 
 /** Answers of a core that holds `settings` and changes them as asked. */
@@ -75,6 +76,13 @@ export function stub(settings: api.SettingsView = view()): void {
   core.onMicLevel.mockImplementation(async (cb) => {
     feeds.level = cb;
   });
+  core.micAccess.mockResolvedValue('allowed');
+  core.onMicFailed.mockImplementation(async (cb) => {
+    feeds.failed = cb;
+  });
+  core.welcomeStep.mockResolvedValue(undefined);
+  core.welcomeClose.mockResolvedValue(undefined);
+  core.openLink.mockResolvedValue(undefined);
 }
 
 /** Promises and zero-delay timers run out. */

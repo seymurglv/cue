@@ -1,0 +1,77 @@
+/* CUE — the welcome window. Ported from the approved design (stage 6, design/06-onboarding/final.html), its welcome
+   window only, Windows look: no frame of its own (Windows draws it, with the close button), so the steps take the
+   room of the design's title bar. The shared parts — the key and microphone rows, menus, buttons, the meter, the
+   label that changes by its letters — are design/window.css; the tokens and their dark values design/cue.css.
+   Added for the real window: the Keys step (two key rows, the links to the consoles, the price and the privacy line),
+   the microphone hint, and a real text field for the first dictation. */
+/* the steps */
+.ob{position:relative;flex:1;min-height:0;overflow:hidden}
+.ob .pgv{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px 64px 6px;text-align:center}
+.ohd{font-family:var(--head-font);font-weight:800;font-size:26px;line-height:1.15;letter-spacing:-.01em}
+.ob .ohd{margin:14px 0 8px}
+.ob .op{max-width:380px;color:var(--muted);font-size:13.5px}
+.ob .oill{width:56px;height:56px;border-radius:50%;display:grid;place-items:center;background:color-mix(in srgb,var(--text) 6%,transparent);color:var(--text)}
+.ob .oill svg{width:26px;height:26px}
+.ob .oname{font-family:"Bebas Neue",sans-serif;font-size:42px;letter-spacing:.07em;line-height:1;margin-top:12px}
+.ob .bigmk svg{width:76px;height:76px;overflow:visible}
+.ob .tryk{margin:16px 0 12px}
+.ob .tryf{width:100%;max-width:400px}
+.ob .tryf .phr{margin-bottom:10px}
+
+/* Keys and Microphone: the settings rows */
+.ob .orows{width:100%;max-width:420px;margin-top:12px;text-align:left}
+.ob .kin{width:170px}
+.olinks{margin-top:10px;font-size:12.5px;color:var(--muted)}
+.oa{color:var(--text);text-decoration:underline;text-decoration-color:var(--faint);text-underline-offset:2px}
+.oa:hover{text-decoration-color:currentColor}
+.onote{max-width:420px;margin-top:4px;font-size:12px;line-height:1.4;color:var(--muted)}
+.ohint{display:flex;align-items:center;gap:10px;width:100%;max-width:420px;margin-top:10px;padding:6px 6px 6px 12px;border-radius:9px;background:color-mix(in srgb,var(--warn) 14%,transparent);font-size:12.5px;text-align:left}
+.ohint span{flex:1}
+
+/* the bottom: dots, Back, the main button */
+.ofoot{flex:none;display:flex;align-items:center;gap:14px;height:66px;padding:0 20px 0 26px}
+.ofoot .sp{flex:1}
+.dots{display:flex;gap:6px}
+.dots i{width:6px;height:6px;border-radius:3px;background:color-mix(in srgb,var(--text) 14%,transparent);transition:width .5s var(--e-spring),background .3s}
+.dots i.ok{background:color-mix(in srgb,var(--text) 38%,transparent)}
+.dots i.on{width:20px;background:var(--text)}
+.obtn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:34px;padding:0 18px;border-radius:5px;background:var(--text);color:var(--bg);font-size:13px;font-weight:600;white-space:nowrap;transition:opacity .25s,transform .12s}
+.obtn:active{transform:scale(.98)}
+.obtn:disabled{opacity:.3}
+.obtn:disabled:active{transform:none}
+.obtn .lbl{display:inline-flex}
+.olink{font-size:12.5px;color:var(--muted)}
+.olink:hover{color:var(--text)}
+
+/* First dictation */
+.phr{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;background:color-mix(in srgb,var(--text) 6%,transparent);font-size:12.5px;color:var(--muted)}
+.phr b{color:var(--text);font-weight:600}
+.ofield{display:block;width:100%;height:58px;padding:11px 14px;border:0;outline:0;resize:none;border-radius:10px;color:var(--text);background:var(--card);box-shadow:0 0 0 1px var(--line);text-align:left;font:inherit;font-size:14px;line-height:1.5;transition:box-shadow .3s}
+[data-theme=dark] .ofield{background:color-mix(in srgb,var(--text) 5%,transparent)}
+.ofield:focus{box-shadow:0 0 0 1.5px color-mix(in srgb,var(--text) 45%,transparent)}
+.ofield::placeholder{color:var(--faint)}
+
+/* keycaps */
+.keys{display:inline-flex;align-items:center;gap:4px;color:var(--muted);font-size:11px;white-space:nowrap;vertical-align:middle}
+.keys>i{font-style:normal}
+.kk{display:inline-grid;place-items:center;min-width:24px;height:24px;padding:2px 7px 0;border-radius:6px;background:var(--card);box-shadow:0 0 0 1px var(--line),inset 0 -1.5px 0 color-mix(in srgb,var(--text) 9%,transparent);font-family:"Bebas Neue",sans-serif;font-size:14px;letter-spacing:.05em;color:var(--text);line-height:1;transition:transform .12s,box-shadow .12s,background .2s}
+[data-theme=dark] .kk{background:color-mix(in srgb,var(--text) 7%,transparent);box-shadow:0 0 0 1px color-mix(in srgb,var(--text) 10%,transparent),inset 0 -1.5px 0 rgba(0,0,0,.4)}
+.keys.sm .kk{height:20px;min-width:20px;padding:1px 5px 0;border-radius:5px;font-size:12.5px}
+.keys.big{gap:8px;font-size:16px}
+.keys.big .kk{height:44px;min-width:50px;padding:4px 14px 0;border-radius:10px;font-size:24px;box-shadow:0 0 0 1px var(--line),inset 0 -3px 0 color-mix(in srgb,var(--text) 10%,transparent)}
+.keys.big.down .kk{transform:translateY(2px);box-shadow:0 0 0 1px var(--line),inset 0 -1px 0 color-mix(in srgb,var(--text) 10%,transparent);background:color-mix(in srgb,var(--text) 6%,var(--card))}
+.keys.big.wait .kk{animation:keyWait 1.6s ease-in-out infinite}
+@keyframes keyWait{50%{transform:translateY(1px)}}
+/* the Windows key: its logo, centered (no Bebas baseline to make up for) */
+.keys .kk.w{padding-top:0}
+.kk.w svg{width:.6em;height:.6em}
+
+/* Done */
+.otips{display:flex;flex-direction:column;gap:8px;width:340px;margin-top:16px;font-size:13px;text-align:left}
+.otips div{display:flex;align-items:center;gap:10px}
+.otips .ic{width:26px;height:26px;border-radius:7px;display:grid;place-items:center;background:color-mix(in srgb,var(--text) 6%,transparent);color:var(--muted)}
+.otips .ic.ask{color:var(--ask)}
+.otips .ic svg{width:15px;height:15px}
+.otips .otl{flex:1;line-height:1.35}
+.bp{position:absolute;z-index:60;width:2px;height:10px;border-radius:1px;pointer-events:none}
+.bp.dot{width:6px;height:6px;border-radius:50%}
