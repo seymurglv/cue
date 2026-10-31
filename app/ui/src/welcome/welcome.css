@@ -3,7 +3,8 @@
    room of the design's title bar. The shared parts — the key and microphone rows, menus, buttons, the meter, the
    label that changes by its letters — are design/window.css; the tokens and their dark values design/cue.css.
    Added for the real window: the Keys step (two key rows, the links to the consoles, the price and the privacy line),
-   the microphone hint, and a real text field for the first dictation. */
+   the microphone hint, and a real text field for the first dictation, which says it waits (its border breathing) in
+   place of a disabled main button. */
 /* the steps */
 .ob{position:relative;flex:1;min-height:0;overflow:hidden}
 .ob .pgv{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px 64px 6px;text-align:center}
@@ -41,6 +42,8 @@
    dictation can cancel it, so the field keeps the focus */
 .obtn:disabled{opacity:.3;pointer-events:none}
 .obtn .lbl{display:inline-flex}
+/* First dictation: the button keeps its place unseen */
+.obtn.wait{visibility:hidden}
 .olink{font-size:12px;color:var(--muted)}
 .olink:hover{color:var(--text)}
 
@@ -51,6 +54,9 @@
 [data-theme=dark] .ofield{background:color-mix(in srgb,var(--text) 5%,transparent)}
 .ofield:focus{box-shadow:0 0 0 1.5px color-mix(in srgb,var(--text) 45%,transparent)}
 .ofield::placeholder{color:var(--faint)}
+/* the field's border breathes while it waits for the dictation (not with reduced motion: the page's option, window.css) */
+.ofield.wait{animation:fieldWait 2.4s ease-in-out infinite}
+@keyframes fieldWait{50%{box-shadow:0 0 0 1.5px color-mix(in srgb,var(--text) 16%,transparent)}}
 
 /* keycaps */
 .keys{display:inline-flex;align-items:center;gap:4px;color:var(--muted);font-size:11px;white-space:nowrap;vertical-align:middle}

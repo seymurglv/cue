@@ -26,7 +26,7 @@ export interface WelcomeText {
   tryText: string;
   trySay: string;
   tryPhrase: string;
-  tryField: string;
+  /** The field's placeholder: the step waits for the dictation (no main button says so). */
   tryWaiting: string;
   /** Done's heading: no word counted, one word, and more ({NAME} — the count) by the count's plural form. */
   ready: string;
@@ -57,8 +57,7 @@ export const en: WelcomeText = {
   tryText: 'Press the keys, say the phrase, and press them again.',
   trySay: 'Say:',
   tryPhrase: '“Hello, this is my first dictation”',
-  tryField: 'The text will appear here',
-  tryWaiting: 'Waiting for dictation',
+  tryWaiting: 'Waiting — press the keys',
   ready: 'All set!',
   firstWord: 'First word!',
   firstWords: { other: 'First {NAME} words!' },
@@ -87,8 +86,7 @@ export const ru: WelcomeText = {
   tryText: 'Нажмите клавиши, скажите фразу и нажмите ещё раз.',
   trySay: 'Скажите:',
   tryPhrase: '«Привет, это моя первая диктовка»',
-  tryField: 'Текст появится здесь',
-  tryWaiting: 'Ждём диктовку',
+  tryWaiting: 'Жду диктовку — нажмите клавиши',
   ready: 'Всё готово!',
   firstWord: 'Первое слово!',
   firstWords: { one: 'Первые {NAME} слово!', few: 'Первые {NAME} слова!', many: 'Первые {NAME} слов!', other: 'Первые {NAME} слова!' },

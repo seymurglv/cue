@@ -92,14 +92,45 @@ describe('The welcome window', () => {
     await next();
     expect(step()).toBe('try');
     expect(heading()).toBe('First dictation');
-    expect(text(primary())).toBe('Waiting for dictation');
+    // No main button to press here: it keeps its place and its label, unseen, so Back does not move.
+    expect(primary().classList.contains('wait')).toBe(true);
     expect(primary().disabled).toBe(true);
+    expect(text(primary())).toBe('It works');
+    expect(back().hidden).toBe(false);
     // Only one page at a time with reduced motion.
     expect($$('.pgv')).toHaveLength(1);
     click(back());
     await settle();
     expect(step()).toBe('mic');
     expect(dots()).toEqual(['ok', 'ok', 'on', '', '']);
+    expect(primary().classList.contains('wait')).toBe(false);
+    expect(primary().disabled).toBe(false);
+  });
+
+  it('First dictation waits in its field, not on a button', async () => {
+    saved();
+    page = await mount(false);
+    for (let i = 0; i < 3; i++) await next();
+    expect(step()).toBe('try');
+    // The field says it waits, and its border breathes.
+    expect(field().placeholder).toBe('Waiting — press the keys');
+    expect(field().classList.contains('wait')).toBe(true);
+    expect(primary().classList.contains('wait')).toBe(true);
+    // The dictation came: the field stops breathing, and Done follows as before, with its button.
+    dictate('Hello, this is my first dictation.');
+    expect(field().classList.contains('wait')).toBe(false);
+    vi.advanceTimersByTime(TYPED_TO_DONE_MS);
+    await settle();
+    expect(step()).toBe('done');
+    expect(primary().classList.contains('wait')).toBe(false);
+    expect(primary().disabled).toBe(false);
+    expect(text(primary())).toBe('Done');
+    // With reduced motion the field stands still.
+    page.dispose();
+    page = await mount(true);
+    for (let i = 0; i < 3; i++) await next();
+    expect(field().placeholder).toBe('Waiting — press the keys');
+    expect(field().classList.contains('wait')).toBe(false);
   });
 
   it('holds the hotkey on load', async () => {
@@ -492,7 +523,9 @@ describe('The welcome window', () => {
     ]);
     await next();
     expect(text($('[data-dd="mic"] .ddv'))).toBe('Как в Windows');
+    expect($('[data-dd="mic"]')!.getAttribute('aria-label')).toBe('Микрофон');
     await next();
+    expect(field().placeholder).toBe('Жду диктовку — нажмите клавиши');
     dictate('Привет, это моя первая диктовка.');
     vi.advanceTimersByTime(TYPED_TO_DONE_MS);
     await settle();

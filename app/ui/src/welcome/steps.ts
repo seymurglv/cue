@@ -113,7 +113,7 @@ export function stepPage(step: Step, p: StepParts): HTMLElement {
       phrase.append(h('b', '', x.tryPhrase));
       const field = h('textarea', 'ofield');
       field.dataset.field = '';
-      field.placeholder = x.tryField;
+      field.placeholder = x.tryWaiting;
       field.spellcheck = false;
       field.setAttribute('aria-label', x.steps.try);
       const box = h('div', 'tryf');

@@ -256,6 +256,8 @@ export class WelcomePage {
     else if (step === 'mic') this.lookAtMic();
     else if (step === 'try') {
       api.welcomeStep(true).catch((e) => logFailed('letting the hotkey go', e));
+      // The field's border breathes while it waits; with reduced motion it stands still.
+      if (!this.reduced()) pg.querySelector('textarea[data-field]')?.classList.add('wait');
       this.focusField();
     } else this.done(pg);
   }
@@ -315,14 +317,17 @@ export class WelcomePage {
     this.paintPrimary();
   }
 
-  /** The main button's label (changing by its common letters) and whether it can be pressed now. */
+  /** The main button's label (changing by its common letters) and whether it can be pressed now. First dictation waits
+   *  for the voice, not a press (its field says so): the button is not shown there, and keeps its place and its label,
+   *  so Back does not move. */
   private paintPrimary(): void {
     const x = this.text;
-    const label = { hello: x.start, keys: x.next, mic: this.blocked() ? x.next : x.micWorks, try: x.tryWaiting, done: x.finish }[
+    const label = { hello: x.start, keys: x.next, mic: this.blocked() ? x.next : x.micWorks, try: null, done: x.finish }[
       this.step
     ];
     const lbl = this.pri.querySelector<HTMLElement>('.lbl')!;
-    if (lbl.dataset.t !== label) CUE().setLabel(lbl, label);
+    if (label !== null && lbl.dataset.t !== label) CUE().setLabel(lbl, label);
+    this.pri.classList.toggle('wait', this.step === 'try');
     this.pri.disabled = this.step === 'try' || (this.step === 'keys' && !keysReady(this.keys));
   }
 
@@ -405,6 +410,7 @@ export class WelcomePage {
     const keys = pg.querySelector('.keys');
     keys?.classList.remove('wait');
     keys?.classList.add('down');
+    pg.querySelector('textarea[data-field]')?.classList.remove('wait');
     this.later(() => {
       this.words = wordCount(pg.querySelector<HTMLTextAreaElement>('textarea[data-field]')?.value ?? '');
       this.go(this.at + 1);

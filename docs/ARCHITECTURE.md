@@ -933,7 +933,8 @@ logical px, centered, not resizable, and it takes the focus, so its first dictat
   with a button to the Windows privacy settings; when the window has the focus again the step reads both again with
   a new preview.
 - **First dictation**: a text field kept in focus takes the paste of an ordinary dictation; the first text in it
-  leads to Done 1.5 s later, with the number of words.
+  leads to Done 1.5 s later, with the number of words. Until then the field says it waits and the main button is not
+  shown (its place kept).
 - **Links** go by name (`open_link`: `soniox`, `anthropic`, `micPrivacy`, exact), each to a fixed address, opened with
   `ShellExecuteW` on `cue-open-link`, so no address of the page reaches the shell. `welcome_close` closes the window.
 - The page takes its language from `settings_get` (English or Russian, `welcome/text.ts`) and changes no setting but
