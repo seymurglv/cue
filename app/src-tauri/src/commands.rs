@@ -286,9 +286,9 @@ pub async fn history_search(
 }
 
 /// The recording of the entry `id`, as the bytes of its Ogg Opus file (an `ArrayBuffer` in the page, not JSON), for
-/// the page to play: `NotFound` when there is none to play — never made (an "Ask" question whose follow-up was already
-/// recording, an entry of an earlier version, recordings off), still being encoded, cleared, or past its period even
-/// before the next prune deletes it. `id` must be an entry id (`history::audio_file`): never a path from the page.
+/// the page to play: `NotFound` when there is none to play — never made (an entry of an earlier version, recordings off,
+/// an attempt whose audio could not be written), still being encoded, cleared, or past its period even before the next
+/// prune deletes it. `id` must be an entry id (`history::audio_file`): never a path from the page.
 #[tauri::command]
 pub async fn history_audio(
     window: WebviewWindow,

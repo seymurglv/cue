@@ -33,8 +33,10 @@
 //!   know) the history is neither written nor cleaned up, until the main window sets it. The new entry goes to the main
 //!   window only. A dictation's or a translation's entry keeps the text as Soniox heard it (`raw_text`), and each
 //!   entry its recording, for the period the user chose (`recordings`): the sound is taken on the core thread — a
-//!   dictation's only once `last\audio.wav` really is its own and the entry is written, an "Ask" question's before the
-//!   flow deletes `current.wav`, and only while it is still that question's — and encoded on a worker of its own;
+//!   dictation's only once `last\audio.wav` really is its own and the entry is written, an "Ask" question's as the
+//!   question goes out, while `current.wav` is its own recording (a follow-up may start recording before its answer
+//!   ends), kept with the turn and given to its entry when it ends — and encoded on a worker of its own. Only an
+//!   attempt's own recording ever becomes its sound (`wav_of`);
 //! - the main window reads and changes the settings through the core (`CoreEvent::Settings`): the core's copy takes the
 //!   change, the whole file is written, and what depends on it follows at once (the translation pair, the interface
 //!   language, the history's period); its "Paste again" and "Copy" of a history entry go through the insert thread like
@@ -89,7 +91,7 @@ use crate::lang::{self, Lang};
 use crate::paths::Paths;
 use crate::trayicon::TrayLook;
 use attempt::{Attempt, UsageLog, log_finished, needs_row, warmup_record};
-use files::LastFiles;
+use files::{LastFiles, Sound};
 use insert::{InsertJob, first_known_app, insert_app, known_app, one_line, pasted_text, trim_edges};
 use recordings::{AudioLimit, Recordings, Snapshot};
 use state::{
@@ -221,6 +223,9 @@ pub struct Runtime {
     mic_told: MicTold,
     mic_missing: Option<(String, String)>,
     wav: Option<WavSink>,
+    /// The dictation whose own recording `current.wav` is: none when its attempt could not make the file — what is
+    /// there then was left by an earlier attempt — and none once the file has gone.
+    wav_of: Option<DictationId>,
     silence: SilenceDetector,
     /// The silence detector said "there is sound" at least once: if the microphone fails, what was said is processed.
     heard: bool,
@@ -270,6 +275,9 @@ pub struct Runtime {
     view_changed: bool,
     /// The attempt of an answer still printing when a follow-up started (decision 12): its row is written when it ends.
     answering: Option<Attempt>,
+    /// The sound of the "Ask" question asked last, taken as it went out, under a name of its own until its turn ends
+    /// and its entry has an id; kept for Retry while its request failed.
+    ask_sound: Option<(DictationId, Snapshot)>,
 }
 
 impl Runtime {
@@ -318,6 +326,7 @@ impl Runtime {
             mic_told: MicTold::default(),
             mic_missing: None,
             wav: None,
+            wav_of: None,
             silence: SilenceDetector::new(),
             heard: false,
             stream: None,
@@ -347,6 +356,7 @@ impl Runtime {
             ask_shown: ShownOnce::default(),
             view_changed: false,
             answering: None,
+            ask_sound: None,
         }
     }
 
@@ -714,6 +724,10 @@ impl Runtime {
                 if let Some(task) = self.ask_task.take_for(id) {
                     task.abort();
                 }
+                // Its turn goes: "restore" asks again and takes the sound anew.
+                if self.ask_sound.as_ref().is_some_and(|(i, _)| *i == id) {
+                    self.drop_ask_sound();
+                }
                 // A follow-up's turn goes; for a first question the conversation closes right after.
                 if let Some(c) = self.conversation.as_mut() {
                     c.abort();
@@ -794,6 +808,8 @@ impl Runtime {
                 None
             }
         };
+        // Without a file of its own, whatever stayed in current.wav is no sound of this attempt's.
+        self.wav_of = self.wav.as_ref().map(|_| id);
         self.mic_gate.open(id);
         let (events, rx) = std::sync::mpsc::channel();
         let core = self.tx.clone();
@@ -825,7 +841,15 @@ impl Runtime {
         {
             tracing::warn!("recording audio not fully saved: {e}");
         }
-        if !keep && let Err(e) = files::discard(&self.paths) {
+        if !keep {
+            self.discard_sound();
+        }
+    }
+
+    /// The attempt's audio, if any, is deleted: `current.wav` is nobody's recording any more.
+    fn discard_sound(&mut self) {
+        self.wav_of = None;
+        if let Err(e) = files::discard(&self.paths) {
             tracing::warn!("recording audio not deleted: {e}");
         }
     }
@@ -1259,7 +1283,29 @@ impl Runtime {
         if follow_up {
             self.send_view(true);
         }
+        self.take_ask_sound(id);
         self.spawn_ask(id);
+    }
+
+    /// The sound of the question `id`, now that it goes out: its recording is final, and a follow-up may start
+    /// recording before its answer ends. Only while `current.wav` is this question's own recording; it replaces the
+    /// sound of a question asked before.
+    fn take_ask_sound(&mut self, id: DictationId) {
+        self.drop_ask_sound();
+        if self.attempt.id != id || self.wav_of != Some(id) {
+            return;
+        }
+        let sound = self.paths.current_wav();
+        if let Some(snapshot) = self.history.ask_snapshot(&self.settings.history, &sound, local_time()) {
+            self.ask_sound = Some((id, snapshot));
+        }
+    }
+
+    /// The sound kept for a question goes: its turn will have no entry.
+    fn drop_ask_sound(&mut self) {
+        if let Some((_, snapshot)) = self.ask_sound.take() {
+            self.history.recordings.discard(snapshot);
+        }
     }
 
     /// The web search of "Ask", if on and if the model takes one.
@@ -1375,10 +1421,12 @@ impl Runtime {
         let opened = c.opened;
         // The turn that ended goes to the history once the flow has heard of it (decision 2).
         let entry = ask_entry(heard, c, self.history.stamp(local_time()));
-        // Its question's sound, now: the flow deletes `current.wav` as it hears the end. Only while this question is
-        // still the one recorded last — a follow-up already recording has replaced it, and this question keeps none.
-        let (own, sound) = (self.attempt.id == id, self.paths.current_wav());
-        let snapshot = self.history.ask_snapshot(&self.settings.history, entry.as_ref(), own, &sound);
+        // Its question's sound, taken as it was asked (`take_ask_sound`). A failed request may be asked again (Retry):
+        // its sound waits — a question asked next, a close of the answer, drops it.
+        let mut snapshot = self.ask_sound.take_if(|(i, _)| *i == id).map(|(_, s)| s);
+        if matches!(heard, ask::Heard::Failed(_)) {
+            self.ask_sound = snapshot.take().map(|s| (id, s));
+        }
         // Kinds and counts only.
         tracing::info!(heard = ?heard, searches = result.usage.web_searches, "ask: done");
         if heard.shows() {
@@ -1454,6 +1502,8 @@ impl Runtime {
         }
         self.conversation = None;
         self.ui.answer(None);
+        // No Retry of its last question any more.
+        self.drop_ask_sound();
     }
 
     /// Insert, Insert below, Replace, or the model's write (spec 2 §6.2, §7). A write is its attempt's result
@@ -1512,7 +1562,7 @@ impl Runtime {
 
     /// An answer pasted with its button becomes the last result (Ctrl+Win+V); it has no audio of its own.
     fn commit_text(&mut self, text: &str) {
-        if let Err(e) = files::commit(&self.paths, text) {
+        if let Err(e) = files::commit(&self.paths, text, Sound::Other) {
             tracing::warn!("last result not saved: {e}");
         }
         self.last_text = Some(text.to_owned());
@@ -1621,9 +1671,7 @@ impl Runtime {
             }
             LastFiles::KeepForRetry => false,
             LastFiles::Discard => {
-                if let Err(e) = files::discard(&self.paths) {
-                    tracing::warn!("recording audio not deleted: {e}");
-                }
+                self.discard_sound();
                 false
             }
         };
@@ -1639,14 +1687,20 @@ impl Runtime {
         }
     }
 
-    /// The attempt's text and audio become the last dictation. The text stays in memory whatever happens with the
-    /// disk write: "Copy" and Ctrl+Win+V work even if the disk failed. `true` if the files were written.
+    /// The attempt's text and audio become the last dictation — its own recording only (`wav_of`): an attempt that
+    /// could not make its file has none, and the answer of a follow-up's question leaves the follow-up's alone. The text
+    /// stays in memory whatever happens with the disk write: "Copy" and Ctrl+Win+V work even if the disk failed. `true`
+    /// if the files were written.
     fn commit_last(&mut self, id: DictationId) -> bool {
         let Some((_, text)) = self.final_text.take_if(|(t, _)| *t == id) else {
             tracing::warn!("last dictation not saved: no final text");
             return false;
         };
-        let written = match files::commit(&self.paths, &text) {
+        let sound = sound_of(self.wav_of, id);
+        if sound != Sound::Other {
+            self.wav_of = None;
+        }
+        let written = match files::commit(&self.paths, &text, sound) {
             Ok(()) => true,
             Err(e) => {
                 tracing::warn!("last dictation not saved: {e}");
@@ -1785,21 +1839,19 @@ impl HistoryLog {
         Some(entry)
     }
 
-    /// The sound of an "Ask" turn's `entry`, from `sound` (`current.wav`), taken before the flow deletes it — only when
-    /// its question is still `own`, the one recorded last.
-    fn ask_snapshot(
-        &self,
-        h: &HistorySettings,
-        entry: Option<&history::Entry>,
-        own: bool,
-        sound: &Path,
-    ) -> Option<Snapshot> {
-        let entry = entry.filter(|_| own)?;
-        self.snapshot(h, sound, &entry.id)
+    /// The sound of an "Ask" question, from `sound` (`current.wav`), taken at the local time `ts` as the question goes
+    /// out, before its turn has an entry: under an id of its own (`stamp`) that no entry gets, so a crash leaves it to the
+    /// startup sweep; `add_ask` gives it to the turn's entry.
+    fn ask_snapshot(&mut self, h: &HistorySettings, sound: &Path, ts: String) -> Option<Snapshot> {
+        if !records(h) {
+            return None;
+        }
+        let asked = self.stamp(ts);
+        self.recordings.snapshot(sound, &asked.id)
     }
 
-    /// An "Ask" turn's entry; the `snapshot` of its question's sound is encoded once the entry is written, and deleted
-    /// otherwise. The entry written, if it was.
+    /// An "Ask" turn's entry; the `snapshot` of its question's sound becomes the entry's recording once the entry is
+    /// written, and is deleted otherwise. The entry written, if it was.
     fn add_ask(
         &mut self,
         h: &HistorySettings,
@@ -1808,18 +1860,16 @@ impl HistoryLog {
     ) -> Option<history::Entry> {
         let written = entry.filter(|e| self.write(h, e));
         match (snapshot, &written) {
-            (Some(snapshot), Some(_)) => self.recordings.encode(snapshot),
+            (Some(snapshot), Some(entry)) => self.recordings.encode_as(snapshot, &entry.id),
             (Some(snapshot), None) => self.recordings.discard(snapshot),
             (None, _) => {}
         }
         written
     }
 
-    /// A snapshot of `sound` for the entry `id` while recordings are kept (`audio_period`): none while they or the
-    /// history are off, or a period is unknown.
+    /// A snapshot of `sound` for the entry `id` while recordings are kept (`records`).
     fn snapshot(&self, h: &HistorySettings, sound: &Path, id: &str) -> Option<Snapshot> {
-        h.audio_period().filter(|keep| *keep != AudioKeep::Off)?;
-        self.recordings.snapshot(sound, id)
+        records(h).then(|| self.recordings.snapshot(sound, id)).flatten()
     }
 
     /// "Clear history": every day goes, and every recording with them, whatever the periods say.
@@ -1830,6 +1880,20 @@ impl HistoryLog {
         }
         self.recordings.clear();
     }
+}
+
+/// Whose sound `current.wav` is for the attempt `id`, when `wav_of` made it (`Runtime::wav_of`).
+fn sound_of(wav_of: Option<DictationId>, id: DictationId) -> Sound {
+    match wav_of {
+        Some(of) if of == id => Sound::Own,
+        Some(_) => Sound::Other,
+        None => Sound::Stale,
+    }
+}
+
+/// Whether recordings are kept (`audio_period`): not while they or the history are off, nor while a period is unknown.
+fn records(h: &HistorySettings) -> bool {
+    h.audio_period().is_some_and(|keep| keep != AudioKeep::Off)
 }
 
 /// The history entry of a dictation or a translation that gave its text (decision 2): the text `commit_last` takes for
@@ -2085,6 +2149,7 @@ fn soniox_key() -> Result<String, EngineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cue_core::settings::Cutoff;
     use cue_engines::ask::{AskEnd, AskFailure, AskResult, AskUsage, Step};
 
     #[test]
@@ -2487,46 +2552,81 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// An "Ask" question's sound is taken before the flow deletes `current.wav`, and only while the question is still
-    /// the one recorded last; it becomes a recording once the entry is written, and goes otherwise.
+    /// How long a recording plays, in ms: the last page's position less the pre-skip, at 48 kHz.
+    fn recorded_ms(file: &Path) -> u64 {
+        let bytes = std::fs::read(file).unwrap();
+        let last = bytes.windows(4).rposition(|w| w == b"OggS").unwrap();
+        (u64::from_le_bytes(bytes[last + 6..last + 14].try_into().unwrap()) - 312) / 48
+    }
+
+    /// An "Ask" question's sound is taken as the question goes out, under an id of its own the startup sweep knows: a
+    /// follow-up that starts recording before the answer ends leaves it whole. It becomes the recording of the turn's
+    /// entry once that is written; it goes when the entry is not, and a clear meanwhile drops it. Nothing is taken
+    /// while recordings or the history are off.
     #[test]
-    fn an_ask_question_is_recorded_from_its_own_sound_taken_before_it_goes() {
+    fn an_ask_question_keeps_the_sound_it_was_asked_with() {
         let dir = tmp("record-ask");
         let paths = Paths::new(&dir.join("Roaming"), &dir.join("Local"));
+        std::fs::create_dir_all(&paths.last_dir).unwrap();
         let (mut log, queue) = log_in(&dir);
         let month = keeping(Keep::Month);
         log.prune(&month, "2026-10-31");
         assert_eq!(queue.run(), 1, "the day's prune, before its first entry");
         let mut c = asked_in("Notepad");
-        let heard = turn(&mut c, "What is CUE?", "A dictation app.", AskEnd::Answer, true);
 
         recordings::tone(&paths.current_wav(), 400);
-        let entry = ask_entry(heard, &c, at("2026-10-31T07:30:00.000"));
-        assert!(log.ask_snapshot(&month, entry.as_ref(), false, &paths.current_wav()).is_none(), "a follow-up's sound");
-        assert!(log.ask_snapshot(&month, None, true, &paths.current_wav()).is_none(), "no entry");
-        assert_eq!((recorded(&dir), queue.run()), (Vec::<String>::new(), 0));
-        let snapshot = log.ask_snapshot(&month, entry.as_ref(), true, &paths.current_wav());
-        // What the flow does as it hears the answer.
+        let snapshot = log.ask_snapshot(&month, &paths.current_wav(), "2026-10-31T07:30:00.000".into());
+        let taken = recorded(&dir);
+        assert_eq!(history::audio_temps(taken.iter().map(String::as_str)).len(), 1, "{taken:?}");
+        // A follow-up starts recording while the answer prints (`open_mic`).
         files::discard(&paths).unwrap();
-        assert!(!paths.current_wav().exists());
-        let written = log.add_ask(&month, entry.clone(), snapshot);
-        assert_eq!(written, entry);
+        recordings::tone(&paths.current_wav(), 100);
+        let heard = turn(&mut c, "What is CUE?", "A dictation app.", AskEnd::Answer, true);
+        let entry = ask_entry(heard, &c, log.stamp("2026-10-31T07:30:05.000".into()));
+        assert_eq!(entry.as_ref().unwrap().id, "2026-10-31T07:30:05.000-2", "no entry has the question's own id");
+        assert_eq!(log.add_ask(&month, entry.clone(), snapshot), entry);
         assert_eq!(queue.run(), 1);
         let kept = history::audio_file(&entry.unwrap().id).unwrap();
         assert_eq!(recorded(&dir), [kept.as_str()]);
+        assert_eq!(recorded_ms(&dir.join("audio").join(&kept)), 400, "the question's sound, not the follow-up's");
 
         // The history's folder cannot be made: the entry is not written, and the snapshot taken for it goes.
         std::fs::write(dir.join("blocked"), b"").unwrap();
         let (others, blocked_queue) = Recordings::queued(dir.join("audio"));
         let mut blocked = HistoryLog::new(dir.join("blocked"), others);
-        recordings::tone(&paths.current_wav(), 400);
-        let entry = ask_entry(heard, &c, at("2026-10-31T07:31:00.000"));
-        let snapshot = blocked.ask_snapshot(&month, entry.as_ref(), true, &paths.current_wav());
+        let snapshot = blocked.ask_snapshot(&month, &paths.current_wav(), "2026-10-31T07:31:00.000".into());
         assert!(snapshot.is_some());
+        let entry = ask_entry(heard, &c, blocked.stamp("2026-10-31T07:31:05.000".into()));
         assert_eq!(blocked.add_ask(&month, entry, snapshot), None);
         blocked_queue.run();
         assert_eq!(recorded(&dir), [kept.as_str()], "no snapshot left behind");
+
+        // Cleared while the answer printed: never encoded, and the folder is not made again.
+        let snapshot = log.ask_snapshot(&month, &paths.current_wav(), "2026-10-31T07:32:00.000".into());
+        assert!(snapshot.is_some());
+        log.clear();
+        let entry = ask_entry(heard, &c, log.stamp("2026-10-31T07:32:05.000".into()));
+        assert!(log.add_ask(&keeping(Keep::Month), entry, snapshot).is_some());
+        queue.run();
+        assert!(!dir.join("audio").exists());
+
+        // Off, or the history off: no sound is taken, and no id is used up.
+        let off = HistorySettings { keep: Period::Set(Keep::Month), audio: Period::Set(AudioKeep::Off) };
+        for h in [off, keeping(Keep::Off)] {
+            assert!(log.ask_snapshot(&h, &paths.current_wav(), "2026-10-31T07:33:00.000".into()).is_none());
+        }
+        assert_eq!(log.stamp("2026-10-31T07:34:00.000".into()).id, "2026-10-31T07:34:00.000-5");
+        assert!(!dir.join("audio").exists());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Only an attempt's own recording becomes the last dictation's sound.
+    #[test]
+    fn the_last_dictation_takes_only_its_own_sound() {
+        let (one, two) = (DictationId(1), DictationId(2));
+        assert_eq!(sound_of(Some(one), one), Sound::Own);
+        assert_eq!(sound_of(Some(two), one), Sound::Other, "a follow-up's, still in use");
+        assert_eq!(sound_of(None, one), Sound::Stale, "its file could not be made");
     }
 
     /// No sound is taken while recordings or the history are off, or a period is unknown.
@@ -2572,7 +2672,7 @@ mod tests {
         assert_eq!(recorded(&dir), [old.as_str(), &kept, "notes.tmp"], "swept at once");
         assert_eq!(queue.run(), 1);
         assert_eq!(recorded(&dir), [kept.as_str(), "notes.tmp"], "pruned on the worker");
-        assert_eq!(log.recordings.limit().get(), Some(AudioKeep::Week));
+        assert_eq!(log.recordings.limit().get(), Some(AudioKeep::Week.cutoff()));
 
         let sound = dir.join("audio.wav");
         recordings::tone(&sound, 100);
@@ -2581,9 +2681,12 @@ mod tests {
         let off = HistorySettings { audio: Period::Set(AudioKeep::Off), ..h };
         log.prune(&off, "2026-10-31");
         assert!(!audio.exists(), "off: the folder is gone at once");
-        assert_eq!(queue.run(), 1);
+        assert_eq!(queue.run(), 2, "the encoding waiting, then the folder set aside");
         assert!(!audio.exists(), "the encoding waiting was dropped");
-        assert_eq!(log.recordings.limit().get(), Some(AudioKeep::Off));
+        let names: Vec<String> =
+            std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        assert!(!names.iter().any(|n| n.starts_with("audio.cleared")), "nothing set aside is left: {names:?}");
+        assert_eq!(log.recordings.limit().get(), Some(Cutoff::All));
         assert_eq!(history::find(&dir, &e.id), Some(e), "the entry stays");
         std::fs::remove_dir_all(dir).unwrap();
     }

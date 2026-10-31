@@ -3,42 +3,48 @@
 //! them; the main window plays them (`Playable`, `read`).
 //!
 //! - The sound of an entry is taken on the core thread — a dictation's once its entry is written, an "Ask" question's
-//!   before the flow deletes it — as a snapshot in the recordings folder (`history::audio_snapshot`): a hard link to
-//!   the WAV it was recorded into — nothing is copied — or a copy where a link cannot be made. The WAV may then be
-//!   replaced or deleted at once: the next dictation's commit, an "Ask" answer's discard. A snapshot is encoded only
-//!   once its entry is written.
+//!   as the question goes out, under an id of its own until its turn has an entry (`encode_as`) — as a snapshot in the
+//!   recordings folder (`history::audio_snapshot`): a hard link to the WAV it was recorded into — nothing is copied —
+//!   or a copy where a link cannot be made. The WAV may then be replaced or deleted at once: the next dictation's
+//!   commit, a follow-up's recording, an "Ask" answer's discard. A snapshot is encoded only once its entry is written.
 //! - One worker thread encodes the snapshots, one at a time, into their recordings (`history::audio_file`) and deletes
 //!   them whatever came of it; the recordings past their period are deleted in the same queue, so a prune never runs
 //!   alongside an encoding. A prune never touches a file still being written: what a crash left half written goes at
 //!   startup alone (`sweep`), before anything is recorded.
-//! - "Clear history", and recordings or the history turned off, delete the whole folder at once on the core thread and
-//!   move the generation on: an encoding of an earlier generation never takes its name (the check comes right before
-//!   its rename; a clear after it leaves the rename no folder), and the folder is never made again by one.
+//! - "Clear history", and recordings or the history turned off, take the whole folder away at once on the core thread
+//!   and move the generation on: an encoding of an earlier generation never takes its name (the check comes right
+//!   before its rename; a clear after it leaves the rename no folder), and the folder is never made again by one. The
+//!   folder is renamed aside (`aside`) and deleted on the worker, so a month of recordings never holds the core up; one
+//!   that cannot be renamed — a file in it still open, an encoding under way — is deleted where it is.
+//! - The main window reads a recording only from a file of the folder itself, never through a link, and none larger
+//!   than `MAX_BYTES`.
 //!
 //! Neither the sound nor a path nor an entry's id goes to the log: lengths, counts and error codes.
 use std::collections::HashSet;
-use std::io;
+use std::io::{self, Read};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 
 use cue_core::history;
-use cue_core::settings::AudioKeep;
+use cue_core::settings::Cutoff;
 use cue_platform_win::opus::{self, EncodeError, Encoded};
 
-/// The longest a recording may stay (`HistorySettings::audio_limit`), as the core holds it now: the main window's
-/// commands play none past it, even before the next prune deletes it. `None` — unknown: nothing is deleted, and what
-/// is there plays.
+/// The largest recording the main window gets: more than five hours of speech, far longer than any dictation.
+const MAX_BYTES: u64 = 32 * 1024 * 1024;
+
+/// What deletes recordings (`HistorySettings::audio_limit`), as the core holds it now: the main window's commands play
+/// none past it, even before the next prune deletes it. `None` — nothing is deleted, and what is there plays.
 #[derive(Clone, Default)]
-pub struct AudioLimit(Arc<Mutex<Option<AudioKeep>>>);
+pub struct AudioLimit(Arc<Mutex<Option<Cutoff>>>);
 
 impl AudioLimit {
-    pub fn get(&self) -> Option<AudioKeep> {
+    pub fn get(&self) -> Option<Cutoff> {
         *self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn set(&self, limit: Option<AudioKeep>) {
+    fn set(&self, limit: Option<Cutoff>) {
         *self.0.lock().unwrap_or_else(PoisonError::into_inner) = limit;
     }
 }
@@ -61,10 +67,12 @@ pub struct Snapshot {
     generation: u64,
 }
 
-/// The worker's work, in the order it came.
+/// The worker's work, in the order it came: an encoding, a prune of the recordings dated before the `days` before
+/// `today`, a folder a clear set aside.
 enum Job {
     Encode(Snapshot),
-    Prune { keep: AudioKeep, today: String },
+    Prune { days: u32, today: String },
+    Remove(PathBuf),
 }
 
 impl Recordings {
@@ -97,39 +105,57 @@ impl Recordings {
         self.limit.clone()
     }
 
-    /// At startup, before anything is recorded: what a crash left half written goes.
+    /// At startup, before anything is recorded: what a crash left half written goes, and the folders a clear set aside
+    /// but did not get to delete (on the worker).
     pub fn sweep(&self) {
         match history::sweep_audio_temps(&self.dir) {
             Ok(0) => {}
             Ok(files) => tracing::info!(files, "recordings: half-written files of an earlier run deleted"),
             Err(e) => tracing::warn!("recordings: half-written files of an earlier run not deleted: {e}"),
         }
+        for folder in set_aside(&self.dir) {
+            self.remove(folder);
+        }
     }
 
-    /// From now on recordings stay for `limit`: past it, counted back from `today` (`YYYY-MM-DD`), they go on the
-    /// worker, after the encodings queued before; `Off` clears them all at once; `None` (unknown) deletes nothing.
-    pub fn prune(&self, limit: Option<AudioKeep>, today: &str) {
+    /// From now on recordings stay until `limit`: past it, counted back from `today` (`YYYY-MM-DD`), they go on the
+    /// worker, after the encodings queued before; `All` clears them all at once; `None` deletes nothing.
+    pub fn prune(&self, limit: Option<Cutoff>, today: &str) {
         self.limit.set(limit);
         match limit {
             None => {}
-            Some(AudioKeep::Off) => self.clear(),
-            Some(keep) => {
-                if let Err(job) = self.send(Job::Prune { keep, today: today.to_owned() }) {
+            Some(Cutoff::All) => self.clear(),
+            Some(Cutoff::DaysBack(days)) => {
+                if let Err(job) = self.send(Job::Prune { days, today: today.to_owned() }) {
                     run(job, &self.dir, &self.generation);
                 }
             }
         }
     }
 
-    /// Every recording goes at once, with the folder and whatever is in it; an encoding still under way never takes
-    /// its name.
+    /// Every recording goes at once, with the folder and whatever is in it: renamed aside, then deleted on the worker.
+    /// An encoding still under way never takes its name.
     pub fn clear(&self) {
-        self.generation.fetch_add(1, Ordering::SeqCst);
-        let there = self.dir.is_dir();
-        match history::clear_audio(&self.dir) {
-            Ok(()) if there => tracing::info!("recordings cleared"),
-            Ok(()) => {}
-            Err(e) => tracing::warn!("recordings: not cleared: {e}"),
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let aside = aside(&self.dir, generation);
+        match std::fs::rename(&self.dir, &aside) {
+            Ok(()) => {
+                tracing::info!("recordings cleared");
+                self.remove(aside);
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            // A file in it is still open (an encoding under way, a read of the main window): deleted where it is.
+            Err(_) => match history::clear_audio(&self.dir) {
+                Ok(()) => tracing::info!("recordings cleared"),
+                Err(e) => tracing::warn!("recordings: not cleared: {e}"),
+            },
+        }
+    }
+
+    /// A folder set aside goes on the worker, or here when it is not running.
+    fn remove(&self, folder: PathBuf) {
+        if let Err(Job::Remove(folder)) = self.send(Job::Remove(folder)) {
+            remove_folder(&folder);
         }
     }
 
@@ -153,6 +179,18 @@ impl Recordings {
                 }
                 remove(&wav);
                 None
+            }
+        }
+    }
+
+    /// The snapshot, taken under a name of its own before its entry had an id (an "Ask" question's), is encoded into the
+    /// recording of the entry `id`, and deleted.
+    pub fn encode_as(&self, snapshot: Snapshot, id: &str) {
+        match history::audio_file(id) {
+            Some(out) => self.encode(Snapshot { out: self.dir.join(out), ..snapshot }),
+            None => {
+                tracing::warn!("recording: the entry's id names no recording");
+                remove(&snapshot.wav);
             }
         }
     }
@@ -186,18 +224,60 @@ fn run(job: Job, dir: &Path, generation: &AtomicU64) {
             let current = || generation.load(Ordering::SeqCst) == snapshot.generation;
             // A snapshot taken before a clear is not even started.
             let done = if current() { encode(&snapshot, current) } else { Err(EncodeError::Dropped) };
-            match done {
-                Ok(Encoded { duration_ms, bytes }) => tracing::info!(duration_ms, bytes, "recording kept"),
-                Err(EncodeError::Dropped) => tracing::info!("recording dropped: the recordings were cleared meanwhile"),
-                Err(e) => tracing::warn!("recording not kept: {e}"),
-            }
+            log_encoded(&done, !current());
             remove(&snapshot.wav);
         }
-        Job::Prune { keep, today } => match history::prune_audio(dir, keep, &today) {
+        Job::Prune { days, today } => match history::prune_audio(dir, Cutoff::DaysBack(days), &today) {
             Ok(0) => {}
-            Ok(recordings) => tracing::info!(recordings, keep = keep.code(), "recordings: old ones deleted"),
+            Ok(recordings) => tracing::info!(recordings, days, "recordings: old ones deleted"),
             Err(e) => tracing::warn!("recordings: old ones not deleted: {e}"),
         },
+        Job::Remove(folder) => remove_folder(&folder),
+    }
+}
+
+/// What came of an encoding, in one line; `cleared` — the recordings were cleared since its snapshot was taken, which
+/// takes its file or its folder away while it is written: whatever failed then, it was dropped.
+fn log_encoded(done: &Result<Encoded, EncodeError>, cleared: bool) {
+    match done {
+        Ok(Encoded { duration_ms, bytes }) => tracing::info!(duration_ms, bytes, "recording kept"),
+        Err(EncodeError::Dropped) => tracing::info!("recording dropped: the recordings were cleared meanwhile"),
+        Err(_) if cleared => tracing::info!("recording dropped: the recordings were cleared meanwhile"),
+        Err(e) => tracing::warn!("recording not kept: {e}"),
+    }
+}
+
+/// Where a clear puts the recordings folder `dir` until it is deleted: next to it (a rename on one volume is done at
+/// once), under its name with `.cleared-` and the clear's generation.
+fn aside(dir: &Path, generation: u64) -> PathBuf {
+    let mut name = dir.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".cleared-{generation}"));
+    dir.with_file_name(name)
+}
+
+/// The folders set aside next to `dir` (`aside`) that are still there; a link is no such folder.
+fn set_aside(dir: &Path) -> Vec<PathBuf> {
+    let (Some(parent), Some(name)) = (dir.parent(), dir.file_name().and_then(|n| n.to_str())) else {
+        return Vec::new();
+    };
+    let prefix = format!("{name}.cleared-");
+    let generation = |g: &str| !g.is_empty() && g.bytes().all(|b| b.is_ascii_digit());
+    let ours = |n: &str| n.strip_prefix(prefix.as_str()).is_some_and(generation);
+    let Ok(listing) = std::fs::read_dir(parent) else { return Vec::new() };
+    listing
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter(|e| e.file_name().to_str().is_some_and(ours))
+        .map(|e| e.path())
+        .collect()
+}
+
+/// Deletes a folder a clear set aside, with all in it; one that cannot be deleted goes at the next startup.
+fn remove_folder(folder: &Path) {
+    if let Err(e) = std::fs::remove_dir_all(folder)
+        && e.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!("recordings: a cleared folder not deleted: {e}");
     }
 }
 
@@ -232,21 +312,21 @@ fn remove(path: &Path) {
 }
 
 /// Whether the recording `file` is past `limit`, counted back from `today`: a prune now would delete it.
-fn expired(file: &str, limit: Option<AudioKeep>, today: &str) -> bool {
-    limit.is_some_and(|keep| !history::audio_to_delete([file], keep, today).is_empty())
+fn expired(file: &str, limit: Option<Cutoff>, today: &str) -> bool {
+    limit.is_some_and(|cutoff| !history::audio_to_delete([file], cutoff, today).is_empty())
 }
 
 /// The recordings the main window may play, from one listing of the folder `dir`: those there, but for any past
 /// `limit` (`AudioLimit`), counted back from `today`.
 pub struct Playable {
     files: HashSet<String>,
-    limit: Option<AudioKeep>,
+    limit: Option<Cutoff>,
     today: String,
 }
 
 impl Playable {
     /// No folder, or one that cannot be listed: none plays.
-    pub fn read(dir: &Path, limit: Option<AudioKeep>, today: &str) -> Self {
+    pub fn read(dir: &Path, limit: Option<Cutoff>, today: &str) -> Self {
         let files: HashSet<String> = std::fs::read_dir(dir)
             .map(|listing| {
                 listing
@@ -267,14 +347,16 @@ impl Playable {
 }
 
 /// The bytes of the recording `file` (`history::audio_file`) of the folder `dir`; `None` when there is none to play —
-/// never made, deleted, past `limit` counted back from `today`, or not a file.
-pub fn read(dir: &Path, file: &str, limit: Option<AudioKeep>, today: &str) -> io::Result<Option<Vec<u8>>> {
+/// never made, deleted, past `limit` counted back from `today`, or not a file of the folder (a folder, a link). One
+/// larger than `MAX_BYTES` is an error: CUE never writes one.
+pub fn read(dir: &Path, file: &str, limit: Option<Cutoff>, today: &str) -> io::Result<Option<Vec<u8>>> {
     if expired(file, limit, today) {
         return Ok(None);
     }
     let path = dir.join(file);
-    let found = match std::fs::metadata(&path) {
-        Ok(m) if m.is_file() => std::fs::read(&path).map(Some),
+    let found = match std::fs::symlink_metadata(&path) {
+        Ok(m) if m.is_file() && m.len() <= MAX_BYTES => read_at_most(&path, MAX_BYTES).map(Some),
+        Ok(m) if m.is_file() => Err(too_large()),
         Ok(_) => Ok(None),
         Err(e) => Err(e),
     };
@@ -282,6 +364,18 @@ pub fn read(dir: &Path, file: &str, limit: Option<AudioKeep>, today: &str) -> io
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         other => other,
     }
+}
+
+/// The bytes of the file `path`, as long as it holds no more than `max` of them (it may have grown since it was looked
+/// at).
+fn read_at_most(path: &Path, max: u64) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?.take(max + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max { Err(too_large()) } else { Ok(bytes) }
+}
+
+fn too_large() -> io::Error {
+    io::Error::other("the recording is larger than any CUE writes")
 }
 
 #[cfg(test)]
@@ -328,6 +422,7 @@ pub fn tone(path: &Path, ms: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cue_core::settings::AudioKeep;
 
     /// A folder of the test's own, deleted with all in it even when the check failed.
     struct Dir(PathBuf);
@@ -389,7 +484,30 @@ mod tests {
         assert_eq!(names(&d.audio()), [recording(ID)], "the snapshot is gone");
         let bytes = std::fs::read(d.audio().join(recording(ID))).unwrap();
         assert!(bytes.starts_with(b"OggS") && bytes.len() > 1_000 && bytes.len() < 4_000, "{}", bytes.len());
-        assert_eq!(read(&d.audio(), &recording(ID), Some(AudioKeep::Day), "2026-10-31").unwrap(), Some(bytes));
+        let day = Some(AudioKeep::Day.cutoff());
+        assert_eq!(read(&d.audio(), &recording(ID), day, "2026-10-31").unwrap(), Some(bytes));
+    }
+
+    /// An "Ask" question's snapshot is taken before its entry has an id, under a name of its own the startup sweep
+    /// knows; it becomes the recording of the entry it is given to.
+    #[test]
+    fn a_snapshot_taken_before_its_entry_becomes_that_entrys_recording() {
+        let d = Dir::new("encode-as");
+        let sound = d.0.join("current.wav");
+        tone(&sound, 300);
+        let (rec, queue) = Recordings::queued(d.audio());
+        let (asked, entry) = ("2026-10-31T07:30:00.000-1", "2026-10-31T07:30:04.500-2");
+        let snapshot = rec.snapshot(&sound, asked).unwrap();
+        let taken = history::audio_snapshot(asked).unwrap();
+        assert_eq!(names(&d.audio()), [taken.as_str()]);
+        assert_eq!(history::audio_temps([taken.as_str()]), [taken.as_str()], "a crash leaves it to the sweep");
+        rec.encode_as(snapshot, entry);
+        assert_eq!(queue.run(), 1);
+        assert_eq!(names(&d.audio()), [recording(entry)], "its own name gone, the entry's recording made");
+
+        let snapshot = rec.snapshot(&sound, asked).unwrap();
+        rec.encode_as(snapshot, "../not-an-id");
+        assert_eq!((queue.run(), names(&d.audio())), (0, vec![recording(entry)]), "no recording, no snapshot left");
     }
 
     /// "Clear history" between the snapshot and its turn on the worker: the folder is gone at once, and the encoding
@@ -404,8 +522,9 @@ mod tests {
         rec.clear();
         assert!(!d.audio().exists(), "cleared at once");
         rec.encode(snapshot);
-        assert_eq!(queue.run(), 1);
+        assert_eq!(queue.run(), 2, "the folder set aside is deleted, then the encoding dropped");
         assert!(!d.audio().exists(), "not made again");
+        assert_eq!(names(&d.0), ["audio.wav"], "nothing set aside is left");
 
         // Its snapshot made again by hand (a clear that could not delete it): still never encoded, and deleted.
         let snapshot = rec.snapshot(&sound, ID).unwrap();
@@ -452,8 +571,9 @@ mod tests {
         let (rec, queue) = Recordings::queued(d.audio());
         let old = "2026-10-29T09:00:00.000-1";
         rec.encode(rec.snapshot(&sound, old).unwrap());
-        rec.prune(Some(AudioKeep::Day), "2026-10-31");
-        assert_eq!(rec.limit().get(), Some(AudioKeep::Day));
+        let day = AudioKeep::Day.cutoff();
+        rec.prune(Some(day), "2026-10-31");
+        assert_eq!(rec.limit().get(), Some(day));
         assert_eq!(queue.run(), 2);
         assert_eq!(names(&d.audio()), Vec::<String>::new(), "encoded, then deleted as older than a day");
 
@@ -462,14 +582,59 @@ mod tests {
         rec.prune(None, "2026-11-30");
         assert_eq!((rec.limit().get(), queue.run()), (None, 0), "unknown: nothing to do");
         assert_eq!(names(&d.audio()), [recording(ID)]);
-        rec.prune(Some(AudioKeep::Week), "2026-11-30");
+        rec.prune(Some(AudioKeep::Week.cutoff()), "2026-11-30");
         assert_eq!(queue.run(), 1);
         assert_eq!(names(&d.audio()), Vec::<String>::new());
 
+        // The history's own year while the recordings' period is unknown: 366 days back.
+        rec.encode(rec.snapshot(&sound, "2025-10-30T09:00:00.000-2").unwrap());
+        rec.encode(rec.snapshot(&sound, "2025-10-29T09:00:00.000-3").unwrap());
+        rec.prune(Some(Cutoff::DaysBack(366)), "2026-10-31");
+        assert_eq!(queue.run(), 3);
+        assert_eq!(names(&d.audio()), [recording("2025-10-30T09:00:00.000-2")]);
+
         std::fs::write(d.audio().join("notes.txt"), "x").unwrap();
-        rec.prune(Some(AudioKeep::Off), "2026-11-30");
-        assert_eq!((rec.limit().get(), queue.run()), (Some(AudioKeep::Off), 0), "off: cleared at once");
-        assert!(!d.audio().exists());
+        rec.prune(Some(Cutoff::All), "2026-11-30");
+        assert_eq!(rec.limit().get(), Some(Cutoff::All));
+        assert!(!d.audio().exists(), "off: cleared at once");
+        assert_eq!(queue.run(), 1, "and deleted on the worker");
+        assert_eq!(names(&d.0), ["audio.wav"]);
+    }
+
+    /// A clear renames the folder aside and the worker deletes it; one that cannot be renamed is deleted where it is;
+    /// at startup the folders a clear left aside go on the worker — only CUE's own.
+    #[test]
+    fn a_clear_sets_the_folder_aside_and_the_worker_deletes_it() {
+        let d = Dir::new("aside");
+        let (rec, queue) = Recordings::queued(d.audio());
+        std::fs::create_dir_all(d.audio()).unwrap();
+        for n in 0..50 {
+            std::fs::write(d.audio().join(recording(&format!("2026-10-31T07:30:00.000-{}", n + 1))), b"OggS").unwrap();
+        }
+        rec.clear();
+        assert_eq!(names(&d.0), ["audio.cleared-1"], "gone at once, set aside");
+        assert_eq!(queue.run(), 1);
+        assert_eq!(names(&d.0), Vec::<String>::new());
+
+        // A file in it held open: Windows renames no such folder, and it is deleted where it is.
+        std::fs::create_dir_all(d.audio()).unwrap();
+        let open = std::fs::File::create(d.audio().join(recording(ID) + ".tmp")).unwrap();
+        rec.clear();
+        drop(open);
+        let left: Vec<String> = names(&d.0);
+        assert!(!d.audio().exists(), "{left:?}");
+        queue.run();
+        assert_eq!(names(&d.0), Vec::<String>::new());
+
+        for folder in ["audio.cleared-7", "audio.cleared-", "audio.cleared-x", "other.cleared-2", "audio"] {
+            std::fs::create_dir_all(d.0.join(folder)).unwrap();
+        }
+        std::fs::write(d.0.join("audio.cleared-7").join("x.ogg"), b"OggS").unwrap();
+        std::fs::write(d.0.join("audio.cleared-3"), b"a file").unwrap();
+        rec.sweep();
+        assert_eq!(queue.run(), 1);
+        let kept = ["audio", "audio.cleared-", "audio.cleared-3", "audio.cleared-x", "other.cleared-2"];
+        assert_eq!(names(&d.0), kept);
     }
 
     /// The worker not running: nothing is recorded, a prune runs where it is asked for.
@@ -484,7 +649,7 @@ mod tests {
         rec.encode(snapshot);
         assert_eq!(names(&d.audio()), Vec::<String>::new(), "its snapshot deleted");
         std::fs::write(d.audio().join(recording("2026-10-01T09:00:00.000-1")), b"OggS").unwrap();
-        rec.prune(Some(AudioKeep::Week), "2026-10-31");
+        rec.prune(Some(AudioKeep::Week.cutoff()), "2026-10-31");
         assert_eq!(names(&d.audio()), Vec::<String>::new());
 
         let none = Recordings { worker: None, ..Recordings::queued(d.audio()).0 };
@@ -519,19 +684,61 @@ mod tests {
 
         let at = |limit| Playable::read(&audio, limit, "2026-10-31");
         let plays = |p: &Playable| [today, yesterday, folder, missing, "..", ""].map(|id| p.has(id));
-        assert_eq!(plays(&at(Some(AudioKeep::Week))), [true, true, false, false, false, false]);
+        assert_eq!(plays(&at(Some(AudioKeep::Week.cutoff()))), [true, true, false, false, false, false]);
         assert_eq!(plays(&at(None)), [true, true, false, false, false, false], "unknown: what is there");
-        assert_eq!(plays(&at(Some(AudioKeep::Day))), [true, false, false, false, false, false]);
-        assert_eq!(plays(&at(Some(AudioKeep::Off))), [false; 6]);
+        assert_eq!(plays(&at(Some(AudioKeep::Day.cutoff()))), [true, false, false, false, false, false]);
+        assert_eq!(plays(&at(Some(AudioKeep::Off.cutoff()))), [false; 6]);
         assert_eq!(plays(&Playable::read(&d.0.join("none"), None, "2026-10-31")), [false; 6]);
 
         let bytes = |id: &str, limit| read(&audio, &recording(id), limit, "2026-10-31").unwrap();
-        assert_eq!(bytes(today, Some(AudioKeep::Day)), Some(today.as_bytes().to_vec()));
-        assert_eq!(bytes(yesterday, Some(AudioKeep::Week)), Some(yesterday.as_bytes().to_vec()));
-        assert_eq!(bytes(yesterday, Some(AudioKeep::Day)), None, "past the limit, not yet deleted");
+        assert_eq!(bytes(today, Some(AudioKeep::Day.cutoff())), Some(today.as_bytes().to_vec()));
+        assert_eq!(bytes(yesterday, Some(AudioKeep::Week.cutoff())), Some(yesterday.as_bytes().to_vec()));
+        assert_eq!(bytes(yesterday, Some(AudioKeep::Day.cutoff())), None, "past the limit, not yet deleted");
         assert_eq!(bytes(yesterday, None), Some(yesterday.as_bytes().to_vec()));
         assert_eq!(bytes(folder, None), None);
         assert_eq!(bytes(missing, None), None);
+    }
+
+    /// The main window never gets a recording larger than CUE writes, nor one through a link.
+    #[test]
+    fn a_recording_too_large_or_behind_a_link_is_not_read() {
+        let d = Dir::new("read-limits");
+        let audio = d.audio();
+        std::fs::create_dir_all(&audio).unwrap();
+        let (large, linked) = ("2026-10-31T09:00:00.000-1", "2026-10-31T09:01:00.000-2");
+        std::fs::File::create(audio.join(recording(large))).unwrap().set_len(MAX_BYTES + 1).unwrap();
+        let e = read(&audio, &recording(large), None, "2026-10-31").unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::Other, "{e}");
+        let small = d.0.join("small");
+        std::fs::write(&small, b"OggS").unwrap();
+        assert_eq!(read_at_most(&small, 4).unwrap(), b"OggS");
+        assert!(read_at_most(&small, 3).is_err(), "grown past the size it was looked at with");
+        // Where Windows lets this account make a link: one under a recording's name is no recording.
+        if std::os::windows::fs::symlink_file(&small, audio.join(recording(linked))).is_ok() {
+            assert_eq!(read(&audio, &recording(linked), None, "2026-10-31").unwrap(), None);
+            assert!(!Playable::read(&audio, None, "2026-10-31").has(linked));
+        }
+    }
+
+    /// The line an encoding gives: a failure after a clear is a drop, not a fault.
+    #[test]
+    fn an_encoding_that_fails_after_a_clear_is_dropped() {
+        // A second subscriber alive, as in `the_log_has_no_path_and_no_id`.
+        let _second = tracing::Dispatch::new(tracing_subscriber::fmt().with_writer(io::sink).finish());
+        let line = |cleared: bool| {
+            let cap = Capture::default();
+            let writer = cap.clone();
+            let sub =
+                tracing_subscriber::fmt().with_writer(move || writer.clone()).with_ansi(false).without_time().finish();
+            tracing::subscriber::with_default(sub, || {
+                tracing::callsite::rebuild_interest_cache();
+                log_encoded(&Err(EncodeError::Write(io::Error::from(io::ErrorKind::NotFound))), cleared);
+            });
+            String::from_utf8(cap.0.lock().unwrap().clone()).unwrap()
+        };
+        let (after, before) = (line(true), line(false));
+        assert!(after.contains("recording dropped") && !after.contains("not kept"), "{after}");
+        assert!(before.contains("recording not kept"), "{before}");
     }
 
     /// A log writer into memory, to check the lines.
@@ -576,7 +783,7 @@ mod tests {
             queue.run();
             assert!(rec.snapshot(&d.0.join("missing.wav"), ID).is_none());
             rec.encode(rec.snapshot(&sound, "2026-10-01T07:30:00.000-7").unwrap());
-            rec.prune(Some(AudioKeep::Day), "2026-10-31");
+            rec.prune(Some(AudioKeep::Day.cutoff()), "2026-10-31");
             queue.run();
             std::fs::write(d.audio().join(history::audio_snapshot(ID).unwrap()), b"left").unwrap();
             rec.sweep();

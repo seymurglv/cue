@@ -15,7 +15,7 @@
 //! (`settings::HistorySettings::audio_period`); `prune_audio` deletes the older ones, and at startup, before anything
 //! is recorded, `sweep_audio_temps` deletes what a crash left half written. There too only CUE's own names count —
 //! recordings, and recordings still being written — so nothing else in the folder is ever deleted one by one.
-use crate::settings::{AudioKeep, Keep};
+use crate::settings::{Cutoff, Keep};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -179,12 +179,10 @@ pub fn find(dir: &Path, id: &str) -> Option<Entry> {
 /// (`YYYY-MM-DD`): a week keeps the 7 days before today, a month 31, a year 366, and earlier days go. `Off` deletes
 /// every day, `Forever` none. A day after today (the clock was moved back) is kept.
 pub fn prune(dir: &Path, keep: Keep, today: &str) -> io::Result<usize> {
-    let back = match keep {
-        Keep::Forever => return Ok(0),
-        Keep::Off => return remove_days(dir, |_| true),
-        Keep::Year => 366,
-        Keep::Month => 31,
-        Keep::Week => 7,
+    let back = match keep.cutoff() {
+        None => return Ok(0),
+        Some(Cutoff::All) => return remove_days(dir, |_| true),
+        Some(Cutoff::DaysBack(days)) => days,
     };
     let Some(first_kept) = date_minus(today, back) else {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "today is not a date"));
@@ -225,17 +223,15 @@ pub fn audio_snapshot(id: &str) -> Option<String> {
     audio_name(id).map(|name| name + SNAPSHOT_EXTENSION)
 }
 
-/// Which of the files `names` of the recordings folder go when recordings are kept for `keep`, counted back from
-/// `today` (`YYYY-MM-DD`) by the date of their entry, like the history's days: a day keeps today's recordings, a week
-/// the 7 days before today too, a month 31, `Off` none. A recording of a day after today (the clock was moved back) is
-/// kept, and with `today` not a date none goes. Any other name is never picked — a file still being written neither,
-/// so recordings may be pruned while one is.
-pub fn audio_to_delete<'a>(names: impl IntoIterator<Item = &'a str>, keep: AudioKeep, today: &str) -> Vec<&'a str> {
-    let back = match keep {
-        AudioKeep::Off => None,
-        AudioKeep::Day => Some(0),
-        AudioKeep::Week => Some(7),
-        AudioKeep::Month => Some(31),
+/// Which of the files `names` of the recordings folder go at `cutoff` (`HistorySettings::audio_limit`), counted back
+/// from `today` (`YYYY-MM-DD`) by the date of their entry, like the history's days: `DaysBack(0)` keeps today's
+/// recordings, `DaysBack(7)` the 7 days before today too, `All` none. A recording of a day after today (the clock was
+/// moved back) is kept, and with `today` not a date none goes. Any other name is never picked — a file still being
+/// written neither, so recordings may be pruned while one is.
+pub fn audio_to_delete<'a>(names: impl IntoIterator<Item = &'a str>, cutoff: Cutoff, today: &str) -> Vec<&'a str> {
+    let back = match cutoff {
+        Cutoff::All => None,
+        Cutoff::DaysBack(days) => Some(days),
     };
     // The first date kept; no date comes before "", so with `today` not a date nothing is old.
     let first_kept = back.map(|days| date_minus(today, days).unwrap_or_default());
@@ -256,9 +252,10 @@ pub fn audio_temps<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<&'a str>
 
 /// Deletes from the recordings folder `dir` what `audio_to_delete` picks; returns how many. No folder: nothing to
 /// delete. A file that cannot be deleted does not stop the others, as with the days.
-pub fn prune_audio(dir: &Path, keep: AudioKeep, today: &str) -> io::Result<usize> {
+pub fn prune_audio(dir: &Path, cutoff: Cutoff, today: &str) -> io::Result<usize> {
     let names = file_names(dir)?;
-    remove_files(audio_to_delete(names.iter().map(String::as_str), keep, today).into_iter().map(|name| dir.join(name)))
+    let old = audio_to_delete(names.iter().map(String::as_str), cutoff, today);
+    remove_files(old.into_iter().map(|name| dir.join(name)))
 }
 
 /// Deletes from the recordings folder `dir` what `audio_temps` picks; returns how many. Only at startup, before
@@ -438,6 +435,7 @@ fn days_in_month(year: i64, month: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::AudioKeep;
     use std::path::PathBuf;
 
     /// A fresh directory for one test; a leftover of an earlier run is removed first.
@@ -813,7 +811,7 @@ mod tests {
             "2026-02-30T12-00-00.000-1.ogg",
         ];
         let names: Vec<&str> = recordings.iter().map(String::as_str).chain(foreign).collect();
-        let pick = |keep, today| audio_to_delete(names.iter().copied(), keep, today);
+        let pick = |keep: AudioKeep, today| audio_to_delete(names.iter().copied(), keep.cutoff(), today);
         // The recordings before `first_kept`.
         let gone = |first_kept: usize| -> Vec<&str> { recordings[..first_kept].iter().map(String::as_str).collect() };
         let today = "2026-10-31";
@@ -828,7 +826,13 @@ mod tests {
         // With no date to count from, no recording is old; off needs none.
         assert_eq!(pick(AudioKeep::Day, "today"), gone(0));
         assert_eq!(pick(AudioKeep::Off, "today"), gone(dates.len()));
-        assert_eq!(audio_to_delete(foreign, AudioKeep::Off, today), Vec::<&str>::new());
+        assert_eq!(audio_to_delete(foreign, Cutoff::All, today), Vec::<&str>::new());
+        // The history's own year, while the recordings' period is unknown: 366 days back, like its days.
+        let year = Keep::Year.cutoff().unwrap();
+        let (older, kept) = (recording("2025-10-29"), recording("2025-10-30"));
+        assert_eq!(audio_to_delete([older.as_str(), &kept], year, today), [older.as_str()]);
+        let month = audio_to_delete(names.iter().copied(), Cutoff::DaysBack(31), today);
+        assert_eq!(pick(AudioKeep::Month, today), month);
     }
 
     /// Only CUE's own half-written files are swept: the snapshot of an entry's sound and a recording being encoded,
@@ -871,7 +875,8 @@ mod tests {
     fn prune_audio_and_clear_audio_on_disk() {
         let history = tmp("audio");
         let dir = history.join("audio");
-        assert_eq!(prune_audio(&dir, AudioKeep::Day, "2026-10-31").unwrap(), 0, "no folder: nothing to delete");
+        let day = AudioKeep::Day.cutoff();
+        assert_eq!(prune_audio(&dir, day, "2026-10-31").unwrap(), 0, "no folder: nothing to delete");
         assert_eq!(sweep_audio_temps(&dir).unwrap(), 0);
         clear_audio(&dir).unwrap();
 
@@ -890,12 +895,12 @@ mod tests {
             std::fs::create_dir_all(dir.join(name)).unwrap();
         }
 
-        assert_eq!(prune_audio(&dir, AudioKeep::Day, "2026-10-31").unwrap(), 1, "not the files being written");
+        assert_eq!(prune_audio(&dir, day, "2026-10-31").unwrap(), 1, "not the files being written");
         let folders = [folder.as_str(), &temp_folder];
         let notes = ["notes.tmp", "notes.txt"];
         let left_over = [&kept, &left, &encoding].map(String::as_str);
         assert_eq!(names(&dir), [&folders[..], &left_over, &notes].concat());
-        assert_eq!(prune_audio(&dir, AudioKeep::Day, "2026-10-31").unwrap(), 0, "nothing more to delete");
+        assert_eq!(prune_audio(&dir, day, "2026-10-31").unwrap(), 0, "nothing more to delete");
         assert_eq!(sweep_audio_temps(&dir).unwrap(), 2);
         let swept = [&folders[..], &[kept.as_str()], &notes].concat();
         assert_eq!(names(&dir), swept, "folders named like ours stay");
@@ -906,7 +911,7 @@ mod tests {
         assert_eq!(names(&history), ["audio"]);
         assert_eq!(names(&dir), swept, "the days are gone, the recordings are not");
 
-        assert_eq!(prune_audio(&dir, AudioKeep::Off, "2026-10-31").unwrap(), 1);
+        assert_eq!(prune_audio(&dir, Cutoff::All, "2026-10-31").unwrap(), 1);
         assert_eq!(names(&dir), [&folders[..], &notes].concat());
         clear_audio(&dir).unwrap();
         assert!(!dir.exists());

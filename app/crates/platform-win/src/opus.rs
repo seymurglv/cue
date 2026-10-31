@@ -86,8 +86,9 @@ pub fn encode_wav_to_ogg_opus_if(
             kind,
         });
     }
-    let mut file = BufWriter::new(File::create(&tmp)?);
+    // The guard first: dropped after the writer, it deletes the file only once its handle is closed.
     let mut temp = Temp { path: tmp, renamed: false };
+    let mut file = BufWriter::new(File::create(&temp.path)?);
     let samples = catch_unwind(AssertUnwindSafe(|| encode(reader, &mut file)))
         .unwrap_or(Err(EncodeError::Codec(OPUS_INTERNAL_ERROR)))?;
     let file = file.into_inner().map_err(io::IntoInnerError::into_error)?;
@@ -352,7 +353,8 @@ mod tests {
         assert_eq!((head[0][8], head[0][9]), (1, 1), "version 1, mono");
         assert_eq!(u32::from_le_bytes(head[0][12..16].try_into().unwrap()), 16_000, "the rate recorded");
         let pre_skip = u64::from(u16::from_le_bytes([head[0][10], head[0][11]]));
-        assert_eq!(pages[1].packets, vec![b"OpusTags\x03\0\0\0CUE\0\0\0\0".to_vec()], "vendor CUE, no comments");
+        let tags = b"OpusTags\x12\0\0\0CUE, libopus 1.3.1\0\0\0\0".to_vec();
+        assert_eq!(pages[1].packets, vec![tags], "vendor CUE and its encoder, no comments");
         assert_eq!((pages[0].granule, pages[1].granule), (0, 0));
         let audio = &pages[2..];
         assert!(audio.windows(2).all(|w| w[0].granule <= w[1].granule), "positions never go back");
@@ -399,6 +401,8 @@ mod tests {
         assert_eq!(stream.end, stream.pre_skip + 3 * n, "the last position: pre-skip and the sound, at 48 kHz");
         let decoded = decode(&stream.packets, 48_000).len() as u64;
         assert!(decoded >= stream.end, "the packets hold all of the sound");
+        // RFC 7845 §4.4: the end trim drops less than a frame — no packet more than the sound needs.
+        assert!(decoded - stream.end < FRAME_48K, "{} samples trimmed from the end", decoded - stream.end);
         let length = decoded - stream.pre_skip;
         assert!(length.abs_diff(3 * n) < FRAME_48K, "decoded {length} samples for {} at 48 kHz", 3 * n);
         (stream, bytes.len() as u64)
@@ -440,11 +444,20 @@ mod tests {
         assert!((1_200..=3_000).contains(&per_second), "{per_second} bytes a second");
     }
 
+    /// Short and empty recordings, and the lengths at the edges: 216 samples end on a frame with nothing to trim, 217
+    /// need one frame more; 15 896 fill the last page with 50 packets, 15 897 need a page more.
     #[test]
     fn a_short_or_empty_recording_still_makes_a_stream() {
         let dir = Dir::new("short");
         round_trip(&dir, &sine(300.0, 0, 5));
         round_trip(&dir, &[]);
+        for (n, packets) in [(1, 1), (216, 1), (217, 2), (15_896, 50), (15_897, 51)] {
+            let (stream, _) = round_trip(&dir, &sine(300.0, 0, n));
+            assert_eq!(stream.packets.len(), packets, "{n} samples");
+        }
+        let (stream, _) = round_trip(&dir, &sine(300.0, 0, 216));
+        assert_eq!(stream.end, 312 + 3 * 216, "it ends on a frame: {}", stream.end % FRAME_48K);
+        assert_eq!(stream.end % FRAME_48K, 0);
     }
 
     /// The loudest sounds a microphone gives — full-scale noise, a clipped square wave, the extremes back to back —

@@ -12,8 +12,8 @@ const MAX_LACING: usize = 255;
 /// An audio page is written after a second of sound (48 kHz samples): a player seeks by pages, and the page headers
 /// stay about 4% of a recording at 16 kbit/s.
 const PAGE_SAMPLES: u64 = 48_000;
-/// The vendor string of the comment header: who wrote the stream.
-const VENDOR: &[u8] = b"CUE";
+/// The vendor string of the comment header: who wrote the stream, and with which encoder.
+const VENDOR: &[u8] = b"CUE, libopus 1.3.1";
 
 /// Ogg's CRC-32 (RFC 3533 §6): polynomial 0x04C11DB7, most significant bit first, initial value 0, no final XOR.
 pub(crate) fn crc32(bytes: &[u8]) -> u32 {
@@ -264,7 +264,7 @@ mod tests {
         assert_eq!(u32::from_le_bytes(h[12..16].try_into().unwrap()), 16_000);
         assert_eq!((i16::from_le_bytes([h[16], h[17]]), h[18]), (0, 0), "no gain, mapping family 0");
         assert_eq!((tags.flags, tags.granule, tags.sequence, tags.serial), (0, 0, 1, 7));
-        assert_eq!(tags.packets, vec![b"OpusTags\x03\0\0\0CUE\0\0\0\0".to_vec()]);
+        assert_eq!(tags.packets, vec![b"OpusTags\x12\0\0\0CUE, libopus 1.3.1\0\0\0\0".to_vec()]);
         assert_eq!((pages[2].flags, pages[2].granule, pages[2].sequence), (LAST_PAGE, 960, 2));
         assert_eq!(pages[2].packets, vec![vec![1, 2, 3]]);
     }

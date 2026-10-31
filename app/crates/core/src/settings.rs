@@ -342,6 +342,27 @@ impl Keep {
         let text = text.trim();
         Self::ALL.into_iter().find(|k| k.code().eq_ignore_ascii_case(text))
     }
+
+    /// What `history::prune` deletes of the days: a week keeps the 7 days before today, a month 31, a year 366; `None`
+    /// — forever, nothing.
+    pub fn cutoff(self) -> Option<Cutoff> {
+        match self {
+            Self::Forever => None,
+            Self::Year => Some(Cutoff::DaysBack(366)),
+            Self::Month => Some(Cutoff::DaysBack(31)),
+            Self::Week => Some(Cutoff::DaysBack(7)),
+            Self::Off => Some(Cutoff::All),
+        }
+    }
+}
+
+/// What a period deletes when the history is cleaned up (`Keep::cutoff`, `AudioKeep::cutoff`): every day or recording,
+/// or those dated before the `n` days before today — 0 keeps today's alone. One dated after today (the clock was moved
+/// back) is kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cutoff {
+    All,
+    DaysBack(u32),
 }
 
 /// How long the history keeps the recordings of its entries; `history::prune_audio` deletes the older ones. A day keeps
@@ -375,6 +396,17 @@ impl AudioKeep {
         let text = text.trim();
         Self::ALL.into_iter().find(|k| k.code().eq_ignore_ascii_case(text))
     }
+
+    /// What `history::prune_audio` deletes: a day keeps today's recordings, a week the 7 days before today too, a month
+    /// 31, `Off` none.
+    pub fn cutoff(self) -> Cutoff {
+        match self {
+            Self::Off => Cutoff::All,
+            Self::Day => Cutoff::DaysBack(0),
+            Self::Week => Cutoff::DaysBack(7),
+            Self::Month => Cutoff::DaysBack(31),
+        }
+    }
 }
 
 /// A period of the history settings ([`Keep`], [`AudioKeep`]) read from its name, the way `parse` reads it.
@@ -397,7 +429,7 @@ impl PeriodName for AudioKeep {
 /// `history.keep` (a [`Keep`]) or `history.audio` (an [`AudioKeep`]) as settings.json has it: one of the periods, or a
 /// value CUE does not know — a typo, a later version's name, `null` — which leaves the period unknown. While `keep` is
 /// unknown the history is neither written nor cleaned up and no recording is written or deleted; while `audio` is, no
-/// recording is written and only the history's own period deletes any (`HistorySettings::audio_period`,
+/// recording is written and only the history's own cut-off deletes any (`HistorySettings::audio_period`,
 /// `audio_limit`) — until the user picks a period in the main window: a guess could delete days or recordings the user
 /// keeps, or keep ones the user turned off. Such a value is written back as it was, so
 /// saving the file never turns it into a period the user did not choose, and it never makes the file unreadable. A
@@ -474,12 +506,14 @@ impl HistorySettings {
         Some(audio_cap(keep).map_or(audio, |cap| audio.min(cap)))
     }
 
-    /// How long a recording may stay before it is deleted: `audio_period`, and while the recordings' own period is
-    /// unknown, the history's, so a recording still never outlives its entry — a week or a month. A year or forever
-    /// is longer than any period recordings have: then none is deleted until the user picks one. `None` while the
-    /// history's period is unknown: nothing is deleted.
-    pub fn audio_limit(&self) -> Option<AudioKeep> {
-        self.audio_period().or_else(|| audio_cap(self.keep.known()?))
+    /// What deletes recordings: `audio_period`, and while the recordings' own period is unknown, the history's own
+    /// cut-off, so a recording still never outlives its entry — kept a year, it goes with its day. `None` while the
+    /// history's period is unknown, or forever with the recordings' unknown: nothing is deleted.
+    pub fn audio_limit(&self) -> Option<Cutoff> {
+        match self.audio_period() {
+            Some(audio) => Some(audio.cutoff()),
+            None => self.keep.known()?.cutoff(),
+        }
     }
 
     fn is_default(&self) -> bool {
@@ -1464,7 +1498,7 @@ mod tests {
             let value: serde_json::Value = serde_json::from_str(audio).unwrap();
             assert_eq!(s.history.audio, Period::Unknown(value), "{audio}");
             assert_eq!((s.history.keep.known(), s.history.audio_period()), (Some(Keep::Month), None), "{audio}");
-            assert_eq!(s.history.audio_limit(), Some(AudioKeep::Month), "{audio}: the history's month");
+            assert_eq!(s.history.audio_limit(), Some(Cutoff::DaysBack(31)), "{audio}: the history's month");
             assert_eq!(s.hold_hints_left, 0, "{audio}");
         }
 
@@ -1502,7 +1536,8 @@ mod tests {
             for (audio, expected) in AudioKeep::ALL.into_iter().zip(expected) {
                 let history = HistorySettings { keep: Period::Set(keep), audio: Period::Set(audio) };
                 assert_eq!(history.audio_period(), Some(expected), "{keep:?} {audio:?}");
-                assert_eq!(history.audio_limit(), Some(expected), "{keep:?} {audio:?}: a known period is the limit");
+                let limit = history.audio_limit();
+                assert_eq!(limit, Some(expected.cutoff()), "{keep:?} {audio:?}: a known period is the limit");
             }
         }
         let unknown = serde_json::json!("forver");
@@ -1510,12 +1545,13 @@ mod tests {
             let history = HistorySettings { keep: Period::Unknown(unknown.clone()), audio: Period::Set(audio) };
             assert_eq!((history.audio_period(), history.audio_limit()), (None, None), "{audio:?}");
         }
+        // The recordings' period unknown: the history's own cut-off, a year's too; forever deletes none.
         for (keep, period, limit) in [
             (Keep::Forever, None, None),
-            (Keep::Year, None, None),
-            (Keep::Month, None, Some(Month)),
-            (Keep::Week, None, Some(Week)),
-            (Keep::Off, Some(Off), Some(Off)),
+            (Keep::Year, None, Some(Cutoff::DaysBack(366))),
+            (Keep::Month, None, Some(Cutoff::DaysBack(31))),
+            (Keep::Week, None, Some(Cutoff::DaysBack(7))),
+            (Keep::Off, Some(Off), Some(Cutoff::All)),
         ] {
             let history = HistorySettings { keep: Period::Set(keep), audio: Period::Unknown(unknown.clone()) };
             assert_eq!((history.audio_period(), history.audio_limit()), (period, limit), "{keep:?}");
@@ -1523,7 +1559,12 @@ mod tests {
         let both = HistorySettings { keep: Period::Unknown(unknown.clone()), audio: Period::Unknown(unknown) };
         assert_eq!((both.audio_period(), both.audio_limit()), (None, None));
         assert_eq!(HistorySettings::default().audio_period(), Some(Week));
-        assert_eq!(HistorySettings::default().audio_limit(), Some(Week));
+        assert_eq!(HistorySettings::default().audio_limit(), Some(Cutoff::DaysBack(7)));
+        let cutoffs = AudioKeep::ALL.map(AudioKeep::cutoff);
+        assert_eq!(cutoffs, [Cutoff::DaysBack(0), Cutoff::DaysBack(7), Cutoff::DaysBack(31), Cutoff::All]);
+        let cutoffs = Keep::ALL.map(Keep::cutoff);
+        let days = [None, Some(Cutoff::DaysBack(366)), Some(Cutoff::DaysBack(31)), Some(Cutoff::DaysBack(7))];
+        assert_eq!(cutoffs, [days[0], days[1], days[2], days[3], Some(Cutoff::All)]);
     }
 
     #[test]

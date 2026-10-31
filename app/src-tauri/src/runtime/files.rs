@@ -29,18 +29,34 @@ pub fn last_files(outcome: Outcome) -> LastFiles {
     }
 }
 
-/// `LastFiles::Commit`: `result.txt` gets the bare text (no join space, line breaks not replaced),
-/// `current.wav` → `audio.wav`. If the attempt has no audio (the WAV was not created), the old `audio.wav`
-/// is deleted, so the audio and the text of the last dictation do not diverge.
-pub fn commit(paths: &Paths, text: &str) -> io::Result<()> {
+/// Whose sound `current.wav` holds when a text becomes the last dictation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sound {
+    /// The attempt's own recording.
+    Own,
+    /// No attempt's: the attempt's own file could not be made, so whatever is there was left by an earlier one.
+    Stale,
+    /// Another attempt's, still in use — a follow-up's — or none: a text without audio of its own.
+    Other,
+}
+
+/// `LastFiles::Commit`: `result.txt` gets the bare text (no join space, line breaks not replaced), and the attempt's
+/// own recording (`Sound::Own`) becomes `audio.wav`. Otherwise, and when the attempt has no audio (the WAV was not
+/// created), the old `audio.wav` is deleted, so the audio and the text of the last dictation do not diverge: a stale
+/// `current.wav` goes too, another attempt's stays.
+pub fn commit(paths: &Paths, text: &str, sound: Sound) -> io::Result<()> {
     std::fs::create_dir_all(&paths.last_dir)?;
     // Through a temporary file: an interrupted write will not leave half the text under the name result.txt.
     let tmp = paths.last_dir.join("result.txt.tmp");
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, paths.last_text())?;
-    match std::fs::rename(paths.current_wav(), paths.last_wav()) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => remove_if_exists(&paths.last_wav()),
-        other => other,
+    match sound {
+        Sound::Own => match std::fs::rename(paths.current_wav(), paths.last_wav()) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => remove_if_exists(&paths.last_wav()),
+            other => other,
+        },
+        Sound::Stale => remove_if_exists(&paths.current_wav()).and_then(|()| remove_if_exists(&paths.last_wav())),
+        Sound::Other => remove_if_exists(&paths.last_wav()),
     }
 }
 
@@ -102,7 +118,7 @@ mod tests {
         std::fs::write(p.last_wav(), "old audio").unwrap();
         std::fs::write(p.last_text(), "старый текст").unwrap();
         std::fs::write(p.current_wav(), "new audio").unwrap();
-        commit(p, "Новый текст.\n- пункт").unwrap();
+        commit(p, "Новый текст.\n- пункт", Sound::Own).unwrap();
         assert_eq!(read(&p.last_text()).as_deref(), Some("Новый текст.\n- пункт"), "the bare text as is");
         assert_eq!(read(&p.last_wav()).as_deref(), Some("new audio"));
         assert!(!p.current_wav().exists());
@@ -113,9 +129,29 @@ mod tests {
         let d = Dir::new("noaudio");
         let p = &d.1;
         std::fs::write(p.last_wav(), "old audio").unwrap();
-        commit(p, "текст").unwrap();
+        commit(p, "текст", Sound::Own).unwrap();
         assert_eq!(read(&p.last_text()).as_deref(), Some("текст"));
         assert!(!p.last_wav().exists(), "the previous dictation's audio must not stay next to the new text");
+    }
+
+    /// An attempt whose own file could not be made never takes the sound an earlier attempt left in `current.wav`: it
+    /// goes. A text without audio of its own leaves another attempt's where it is.
+    #[test]
+    fn commit_takes_only_the_attempts_own_sound() {
+        let d = Dir::new("sound");
+        let p = &d.1;
+        std::fs::write(p.last_wav(), "old audio").unwrap();
+        std::fs::write(p.current_wav(), "an earlier attempt's audio, kept for its retry").unwrap();
+        commit(p, "текст", Sound::Stale).unwrap();
+        assert_eq!(read(&p.last_text()).as_deref(), Some("текст"));
+        assert!(!p.last_wav().exists() && !p.current_wav().exists());
+
+        std::fs::write(p.last_wav(), "old audio").unwrap();
+        std::fs::write(p.current_wav(), "a follow-up's audio").unwrap();
+        commit(p, "ответ", Sound::Other).unwrap();
+        assert!(!p.last_wav().exists());
+        assert_eq!(read(&p.current_wav()).as_deref(), Some("a follow-up's audio"));
+        commit(p, "ответ", Sound::Other).unwrap();
     }
 
     #[test]
@@ -123,7 +159,7 @@ mod tests {
         let d = Dir::new("mkdir");
         let p = &d.1;
         std::fs::remove_dir_all(&p.last_dir).unwrap();
-        commit(p, "текст").unwrap();
+        commit(p, "текст", Sound::Own).unwrap();
         assert_eq!(read(&p.last_text()).as_deref(), Some("текст"));
     }
 
