@@ -1,7 +1,7 @@
 /* CUE — shared tokens and the colors of the live mark.
    Free fonts (SIL OFL): Bebas Neue — logo and digits, Montserrat ExtraBold — rare large headings. */
 :root{
-  --bg:#FBFBFA;--card:#FFFFFF;--surface2:#F3F3F1;--text:#111111;--muted:#8E8E8B;--faint:#C4C4C0;--line:#ECECE9;
+  --bg:#FBFBFA;--card:#FFFFFF;--surface2:#F3F3F1;--text:#111111;--muted:#6B6B67;--faint:#C4C4C0;--line:#ECECE9;
   --rec:#FF4A1C;--warn:#EE9A00;--ask:#2F6BFF;--ok:#1E9E5A;--graphite:#1C1C1F;
   --mac-font:-apple-system,BlinkMacSystemFont,"SF Pro Text","Inter",system-ui,sans-serif;
   --win-font:"Segoe UI Variable Text","Segoe UI Variable","Segoe UI","Inter",system-ui,sans-serif;
