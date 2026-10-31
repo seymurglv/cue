@@ -29,7 +29,8 @@ export const AUDIO_AGAIN_MS = 2000;
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const ID_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})/;
-const MODE_ICON: Record<api.Mode, IconName> = { dictation: 'micOn', translation: 'tr', ask: 'ask' };
+/** The badge of a mode; a plain dictation (most entries) has none, and neither has a mode the window does not know. */
+const MODE_ICON: Partial<Record<api.Mode, IconName>> = { translation: 'tr', ask: 'ask' };
 
 /** The local date an entry came: its id starts with its time. */
 function entryDate(e: EntryView, today: string): string {
@@ -347,7 +348,8 @@ export class HistoryView {
     return s;
   }
 
-  /** time · mode · [app] [question] text, in one line; the whole of it in the tooltip; copy and paste again on hover.
+  /** time · mode · [app] [question] text, in one line (a dictation's mode is an empty place, so the texts line up);
+   *  the whole of it in the tooltip; copy and paste again on hover.
    *  `count` — the top of a stack of so many: its app is the stack's chip. An entry that has how it was said, or may
    *  have a recording, opens. */
   private row(e: EntryView, q: string, count = 0): HTMLElement {
@@ -355,11 +357,13 @@ export class HistoryView {
     const r = h('div', 'hr');
     r.dataset.id = e.id;
     const ha = h('span', 'ha');
-    const badge = h('span', e.mode === 'ask' ? 'aski' : 'hmi');
-    const known = Object.hasOwn(MODE_ICON, e.mode);
-    badge.innerHTML = icon(known ? MODE_ICON[e.mode] : 'micOn');
-    badge.title = known ? t.modes[e.mode] : '';
-    ha.append(badge);
+    const mi = Object.hasOwn(MODE_ICON, e.mode) ? MODE_ICON[e.mode] : undefined;
+    if (mi) {
+      const badge = h('span', e.mode === 'ask' ? 'aski' : 'hmi');
+      badge.innerHTML = icon(mi);
+      badge.title = t.modes[e.mode];
+      ha.append(badge);
+    }
     const hx = h('div', 'hx');
     const htx = h('div', 'htx');
     if (e.app && count) {

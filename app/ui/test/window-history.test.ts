@@ -64,12 +64,15 @@ describe('The history', () => {
     expect($$('.hgrp .hday').map((d) => d.textContent)).toEqual(['Today', 'Yesterday']);
     const today = $$('.hgrp')[0];
     expect([...today.querySelectorAll('.ht')].map((t) => t.textContent)).toEqual(['09:15', '08:02']);
-    // App and question muted before the text; the mode as a badge.
+    // App and question muted before the text; the mode as a badge, none for a plain dictation: its place stays empty,
+    // so the texts line up.
     const first = rows()[0];
     expect(first.querySelector('.happ')!.textContent).toBe('Notepad');
-    expect(first.querySelector('.hmi')).not.toBeNull();
+    expect([...first.children].map((c) => c.className)).toEqual(['ht', 'ha', 'hx', 'hact']);
+    expect(first.querySelector('.ha')!.childElementCount).toBe(0);
     const ask = rows()[1];
-    expect(ask.querySelector('.aski')).not.toBeNull();
+    expect(ask.querySelector('.ha > .aski')!.getAttribute('title')).toBe('Ask');
+    expect(rows()[2].querySelector('.ha > .hmi')!.getAttribute('title')).toBe('Translation');
     expect(ask.querySelector('.hq')!.textContent).toBe('Swarm or Kubernetes?');
     expect(ask.querySelector('.htx')!.getAttribute('title')).toBe('Swarm or Kubernetes?\n\nSwarm is simpler.');
     expect(first.querySelector('.htx')!.getAttribute('title')).toBe('Morning standup notes.');

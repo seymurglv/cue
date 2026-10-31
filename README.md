@@ -151,7 +151,8 @@ from source.
 - **The main window** opens from the tray icon: **Open CUE** in its menu, or a double click. It is one ordinary window
   in the Windows theme; opening it again brings it forward, and closing it leaves CUE running.
   - **History:** every result of CUE, newest first, with its time, mode and app: dictations, translations, "Ask"
-    answers (the question and the answer) and texts "Ask" wrote into a field. Today and yesterday first, earlier days
+    answers (the question and the answer) and texts "Ask" wrote into a field; a translation and "Ask" show their mode
+    as a small icon, a plain dictation none. Today and yesterday first, earlier days
     with **Show earlier**. Three or more entries in a row from one app, each within 10 minutes of the one before, make
     a stack: its newest entry on top, the app and the count on a chip that opens it. A click on an entry (or `Enter`)
     shows how you said it: a dictation as Soniox heard it, the words CUE removed struck out and the ones it added or
