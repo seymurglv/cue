@@ -268,7 +268,7 @@ describe('The welcome window', () => {
     await next();
     const hint = () => pg().querySelector<HTMLElement>('.ohint')!;
     expect(hint().hidden).toBe(false);
-    expect(text(hint().querySelector('span'))).toBe('Windows keeps the microphone from CUE');
+    expect(text(hint().querySelector('span'))).toBe('Windows is blocking CUE from using the microphone');
     expect(text(primary())).toBe('Next');
     click(hint().querySelector('[data-link="micPrivacy"]'));
     expect(core.openLink).toHaveBeenCalledWith('micPrivacy');
@@ -415,7 +415,7 @@ describe('The welcome window', () => {
     expect($$('.otips .otl').map(text)).toEqual([
       'Translation',
       'Ask',
-      'CUE lives by the clock: double-click its icon for the window, right-click for the menu',
+      'CUE lives next to the clock: double-click its icon for the window, right-click for the menu',
     ]);
     expect($$('.otips .keys').map((k) => k.getAttribute('aria-label'))).toEqual(['Ctrl + Win + Shift', 'Ctrl + Win + Alt']);
   });

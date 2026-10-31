@@ -238,8 +238,12 @@ export class WindowPage implements Ctx {
       if (this.tray.isOpen && !within(e, '.btray, .menu, .gear')) this.tray.close();
     }, { signal });
     window.addEventListener('resize', () => this.tray.place(), { signal });
-    // Back to the window, maybe on another day: "Today" and "Yesterday" follow the date.
-    window.addEventListener('focus', () => this.history.followDate(), { signal });
+    // Back to the window, maybe on another day: "Today" and "Yesterday" follow the date, and the microphone level
+    // comes back if the welcome window took the preview meanwhile.
+    window.addEventListener('focus', () => {
+      this.history.followDate();
+      this.tray.regained();
+    }, { signal });
     // The microphone stays open only while its settings page is shown.
     window.addEventListener('pagehide', () => this.tray.stopPreview(), { signal });
   }

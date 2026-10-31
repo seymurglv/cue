@@ -184,6 +184,26 @@ describe('The settings tray', () => {
     expect(previews()).toEqual([]);
   });
 
+  it('the mic page starts its preview anew when the window has the focus again', async () => {
+    page = await mount();
+    await open();
+    await sub('mic');
+    core.micPreview.mockClear();
+    // The welcome window took the preview meanwhile: its meter fell to 0.
+    window.dispatchEvent(new Event('focus'));
+    expect(previews()).toEqual(['on:windows']);
+    // Off the Microphone page, or with the tray closed, the microphone stays closed.
+    click($('.btray [data-tback]'));
+    core.micPreview.mockClear();
+    window.dispatchEvent(new Event('focus'));
+    await sub('keys');
+    window.dispatchEvent(new Event('focus'));
+    key('Escape');
+    key('Escape');
+    window.dispatchEvent(new Event('focus'));
+    expect(previews()).toEqual([]);
+  });
+
   it('mic preview follows the pinned microphone and a new choice', async () => {
     stub(view({ micDevice: 'USB Microphone' }));
     core.micList.mockResolvedValue({ names: ['Laptop Microphone', 'USB Microphone'], default: 'Laptop Microphone' });

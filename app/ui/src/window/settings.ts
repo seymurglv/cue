@@ -158,6 +158,12 @@ export class SettingsTray {
     this.mic.stopPreview();
   }
 
+  /** The window has the focus again: the Microphone page starts its preview anew. The welcome window's Microphone step
+   *  may have taken it meanwhile (one preview at a time), and the meter then fell to 0 and would stay there. */
+  regained(): void {
+    if (this.isOpen && this.sub === 'mic') this.mic.startPreview();
+  }
+
   private fit(): void {
     const pg = this.current;
     if (!pg || !this.el) return;

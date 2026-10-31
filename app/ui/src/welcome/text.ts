@@ -50,9 +50,9 @@ export const en: WelcomeText = {
   keysWhere: 'Where to get them:',
   price: 'Roughly $4–5 a month for an hour of speech a day.',
   privacy: 'Sound goes to Soniox, text to Anthropic; the history stays on this computer only.',
-  micText: 'CUE listens only while it records — while the red lamp is on.',
+  micText: 'CUE listens only while it records — while the red light is on.',
   micWorks: 'It works',
-  micBlocked: 'Windows keeps the microphone from CUE',
+  micBlocked: 'Windows is blocking CUE from using the microphone',
   micSettings: 'Open Windows settings',
   tryText: 'Press the keys, say the phrase, and press them again.',
   trySay: 'Say:',
@@ -65,7 +65,7 @@ export const en: WelcomeText = {
   doneText: 'Keep going: emails, chats, notes. Two more modes, and where to find CUE:',
   doneTranslate: 'Translation',
   doneAsk: 'Ask',
-  doneWhere: 'CUE lives by the clock: double-click its icon for the window, right-click for the menu',
+  doneWhere: 'CUE lives next to the clock: double-click its icon for the window, right-click for the menu',
 };
 
 export const ru: WelcomeText = {
