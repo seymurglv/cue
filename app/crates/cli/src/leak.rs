@@ -14,15 +14,19 @@
 //!   dictionary terms and the microphone names (4 or longer), the Windows user name, computer name and profile path,
 //!   the git user name and email, and the private folders the repository's `.git/info/exclude` names (its folder
 //!   lines, 4 characters or longer);
+//! - recordings: an Ogg stream whose first page holds `OpusHead` (the history's recordings) and a RIFF `WAVE` file
+//!   with its format chunk (the WAVs CUE records, the bench's), at the start of a file or anywhere in one — a file an
+//!   installer stores as it is starts there;
 //! - in text files only, long random-looking strings: a key of a kind no pattern knows, also one split by `-` or
-//!   `_` (a UUID). Hashes of known kinds (npm integrity, `Cargo.lock` checksums, base64 data URLs, a commit or hash in
-//!   a URL path, a Windows GUID in braces) are passed over. Binaries (the program, fonts, installers) get the first two
-//!   checks only: compressed data and machine code look random throughout.
+//!   `_` (a UUID), or by `+` or `/` (base64). Hashes of known kinds (npm integrity, `Cargo.lock` checksums, base64 data
+//!   URLs, a commit or hash in a URL path, a Windows GUID in braces) are passed over. Binaries (the program, fonts,
+//!   installers) get the other checks only: compressed data and machine code look random throughout. Text is UTF-8
+//!   (with a NUL byte now and then), UTF-16LE, or, in any other encoding, mostly printable ASCII.
 //!
 //! Text is looked for as ASCII or UTF-8 and as UTF-16LE (Windows resources, installer strings), ASCII letters in any
 //! case. [`PUBLIC_NAME`] is the one name CUE publishes: when it is also the Windows user name or the computer name, it
 //! is a finding only next to `\`, `/` or `@` (a path or an address), not in words, and not as the installer's registry
-//! key `Software\<publisher>`.
+//! key `Software\<publisher>`, followed by `\CUE` or by a character no path holds.
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -65,6 +69,8 @@ pub enum Kind {
     GitName,
     GitEmail,
     RandomString,
+    /// A recording, by its format.
+    Recording(&'static str),
 }
 
 impl fmt::Display for Kind {
@@ -83,6 +89,7 @@ impl fmt::Display for Kind {
             Kind::GitName => f.write_str("the git user name"),
             Kind::GitEmail => f.write_str("the git email"),
             Kind::RandomString => f.write_str("a random-looking string"),
+            Kind::Recording(format) => write!(f, "a recording ({format})"),
         }
     }
 }
@@ -382,6 +389,9 @@ impl Scanner {
                 }
             }
         }
+        for (offset, format) in recordings(bytes) {
+            hits.insert(Hit { offset, kind: Kind::Recording(format) });
+        }
         if let Some(view) = View::text(bytes) {
             for at in random_strings(&view.bytes) {
                 hits.insert(Hit { offset: view.offset(at), kind: Kind::RandomString });
@@ -391,18 +401,63 @@ impl Scanner {
     }
 }
 
+/// Where recordings start in `bytes`, and in which format: an Ogg page (RFC 3533, version 0) whose first packet is an
+/// `OpusHead` (RFC 7845), and `RIFF`, its size, `WAVE` and right after it a format chunk that reads as one — of 16, 18
+/// or 40 bytes, PCM, float, A-law, µ-law or extensible, 1 to 8 channels — whatever the size says: a recording cut off
+/// by a crash still holds 0 there. A program's table of these names alone is no recording.
+fn recordings(bytes: &[u8]) -> Vec<(usize, &'static str)> {
+    let starts = |tag: &'static [u8]| bytes.windows(4).enumerate().filter(move |(_, w)| *w == tag).map(|(at, _)| at);
+    let u16_at = |at: usize| bytes.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let mut found = Vec::new();
+    for at in starts(b"OggS") {
+        let first = bytes.get(at + 26).map(|&segments| at + 27 + usize::from(segments));
+        if bytes.get(at + 4) == Some(&0) && first.is_some_and(|p| bytes.get(p..p + 8) == Some(b"OpusHead")) {
+            found.push((at, "Ogg Opus"));
+        }
+    }
+    for at in starts(b"RIFF") {
+        let wave = bytes.get(at + 8..at + 16) == Some(b"WAVEfmt ");
+        let chunk = u32_at(at + 16).is_some_and(|n| matches!(n, 16 | 18 | 40));
+        let format = u16_at(at + 20).is_some_and(|f| matches!(f, 1 | 3 | 6 | 7 | 0xFFFE));
+        let channels = u16_at(at + 22).is_some_and(|c| (1..=8).contains(&c));
+        if wave && chunk && format && channels {
+            found.push((at, "WAV"));
+        }
+    }
+    found.sort_unstable();
+    found
+}
+
 fn utf16le(text: &str) -> Vec<u8> {
     text.encode_utf16().flat_map(u16::to_le_bytes).collect()
 }
 
 /// Whether the character before or after `bytes[start..end]` is `\`, `/` or `@`: the name is a part of a path or an
-/// address. `Software\` before it is no path: the registry key the installer writes under its publisher's name.
-/// `wide`: the match is UTF-16LE.
+/// address. The registry key the installer writes under its publisher's name is no path: `Software\` before the name,
+/// and after it a character no path holds (a quote, a control character, the end) or `\CUE` and then `\` or such a
+/// character. `wide`: the match is UTF-16LE.
 fn touches_a_path(bytes: &[u8], start: usize, end: usize, wide: bool) -> bool {
-    let key = br"software\";
-    let key: Vec<u8> = if wide { key.iter().flat_map(|&c| [c, 0]).collect() } else { key.to_vec() };
-    if start >= key.len() && bytes[start - key.len()..start].eq_ignore_ascii_case(&key) {
-        return false;
+    let as_matched = |text: &[u8]| -> Vec<u8> {
+        if wide { text.iter().flat_map(|&c| [c, 0]).collect() } else { text.to_vec() }
+    };
+    let (key, product) = (as_matched(br"software\"), as_matched(br"\cue"));
+    let holds = |at: usize, text: &[u8]| bytes.get(at..at + text.len()).is_some_and(|b| b.eq_ignore_ascii_case(text));
+    // The character at `at`, one byte or one UTF-16 unit: none, or one no path holds.
+    let path_ends = |at: usize| {
+        let c = if wide {
+            bytes.get(at..at + 2).map(|u| u32::from(u16::from_le_bytes([u[0], u[1]])))
+        } else {
+            bytes.get(at).map(|&c| u32::from(c))
+        };
+        c.is_none_or(|c| c < 0x20 || b"\"<>|*?".iter().any(|&x| u32::from(x) == c))
+    };
+    if start >= key.len() && holds(start - key.len(), &key) {
+        let after = end + product.len();
+        let below = holds(end, &product) && (path_ends(after) || holds(after, &as_matched(br"\")));
+        if path_ends(end) || below {
+            return false;
+        }
     }
     let (before, after) = if wide {
         let unit = |at: usize| bytes.get(at..at + 2).filter(|u| u[1] == 0).map(|u| u[0]);
@@ -442,12 +497,17 @@ impl<'a> View<'a> {
     }
 
     /// The view the random-string check reads, if the file is text: UTF-16LE with its byte order mark, UTF-8 with a
-    /// NUL byte now and then at most (one a KiB), or UTF-16LE without the mark and without control characters.
+    /// NUL byte now and then at most (one a KiB), text in another encoding (a code page) or with a few more NULs —
+    /// printable ASCII but for one byte in 20 at most — or UTF-16LE without the mark and without control characters.
+    /// Machine code and compressed data are far from either.
     fn text(bytes: &'a [u8]) -> Option<View<'a>> {
         let nuls = bytes.iter().filter(|&&b| b == 0).count();
+        let utf8 = nuls <= (bytes.len() / 1024).max(1) && std::str::from_utf8(bytes).is_ok();
+        let printable = |b: &&u8| b.is_ascii_graphic() || matches!(**b, b' ' | b'\t' | b'\r' | b'\n');
+        let ascii = !bytes.is_empty() && 20 * bytes.iter().filter(printable).count() >= 19 * bytes.len();
         if bytes.starts_with(&[0xFF, 0xFE]) {
             Some(View::wide(bytes, 0))
-        } else if nuls <= (bytes.len() / 1024).max(1) && std::str::from_utf8(bytes).is_ok() {
+        } else if utf8 || ascii {
             Some(View::narrow(bytes))
         } else if utf16_text(bytes) {
             Some(View::wide(bytes, 0))
@@ -462,9 +522,11 @@ impl<'a> View<'a> {
 }
 
 /// Whether `bytes` read as UTF-16LE text: whole code units, no lone surrogate, and no control character but a tab and
-/// line breaks. Machine code and compressed data hold a NUL unit or a control character within a few bytes.
+/// line breaks — and one NUL unit at the end, which ends a string. Machine code and compressed data hold a NUL unit or a
+/// control character within a few bytes.
 fn utf16_text(bytes: &[u8]) -> bool {
     let (units, rest) = bytes.as_chunks::<2>();
+    let units = units.strip_suffix(&[[0, 0]]).unwrap_or(units);
     !units.is_empty()
         && rest.is_empty()
         && char::decode_utf16(units.iter().map(|&u| u16::from_le_bytes(u)))
@@ -478,7 +540,8 @@ const KNOWN_HASHES: [&[u8]; 6] = [b"base64,", b"sha512-", b"sha384-", b"sha256-"
 /// Where random-looking runs of letters and digits start in a text: 24 or more of them with digits and both cases, or
 /// 32 or more hex digits with letters among them, with an even enough spread of characters. Runs joined by single `-`
 /// or `_` (a UUID, a token in parts) are judged together first, then each alone: the words of a file name or an
-/// identifier (`Montserrat-ExtraBold-latin`) change between capitals, small letters and digits too seldom.
+/// identifier (`Montserrat-ExtraBold-latin`) change between capitals, small letters and digits too seldom. Runs joined
+/// by `+` or `/` too (base64), once they make 32 characters together: shorter ones are a path or arithmetic.
 fn random_strings(text: &[u8]) -> Vec<usize> {
     let mut found = Vec::new();
     let mut i = 0;
@@ -496,6 +559,7 @@ fn random_strings(text: &[u8]) -> Vec<usize> {
             continue;
         }
         let mut runs = Vec::new();
+        let mut slashed = false;
         loop {
             let start = i;
             while i < text.len() && text[i].is_ascii_alphanumeric() {
@@ -503,15 +567,17 @@ fn random_strings(text: &[u8]) -> Vec<usize> {
             }
             runs.push(start..i);
             let joined = text.get(i + 1).is_some_and(u8::is_ascii_alphanumeric);
-            if !joined || !matches!(text[i], b'-' | b'_') {
+            if !joined || !matches!(text[i], b'-' | b'_' | b'+' | b'/') {
                 break;
             }
+            slashed |= matches!(text[i], b'+' | b'/');
             i += 1;
         }
         let start = runs[0].start;
         if runs.len() > 1 {
             let whole: Vec<u8> = runs.iter().flat_map(|r| &text[r.clone()]).copied().collect();
-            if !braced_guid(text, &runs) && !url_hash(text, start, &whole) && random_looking(&whole) {
+            let long_enough = !slashed || whole.len() >= 32;
+            if long_enough && !braced_guid(text, &runs) && !url_hash(text, start, &whole) && random_looking(&whole) {
                 found.push(start);
                 continue;
             }
@@ -814,9 +880,21 @@ mod tests {
         assert_eq!(offsets(&s.scan(parts.concat().as_bytes()), Kind::UserName), [at[1], at[2], at[3]]);
         let wide = utf16le(r"x\pubname");
         assert_eq!(offsets(&s.scan(&wide), Kind::UserName), [4]);
-        // The installer's registry key under its publisher's name is no path.
+        // The installer's registry key under its publisher's name is no path: the name, then `\CUE` or the key's end.
         assert_eq!(s.scan(br"WriteRegStr HKCU Software\PubName\CUE"), []);
         assert_eq!(s.scan(&utf16le(r"Software\pubname\CUE")), []);
+        assert_eq!(s.scan(br#"DeleteRegKey /ifempty HKCU "Software\pubname" ; and "Software\pubname\CUE\Sub""#), []);
+        assert_eq!(s.scan(b"Software\\pubname\0Software\\pubname\\CUE\0"), []);
+        let mut wide = utf16le(r"Software\pubname");
+        wide.extend([0, 0]);
+        wide.extend(utf16le(r"Software\pubname\cue"));
+        assert_eq!(s.scan(&wide), []);
+        // A folder of that name is a path, also under a folder called Software, in either form.
+        let parts = [r"D:\Software\", r"pubname\notes | Software\", r"pubname\CUEfiles | Software\", "pubname/x"];
+        let at = starts(&parts);
+        let expected = [at[1], at[2], at[3]];
+        assert_eq!(offsets(&s.scan(parts.concat().as_bytes()), Kind::UserName), expected);
+        assert_eq!(offsets(&s.scan(&utf16le(r"D:\Software\pubname\notes")), Kind::UserName), [24]);
     }
 
     /// The computer name follows the user name's rule: the public name in a path (a UNC one) or an address, another
@@ -852,7 +930,7 @@ mod tests {
         assert_eq!(offsets(&s.scan(text.as_bytes()), Kind::RandomString), [5]);
         // Machine code and compressed data look random throughout: a binary gets no such check.
         let mut binary = text.into_bytes();
-        binary.extend([0, 0, 0, 1]);
+        binary.extend([0x8B, 0x05, 0, 0, 0, 0, 0xE8, 0x01, 0, 0, 0, 0xC3]);
         assert_eq!(s.scan(&binary), []);
     }
 
@@ -889,6 +967,20 @@ mod tests {
         let mut binary = utf16le(&made_up(18, 30, BASE62));
         binary.extend([0x01, 0x00, 0x00, 0x00]);
         assert_eq!(s.scan(&binary), []);
+        // A string's closing NUL unit is text still.
+        let mut ended = utf16le(&format!("name = {}", made_up(23, 30, BASE62)));
+        ended.extend([0, 0]);
+        assert_eq!(offsets(&s.scan(&ended), Kind::RandomString), [14]);
+        // Short text with two NULs, and text in a code page (one byte that is no UTF-8), are text too.
+        let text = format!("a\0b\0 = \"{}\";", made_up(24, 30, BASE62));
+        assert_eq!(offsets(&s.scan(text.as_bytes()), Kind::RandomString), [8]);
+        let mut code_page = b"caf\xE9 = \"".to_vec();
+        code_page.extend(made_up(25, 30, BASE62).as_bytes());
+        code_page.extend(b"\";\r\n");
+        assert_eq!(offsets(&s.scan(&code_page), Kind::RandomString), [8]);
+        // Compressed data is far from printable.
+        let noise: Vec<u8> = made_up(26, 4096, BASE62).bytes().map(|b| b.wrapping_mul(149)).collect();
+        assert!(View::text(&noise).is_none());
     }
 
     /// A key split by `-` or `_` is judged whole: a UUID, a token in parts. A Windows GUID in braces is an identifier.
@@ -902,6 +994,96 @@ mod tests {
         assert_eq!(s.scan(format!("CLSID {{{}}}\n", uuid.to_ascii_uppercase()).as_bytes()), []);
         let token = format!("tok_{}_{}_{}", made_up(20, 10, BASE62), made_up(21, 10, BASE62), made_up(22, 10, BASE62));
         assert_eq!(offsets(&s.scan(format!("\"{token}\"").as_bytes()), Kind::RandomString), [1]);
+        // Base64 split by `/` and `+` into parts too short alone, judged whole once they make 32 characters.
+        let base64 = format!("{}/{}+{}", made_up(27, 13, BASE62), made_up(28, 7, BASE62), made_up(29, 18, BASE62));
+        assert_eq!(offsets(&s.scan(format!("key: {base64}\n").as_bytes()), Kind::RandomString), [5]);
+        let short = format!("{}/{}+{}", made_up(30, 9, BASE62), made_up(31, 7, BASE62), made_up(32, 9, BASE62));
+        assert_eq!(s.scan(format!("x = {short};\n").as_bytes()), []);
+        let paths = "import { h } from './window/history/Page2Of4+Row3/Column7';\nn = e/1e3+t/60+Math.floor(x);\n";
+        assert_eq!(s.scan(paths.as_bytes()), []);
+    }
+
+    /// The header of a made-up Ogg Opus stream's first page, as CUE writes one: `OggS`, version 0, the first-page flag,
+    /// one segment, then `OpusHead`.
+    fn ogg_opus_head() -> Vec<u8> {
+        let mut page = b"OggS\0\x02".to_vec();
+        page.extend([0; 20]);
+        page.push(1);
+        page.push(19);
+        page.extend(b"OpusHead\x01\x01\x38\x01\x80\x3e\0\0\0\0\0");
+        page
+    }
+
+    /// The header of a made-up WAV, as CUE records one: 16 kHz, mono, 16-bit PCM.
+    fn wav_head(size: u32) -> Vec<u8> {
+        let mut head = b"RIFF".to_vec();
+        head.extend(size.to_le_bytes());
+        head.extend(b"WAVEfmt ");
+        head.extend(16u32.to_le_bytes());
+        head.extend([1, 0, 1, 0]);
+        head.extend(16_000u32.to_le_bytes());
+        head.extend(32_000u32.to_le_bytes());
+        head.extend([2, 0, 16, 0]);
+        head.extend(b"data");
+        head.extend(size.saturating_sub(36).to_le_bytes());
+        head
+    }
+
+    /// A recording is found as a file of its own and as a file an installer stores as it is; a program's table of the
+    /// names alone, another RIFF file or an Ogg stream of another codec is none.
+    #[test]
+    fn recordings_are_found_in_files_and_inside_an_installer() {
+        let s = scanner(&[], None);
+        let mut ogg = ogg_opus_head();
+        ogg.extend([0x55; 64]);
+        assert_eq!(s.scan(&ogg), [Hit { offset: 0, kind: Kind::Recording("Ogg Opus") }]);
+        let mut wav = wav_head(1036);
+        wav.extend([0x11; 1000]);
+        assert_eq!(s.scan(&wav), [Hit { offset: 0, kind: Kind::Recording("WAV") }]);
+        assert_eq!(kinds(&s.scan(&wav_head(0))), [Kind::Recording("WAV")], "cut off by a crash: no size yet");
+
+        let mut installer = b"MZ\x90\0".to_vec();
+        installer.extend([0xAB; 300]);
+        let ogg_at = installer.len();
+        installer.extend(&ogg);
+        installer.extend([0xCD; 77]);
+        let wav_at = installer.len();
+        installer.extend(&wav);
+        let hits = s.scan(&installer);
+        assert_eq!(kinds(&hits), [Kind::Recording("Ogg Opus"), Kind::Recording("WAV")]);
+        assert_eq!(hits.iter().map(|h| h.offset).collect::<Vec<_>>(), [ogg_at, wav_at]);
+        assert_eq!(Kind::Recording("WAV").to_string(), "a recording (WAV)");
+
+        let mut table = b"RIFF\0\0\0\0WAVEfmt cpal: could not create".to_vec();
+        table.extend(b"RIFF\0\0\0\0WEBP\xff\xff\xff\xffOggS\0\0OpusHead");
+        let mut vorbis = b"OggS\0\x02".to_vec();
+        vorbis.extend([0; 20]);
+        vorbis.extend([1, 30]);
+        vorbis.extend(b"\x01vorbis");
+        table.extend(&vorbis);
+        let mut odd = wav_head(1036);
+        odd[20] = 0x55;
+        table.extend(&odd);
+        assert_eq!(s.scan(&table), []);
+    }
+
+    /// What CUE itself writes is found: its WAV and an Ogg Opus recording of it, of a made-up tone.
+    #[test]
+    fn recordings_cue_writes_are_found() {
+        let dir = std::env::temp_dir().join(format!("cue-test-{}-leak-audio", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (wav, ogg) = (dir.join("tone.wav"), dir.join("tone.ogg"));
+        let mut sink = cue_platform_win::wav::WavSink::create(&wav).unwrap();
+        let tone: Vec<i16> = (0..3200).map(|i| ((i as f32 * 0.1).sin() * 6_000.0) as i16).collect();
+        sink.write(&tone);
+        sink.finish().unwrap();
+        cue_platform_win::opus::encode_wav_to_ogg_opus(&wav, &ogg).unwrap();
+        let (wav, ogg) = (std::fs::read(&wav).unwrap(), std::fs::read(&ogg).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+        let s = scanner(&[], None);
+        assert_eq!(s.scan(&wav), [Hit { offset: 0, kind: Kind::Recording("WAV") }]);
+        assert_eq!(s.scan(&ogg), [Hit { offset: 0, kind: Kind::Recording("Ogg Opus") }]);
     }
 
     #[test]

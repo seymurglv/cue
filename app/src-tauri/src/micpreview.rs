@@ -116,6 +116,10 @@ fn forward(app: &AppHandle, owner: &str, events: &Receiver<MicEvent>, live: &Ato
                     continue;
                 }
                 last = Some(Instant::now());
+                // Taken over since this frame was read: its level would come after the 0 the takeover sent.
+                if !live.load(Ordering::Relaxed) {
+                    break;
+                }
                 send(app, owner, "cue://mic-level", level);
             }
             // The page shows a pinned microphone that is not there itself; meanwhile the level is the Windows one's.
