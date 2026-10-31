@@ -110,7 +110,12 @@ pub fn open(device: Option<String>, events: Sender<MicEvent>) -> MicHandle {
 /// The names of the microphones Windows has now, as it shows them (a name it cannot read is left out). It lists the
 /// devices: never on a thread that must not wait.
 pub fn input_names() -> Vec<String> {
-    devices(&cpal::default_host()).1.into_iter().map(|(_, name)| name).collect()
+    listed_names().unwrap_or_default()
+}
+
+/// `input_names`, or `None` when Windows did not list the devices at all.
+pub fn listed_names() -> Option<Vec<String>> {
+    listed(&cpal::default_host()).1.map(|all| all.into_iter().map(|(_, name)| name).collect())
 }
 
 /// The name of the microphone Windows records from by default, if there is one.
@@ -170,9 +175,15 @@ mod consent {
 /// The default input device, and every input device with the name Windows shows for it. The default one is asked for
 /// first, as with nothing pinned: cpal sets up COM on this thread then, and the list needs it too.
 fn devices(host: &cpal::Host) -> (Option<cpal::Device>, Vec<(cpal::Device, String)>) {
+    let (default, all) = listed(host);
+    (default, all.unwrap_or_default())
+}
+
+/// `devices`, with `None` for a list Windows did not give.
+fn listed(host: &cpal::Host) -> (Option<cpal::Device>, Option<Vec<(cpal::Device, String)>>) {
     let default = host.default_input_device();
-    let Ok(all) = host.input_devices() else { return (default, Vec::new()) };
-    (default, all.filter_map(|d| name_of(&d).map(|name| (d, name))).collect())
+    let Ok(all) = host.input_devices() else { return (default, None) };
+    (default, Some(all.filter_map(|d| name_of(&d).map(|name| (d, name))).collect()))
 }
 
 /// A device's name as Windows shows it. The driver's property store can fail, and cpal panics then: that device has no

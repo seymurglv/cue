@@ -99,8 +99,18 @@ fn show_usage(month: &str) -> Result<()> {
     Ok(())
 }
 
+/// A crash prints where it happened, never its message: a message can quote the string it was working on (a key, or a
+/// text the leak scan looks for).
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let (file, line) = info.location().map_or(("?", 0), |at| (at.file(), at.line()));
+        eprintln!("cue-cli: crash (panic) at {file}:{line}");
+    }));
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    install_panic_hook();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["keys", "set", name] => {

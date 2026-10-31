@@ -13,7 +13,9 @@ The first installer build downloads NSIS and its Tauri plugin into %LOCALAPPDATA
 
 -ScanBuild makes the same installer without compression, to look inside it: `cue-cli leak-scan` reads its files as
 they are. The setting reaches the Tauri CLI through a config file written for the build into target\dist, which the
-CLI merges over tauri.conf.json; tauri.conf.json is left as it is. That installer is moved to target\dist\scan.
+CLI merges over tauri.conf.json; tauri.conf.json is left as it is. That installer is moved to target\dist\scan. Both
+builds write the installer to the same place, so an installer already there is moved aside to target\dist\aside for
+the scan build and put back afterwards, whether the build succeeds or not: both installers stay, in either order.
 
 .EXAMPLE
 scripts\build-release.ps1
@@ -30,6 +32,9 @@ $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $dist = Join-Path $repo 'target\dist'
 $app = Join-Path $repo 'app'
 $profileDir = $env:USERPROFILE.TrimEnd('\')
+$version = (Get-Content -LiteralPath (Join-Path $app 'src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json).version
+$installer = Join-Path $dist "release\bundle\nsis\CUE_${version}_x64-setup.exe"
+$aside = $null
 
 $saved = @{}
 foreach ($name in 'CARGO_TARGET_DIR', 'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS') {
@@ -48,6 +53,13 @@ try {
         $patch = Join-Path $dist 'scan-build.json'
         Set-Content -LiteralPath $patch -Encoding ascii -Value '{"bundle":{"windows":{"nsis":{"compression":"none"}}}}'
         $tauriArgs += @('--config', $patch)
+        if (Test-Path -LiteralPath $installer) {
+            $asideDir = Join-Path $dist 'aside'
+            New-Item -ItemType Directory -Force -Path $asideDir | Out-Null
+            $kept = Join-Path $asideDir (Split-Path -Leaf $installer)
+            Move-Item -LiteralPath $installer -Destination $kept -Force
+            $aside = $kept
+        }
     }
     & npm @tauriArgs
     if ($LASTEXITCODE -ne 0) {
@@ -59,8 +71,6 @@ try {
         throw "app\dist holds source maps, which carry the sources and their paths: $($maps.Count) found."
     }
 
-    $version = (Get-Content -LiteralPath (Join-Path $app 'src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json).version
-    $installer = Join-Path $dist "release\bundle\nsis\CUE_${version}_x64-setup.exe"
     if (-not (Test-Path -LiteralPath $installer)) {
         throw "The installer is not where it should be: $installer"
     }
@@ -68,8 +78,7 @@ try {
         $scanDir = Join-Path $dist 'scan'
         New-Item -ItemType Directory -Force -Path $scanDir | Out-Null
         Move-Item -LiteralPath $installer -Destination $scanDir -Force
-        $installer = Join-Path $scanDir (Split-Path -Leaf $installer)
-        Write-Host "Uncompressed installer, for the leak scan only: $installer"
+        Write-Host "Uncompressed installer, for the leak scan only: $(Join-Path $scanDir (Split-Path -Leaf $installer))"
     } else {
         Write-Host "Installer: $installer"
     }
@@ -79,5 +88,10 @@ try {
         # A $null passed to .NET becomes "", which would leave the variable set but empty; NullString removes it.
         $value = if ($null -eq $saved[$name]) { [NullString]::Value } else { $saved[$name] }
         [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+    }
+    if ($aside) {
+        # Over whatever a failed scan build left in its place.
+        Move-Item -LiteralPath $aside -Destination $installer -Force
+        Write-Host "Installer put back: $installer"
     }
 }

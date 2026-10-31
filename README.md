@@ -16,9 +16,10 @@ main window, with the history of everything CUE wrote and the settings.
 2. The installer, in English or Russian, needs no administrator rights and asks for no license agreement. It installs
    CUE for you alone, into `%LOCALAPPDATA%\Programs\CUE`, adds it to the Start menu and downloads nothing: the
    WebView2 runtime that CUE's windows use comes with Windows 11.
-3. When it finishes, CUE starts. A first install also turns on **Start at sign-in**; installing CUE again, or a newer
-   version, keeps your choice. You can turn it off in the menu of the icon next to the clock, or in the main window's
-   General settings.
+3. Its last page starts CUE and offers a desktop shortcut: both boxes are ticked, so untick **Create desktop
+   shortcut** if you do not want one. A first install also turns on **Start at sign-in**; installing CUE again, or a
+   newer version, keeps your choice. You can turn it off in the menu of the icon next to the clock, or in the main
+   window's General settings.
 
 On its first start, and on every start while one of its two keys is missing, CUE opens a welcome window: Hello,
 Keys, Microphone, First dictation and Done. While it is open, `Ctrl + Win` works only at the First dictation step. If
@@ -68,8 +69,8 @@ key (the last line). To remove everything:
 - the folder `%LOCALAPPDATA%\app.cue.dictation`: the cache of CUE's windows;
 - the keys: in **Control Panel → Credential Manager → Windows Credentials**, remove `soniox.CUE` and `anthropic.CUE`
   under Generic Credentials;
-- the registry key `HKEY_CURRENT_USER\Software\cue`, where the installer remembers the folder CUE was installed in
-  and whether Start at sign-in was on: in Registry Editor.
+- the registry key `HKEY_CURRENT_USER\Software\seymurglv`, named after CUE's publisher, where the installer remembers
+  the folder CUE was installed in and whether Start at sign-in was on: in Registry Editor.
 
 To open a folder, paste its path into the address bar of File Explorer.
 
@@ -223,10 +224,14 @@ npx tauri build --no-bundle
 The result is `target\release\cue.exe` at the repository root. Run it directly; use **Start at sign-in** in the tray
 menu to launch it with Windows. A second launch does nothing: only one instance runs.
 
-The installer is built into `target\dist`, so `target\release` is left alone:
+The installer is built into `target\dist`, so `target\release` is left alone. Before an installer leaves this
+computer, build it twice, the uncompressed one for the scan first, and look through both and the program for anything
+private:
 
 ```powershell
+scripts\build-release.ps1 -ScanBuild
 scripts\build-release.ps1
+cargo run -p cue-cli -- leak-scan target\dist\release\cue.exe target\dist\release\bundle\nsis target\dist\scan app\dist
 ```
 
 The script prints the installer's path, `target\dist\release\bundle\nsis\CUE_<version>_x64-setup.exe`. It cuts this
@@ -238,22 +243,23 @@ afterwards. The first installer build downloads NSIS and Tauri's plugin for it f
 `hooks.nsh` next to it turns on Start at sign-in at the first install. The CLI is pinned to that version in
 `app/package.json`: after updating it, compare its template with this one again.
 
-Before an installer leaves this computer, look through it and the program for anything private:
-
-```powershell
-scripts\build-release.ps1 -ScanBuild
-cargo run -p cue-cli -- leak-scan target\dist\release\cue.exe target\dist\release\bundle\nsis target\dist\scan app\dist
-```
-
 `-ScanBuild` makes the same installer without compression, in `target\dist\scan`, so that the scan reads the files
-inside it as they are; its program differs from the other installer's only in the time stamps of the build.
-`leak-scan` looks for paths into a user profile, the Windows user name, email addresses and API keys, for exact copies
-of the keys saved in Credential Manager, the history of the last 31 days, the dictionary terms, the microphone names
-and the git name and email, and, in text files, for long random-looking strings. It prints the file, the offset and
-the kind of each finding, never the finding itself, and exits with 1 when it found anything. The installer script
-that Tauri writes for the build (`target\dist\release\nsis\x64\installer.nsi`) names files of this computer in its
-`File`, `!include` and path `!define` lines: makensis reads them and stores none of those paths, which the scan of the
-uncompressed installer confirms.
+inside it as they are. Both builds write the installer to the same place: an installer already there is moved aside
+for the scan build and put back, so either order keeps both. The programs inside the two differ only in the time
+stamps of the build and the id of its debug-symbol file. The shipped installer is compressed, so the scan cannot read
+inside it, and a few bytes of its compressed data can look like an email address by chance: the leak review before an
+installer leaves this computer unpacks it by hand and scans what it holds.
+
+`leak-scan` looks for paths into a user profile (also URL-encoded), the Windows user name and computer name, email
+addresses and API keys, for exact copies of the keys saved in Credential Manager, the history of the last 31 days, the
+dictionary terms, the microphone names, the git name and email and the private folders that `.git/info/exclude` names
+(its lines ending with `/`), and, in text files, for long random-looking strings. It prints the file, the offset and
+the kind of each finding, never the finding itself. It exits with 1 when it found anything, and with 2 when it could
+not read what to look for (a key, the settings, the history, the microphone list, git) or a given path, or a given
+path holds no file. The installer script that Tauri writes for the build
+(`target\dist\release\nsis\x64\installer.nsi`) names files of this computer in its `File`, `!include`, icon and path
+`!define` lines: makensis reads them and stores none of those paths, which the scan of the uncompressed installer
+confirms.
 
 Tests and lints:
 
