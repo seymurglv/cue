@@ -232,6 +232,33 @@ describe('The settings tray', () => {
     expect(previews().at(-1)).toBe('on:windows');
   });
 
+  it('the microphone row has no label under the Microphone heading: the drop-down fills it and keeps that name', async () => {
+    stub(view({ micDevice: 'Old Headset' }));
+    page = await mount();
+    await open();
+    await sub('mic');
+    expect(title()).toBe('Microphone');
+    const [choose, test] = $$('.btray .srow');
+    expect(choose.querySelector('b')).toBeNull();
+    expect(choose.querySelector('.sc')).toBeNull();
+    const dd = choose.querySelector<HTMLElement>('.stx > [data-dd="mic"]')!;
+    expect(dd.getAttribute('aria-label')).toBe('Microphone');
+    expect(dd.title).toBe('Old Headset');
+    // The hint still shows under it while the pinned one is not connected.
+    const hint = choose.querySelector<HTMLElement>('.stx > [data-dd="mic"] + small')!;
+    expect(hint.hidden).toBe(false);
+    expect(text(hint)).toBe('Not connected — recording from the Windows microphone');
+    expect(text(test.querySelector('.stx b'))).toBe('Test');
+    // In Russian too.
+    page.dispose();
+    stub(view({ lang: 'ru', uiLanguage: 'ru' }));
+    page = await mount();
+    await open();
+    await sub('mic');
+    expect($('[data-dd="mic"]')!.getAttribute('aria-label')).toBe('Микрофон');
+    expect($('[data-dd="mic"] + small')!.hidden).toBe(true);
+  });
+
   it('mic level lights the meter', async () => {
     page = await mount();
     await open();

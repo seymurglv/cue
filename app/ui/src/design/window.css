@@ -167,6 +167,11 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .srow .stx small.ok{color:var(--ok)}
 .srow .stx small.warn{color:var(--warn)}
 .srow .sc{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;flex:none;max-width:64%}
+/* a drop-down in place of the label (the microphone under its own heading): as wide as the row, its value on the left,
+   the chevron at the end, the hint under it */
+.srow .stx>.dd{display:flex;width:100%;max-width:none}
+.srow .stx>.dd .ddv{flex:1;min-width:0;text-align:left}
+.srow .stx>.dd+small{margin-top:5px}
 
 /* ================= one page ================= */
 .bsc{position:relative;flex:1;min-height:0;overflow:auto;scrollbar-width:thin}

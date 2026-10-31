@@ -54,12 +54,21 @@ export class MicRows {
     const t = this.ctx.t;
     const at = this.pinnedAt();
     const shown = at >= 0 ? this.names()[at] : this.label();
-    const choose = srow(t.micLabel, this.pinnedMissing() ? t.notConnectedHint : null, dropDown('mic', shown));
-    choose.small.classList.add('warn');
+    // No label: the heading over the rows already says "Microphone". The drop-down fills the row and keeps the label
+    // as its name; its value is its description (and the tooltip of a long device name).
+    const dd = dropDown('mic', shown);
+    dd.setAttribute('aria-label', t.micLabel);
+    dd.title = shown;
+    const hint = h('small', 'warn', t.notConnectedHint);
+    hint.hidden = !this.pinnedMissing();
+    const stx = h('div', 'stx');
+    stx.append(dd, hint);
+    const choose = h('div', 'srow');
+    choose.append(stx);
     const meter = h('span', 'meter');
     meter.dataset.meter = '';
     for (let i = 0; i < METER_SEGMENTS; i++) meter.append(h('i'));
-    return [choose.row, srow(t.micTest, t.micTestHint, meter).row];
+    return [choose, srow(t.micTest, t.micTestHint, meter).row];
   }
 
   /** The level on the meter shown. */

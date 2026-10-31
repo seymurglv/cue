@@ -258,6 +258,11 @@ describe('The welcome window', () => {
     expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'micDevice', value: 'USB Microphone' });
     expect(previews().at(-1)).toBe('on:USB Microphone');
     expect(text($('[data-dd="mic"] .ddv'))).toBe('USB Microphone');
+    // Under the Microphone heading the row has no label of its own; the drop-down keeps it as its name.
+    expect(heading()).toBe('Microphone');
+    const row = $('[data-dd="mic"]')!.closest('.srow')!;
+    expect(row.querySelector('b')).toBeNull();
+    expect($('[data-dd="mic"]')!.getAttribute('aria-label')).toBe('Microphone');
   });
 
   it('a denied, failed or missing microphone shows the hint with the Windows settings', async () => {
