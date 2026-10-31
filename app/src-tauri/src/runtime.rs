@@ -1743,7 +1743,7 @@ fn dictation_entry(a: &Attempt, final_text: Option<&(DictationId, String)>, at: 
     };
     let (_, text) = final_text.filter(|(id, _)| *id == a.id)?;
     let (Stamp { ts, id }, app) = (at, stored_app(&a.app));
-    Some(history::Entry { id, ts, mode, app, text: text.clone(), question: None })
+    Some(history::Entry { id, ts, mode, app, text: text.clone(), question: None, raw: None })
 }
 
 /// The history entry of an "Ask" turn that ended (decision 2): the question, and the text the model wrote for the field
@@ -1757,7 +1757,8 @@ fn ask_entry(heard: ask::Heard, c: &ask::Conversation, at: Stamp) -> Option<hist
     let turn = c.view.turns.last().filter(|t| t.state == TurnState::Done)?;
     let text = c.paste_text()?;
     let (Stamp { ts, id }, app) = (at, stored_app(&c.taken.ctx.app));
-    Some(history::Entry { id, ts, mode: history::Mode::Ask, app, text, question: Some(turn.question.clone()) })
+    let question = Some(turn.question.clone());
+    Some(history::Entry { id, ts, mode: history::Mode::Ask, app, text, question, raw: None })
 }
 
 /// Where a history entry's text goes (decision 3).
@@ -2083,6 +2084,7 @@ mod tests {
             app: "Notepad".into(),
             text: "Hello, world.\nSecond line ".into(),
             question: None,
+            raw: None,
         };
         assert_eq!(e, expected);
         // Another attempt's text, or none, is not this attempt's result.

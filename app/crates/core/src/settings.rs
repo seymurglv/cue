@@ -1,6 +1,7 @@
 //! settings.json: engine and models, refine thresholds, the hint counter, bench, interface language, where the Drop
-//! sits, the user's dictionary, the translation pair, "Ask", the pinned microphone, how long the history keeps its days,
-//! prices for usage accounting. The main window changes a setting one at a time (`SettingChange`).
+//! sits, the user's dictionary, the translation pair, "Ask", the pinned microphone, how long the history keeps its days
+//! and their recordings, prices for usage accounting. The main window changes a setting one at a time
+//! (`SettingChange`).
 use crate::translate;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::io::Write;
@@ -343,20 +344,72 @@ impl Keep {
     }
 }
 
-/// `history.keep` as settings.json has it: one of the five periods, or a value CUE does not know — a typo, a later
-/// version's name, `null` — which leaves the period unknown. While it is unknown the history is neither written nor
-/// cleaned up, until the user picks a period in the main window: a guess could delete days the user keeps, or keep
-/// entries the user turned off. Such a value is written back as it was, so saving the file never turns it into a period
-/// the user did not choose, and it never makes the file unreadable. A missing value is a month (`Default`).
+/// How long the history keeps the recordings of its entries; `history::prune_audio` deletes the older ones. A day keeps
+/// today's recordings; a week and a month count back like the history's (`Keep`). Declared from the shortest, so of
+/// two periods the shorter is the lesser.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioKeep {
+    Off,
+    Day,
+    #[default]
+    Week,
+    Month,
+}
+
+impl AudioKeep {
+    pub const ALL: [Self; 4] = [Self::Day, Self::Week, Self::Month, Self::Off];
+
+    /// The name in settings.json and in the main window.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Day => "day",
+            Self::Week => "week",
+            Self::Month => "month",
+            Self::Off => "off",
+        }
+    }
+
+    /// Case and surrounding spaces do not matter; anything else is `None`.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        Self::ALL.into_iter().find(|k| k.code().eq_ignore_ascii_case(text))
+    }
+}
+
+/// A period of the history settings ([`Keep`], [`AudioKeep`]) read from its name, the way `parse` reads it.
+pub trait PeriodName: Copy {
+    fn from_name(text: &str) -> Option<Self>;
+}
+
+impl PeriodName for Keep {
+    fn from_name(text: &str) -> Option<Self> {
+        Self::parse(text)
+    }
+}
+
+impl PeriodName for AudioKeep {
+    fn from_name(text: &str) -> Option<Self> {
+        Self::parse(text)
+    }
+}
+
+/// `history.keep` (a [`Keep`]) or `history.audio` (an [`AudioKeep`]) as settings.json has it: one of the periods, or a
+/// value CUE does not know — a typo, a later version's name, `null` — which leaves the period unknown. While `keep` is
+/// unknown the history is neither written nor cleaned up, and while either is unknown no recording is written or
+/// deleted (`HistorySettings::audio_period`), until the user picks a period in the main window: a guess could delete
+/// days or recordings the user keeps, or keep ones the user turned off. Such a value is written back as it was, so
+/// saving the file never turns it into a period the user did not choose, and it never makes the file unreadable. A
+/// missing value is the default (`Default`): a month for the history, a week for its recordings.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Period {
-    Set(Keep),
+pub enum Period<K = Keep> {
+    Set(K),
     Unknown(serde_json::Value),
 }
 
-impl Period {
+impl<K: Copy> Period<K> {
     /// The period, if it is known.
-    pub fn known(&self) -> Option<Keep> {
+    pub fn known(&self) -> Option<K> {
         match self {
             Self::Set(keep) => Some(*keep),
             Self::Unknown(_) => None,
@@ -364,13 +417,19 @@ impl Period {
     }
 }
 
-impl Default for Period {
-    fn default() -> Self {
-        Self::Set(Keep::default())
+impl<K: Default + PartialEq> Period<K> {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
     }
 }
 
-impl Serialize for Period {
+impl<K: Default> Default for Period<K> {
+    fn default() -> Self {
+        Self::Set(K::default())
+    }
+}
+
+impl<K: Serialize> Serialize for Period<K> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::Set(keep) => keep.serialize(serializer),
@@ -379,24 +438,43 @@ impl Serialize for Period {
     }
 }
 
-impl<'de> Deserialize<'de> for Period {
+impl<'de, K: PeriodName> Deserialize<'de> for Period<K> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
-        Ok(match value.as_str().and_then(Keep::parse) {
+        Ok(match value.as_str().and_then(K::from_name) {
             Some(keep) => Self::Set(keep),
             None => Self::Unknown(value),
         })
     }
 }
 
-/// The history (spec 3 §2). Not written while it is the default (a month), like `drop`.
+/// The history (spec 3 §2) and the recordings of its entries. A period is not written while it is the default (a
+/// month, a week), like the fields of `translate`.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HistorySettings {
+    #[serde(skip_serializing_if = "Period::is_default")]
     pub keep: Period,
+    /// How long the recordings are kept, as the user chose it; what holds is `audio_period`.
+    #[serde(skip_serializing_if = "Period::is_default")]
+    pub audio: Period<AudioKeep>,
 }
 
 impl HistorySettings {
+    /// How long recordings are kept for real: the shorter of `audio` and `keep`, so a recording never outlives its
+    /// entry — `Off` while the history is off. `None` while either period is unknown: then no recording is written or
+    /// deleted.
+    pub fn audio_period(&self) -> Option<AudioKeep> {
+        let (keep, audio) = (self.keep.known()?, self.audio.known()?);
+        let longest = match keep {
+            Keep::Forever | Keep::Year => return Some(audio),
+            Keep::Month => AudioKeep::Month,
+            Keep::Week => AudioKeep::Week,
+            Keep::Off => AudioKeep::Off,
+        };
+        Some(audio.min(longest))
+    }
+
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -407,9 +485,12 @@ impl HistorySettings {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "camelCase")]
 pub enum SettingChange {
+    /// How long recordings are kept. An unknown period is refused, like the history's.
+    #[serde(deserialize_with = "period_or_refuse")]
+    HistoryAudio(AudioKeep),
     /// Unlike the file, an unknown period is refused rather than read as a month: a slip of the window must never
     /// shorten the history.
-    #[serde(deserialize_with = "keep_or_refuse")]
+    #[serde(deserialize_with = "period_or_refuse")]
     HistoryKeep(Keep),
     /// A device name; `None` or a blank name — the Windows microphone.
     MicDevice(Option<String>),
@@ -418,15 +499,16 @@ pub enum SettingChange {
     UiLanguage(UiLanguage),
 }
 
-fn keep_or_refuse<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Keep, D::Error> {
+fn period_or_refuse<'de, D: Deserializer<'de>, K: PeriodName>(deserializer: D) -> Result<K, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
-    value.as_str().and_then(Keep::parse).ok_or_else(|| serde::de::Error::custom("unknown history period"))
+    value.as_str().and_then(K::from_name).ok_or_else(|| serde::de::Error::custom("unknown history period"))
 }
 
 /// Like `AudioSettings`: a log shows only the length of a device name, and a language code only when Soniox knows it.
 impl std::fmt::Debug for SettingChange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::HistoryAudio(keep) => f.debug_tuple("HistoryAudio").field(keep).finish(),
             Self::HistoryKeep(keep) => f.debug_tuple("HistoryKeep").field(keep).finish(),
             Self::MicDevice(device) => {
                 f.debug_struct("MicDevice").field("chars", &device.as_ref().map(|d| d.chars().count())).finish()
@@ -445,6 +527,7 @@ impl Settings {
     /// language (`en`) as no value. A period set here makes an unknown one known.
     pub fn apply(&mut self, change: SettingChange) -> bool {
         match change {
+            SettingChange::HistoryAudio(keep) => set_if_changed(&mut self.history.audio, Period::Set(keep)),
             SettingChange::HistoryKeep(keep) => set_if_changed(&mut self.history.keep, Period::Set(keep)),
             SettingChange::MicDevice(device) => {
                 let device = device.as_deref().map(str::trim).filter(|d| !d.is_empty());
@@ -515,7 +598,7 @@ pub struct Settings {
     /// The pinned microphone. Not written while it follows Windows, like `translate`.
     #[serde(deserialize_with = "section_or_default", skip_serializing_if = "AudioSettings::is_default")]
     pub audio: AudioSettings,
-    /// How long the history keeps its days. Not written while it is the default, like `translate`.
+    /// How long the history keeps its days and their recordings. Not written while it is the default, like `translate`.
     #[serde(deserialize_with = "section_or_default", skip_serializing_if = "HistorySettings::is_default")]
     pub history: HistorySettings,
     /// Default prices are not written to the file, so a price fix in the code also reaches existing installs.
@@ -1312,6 +1395,117 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Recordings are kept a week unless the user chose otherwise. Like the history's period, the default — also one
+    /// the file states — is not written, and a chosen period is, beside the history's.
+    #[test]
+    fn history_audio_is_a_week_and_written_only_when_chosen() {
+        let dir = tmp("history-audio");
+        let p = dir.join("settings.json");
+        let written = |p: &Path| serde_json::from_slice::<serde_json::Value>(&std::fs::read(p).unwrap()).unwrap();
+        assert_eq!(Settings::default().history.audio, Period::Set(AudioKeep::Week));
+        for text in [r#"{}"#, r#"{"history":{"keep":"year"}}"#, r#"{"history":"day"}"#] {
+            let s: Settings = serde_json::from_str(text).unwrap();
+            assert_eq!(s.history.audio.known(), Some(AudioKeep::Week), "{text}");
+        }
+        for (text, expected) in
+            [("day", AudioKeep::Day), (" Week ", AudioKeep::Week), ("MONTH", AudioKeep::Month), ("off", AudioKeep::Off)]
+        {
+            let json = serde_json::json!({ "history": { "audio": text } }).to_string();
+            let s: Settings = serde_json::from_str(&json).unwrap();
+            assert_eq!(s.history.audio, Period::Set(expected), "{text:?}");
+        }
+
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&p, r#"{"history":{"keep":"month","audio":" WEEK "},"hold_hints_left":2}"#).unwrap();
+        save(&load(&p).unwrap(), &p).unwrap();
+        assert!(written(&p).get("history").is_none(), "explicit defaults were written back");
+
+        for (keep, audio, expected) in [
+            (Keep::Month, AudioKeep::Day, serde_json::json!({ "audio": "day" })),
+            (Keep::Year, AudioKeep::Week, serde_json::json!({ "keep": "year" })),
+            (Keep::Week, AudioKeep::Off, serde_json::json!({ "keep": "week", "audio": "off" })),
+            (Keep::Forever, AudioKeep::Month, serde_json::json!({ "keep": "forever", "audio": "month" })),
+        ] {
+            let history = HistorySettings { keep: Period::Set(keep), audio: Period::Set(audio) };
+            let s = Settings { history, ..Settings::default() };
+            save(&s, &p).unwrap();
+            assert_eq!(written(&p)["history"], expected);
+            assert_eq!(load(&p).unwrap(), s);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A recording period CUE does not know is unknown, like the history's: no recording is written or deleted
+    /// (`audio_period`), and it is written back as it was until the main window sets a period. The history's own
+    /// names that recordings do not have (`forever`, `year`) are unknown too.
+    #[test]
+    fn history_audio_unknown_is_unknown_and_written_back() {
+        for audio in [r#""fortnight""#, r#""forever""#, r#""year""#, r#""""#, "7", "null", "true", r#"["day"]"#] {
+            let text = format!(r#"{{"history":{{"audio":{audio}}},"hold_hints_left":0}}"#);
+            let s: Settings = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{audio}: {e}"));
+            let value: serde_json::Value = serde_json::from_str(audio).unwrap();
+            assert_eq!(s.history.audio, Period::Unknown(value), "{audio}");
+            assert_eq!((s.history.keep.known(), s.history.audio_period()), (Some(Keep::Month), None), "{audio}");
+            assert_eq!(s.hold_hints_left, 0, "{audio}");
+        }
+
+        let dir = tmp("unknown-audio");
+        let p = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&p, r#"{"history":{"keep":"week","audio":"fortnite"},"hold_hints_left":2}"#).unwrap();
+        let mut s = load(&p).unwrap();
+        s.hold_hints_left = 1;
+        save(&s, &p).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        assert_eq!(json["history"], serde_json::json!({ "keep": "week", "audio": "fortnite" }));
+        assert_eq!(load(&p).unwrap().history.audio_period(), None);
+
+        assert!(s.apply(SettingChange::HistoryAudio(AudioKeep::Day)));
+        save(&s, &p).unwrap();
+        let history = load(&p).unwrap().history;
+        assert_eq!((history.audio_period(), history.audio), (Some(AudioKeep::Day), Period::Set(AudioKeep::Day)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A recording never outlives its entry: the shorter of the two periods holds, and none while either is unknown.
+    #[test]
+    fn audio_period_is_never_longer_than_the_history() {
+        use AudioKeep::{Day, Month, Off, Week};
+        for (keep, expected) in [
+            (Keep::Forever, [Day, Week, Month, Off]),
+            (Keep::Year, [Day, Week, Month, Off]),
+            (Keep::Month, [Day, Week, Month, Off]),
+            (Keep::Week, [Day, Week, Week, Off]),
+            (Keep::Off, [Off, Off, Off, Off]),
+        ] {
+            for (audio, expected) in AudioKeep::ALL.into_iter().zip(expected) {
+                let history = HistorySettings { keep: Period::Set(keep), audio: Period::Set(audio) };
+                assert_eq!(history.audio_period(), Some(expected), "{keep:?} {audio:?}");
+            }
+        }
+        let unknown = serde_json::json!("forver");
+        for audio in AudioKeep::ALL {
+            let history = HistorySettings { keep: Period::Unknown(unknown.clone()), audio: Period::Set(audio) };
+            assert_eq!(history.audio_period(), None, "{audio:?}");
+        }
+        for keep in Keep::ALL {
+            let history = HistorySettings { keep: Period::Set(keep), audio: Period::Unknown(unknown.clone()) };
+            assert_eq!(history.audio_period(), None, "{keep:?}");
+        }
+        assert_eq!(HistorySettings::default().audio_period(), Some(Week));
+    }
+
+    #[test]
+    fn audio_keep_codes_parse_back() {
+        for keep in AudioKeep::ALL {
+            assert_eq!(AudioKeep::parse(keep.code()), Some(keep));
+            assert_eq!(serde_json::to_string(&keep).unwrap(), format!("\"{}\"", keep.code()));
+        }
+        for other in ["forever", "year", "days", "", "da y"] {
+            assert_eq!(AudioKeep::parse(other), None, "{other:?}");
+        }
+    }
+
     #[test]
     fn audio_device_blank_or_not_a_string_reads_as_windows() {
         for audio in [
@@ -1375,6 +1569,7 @@ mod tests {
     fn apply_reports_no_change() {
         let mut s = Settings::default();
         for change in [
+            SettingChange::HistoryAudio(AudioKeep::Week),
             SettingChange::HistoryKeep(Keep::Month),
             SettingChange::MicDevice(None),
             SettingChange::MicDevice(Some(" ".into())),
@@ -1386,6 +1581,7 @@ mod tests {
         assert_eq!(s, Settings::default());
 
         for change in [
+            SettingChange::HistoryAudio(AudioKeep::Day),
             SettingChange::HistoryKeep(Keep::Week),
             SettingChange::MicDevice(Some("Mic".into())),
             SettingChange::TranslateTarget("fr".into()),
@@ -1397,14 +1593,19 @@ mod tests {
         assert!(!s.apply(SettingChange::MicDevice(Some(" Mic ".into()))));
         assert!(!s.apply(SettingChange::TranslateTarget("FR".into())));
         assert_eq!((s.history.keep.known(), s.audio.device.as_deref()), (Some(Keep::Week), Some("Mic")));
+        assert_eq!(s.history.audio.known(), Some(AudioKeep::Day));
         assert_eq!((s.translate.target(), s.ui.language), ("fr", UiLanguage::Ru));
     }
 
-    /// The window sends `{"kind": …, "value": …}`. An unknown retention is refused rather than read as a month.
+    /// The window sends `{"kind": …, "value": …}`. An unknown retention is refused rather than read as a month, and an
+    /// unknown recording period as well — the history's own names among them.
     #[test]
     fn setting_change_reads_the_window_json() {
         let read = |json: &str| serde_json::from_str::<SettingChange>(json);
         assert_eq!(read(r#"{"kind":"historyKeep","value":"week"}"#).unwrap(), SettingChange::HistoryKeep(Keep::Week));
+        let audio = SettingChange::HistoryAudio;
+        assert_eq!(read(r#"{"kind":"historyAudio","value":"day"}"#).unwrap(), audio(AudioKeep::Day));
+        assert_eq!(read(r#"{"kind":"historyAudio","value":"off"}"#).unwrap(), audio(AudioKeep::Off));
         assert_eq!(read(r#"{"kind":"micDevice","value":"Mic"}"#).unwrap(), SettingChange::MicDevice(Some("Mic".into())));
         assert_eq!(read(r#"{"kind":"micDevice","value":null}"#).unwrap(), SettingChange::MicDevice(None));
         assert_eq!(read(r#"{"kind":"translateTarget","value":"de"}"#).unwrap(), SettingChange::TranslateTarget("de".into()));
@@ -1413,6 +1614,12 @@ mod tests {
             r#"{"kind":"historyKeep","value":"always"}"#,
             r#"{"kind":"historyKeep","value":7}"#,
             r#"{"kind":"historyKeep"}"#,
+            r#"{"kind":"historyAudio","value":"forever"}"#,
+            r#"{"kind":"historyAudio","value":"year"}"#,
+            r#"{"kind":"historyAudio","value":"fortnight"}"#,
+            r#"{"kind":"historyAudio","value":1}"#,
+            r#"{"kind":"historyAudio","value":null}"#,
+            r#"{"kind":"historyAudio"}"#,
             r#"{"kind":"sounds","value":true}"#,
             r#"{"value":"de"}"#,
         ] {
@@ -1420,6 +1627,9 @@ mod tests {
         }
         let change = serde_json::to_value(SettingChange::HistoryKeep(Keep::Forever)).unwrap();
         assert_eq!(change, serde_json::json!({ "kind": "historyKeep", "value": "forever" }));
+        let change = serde_json::to_value(SettingChange::HistoryAudio(AudioKeep::Month)).unwrap();
+        assert_eq!(change, serde_json::json!({ "kind": "historyAudio", "value": "month" }));
+        assert_eq!(format!("{:?}", SettingChange::HistoryAudio(AudioKeep::Day)), "HistoryAudio(Day)");
     }
 
     /// The device name is the user's: neither the settings nor a change show it in a log.

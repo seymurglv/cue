@@ -9,7 +9,13 @@
 //! skipped: one bad line never hides the rest of its day. Newest first everywhere: days, and entries within a day.
 //!
 //! The text of an entry is the user's and never goes to the log: `Debug` of an entry shows only its lengths.
-use crate::settings::Keep;
+//!
+//! The recordings of the entries live in the folder `history\audio`, one file per entry named by its id
+//! (`audio_file`), for a period of their own that is never longer than the history's
+//! (`settings::HistorySettings::audio_period`); `prune_audio` deletes the older ones. There too only names of
+//! recordings count, and those of files still being written (`.tmp`), so nothing else in the folder is ever deleted
+//! one by one.
+use crate::settings::{AudioKeep, Keep};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -24,8 +30,10 @@ pub enum Mode {
 }
 
 /// One result. `ts` is the local time it came, `YYYY-MM-DDTHH:MM:SS.mmm`, and its date names the day file; `id` is
-/// unique and starts with `ts`. `app` is the app the result went to, empty when not known. For "Ask", `question` is the
-/// question and `text` the answer or the text the model wrote.
+/// unique and starts with `ts` (`audio_file` has its form). `app` is the app the result went to, empty when not known.
+/// For "Ask", `question` is the question and `text` the answer or the text the model wrote. `raw` is the text as it was
+/// heard, before CUE cleaned it up — for a translation, the speech before it was translated. "Ask" has none (its
+/// question is as it was heard), and neither do the entries of earlier versions.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub id: String,
@@ -35,6 +43,8 @@ pub struct Entry {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
 }
 
 impl std::fmt::Debug for Entry {
@@ -46,15 +56,16 @@ impl std::fmt::Debug for Entry {
             .field("app", &self.app)
             .field("text_chars", &self.text.chars().count())
             .field("question_chars", &self.question.as_ref().map(|q| q.chars().count()))
+            .field("raw_chars", &self.raw.as_ref().map(|r| r.chars().count()))
             .finish()
     }
 }
 
 impl Entry {
-    /// Whether the text or the question holds `query`, which is already folded (`fold`).
+    /// Whether the text, the question or the text as it was heard holds `query`, which is already folded (`fold`).
     fn matches(&self, query: &str) -> bool {
         let holds = |s: &str| fold(s).contains(query);
-        holds(&self.text) || self.question.as_deref().is_some_and(holds)
+        holds(&self.text) || self.question.as_deref().is_some_and(holds) || self.raw.as_deref().is_some_and(holds)
     }
 }
 
@@ -132,8 +143,8 @@ pub fn older(dir: &Path, before: &str, n_days: usize) -> Page {
     page
 }
 
-/// The entries whose text or question holds `query` (trimmed, in any case, ё and е alike), newest first, at most
-/// `limit` of them. A blank query finds nothing.
+/// The entries whose text, question or text as it was heard holds `query` (trimmed, in any case, ё and е alike), newest
+/// first, at most `limit` of them. A blank query finds nothing.
 pub fn search(dir: &Path, query: &str, limit: usize) -> Vec<Day> {
     let query = fold(query.trim());
     let mut days = Vec::new();
@@ -192,13 +203,109 @@ pub fn date_minus(date: &str, days: u32) -> Option<String> {
     date_of(days_from_date(date)? - i64::from(days))
 }
 
-/// Deletes the day files `old` picks; returns how many. A file that cannot be deleted (another program holds it open)
-/// does not stop the others: the first such error is returned, and the next prune tries again.
+/// The extension of a recording.
+const AUDIO_EXTENSION: &str = ".ogg";
+/// The end of the name of a file still being written in the recordings folder: the snapshot of an entry's sound
+/// (`audio_snapshot`), an encoding.
+const TEMP_EXTENSION: &str = ".tmp";
+
+/// The file of the recording of the entry `id` in the recordings folder: the id with the `:` of its time as `-`
+/// (Windows allows no `:` in a file name; the bench names its recordings the same way), then `.ogg`. `None` for
+/// anything but an id as CUE makes them — `YYYY-MM-DDTHH:MM:SS.mmm-n` of a real date and time of day, `n` counting
+/// from 1 — so an id from a page never names a path.
+pub fn audio_file(id: &str) -> Option<String> {
+    audio_name(id).map(|name| name + AUDIO_EXTENSION)
+}
+
+/// The snapshot of the sound of the entry `id`, encoded into its recording, next to it: `audio_file` with `.wav.tmp`
+/// for `.ogg`. Like any file still being written, `prune_audio` deletes one that was left over.
+pub fn audio_snapshot(id: &str) -> Option<String> {
+    audio_name(id).map(|name| name + ".wav" + TEMP_EXTENSION)
+}
+
+/// Which of the files `names` of the recordings folder go when recordings are kept for `keep`, counted back from
+/// `today` (`YYYY-MM-DD`) by the date of their entry, like the history's days: a day keeps today's recordings, a week
+/// the 7 days before today too, a month 31, `Off` none. A recording of a day after today (the clock was moved back) is
+/// kept, and with `today` not a date none goes. Every file still being written (`.tmp`) goes too — what a crash cut
+/// off — so this is for when nothing is being written. Any other name is never picked.
+pub fn audio_to_delete<'a>(names: impl IntoIterator<Item = &'a str>, keep: AudioKeep, today: &str) -> Vec<&'a str> {
+    let back = match keep {
+        AudioKeep::Off => None,
+        AudioKeep::Day => Some(0),
+        AudioKeep::Week => Some(7),
+        AudioKeep::Month => Some(31),
+    };
+    // The first date kept; no date comes before "", so with `today` not a date nothing is old.
+    let first_kept = back.map(|days| date_minus(today, days).unwrap_or_default());
+    let old = |date: &str| first_kept.as_deref().is_none_or(|first| date < first);
+    names.into_iter().filter(|name| name.ends_with(TEMP_EXTENSION) || recording_date(name).is_some_and(old)).collect()
+}
+
+/// Deletes from the recordings folder `dir` what `audio_to_delete` picks; returns how many. No folder: nothing to
+/// delete. A file that cannot be deleted does not stop the others, as with the days.
+pub fn prune_audio(dir: &Path, keep: AudioKeep, today: &str) -> io::Result<usize> {
+    let names = file_names(dir)?;
+    remove_files(audio_to_delete(names.iter().map(String::as_str), keep, today).into_iter().map(|name| dir.join(name)))
+}
+
+/// Deletes the recordings folder `dir` with all in it: "Clear history", or the recordings turned off. No folder: done.
+pub fn clear_audio(dir: &Path) -> io::Result<()> {
+    match std::fs::remove_dir_all(dir) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        done => done,
+    }
+}
+
+/// The id with the `:` of its time as `-`; `None` if it is not an entry id.
+fn audio_name(id: &str) -> Option<String> {
+    is_entry_id(id).then(|| id.replace(':', "-"))
+}
+
+/// The date of the entry whose recording `name` is (`audio_file`); `None` for any other name.
+fn recording_date(name: &str) -> Option<&str> {
+    let stem = name.strip_suffix(AUDIO_EXTENSION)?;
+    // Back to the id: `audio_file` wrote the two `:` of the time as `-`.
+    let id: String = stem.char_indices().map(|(at, c)| if at == 13 || at == 16 { ':' } else { c }).collect();
+    (audio_name(&id).as_deref() == Some(stem)).then(|| &stem[..10])
+}
+
+/// Whether `id` is an entry id as CUE makes them: `YYYY-MM-DDTHH:MM:SS.mmm-n`, a real date and time of day, and `n`
+/// counting from 1 in ASCII digits, without leading zeros.
+fn is_entry_id(id: &str) -> bool {
+    let Some((ts, count)) = id.split_at_checked(23) else { return false };
+    let Some(count) = count.strip_prefix('-') else { return false };
+    let digits = count.bytes().all(|c| c.is_ascii_digit());
+    (1..=20).contains(&count.len()) && !count.starts_with('0') && digits && is_entry_time(ts)
+}
+
+/// Whether `ts` is `YYYY-MM-DDTHH:MM:SS.mmm` of a real date and time of day.
+fn is_entry_time(ts: &str) -> bool {
+    let b = ts.as_bytes();
+    let up_to = |at: usize, max: u8| {
+        let (tens, ones) = (b[at], b[at + 1]);
+        tens.is_ascii_digit() && ones.is_ascii_digit() && (tens - b'0') * 10 + (ones - b'0') <= max
+    };
+    b.len() == 23
+        && ts.get(..10).is_some_and(|date| days_from_date(date).is_some())
+        && (b[10], b[13], b[16], b[19]) == (b'T', b':', b':', b'.')
+        && up_to(11, 23)
+        && up_to(14, 59)
+        && up_to(17, 59)
+        && b[20..].iter().all(u8::is_ascii_digit)
+}
+
+/// Deletes the day files `old` picks; returns how many.
 fn remove_days(dir: &Path, old: impl Fn(&str) -> bool) -> io::Result<usize> {
+    remove_files(dates(dir)?.into_iter().filter(|d| old(d)).map(|date| day_file(dir, &date)))
+}
+
+/// Deletes the files; returns how many. A file that cannot be deleted (another program holds it open) does not stop
+/// the others: the first such error is returned, and the next prune tries again. A file already gone is no error.
+fn remove_files(files: impl IntoIterator<Item = PathBuf>) -> io::Result<usize> {
     let mut removed = 0;
     let mut failed = None;
-    for date in dates(dir)?.into_iter().filter(|d| old(d)) {
-        match std::fs::remove_file(day_file(dir, &date)) {
+    for file in files {
+        match std::fs::remove_file(file) {
             Ok(()) => removed += 1,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => {
@@ -211,18 +318,24 @@ fn remove_days(dir: &Path, old: impl Fn(&str) -> bool) -> io::Result<usize> {
 
 /// The dates of the day files, newest first; no directory — none.
 fn dates(dir: &Path) -> io::Result<Vec<String>> {
+    let names = file_names(dir)?;
+    let mut dates: Vec<String> = names.iter().filter_map(|name| file_date(name)).map(str::to_owned).collect();
+    dates.sort_unstable_by(|a, b| b.cmp(a));
+    Ok(dates)
+}
+
+/// The names of the files in `dir`, not its folders; a name that is not Unicode is left out. No directory — none.
+fn file_names(dir: &Path) -> io::Result<Vec<String>> {
     let listing = match std::fs::read_dir(dir) {
         Ok(listing) => listing,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let mut dates: Vec<String> = listing
+    Ok(listing
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter_map(|e| e.file_name().to_str().and_then(file_date).map(str::to_owned))
-        .collect();
-    dates.sort_unstable_by(|a, b| b.cmp(a));
-    Ok(dates)
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect())
 }
 
 /// The date in the name of a day file; `None` for any other name.
@@ -310,11 +423,17 @@ mod tests {
     }
 
     fn entry(ts: &str, mode: Mode, text: &str) -> Entry {
-        Entry { id: format!("{ts}-1"), ts: ts.into(), mode, app: "Notepad".into(), text: text.into(), question: None }
+        let (id, app) = (format!("{ts}-1"), "Notepad".into());
+        Entry { id, ts: ts.into(), mode, app, text: text.into(), question: None, raw: None }
     }
 
     fn ask(ts: &str, question: &str, answer: &str) -> Entry {
         Entry { question: Some(question.into()), ..entry(ts, Mode::Ask, answer) }
+    }
+
+    /// A dictation that gave `text`, heard as `raw`.
+    fn heard(ts: &str, text: &str, raw: &str) -> Entry {
+        Entry { raw: Some(raw.into()), ..entry(ts, Mode::Dictation, text) }
     }
 
     fn add(dir: &Path, entries: &[Entry]) {
@@ -536,6 +655,194 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// The text as it was heard is kept with its entry, and only when there is one: the line of an entry without it,
+    /// like every entry of an earlier version, has no such field and reads back without it.
+    #[test]
+    fn raw_text_is_written_only_when_there_is_one() {
+        let dir = tmp("raw");
+        let cleaned = heard("2026-10-31T07:00:00.000", "Send the report on Friday.", "uh send the report on\nfriday");
+        let plain = entry("2026-10-31T07:05:00.000", Mode::Dictation, "Plain.");
+        add(&dir, &[cleaned.clone(), plain.clone()]);
+        let file = std::fs::read_to_string(dir.join("2026-10-31.jsonl")).unwrap();
+        assert_eq!(file.lines().count(), 2, "a line break in the raw text stays inside its line");
+        let lines: Vec<serde_json::Value> = file.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(lines[0]["raw"], "uh send the report on\nfriday");
+        assert!(lines[1].get("raw").is_none(), "{file}");
+        assert_eq!(recent(&dir, "2026-10-31").days[0].entries, [plain, cleaned.clone()]);
+        assert_eq!(find(&dir, &cleaned.id), Some(cleaned));
+
+        let line = concat!(
+            r#"{"id":"2026-10-30T09:00:00.000-1","ts":"2026-10-30T09:00:00.000","#,
+            r#""mode":"dictation","app":"","text":"Earlier."}"#,
+            "\n",
+        );
+        std::fs::write(dir.join("2026-10-30.jsonl"), line).unwrap();
+        let earlier = find(&dir, "2026-10-30T09:00:00.000-1").expect("an entry of an earlier version reads");
+        assert_eq!((earlier.text.as_str(), earlier.raw), ("Earlier.", None));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A search looks in the text as it was heard too, with ё and е alike, and finds each entry once.
+    #[test]
+    fn search_looks_in_the_text_as_heard() {
+        let dir = tmp("search-raw");
+        let translated = heard("2026-10-31T09:00:00.000", "See you on Friday.", "Увидимся в пятницу");
+        let translated = Entry { mode: Mode::Translation, ..translated };
+        add(
+            &dir,
+            &[
+                heard("2026-10-30T09:00:00.000", "Отчёт будет в пятницу.", "ну отчет будет э в пятницу"),
+                translated,
+                entry("2026-10-31T10:00:00.000", Mode::Dictation, "nothing here"),
+            ],
+        );
+        assert_eq!(texts(&search(&dir, "НУ ОТЧЁТ", 10)), [("2026-10-30", vec!["Отчёт будет в пятницу."])]);
+        assert_eq!(texts(&search(&dir, "увидимся", 10)), [("2026-10-31", vec!["See you on Friday."])]);
+        assert_eq!(
+            texts(&search(&dir, "пятниц", 10)),
+            [("2026-10-31", vec!["See you on Friday."]), ("2026-10-30", vec!["Отчёт будет в пятницу."])]
+        );
+        assert_eq!(texts(&search(&dir, "friday", 10)), [("2026-10-31", vec!["See you on Friday."])]);
+        assert_eq!(search(&dir, "absent", 10), Vec::<Day>::new());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An entry id names its recording, with the `:` Windows does not allow as `-`; anything else names none, so no id
+    /// from a page reaches outside the folder.
+    #[test]
+    fn audio_file_takes_entry_ids_alone() {
+        for (id, file) in [
+            ("2026-10-31T07:30:00.123-1", "2026-10-31T07-30-00.123-1.ogg"),
+            ("2026-10-31T23:59:59.999-42", "2026-10-31T23-59-59.999-42.ogg"),
+            ("2024-02-29T00:00:00.000-18446744073709551615", "2024-02-29T00-00-00.000-18446744073709551615.ogg"),
+        ] {
+            assert_eq!(audio_file(id).as_deref(), Some(file), "{id}");
+            assert_eq!(audio_snapshot(id), Some(file.replace(".ogg", ".wav.tmp")), "{id}");
+        }
+        let e = entry("2026-10-31T07:30:00.123", Mode::Dictation, "x");
+        assert_eq!(audio_file(&e.id).as_deref(), Some("2026-10-31T07-30-00.123-1.ogg"), "the ids of the entries");
+
+        for id in [
+            "",
+            "..",
+            r"C:\Windows\win.ini",
+            "2026-10-31T07:30:00.123",
+            "2026-10-31T07:30:00.123-",
+            "2026-10-31T07:30:00.123-0",
+            "2026-10-31T07:30:00.123-01",
+            "2026-10-31T07:30:00.123-+1",
+            "2026-10-31T07:30:00.123--1",
+            "2026-10-31T07:30:00.123-1a",
+            "2026-10-31T07:30:00.123-123456789012345678901",
+            "2026-10-31T07:30:00.123-1.ogg",
+            "2026-10-31T07:30:00.123-1/../../x",
+            r"2026-10-31T07:30:00.123-1\..\..\x",
+            "2026-10-31T07:30:00.123-1\0",
+            "2026-10-31T07:30:00.123-1 ",
+            " 2026-10-31T07:30:00.123-1",
+            "x2026-10-31T07:30:00.123-1",
+            "2026-10-31T07-30-00.123-1",
+            "2026-10-31 07:30:00.123-1",
+            "2026-10-31T07:30:00,123-1",
+            "2026-10-31T07:30:00.12-1",
+            "2026-10-31T07:30:00.1234-1",
+            "2026-10-31T7:30:00.123-1",
+            "2026-10-31T24:00:00.000-1",
+            "2026-10-31T07:60:00.000-1",
+            "2026-10-31T07:30:60.000-1",
+            "2026-10-31T0a:30:00.000-1",
+            "2026-02-30T07:30:00.000-1",
+            "2026-13-01T07:30:00.000-1",
+            "２026-10-31T07:30:00.123-1",
+            "2026-10-31T07:30:00.12３-1",
+            "2026-10-31T07:30:00.123-１",
+        ] {
+            assert_eq!(audio_file(id), None, "{id:?}");
+            assert_eq!(audio_snapshot(id), None, "{id:?}");
+        }
+    }
+
+    /// Recordings go by the date of their entry, counted back like the days; the files left being written go
+    /// whatever the period; no other name is ever picked.
+    #[test]
+    fn audio_to_delete_keeps_the_period_and_sweeps_leftovers() {
+        let dates = ["2026-09-29", "2026-09-30", "2026-10-23", "2026-10-24", "2026-10-30", "2026-10-31", "2026-11-02"];
+        let recording = |date: &str| audio_file(&format!("{date}T12:00:00.000-1")).unwrap();
+        let recordings: Vec<String> = dates.iter().map(|d| recording(d)).collect();
+        let snapshot = audio_snapshot("2026-10-31T12:00:00.000-2").unwrap();
+        let leftovers = [snapshot, "2026-10-31T12-00-00.000-3.ogg.tmp".to_owned(), "x.tmp".to_owned()];
+        let foreign = [
+            "notes.txt",
+            "2026-10-30.jsonl",
+            ".ogg",
+            "x.ogg",
+            "2026-10-01.ogg",
+            "2026-10-01T12-00-00.000-1.wav",
+            "2026-10-01T12-00-00.000-1.ogg.bak",
+            "2026-10-01T12-00-00.000-1.OGG",
+            "2026-10-01T12:00:00.000-1.ogg",
+            "2026-10-01T12-00-00.000-0.ogg",
+            "2026-10-01T12-00-00.000-1-1.ogg",
+            "2026-02-30T12-00-00.000-1.ogg",
+        ];
+        let names: Vec<&str> = recordings.iter().chain(&leftovers).map(String::as_str).chain(foreign).collect();
+        let pick = |keep, today| audio_to_delete(names.iter().copied(), keep, today);
+        // The recordings before `first_kept`, then every leftover.
+        let gone = |first_kept: usize| -> Vec<&str> {
+            recordings[..first_kept].iter().chain(&leftovers).map(String::as_str).collect()
+        };
+        let today = "2026-10-31";
+        assert_eq!(pick(AudioKeep::Off, today), gone(dates.len()), "off: every recording, also one after today");
+        // A month keeps 31 days back: 2026-09-30 stays.
+        assert_eq!(pick(AudioKeep::Month, today), gone(1));
+        // A week keeps 7 days back: 2026-10-24 stays.
+        assert_eq!(pick(AudioKeep::Week, today), gone(3));
+        // A day keeps today's, and one after today (the clock was moved back).
+        assert_eq!(pick(AudioKeep::Day, today), gone(5));
+        assert_eq!(pick(AudioKeep::Day, "2026-11-03"), gone(dates.len()));
+        // With no date to count from, no recording is old; off needs none.
+        assert_eq!(pick(AudioKeep::Day, "today"), gone(0));
+        assert_eq!(pick(AudioKeep::Off, "today"), gone(dates.len()));
+        assert_eq!(audio_to_delete(foreign, AudioKeep::Off, today), Vec::<&str>::new());
+    }
+
+    /// On disk: recordings and leftovers go, other files and folders stay; clearing removes the whole folder. The
+    /// history's own deletions never touch the recordings folder inside it.
+    #[test]
+    fn prune_audio_and_clear_audio_on_disk() {
+        let history = tmp("audio");
+        let dir = history.join("audio");
+        assert_eq!(prune_audio(&dir, AudioKeep::Day, "2026-10-31").unwrap(), 0, "no folder: nothing to delete");
+        clear_audio(&dir).unwrap();
+
+        add(&history, &[entry("2026-10-30T12:00:00.000", Mode::Dictation, "yesterday")]);
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = audio_file("2026-10-30T12:00:00.000-1").unwrap();
+        let kept = audio_file("2026-10-31T08:00:00.000-2").unwrap();
+        let left = audio_snapshot("2026-10-31T08:00:00.000-3").unwrap();
+        for name in [old.as_str(), &kept, &left, "notes.txt"] {
+            std::fs::write(dir.join(name), b"OggS").unwrap();
+        }
+        let folder = audio_file("2026-10-01T12:00:00.000-1").unwrap();
+        std::fs::create_dir_all(dir.join(&folder)).unwrap();
+
+        assert_eq!(prune_audio(&dir, AudioKeep::Day, "2026-10-31").unwrap(), 2);
+        assert_eq!(names(&dir), [folder.as_str(), &kept, "notes.txt"], "a folder named like a recording stays");
+        assert_eq!(prune_audio(&dir, AudioKeep::Day, "2026-10-31").unwrap(), 0, "nothing more to delete");
+
+        assert_eq!(prune(&history, Keep::Off, "2026-10-31").unwrap(), 1);
+        clear(&history).unwrap();
+        assert_eq!(names(&history), ["audio"]);
+        assert_eq!(names(&dir), [folder.as_str(), &kept, "notes.txt"], "the days are gone, the recordings are not");
+
+        assert_eq!(prune_audio(&dir, AudioKeep::Off, "2026-10-31").unwrap(), 1);
+        assert_eq!(names(&dir), [folder.as_str(), "notes.txt"]);
+        clear_audio(&dir).unwrap();
+        assert!(!dir.exists());
+        clear_audio(&dir).unwrap();
+        std::fs::remove_dir_all(history).unwrap();
+    }
+
     #[test]
     fn search_respects_the_limit() {
         let dir = tmp("search-limit");
@@ -638,7 +945,13 @@ mod tests {
         assert!(!text.contains("secret") && !text.contains("private"), "{text}");
         assert!(text.contains("2026-10-31T07:30:00.000") && text.contains("Ask") && text.contains("Notepad"), "{text}");
         assert!(text.contains("14") && text.contains("Some(15)"), "the lengths are shown: {text}");
+        assert!(text.contains("raw_chars: None"), "{text}");
         let page = Page { days: vec![Day { date: "2026-10-31".into(), entries: vec![e] }], more: false };
         assert!(!format!("{page:?}").contains("private"));
+
+        let dictated = heard("2026-10-31T07:31:00.000", "Clean.", "secret raw speech");
+        let text = format!("{dictated:?}");
+        assert!(!text.contains("secret") && !text.contains("speech") && !text.contains("Clean"), "{text}");
+        assert!(text.contains("raw_chars: Some(17)"), "the length is shown: {text}");
     }
 }

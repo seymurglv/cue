@@ -446,6 +446,7 @@ mod tests {
             app: "Notepad".into(),
             text: "private answer".into(),
             question: Some("secret question".into()),
+            raw: None,
         };
         let view = EntryView::from(&e);
         let expected = json!({
@@ -501,6 +502,7 @@ mod tests {
             app: String::new(),
             text: "Hello.".into(),
             question: None,
+            raw: None,
         };
         EntryView::from(&e)
     }

@@ -940,6 +940,7 @@ mod tests {
             app: "Notepad".into(),
             text: text.into(),
             question: question.map(str::to_owned),
+            raw: None,
         };
         for e in [
             entry("2026-10-31", "first line\nsecond line", None),

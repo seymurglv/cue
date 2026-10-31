@@ -1,5 +1,5 @@
-//! CUE directories: `%LOCALAPPDATA%\CUE` (last dictation, log, usage.csv, bench, history) and `%APPDATA%\CUE`
-//! (settings).
+//! CUE directories: `%LOCALAPPDATA%\CUE` (last dictation, log, usage.csv, bench, history and its recordings) and
+//! `%APPDATA%\CUE` (settings).
 //! Paths are built by pure functions from a base directory; only `local_app_data` and `app_data` read
 //! environment variables.
 use std::ffi::OsString;
@@ -23,6 +23,11 @@ pub fn bench_dir(local_app_data: &Path) -> PathBuf {
 /// `<base>\CUE\history`: the history, one file per local day (see `crate::history`), kept only on this computer.
 pub fn history_dir(local_app_data: &Path) -> PathBuf {
     local_dir(local_app_data).join("history")
+}
+
+/// `<base>\CUE\history\audio`: the recordings of the history's entries, one file each (`crate::history::audio_file`).
+pub fn history_audio_dir(local_app_data: &Path) -> PathBuf {
+    history_dir(local_app_data).join("audio")
 }
 
 /// `%LOCALAPPDATA%`. `None` if the variable is missing, empty or a relative path
@@ -64,6 +69,9 @@ mod tests {
         let history = history_dir(&base);
         assert_eq!(history.parent(), Some(dir.as_path()));
         assert_eq!(history.file_name().unwrap(), "history");
+        let audio = history_audio_dir(&base);
+        assert_eq!(audio.parent(), Some(history.as_path()));
+        assert_eq!(audio.file_name().unwrap(), "audio");
         let settings = settings_json(&base);
         assert_eq!(settings.parent(), Some(base.join("CUE").as_path()));
         assert_eq!(settings.file_name().unwrap(), "settings.json");
@@ -77,6 +85,7 @@ mod tests {
         assert_eq!(usage_csv(base), PathBuf::from(r"C:\Users\u\AppData\Local\CUE\usage.csv"));
         assert_eq!(bench_dir(base), PathBuf::from(r"C:\Users\u\AppData\Local\CUE\bench"));
         assert_eq!(history_dir(base), PathBuf::from(r"C:\Users\u\AppData\Local\CUE\history"));
+        assert_eq!(history_audio_dir(base), PathBuf::from(r"C:\Users\u\AppData\Local\CUE\history\audio"));
         let roaming = Path::new(r"C:\Users\u\AppData\Roaming");
         assert_eq!(settings_json(roaming), PathBuf::from(r"C:\Users\u\AppData\Roaming\CUE\settings.json"));
     }
