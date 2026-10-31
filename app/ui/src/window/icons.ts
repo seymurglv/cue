@@ -1,6 +1,7 @@
 // The window's icons: the shared set (CUE.IC from design/drop.js) and the ones only the window uses, drawn as in the
-// approved design (stage 5): search, chevron, paste again, microphone, globe, half circle. The key of the "Keys" row is
-// new: the design's key icon is a keyboard, for its hotkeys section, which the window does not have.
+// approved design (stage 5): search, chevron, paste again, microphone, globe, half circle, play and pause. The key of
+// the "Keys" row is new: the design's key icon is a keyboard, for its hotkeys section, which the window does not have;
+// so is the clock of the "History" row.
 import { CUE } from '../designParts';
 
 const SV = (d: string) =>
@@ -14,6 +15,9 @@ const OWN = {
   globe: SV('<circle cx="10" cy="10" r="7"/><path d="M3 10h14M10 3c2 2.2 2.8 4.5 2.8 7s-.8 4.8-2.8 7c-2-2.2-2.8-4.5-2.8-7S8 5.2 10 3z"/>'),
   half: SV('<circle cx="10" cy="10" r="6.6"/><path d="M10 3.4v13.2a6.6 6.6 0 0 0 0-13.2z" fill="currentColor" stroke="none"/>'),
   apiKey: SV('<circle cx="6.8" cy="13.2" r="3.4"/><path d="m9.2 10.8 7-7M13.6 6.4l2 2M11.6 8.4l1.6 1.6"/>'),
+  clock: SV('<circle cx="10" cy="10" r="7"/><path d="M10 6.2V10l2.6 1.7"/>'),
+  play: '<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M7 5.2v9.6l7.6-4.8z" fill="currentColor"/></svg>',
+  pause: SV('<path d="M7.5 5.5v9M12.5 5.5v9"/>'),
 };
 
 export type IconName = keyof typeof OWN | 'x' | 'ok' | 'tr' | 'ask' | 'copy' | 'gear';

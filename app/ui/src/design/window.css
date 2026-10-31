@@ -1,12 +1,14 @@
 /* CUE — the main window: its header, the History section and the settings tray from the gear. Ported from the approved
    design (stage 5, design/05-main-window/final.html), Windows look, only these parts: no Today, Dictionary or Habits
-   sections and no links to them in the header, no window chrome of its own (Windows draws the frame), no "as you said"
-   expansion of a history row. Layout, classes and motion are the design's; where it had a macOS and a Windows variant,
-   the Windows one is folded into the rule. The theme follows prefers-color-scheme (the page sets data-theme on <html>;
-   the tokens and their dark values are design/cue.css).
+   sections and no links to them in the header, no window chrome of its own (Windows draws the frame), no dictionary or
+   habit chips under an opened history row. Layout, classes and motion are the design's; where it had a macOS and a
+   Windows variant, the Windows one is folded into the rule. The theme follows prefers-color-scheme (the page sets
+   data-theme on <html>; the tokens and their dark values are design/cue.css).
    Added for the real data: a history row shows its mode (a small badge) and its app as muted text before the text, an
    "Ask" question muted before the answer; a period note and a "not connected" mark in menus; long menus scroll; a key
-   field; quiet lines for an empty history and for nothing found. */
+   field; quiet lines for an empty history and for nothing found. Since: runs from one app stacked, the search grown out
+   of the magnifier on the heading's line, an opened row's recording as a thin progress line in place of the design's
+   waveform. */
 @font-face{font-family:"Bebas Neue";src:url("./fonts/BebasNeue-Regular.ttf") format("truetype");font-display:block}
 @font-face{font-family:"Montserrat";font-weight:800;src:url("./fonts/Montserrat-ExtraBold-cyrillic-ext.woff2") format("woff2");font-display:block;unicode-range:U+0460-052F,U+1C80-1C8A,U+20B4,U+2DE0-2DFF,U+A640-A69F,U+FE2E-FE2F}
 @font-face{font-family:"Montserrat";font-weight:800;src:url("./fonts/Montserrat-ExtraBold-cyrillic.woff2") format("woff2");font-display:block;unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
@@ -24,7 +26,10 @@ button:disabled{cursor:default}
 input{font:inherit;color:inherit;letter-spacing:inherit}
 
 /* ================= the window ================= */
-.app{position:fixed;inset:0;display:flex;flex-direction:column;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--win-font);font-size:13px;line-height:1.45;letter-spacing:0;-webkit-font-smoothing:antialiased}
+.app{position:fixed;inset:0;display:flex;flex-direction:column;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--win-font);font-size:13px;line-height:1.45;letter-spacing:0;-webkit-font-smoothing:antialiased;interpolate-size:allow-keywords;--e-sm:cubic-bezier(.32,.72,0,1)}
+/* --e-sm: a smooth ease without overshoot for parts that grow (height to auto cannot overshoot: a spring is cut off).
+   Growing parts go from height 0 to auto, not grid rows 0fr to 1fr: Chromium resolves the fraction against the box's
+   own height, so while the box grows by f its content shows only f² of itself and an empty band opens under it. */
 .app svg{display:block;flex:none}
 .app [hidden]{display:none!important}
 .app .mut{color:var(--muted)}
@@ -41,10 +46,7 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .btn2:hover{background:color-mix(in srgb,var(--text) 11%,transparent)}
 .btn2.ck{padding:0 10px}
 .btn2:disabled{opacity:.5}
-.srch{display:flex;align-items:center;gap:6px;height:28px;width:100%;margin:2px 0 6px;padding:0 8px;border-radius:5px;background:color-mix(in srgb,var(--card) 60%,transparent);box-shadow:inset 0 -1px 0 color-mix(in srgb,var(--text) 35%,transparent),0 0 0 1px color-mix(in srgb,var(--text) 8%,transparent);color:var(--muted)}
-.srch svg{width:14px;height:14px}
-.srch input{flex:1;min-width:0;border:0;outline:0;background:none;font-size:12.5px;color:var(--text)}
-/* a key field: the search field's look */
+/* a key field: the Windows text field's look */
 .kin{width:100px;height:26px;padding:0 8px;border:0;outline:0;border-radius:5px;background:color-mix(in srgb,var(--card) 60%,transparent);box-shadow:inset 0 -1px 0 color-mix(in srgb,var(--text) 35%,transparent),0 0 0 1px color-mix(in srgb,var(--text) 8%,transparent);font-size:12px;color:var(--text)}
 .kin:focus{box-shadow:inset 0 -2px 0 var(--text),0 0 0 1px color-mix(in srgb,var(--text) 8%,transparent)}
 .kin::placeholder{color:var(--muted)}
@@ -93,10 +95,61 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .hmi{background:color-mix(in srgb,var(--text) 7%,transparent);color:var(--muted)}
 .aski svg,.hmi svg{width:14px;height:14px}
 .hx{min-width:0}
-.htx{font-size:13px;line-height:20px;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
+.htx{height:20px;font-size:13px;line-height:20px;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden;transition:height .45s var(--e-sm)}
 .htx .happ,.htx .hq{color:var(--muted);margin-right:6px}
 .hact{display:flex;gap:2px;margin:-3px -4px -3px 0;opacity:0;transition:opacity .2s}
-.hr:hover .hact,.hr:focus-within .hact{opacity:1}
+.hr:hover .hact,.hr:focus-within .hact,.hr.open .hact{opacity:1}
+/* an opened row: its whole text, then how it was said and its recording (the question of an "Ask" moves down there);
+   both grow in one motion, and while it closes (.shut) the text stays whole until it is one line again */
+.hr.hmore{cursor:pointer}
+.hr.open{background:color-mix(in srgb,var(--text) 5%,transparent)}
+.hr.open .htx,.hr.shut .htx{display:block}
+.hr.open .htx{height:auto}
+.hr.open .hq{display:none}
+.hdet{height:0;overflow:hidden;visibility:hidden;cursor:auto;transition:height .45s var(--e-sm),visibility 0s .45s}
+.hr.open .hdet{height:auto;visibility:visible;transition:height .45s var(--e-sm)}
+.hdet>div{padding-bottom:2px}
+.hlab{font-size:11px;font-weight:600;color:var(--muted);margin-top:10px}
+.hraw{margin-top:2px;font-size:12.5px;line-height:1.55;color:var(--muted);overflow-wrap:anywhere}
+.hraw s{color:var(--faint);text-decoration-thickness:1px}
+.hraw mark{color:var(--text)}
+.hraw ins{text-decoration:none;color:var(--text);background:color-mix(in srgb,var(--ok) 15%,transparent);border-radius:3px;padding:0 3px}
+/* the recording: play/pause, a thin line of how far it played, its length */
+.hplay{display:flex;align-items:center;gap:10px;margin:10px 0 2px}
+.hpb{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:var(--text);color:var(--bg);transition:opacity .2s}
+.hpb svg{width:14px;height:14px}
+.hpb:disabled{opacity:.3;cursor:default}
+.hpr{position:relative;flex:1;max-width:210px;height:2px;border-radius:1px;overflow:hidden;background:color-mix(in srgb,var(--text) 14%,transparent)}
+.hpr i{position:absolute;inset:0;border-radius:1px;background:var(--text);transform:scaleX(0);transform-origin:0 50%;transition:transform .25s linear}
+.hdur{min-width:28px;font-family:"Bebas Neue",sans-serif;font-size:15px;letter-spacing:.03em;line-height:20px;color:var(--muted);font-variant-numeric:tabular-nums}
+
+/* a stack: one soft sheet per run from one app, two sheets peeking out under it; the chip and the sheets open it in place */
+.hstk{--sh:color-mix(in srgb,var(--text) 4%,var(--bg));position:relative;isolation:isolate;display:flex;flex-direction:column;margin:1px 0 9px;border-radius:9px;transition:background-color .3s,margin .5s var(--e-sm)}
+[data-theme=dark] .hstk{--sh:color-mix(in srgb,var(--text) 6%,var(--bg))}
+.hstk>.htop{background:var(--sh);transition:background-color .3s}
+.hstk>.htop:hover{background:color-mix(in srgb,var(--text) 6%,var(--bg))}
+.hstk>.htop.open{background:color-mix(in srgb,var(--text) 6.5%,var(--bg))}
+.hedge{position:absolute;z-index:-1;left:8px;right:8px;bottom:-9px;height:21px;cursor:pointer;transition:opacity .25s}
+.hedge i{position:absolute;left:0;right:0;bottom:5px;height:12px;border-radius:0 0 8px 8px;background:color-mix(in srgb,var(--text) 3.2%,var(--bg));transition:transform .5s var(--e-sm),background-color .2s}
+.hedge i+i{z-index:-1;left:9px;right:9px;bottom:1px;background:color-mix(in srgb,var(--text) 2%,var(--bg))}
+[data-theme=dark] .hedge i{background:color-mix(in srgb,var(--text) 4%,var(--bg))}
+[data-theme=dark] .hedge i+i{background:color-mix(in srgb,var(--text) 2.6%,var(--bg))}
+.hedge:hover i{background:color-mix(in srgb,var(--text) 6%,var(--bg))}
+.hedge:hover i+i{background:color-mix(in srgb,var(--text) 4%,var(--bg))}
+.hchip{display:inline;padding:0;font:inherit;line-height:inherit;color:inherit}
+.hchip .happ{transition:color .2s}
+.hchip:hover .happ{color:var(--text)}
+.hcnt{display:inline-grid;place-items:center;min-width:17px;height:16px;padding:0 4px;margin:0 7px 0 -2px;border-radius:5px;background:color-mix(in srgb,var(--text) 7%,transparent);font-family:"Bebas Neue",sans-serif;font-size:13px;line-height:16px;letter-spacing:.04em;color:var(--muted);vertical-align:1px;transition:background-color .25s,color .25s}
+.hchip:hover .hcnt{background:color-mix(in srgb,var(--text) 11%,transparent);color:var(--text)}
+.hrest{height:0;overflow:hidden;visibility:hidden;transition:height .5s var(--e-sm),visibility 0s .5s}
+.hstk.open{margin:1px 0 4px;background:color-mix(in srgb,var(--text) 2.5%,transparent)}
+.hstk.open>.hrest{height:auto;visibility:visible;transition:height .5s var(--e-sm)}
+.hstk.open>.hedge{opacity:0;pointer-events:none}
+.hstk.open>.hedge i{transform:translateY(-8px)}
+.hstk.open>.htop{background:transparent}
+.hstk.open>.htop:hover,.hstk .hrest .hr:hover{background:color-mix(in srgb,var(--text) 4%,transparent)}
+.hstk.open>.htop.open,.hstk .hrest .hr.open{background:color-mix(in srgb,var(--text) 5%,transparent)}
+.hstk.open .hcnt{background:color-mix(in srgb,var(--text) 13%,transparent);color:var(--text)}
 
 /* settings in the tray */
 .sgrp{display:flex;flex-direction:column}
@@ -120,12 +173,27 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .gear.hid{opacity:0}
 .bcol{max-width:540px;margin:0 auto;padding:0 20px 90px}
 .bsec{padding-top:22px}
-.bsec>h3{display:flex;align-items:center;gap:10px;margin:0 0 8px;font-size:13px;font-weight:600}
-.bsec>h3::after{content:"";order:5;flex:1;height:1px;background:var(--line)}
-.bsec>h3 .ibt{order:6;margin:-4px -4px -4px 0}
-.bsr{display:grid;grid-template-rows:0fr;transition:grid-template-rows .45s var(--e-spring)}
-.bsr>div{overflow:hidden}
-.bsr.open{grid-template-rows:1fr}
+.bsec>h3{display:flex;align-items:center;gap:10px;margin:0 0 10px;font-size:13px;font-weight:600}
+/* the search on the heading's line. Closed: the hairline and the magnifier. Open: the magnifier's own background
+   stretches left over the line into a soft field — one eased motion, no overshoot, nothing under it moves — and the
+   magnifier turns into a cross. The field is the window's control look: a soft fill like the icon buttons' hover,
+   radius 7, a thin ring while it has the focus, its own placeholder. */
+.hsb{position:relative;flex:1;min-width:0;height:24px;margin:-4px -4px -4px 0;display:flex;justify-content:flex-end}
+.hsb::before{content:"";position:absolute;left:0;right:32px;top:50%;height:1px;background:var(--line);transition:opacity .3s var(--e-out)}
+.hsb.open::before{opacity:0;transition-duration:.16s}
+.hsf{position:absolute;top:0;bottom:0;right:0;width:24px;overflow:hidden;border-radius:6px;background:transparent;transition:width .4s var(--e-sm),top .4s var(--e-sm),bottom .4s var(--e-sm),border-radius .4s var(--e-sm),background-color .2s,box-shadow .2s}
+.hsb.open .hsf{width:100%;top:-2px;bottom:-2px;border-radius:7px;background:color-mix(in srgb,var(--text) 6%,transparent)}
+.hsb.open:focus-within .hsf{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--text) 9%,transparent)}
+/* the text rides on the field's leading edge and fades in on the way */
+.hsf input{position:absolute;left:0;right:28px;top:0;bottom:0;width:auto;min-width:0;padding:0 0 0 11px;border:0;outline:0;background:none;font-size:12.5px;font-weight:400;color:var(--text);opacity:0;visibility:hidden;transition:opacity .1s,visibility 0s .1s}
+.hsf input::placeholder{color:var(--muted);opacity:1}
+.hsb.open .hsf input{opacity:1;visibility:visible;transition:opacity .24s .1s}
+.hsb .hsbt{position:relative;z-index:1;margin:0}
+.hsb .hsbt svg{position:absolute;left:5px;top:5px;transition:opacity .18s,transform .3s var(--e-out)}
+.hsb .hsbt svg+svg{opacity:0;transform:scale(.6)}
+.hsb.open .hsbt svg:first-child{opacity:0;transform:scale(.6)}
+.hsb.open .hsbt svg+svg{opacity:1;transform:none}
+.hsb.open .hsbt:hover{background:color-mix(in srgb,var(--text) 8%,transparent)}
 .bmore{display:flex;align-items:center;gap:12px;margin-top:8px;font-size:12.5px;color:var(--muted)}
 .bmore button{color:var(--muted)}
 .bmore button:hover{color:var(--text)}

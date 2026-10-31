@@ -244,8 +244,11 @@ export class WindowPage implements Ctx {
       this.history.followDate();
       this.tray.regained();
     }, { signal });
-    // The microphone stays open only while its settings page is shown.
-    window.addEventListener('pagehide', () => this.tray.stopPreview(), { signal });
+    // The microphone stays open only while its settings page is shown; recordings stop and give back their URLs.
+    window.addEventListener('pagehide', () => {
+      this.tray.stopPreview();
+      this.history.release();
+    }, { signal });
   }
 
   today(): string {
@@ -271,10 +274,11 @@ export class WindowPage implements Ctx {
     await this.history.load();
   }
 
-  /** Listeners off (the page is gone); the microphone preview ends. */
+  /** Listeners off (the page is gone); the microphone preview ends, recordings stop. */
   dispose(): void {
     this.off.abort();
     this.tray.stopPreview();
+    this.history.release();
     this.looping = false;
   }
 
@@ -372,7 +376,7 @@ export class WindowPage implements Ctx {
     requestAnimationFrame(frame);
   }
 
-  /** Esc: an open menu closes; in the tray, back to its first page, then closed. */
+  /** Esc: an open menu closes; in the tray, back to its first page, then closed; then the history's search closes. */
   private onKey(e: KeyboardEvent): void {
     if (e.key !== 'Escape') return;
     if (this.menus.isOpen) {
@@ -380,7 +384,7 @@ export class WindowPage implements Ctx {
       e.preventDefault();
       return;
     }
-    if (this.tray.esc()) e.preventDefault();
+    if (this.tray.esc() || this.history.esc()) e.preventDefault();
   }
 }
 

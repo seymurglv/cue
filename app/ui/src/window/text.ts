@@ -1,6 +1,6 @@
 // The main window's texts in English and Russian. The language is the core's (SettingsView.lang): the window has no
 // language set before its script runs, so the page asks for the settings before it draws anything.
-import type { Keep, KeyCheck, Mode, UiLanguage } from './api';
+import type { AudioKeep, Keep, KeyCheck, Mode, UiLanguage } from './api';
 
 export type Lang = 'en' | 'ru';
 
@@ -11,6 +11,8 @@ export interface WinText {
   history: string;
   search: string;
   searchHint: string;
+  /** The search's own button once it is open: it closes it. */
+  searchClose: string;
   today: string;
   yesterday: string;
   earlier: string;
@@ -27,6 +29,13 @@ export interface WinText {
   copy: string;
   pasteAgain: string;
   modes: Record<Mode, string>;
+  /** A stack's chip, "Telegram 5": its name for a screen reader and its tooltip ({APP}, {N}). */
+  stack: string;
+  /** Over an opened entry: the text as it was heard (a dictation, its cleanup marked), the speech before it was
+   *  translated, the question as it was heard. */
+  saidAs: Record<Mode, string>;
+  play: string;
+  pause: string;
   settings: string;
   close: string;
   back: string;
@@ -55,12 +64,21 @@ export interface WinText {
   autostart: string;
   uiLanguage: string;
   uiLanguages: Record<UiLanguage, string>;
+  /** The tray's History page: how long recordings are kept, never longer than the history. */
+  keepAudio: string;
+  keepAudioHint: string;
+  audioKeeps: Record<AudioKeep, string>;
+  audioNote: string;
+  /** The History row's value on the tray's first page. */
+  audioShort: Record<AudioKeep, string>;
+  audioShortUnset: string;
 }
 
 export const en: WinText = {
   history: 'History',
   search: 'Search',
   searchHint: 'Search the history',
+  searchClose: 'Close search',
   today: 'Today',
   yesterday: 'Yesterday',
   earlier: 'Show earlier',
@@ -75,6 +93,10 @@ export const en: WinText = {
   copy: 'Copy',
   pasteAgain: 'Paste again',
   modes: { dictation: 'Dictation', translation: 'Translation', ask: 'Ask' },
+  stack: '{APP}, {N} entries',
+  saidAs: { dictation: 'How you said it', translation: 'What you said', ask: 'Your question' },
+  play: 'Play',
+  pause: 'Pause',
   settings: 'Settings',
   close: 'Close · Esc',
   back: 'Back',
@@ -107,12 +129,19 @@ export const en: WinText = {
   autostart: 'Start at sign-in',
   uiLanguage: 'Interface language',
   uiLanguages: { auto: 'Auto', en: 'English', ru: 'Русский' },
+  keepAudio: 'Keep recordings',
+  keepAudioHint: 'Never longer than the history',
+  audioKeeps: { day: 'A day', week: 'A week', month: 'A month', off: "Don't keep" },
+  audioNote: 'A shorter period deletes older recordings at once.',
+  audioShort: { day: 'Recordings: a day', week: 'Recordings: a week', month: 'Recordings: a month', off: 'No recordings' },
+  audioShortUnset: 'Recordings: not set',
 };
 
 export const ru: WinText = {
   history: 'История',
   search: 'Поиск',
   searchHint: 'Найти в истории',
+  searchClose: 'Закрыть поиск',
   today: 'Сегодня',
   yesterday: 'Вчера',
   earlier: 'Показать раньше',
@@ -127,6 +156,10 @@ export const ru: WinText = {
   copy: 'Копировать',
   pasteAgain: 'Вставить снова',
   modes: { dictation: 'Диктовка', translation: 'Перевод', ask: 'Спросить' },
+  stack: '{APP}, записей: {N}',
+  saidAs: { dictation: 'Как вы сказали', translation: 'Что вы сказали', ask: 'Ваш вопрос' },
+  play: 'Слушать',
+  pause: 'Пауза',
   settings: 'Настройки',
   close: 'Закрыть · Esc',
   back: 'Назад',
@@ -159,6 +192,12 @@ export const ru: WinText = {
   autostart: 'Запускать при входе',
   uiLanguage: 'Язык интерфейса',
   uiLanguages: { auto: 'Авто', en: 'English', ru: 'Русский' },
+  keepAudio: 'Хранить записи',
+  keepAudioHint: 'Не дольше самой истории',
+  audioKeeps: { day: 'День', week: 'Неделю', month: 'Месяц', off: 'Не хранить' },
+  audioNote: 'Более короткий срок сразу удаляет старые записи.',
+  audioShort: { day: 'Записи: день', week: 'Записи: неделя', month: 'Записи: месяц', off: 'Без записей' },
+  audioShortUnset: 'Записи: не задано',
 };
 
 export const TEXTS: Record<Lang, WinText> = { en, ru };

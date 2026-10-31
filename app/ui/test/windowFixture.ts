@@ -70,6 +70,7 @@ export function stub(settings: api.SettingsView = view()): void {
   core.historyCopy.mockResolvedValue(undefined);
   core.historyPaste.mockResolvedValue('pasted');
   core.historyClear.mockResolvedValue(undefined);
+  core.historyAudio.mockResolvedValue(null);
   core.keyState.mockResolvedValue({ saved: false, mask: '' });
   core.keySet.mockImplementation(async (_name, value) => ({ saved: true, mask: `${value.slice(0, 3)}…${value.slice(-3)}` }));
   core.keyCheck.mockResolvedValue('works');
@@ -121,4 +122,32 @@ export function key(k: string): void {
 export function type(input: HTMLInputElement, value: string): void {
   input.value = value;
   input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+/** A made-up Ogg Opus file laid out as CUE writes one — OpusHead alone on the first page, the end-of-stream page last —
+ *  that plays `seconds` (its last position less the pre-skip, at 48 kHz). No sound in it: nothing here decodes it. */
+export function oggFile(seconds: number, preSkip = 312): ArrayBuffer {
+  const page = (type: number, granule: number, seq: number, packet: number[]) => {
+    const p = new Uint8Array(28 + packet.length);
+    p.set([0x4f, 0x67, 0x67, 0x53, 0, type]);
+    const v = new DataView(p.buffer);
+    v.setUint32(6, granule % 2 ** 32, true);
+    v.setUint32(10, Math.floor(granule / 2 ** 32), true);
+    v.setUint32(14, 7, true);
+    v.setUint32(18, seq, true);
+    p[26] = 1;
+    p[27] = packet.length;
+    p.set(packet, 28);
+    return p;
+  };
+  const head = [...'OpusHead'].map((c) => c.charCodeAt(0)).concat([1, 1, preSkip & 255, preSkip >> 8, 0x80, 0x3e, 0, 0, 0, 0, 0]);
+  const tags = [...'OpusTags'].map((c) => c.charCodeAt(0)).concat([3, 0, 0, 0, 67, 85, 69, 0, 0, 0, 0]);
+  const parts = [page(2, 0, 0, head), page(0, 0, 1, tags), page(0, preSkip + 960, 2, [8, 1, 2]), page(4, preSkip + Math.round(seconds * 48_000), 3, [8, 3, 4])];
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out.buffer;
 }

@@ -48,10 +48,17 @@ describe('The settings tray', () => {
       'Keys',
       'Microphone',
       'Translation',
+      'History',
       'General',
     ]);
     // Each row with its value.
-    expect($$('.btray .trw em').map((e) => e.textContent)).toEqual(['No keys', 'As in Windows', 'English', 'Auto']);
+    expect($$('.btray .trw em').map((e) => e.textContent)).toEqual([
+      'No keys',
+      'As in Windows',
+      'English',
+      'Recordings: a week',
+      'Auto',
+    ]);
     await sub('translate');
     expect(title()).toBe('Translation');
     key('Escape');
@@ -330,6 +337,59 @@ describe('The settings tray', () => {
     expect($('.gear')!.getAttribute('aria-label')).toBe('Настройки');
     key('Escape');
     expect(title()).toBe('Настройки');
+  });
+
+  it('the History page keeps recordings for the period chosen', async () => {
+    page = await mount();
+    await open();
+    await sub('history');
+    expect(title()).toBe('History');
+    expect(text($('.btray .srow .stx b'))).toBe('Keep recordings');
+    expect(text($('.btray .srow .stx small'))).toBe('Never longer than the history');
+    const dd = $('[data-dd="haudio"]')!;
+    expect(text(dd.querySelector('.ddv'))).toBe('A week');
+    click(dd);
+    const items = $$('.menu [data-i]');
+    expect(items.map((b) => b.querySelector('.mlb')!.textContent)).toEqual(['A day', 'A week', 'A month', "Don't keep"]);
+    expect(items.map((b) => b.getAttribute('aria-checked'))).toEqual(['false', 'true', 'false', 'false']);
+    expect(text($('.menu .mnote'))).toBe('A shorter period deletes older recordings at once.');
+    click(items[0]);
+    await settle();
+    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'historyAudio', value: 'day' });
+    expect($('.menu')).toBeNull();
+    expect(text($('[data-dd="haudio"] .ddv'))).toBe('A day');
+    // The history itself is not read again: its period did not change.
+    expect(core.historyPage).toHaveBeenCalledTimes(1);
+    key('Escape');
+    expect(text($('.btray em[data-val="history"]'))).toBe('Recordings: a day');
+    click($('.btray [data-sub="history"]'));
+    await settle();
+    click($('[data-dd="haudio"]'));
+    click($$('.menu [data-i]')[3]);
+    await settle();
+    expect(core.settingsSet).toHaveBeenLastCalledWith({ kind: 'historyAudio', value: 'off' });
+    key('Escape');
+    expect(text($('.btray em[data-val="history"]'))).toBe('No recordings');
+  });
+
+  it('an unknown recordings period shows unset, with nothing chosen, in Russian too', async () => {
+    stub(view({ historyAudio: null, lang: 'ru', uiLanguage: 'ru' }));
+    page = await mount();
+    await open();
+    expect($$('.btray .trw span:not(.si)').map((e) => e.textContent)).toContain('История');
+    expect(text($('.btray em[data-val="history"]'))).toBe('Записи: не задано');
+    await sub('history');
+    expect(text($('.btray .srow .stx b'))).toBe('Хранить записи');
+    const dd = $('[data-dd="haudio"]')!;
+    expect(text(dd.querySelector('.ddv'))).toBe('Не задано');
+    click(dd);
+    const items = $$('.menu [data-i]');
+    expect(items.map((b) => b.querySelector('.mlb')!.textContent)).toEqual(['День', 'Неделю', 'Месяц', 'Не хранить']);
+    expect(items.every((b) => b.getAttribute('aria-checked') === 'false')).toBe(true);
+    click(items[2]);
+    await settle();
+    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'historyAudio', value: 'month' });
+    expect(text($('[data-dd="haudio"] .ddv'))).toBe('Месяц');
   });
 
   it('autostart switch calls autostart_set', async () => {

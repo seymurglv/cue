@@ -1,10 +1,11 @@
 // The settings tray (spec 3 §3): it grows out of the gear (the gear turns into its close button) and folds back into
-// it. Its first page lists Keys, Microphone, Translation and General with their values; one of them at a time slides
-// in, the chevron goes back; Esc goes back, then closes. Every change goes to the core at once.
+// it. Its first page lists Keys, Microphone, Translation, History (how long recordings are kept) and General with their
+// values; one of them at a time slides in, the chevron goes back; Esc goes back, then closes. Every change goes to the
+// core at once.
 // The Keys page holds the key rows of keys.ts, the Microphone page the microphone rows of mic.ts (the welcome window
 // shows them too); the microphone's level is listened to only while that page is shown.
 import * as api from './api';
-import type { KeyName, UiLanguage } from './api';
+import { AUDIO_KEEPS, type AudioKeep, type KeyName, type UiLanguage } from './api';
 import { icon, type IconName } from './icons';
 import { KEYS, KEY_TITLE, KeyRows } from './keys';
 import { MicRows } from './mic';
@@ -13,9 +14,15 @@ import { fill, languageName } from './text';
 
 export { matchMic } from './mic';
 
-type Sub = 'keys' | 'mic' | 'translate' | 'general';
-const SUBS: readonly Sub[] = ['keys', 'mic', 'translate', 'general'];
-const SUB_ICON: Record<Sub, IconName> = { keys: 'apiKey', mic: 'micOn', translate: 'globe', general: 'half' };
+type Sub = 'keys' | 'mic' | 'translate' | 'history' | 'general';
+const SUBS: readonly Sub[] = ['keys', 'mic', 'translate', 'history', 'general'];
+const SUB_ICON: Record<Sub, IconName> = {
+  keys: 'apiKey',
+  mic: 'micOn',
+  translate: 'globe',
+  history: 'clock',
+  general: 'half',
+};
 const UI_LANGUAGES: readonly UiLanguage[] = ['auto', 'en', 'ru'];
 /** The tray's width (the design's). */
 const WIDTH = 340;
@@ -234,6 +241,7 @@ export class SettingsTray {
     else if ((b = t.closest<HTMLElement>('[data-check]'))) void this.keys.check(b.dataset.check as KeyName);
     else if ((b = t.closest<HTMLElement>('[data-dd="mic"]'))) this.mic.menu(b);
     else if ((b = t.closest<HTMLElement>('[data-dd="target"]'))) this.targetMenu(b);
+    else if ((b = t.closest<HTMLElement>('[data-dd="haudio"]'))) this.audioMenu(b);
     else if (t.closest('[data-sw="autostart"]')) void this.toggleAutostart();
     else if ((b = t.closest<HTMLElement>('.segc button')) && b.getAttribute('aria-pressed') !== 'true') {
       void this.ctx.change({ kind: 'uiLanguage', value: b.dataset.v as UiLanguage });
@@ -276,6 +284,7 @@ export class SettingsTray {
     if (sub === 'keys') g.append(...KEYS.map((k) => this.keys.row(k)));
     else if (sub === 'mic') g.append(...this.mic.rows());
     else if (sub === 'translate') g.append(srow(t.translateTo, null, dropDown('target', this.value('translate'))).row);
+    else if (sub === 'history') g.append(srow(t.keepAudio, t.keepAudioHint, dropDown('haudio', this.audioLabel())).row);
     else g.append(...this.generalRows());
     pg.append(g);
     return pg;
@@ -283,7 +292,7 @@ export class SettingsTray {
 
   private title(sub: Sub): string {
     const t = this.ctx.t;
-    return { keys: t.keys, mic: t.mic, translate: t.translate, general: t.general }[sub];
+    return { keys: t.keys, mic: t.mic, translate: t.translate, history: t.history, general: t.general }[sub];
   }
 
   /** A section's value on the first page. */
@@ -305,9 +314,30 @@ export class SettingsTray {
         const english = s.languages.find(([c]) => c === s.translateTarget)?.[1] ?? s.translateTarget;
         return languageName(s.translateTarget, english, this.ctx.lang);
       }
+      case 'history':
+        return s ? (s.historyAudio ? t.audioShort[s.historyAudio] ?? '' : t.audioShortUnset) : '';
       case 'general':
         return s ? t.uiLanguages[s.uiLanguage] ?? '' : '';
     }
+  }
+
+  /* ---------- history ---------- */
+
+  /** How long recordings are kept; unset while the core does not know it. */
+  private audioLabel(): string {
+    const v = this.ctx.settings?.historyAudio ?? null;
+    return v ? this.ctx.t.audioKeeps[v] ?? '' : this.ctx.t.keepUnset;
+  }
+
+  private audioMenu(b: HTMLElement): void {
+    const t = this.ctx.t;
+    const cur = this.ctx.settings?.historyAudio ?? null;
+    this.ctx.menu(
+      b,
+      AUDIO_KEEPS.map((k) => ({ value: k, label: t.audioKeeps[k], on: k === cur })),
+      (v) => void this.ctx.change({ kind: 'historyAudio', value: v as AudioKeep }),
+      t.audioNote,
+    );
   }
 
   /* ---------- translation ---------- */
