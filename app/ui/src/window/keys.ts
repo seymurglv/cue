@@ -55,6 +55,12 @@ export class KeyRows {
     return k.state ?? (this.read ? (k.saved ? 'saved' : 'missing') : null);
   }
 
+  /** A field shown holds a key typed and not sent yet (its value is only looked at, not kept). */
+  typed(): boolean {
+    const box = this.box();
+    return KEYS.some((name) => !!box?.querySelector<HTMLInputElement>(`input[data-key="${name}"]`)?.value.trim());
+  }
+
   /** The rows shown show what is known now. */
   refresh(): void {
     const box = this.box();

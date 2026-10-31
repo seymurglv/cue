@@ -9,7 +9,7 @@
 .ob .pgv{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px 64px 6px;text-align:center}
 .ohd{font-family:var(--head-font);font-weight:800;font-size:26px;line-height:1.15;letter-spacing:-.01em}
 .ob .ohd{margin:14px 0 8px}
-.ob .op{max-width:380px;color:var(--muted);font-size:13.5px}
+.ob .op{max-width:380px;color:var(--muted);font-size:13.5px;text-wrap:balance}
 .ob .oill{width:56px;height:56px;border-radius:50%;display:grid;place-items:center;background:color-mix(in srgb,var(--text) 6%,transparent);color:var(--text)}
 .ob .oill svg{width:26px;height:26px}
 .ob .oname{font-family:"Bebas Neue",sans-serif;font-size:42px;letter-spacing:.07em;line-height:1;margin-top:12px}
@@ -24,7 +24,7 @@
 .olinks{margin-top:10px;font-size:12.5px;color:var(--muted)}
 .oa{color:var(--text);text-decoration:underline;text-decoration-color:var(--faint);text-underline-offset:2px}
 .oa:hover{text-decoration-color:currentColor}
-.onote{max-width:420px;margin-top:4px;font-size:12px;line-height:1.4;color:var(--muted)}
+.onote{max-width:420px;margin-top:4px;font-size:12px;line-height:1.4;color:var(--muted);text-wrap:balance}
 .ohint{display:flex;align-items:center;gap:10px;width:100%;max-width:420px;margin-top:10px;padding:6px 6px 6px 12px;border-radius:9px;background:color-mix(in srgb,var(--warn) 14%,transparent);font-size:12.5px;text-align:left}
 .ohint span{flex:1}
 
@@ -37,8 +37,9 @@
 .dots i.on{width:20px;background:var(--text)}
 .obtn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:34px;padding:0 18px;border-radius:5px;background:var(--text);color:var(--bg);font-size:13px;font-weight:600;white-space:nowrap;transition:opacity .25s,transform .12s}
 .obtn:active{transform:scale(.98)}
-.obtn:disabled{opacity:.3}
-.obtn:disabled:active{transform:none}
+/* a press on a disabled button reaches no listener yet takes the focus away: here it lands on the bar, where First
+   dictation can cancel it, so the field keeps the focus */
+.obtn:disabled{opacity:.3;pointer-events:none}
 .obtn .lbl{display:inline-flex}
 .olink{font-size:12.5px;color:var(--muted)}
 .olink:hover{color:var(--text)}

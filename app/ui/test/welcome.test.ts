@@ -41,6 +41,15 @@ const dictate = (value: string) => {
   field().value = value;
   field().dispatchEvent(new Event('input', { bubbles: true }));
 };
+/** A key pasted into its field, not checked. */
+const paste = (input: HTMLInputElement, value: string) => {
+  input.value = value;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+};
+/** A mouse press on `e`; true — the page cancelled it, so the focus stays where it is. */
+const press = (e: Element) => !e.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+/** The window has the focus again. */
+const regain = () => window.dispatchEvent(new Event('focus'));
 
 beforeEach(() => {
   vi.useFakeTimers({ now: NOW });
@@ -131,6 +140,32 @@ describe('The welcome window', () => {
     expect(primary().disabled).toBe(true);
     answer('works');
     await settle();
+    expect(primary().disabled).toBe(false);
+    await next();
+    expect(step()).toBe('mic');
+  });
+
+  it('a key pasted over saved ones holds Next until it is checked', async () => {
+    saved();
+    page = await mount();
+    await next();
+    expect(primary().disabled).toBe(false);
+    const input = $<HTMLInputElement>('input[data-key="anthropic"]')!;
+    paste(input, 'sk-ant-newer-2468');
+    expect(primary().disabled).toBe(true);
+    click(primary());
+    await settle();
+    expect(step()).toBe('keys');
+    expect(core.keySet).not.toHaveBeenCalled();
+    // Taken out again (spaces alone are no key): Next as before.
+    paste(input, '  ');
+    expect(primary().disabled).toBe(false);
+    paste(input, 'sk-ant-newer-2468');
+    click($('[data-check="anthropic"]'));
+    await settle();
+    expect(core.keySet).toHaveBeenCalledWith('anthropic', 'sk-ant-newer-2468');
+    expect(input.value).toBe('');
+    expect(text($('small[data-state="anthropic"]'))).toBe('Works');
     expect(primary().disabled).toBe(false);
     await next();
     expect(step()).toBe('mic');
@@ -255,6 +290,84 @@ describe('The welcome window', () => {
     // The step can still be passed.
     await next();
     expect(step()).toBe('try');
+  });
+
+  it('looks at the microphone again when the window has the focus back', async () => {
+    saved();
+    core.micAccess.mockResolvedValue('denied');
+    page = await mount();
+    await next();
+    await next();
+    const hint = () => pg().querySelector<HTMLElement>('.ohint')!;
+    feeds.failed();
+    expect(hint().hidden).toBe(false);
+    expect(text(primary())).toBe('Next');
+    // Allowed in the Windows settings meanwhile, and a microphone plugged in.
+    core.micAccess.mockResolvedValue('allowed');
+    core.micList.mockResolvedValue({ names: ['Laptop Microphone', 'USB Microphone'], default: 'Laptop Microphone' });
+    core.micPreview.mockClear();
+    core.micAccess.mockClear();
+    click($('[data-dd="mic"]'));
+    expect($('.menu')).not.toBeNull();
+    regain();
+    await settle();
+    expect(previews()).toEqual(['on:windows']);
+    expect(core.micAccess).toHaveBeenCalledTimes(1);
+    expect(hint().hidden).toBe(true);
+    expect(text(primary())).toBe('It works');
+    // The rows are drawn again, so a menu over the old ones is closed.
+    expect($('.menu')).toBeNull();
+    click($('[data-dd="mic"]'));
+    expect($$('.menu [data-i] .mlb').map((e) => e.textContent)).toContain('USB Microphone');
+    // The listeners of the load still serve: no new ones, a level lights the meter, a new failure shows the hint.
+    expect(core.onMicLevel).toHaveBeenCalledTimes(1);
+    expect(core.onMicFailed).toHaveBeenCalledTimes(1);
+    feeds.level(0.5);
+    expect($$('[data-meter] i.on')).toHaveLength(8);
+    feeds.failed();
+    expect(hint().hidden).toBe(false);
+    // On another step the window's focus opens nothing.
+    await next();
+    expect(step()).toBe('try');
+    core.micPreview.mockClear();
+    core.micAccess.mockClear();
+    regain();
+    await settle();
+    expect(core.micPreview).not.toHaveBeenCalled();
+    expect(core.micAccess).not.toHaveBeenCalled();
+  });
+
+  it('First dictation keeps its field in focus, so the dictation is pasted into it', async () => {
+    saved();
+    page = await mount();
+    await next();
+    await next();
+    // Before the step a press is the browser's as usual.
+    expect(press(pg())).toBe(false);
+    await next();
+    expect(step()).toBe('try');
+    expect(document.activeElement).toBe(field());
+    // The page, the keys, the bar under the waiting button, that button: the focus stays in the field.
+    for (const e of [pg(), pg().querySelector('.keys')!, $('.ofoot')!, primary()]) expect(press(e)).toBe(true);
+    // The field itself and Back take the press.
+    expect(press(field())).toBe(false);
+    expect(press(back())).toBe(false);
+    // The window or its page shown again: the field takes the focus back.
+    field().blur();
+    expect(document.activeElement).toBe(document.body);
+    regain();
+    expect(document.activeElement).toBe(field());
+    field().blur();
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(document.activeElement).toBe(field());
+    // Back still works, and off the step a press is as usual again.
+    click(back());
+    await settle();
+    expect(step()).toBe('mic');
+    expect(press(pg())).toBe(false);
+    // Entering the step again focuses the field.
+    await next();
+    expect(document.activeElement).toBe(field());
   });
 
   it('lets the hotkey go on First dictation and holds it again when leaving', async () => {
@@ -409,5 +522,14 @@ describe('The welcome window', () => {
       rows.keys.anthropic.state = state;
       expect(keysReady(rows)).toBe(false);
     }
+    // A key typed and not checked yet.
+    const box = document.createElement('div');
+    box.innerHTML = '<input data-key="soniox">';
+    const typed = new KeyRows({ t: {} as any }, () => box, () => {});
+    typed.read = true;
+    typed.keys.soniox.saved = typed.keys.anthropic.saved = true;
+    expect(keysReady(typed)).toBe(true);
+    box.querySelector('input')!.value = 'soniox-typed-1357';
+    expect(keysReady(typed)).toBe(false);
   });
 });

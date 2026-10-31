@@ -101,7 +101,10 @@ export class WelcomePage {
     dark?.addEventListener?.('change', theme, { signal });
     app.addEventListener('click', (e) => this.onClick(e), { signal });
     app.addEventListener('input', (e) => {
-      if ((e.target as Element).matches('textarea[data-field]')) this.onTyped();
+      const t = e.target as Element;
+      if (t.matches('textarea[data-field]')) this.onTyped();
+      // A key typed and not checked yet holds Next (Next would drop it).
+      else if (t.matches('input[data-key]')) this.paintPrimary();
     }, { signal });
     app.addEventListener('keydown', (e) => {
       const input = (e.target as Element).closest<HTMLInputElement>('input[data-key]');
@@ -121,6 +124,16 @@ export class WelcomePage {
       if (this.menus.isOpen && !within(e, '.menu, [data-dd]')) this.menus.close();
     }, { signal });
     window.addEventListener('pagehide', () => this.mic.stopPreview(), { signal });
+    // First dictation is pasted where the focus is: on that step a press anywhere but on the field, an enabled button
+    // or a link leaves the focus in the field (a disabled button lets the press through to the bar, welcome.css).
+    document.addEventListener('mousedown', (e) => {
+      const t = e.target instanceof Element ? e.target : null;
+      if (this.step === 'try' && !t?.closest('textarea[data-field], button:not(:disabled), a[href]')) e.preventDefault();
+    }, { signal });
+    window.addEventListener('focus', () => this.regained(), { signal });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) this.focusField();
+    }, { signal });
   }
 
   get step(): Step {
@@ -240,15 +253,35 @@ export class WelcomePage {
     const pg = this.current!;
     if (step === 'hello') this.hello(pg);
     else if (step === 'keys') void this.keys.readAll();
-    else if (step === 'mic') {
-      this.mic.startPreview();
-      void this.mic.read();
-      void this.readAccess();
-      this.paintHint();
-    } else if (step === 'try') {
+    else if (step === 'mic') this.lookAtMic();
+    else if (step === 'try') {
       api.welcomeStep(true).catch((e) => logFailed('letting the hotkey go', e));
-      pg.querySelector<HTMLTextAreaElement>('textarea[data-field]')?.focus();
+      this.focusField();
     } else this.done(pg);
+  }
+
+  /** The Microphone step's preview starts, and Windows' access and its microphones are read. */
+  private lookAtMic(): void {
+    this.mic.startPreview();
+    void this.mic.read();
+    void this.readAccess();
+    this.paintHint();
+  }
+
+  /** The window has the focus again. On Microphone the user may have come back from the Windows settings: the step
+   *  looks again with a new preview (a failed one stays failed). On First dictation the field takes the focus back. */
+  private regained(): void {
+    if (this.step === 'mic') {
+      this.menus.close();
+      this.failed = false;
+      this.lookAtMic();
+    }
+    this.focusField();
+  }
+
+  /** First dictation's field has the focus, so the dictation is pasted into it. */
+  private focusField(): void {
+    this.shown('try')?.querySelector<HTMLTextAreaElement>('textarea[data-field]')?.focus();
   }
 
   /** `pg` in place of the step's page shown, as in the design: the new one in from 46 px (480 ms), the old one out by

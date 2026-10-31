@@ -17,9 +17,10 @@ export const STEPS: readonly Step[] = ['hello', 'keys', 'mic', 'try', 'done'];
 const WIN_LOGO =
   '<svg viewBox="0 0 10 10" fill="currentColor" aria-hidden="true"><rect x="0" y="0" width="4.4" height="4.4"/><rect x="5.6" y="0" width="4.4" height="4.4"/><rect x="0" y="5.6" width="4.4" height="4.4"/><rect x="5.6" y="5.6" width="4.4" height="4.4"/></svg>';
 
-/** "Next" on Keys: both keys saved, and neither refused by its check, being checked or found missing by it. */
+/** "Next" on Keys: both keys saved, neither refused by its check, being checked or found missing by it, and no key typed
+ *  and not checked yet (Next would drop it; Check saves it). */
 export function keysReady(rows: KeyRows): boolean {
-  return KEYS.every((k) => {
+  return !rows.typed() && KEYS.every((k) => {
     const state = rows.state(k);
     return rows.keys[k].saved && state !== 'badKey' && state !== 'checking' && state !== 'missing';
   });
