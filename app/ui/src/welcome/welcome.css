@@ -56,6 +56,8 @@
 .ofield::placeholder{color:var(--faint)}
 /* the field's border breathes while it waits for the dictation (not with reduced motion: the page's option, window.css) */
 .ofield.wait{animation:fieldWait 2.4s ease-in-out infinite}
+/* while it waits the placeholder is the step's status, so it reads as text rather than a faint hint */
+.ofield.wait::placeholder{color:var(--muted)}
 @keyframes fieldWait{50%{box-shadow:0 0 0 1.5px color-mix(in srgb,var(--text) 16%,transparent)}}
 
 /* keycaps */
