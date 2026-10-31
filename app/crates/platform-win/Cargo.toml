@@ -11,6 +11,7 @@ thiserror.workspace = true
 tracing.workspace = true
 cpal.workspace = true
 hound.workspace = true
+unsafe-libopus.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true

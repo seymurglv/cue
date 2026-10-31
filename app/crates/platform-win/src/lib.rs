@@ -3,6 +3,8 @@ pub mod chord;
 pub mod clipboard;
 pub mod focus;
 pub mod mic;
+mod ogg;
+pub mod opus;
 pub mod placement;
 pub mod selection;
 pub mod terminal;

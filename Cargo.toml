@@ -30,6 +30,8 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "mul
 keyring = "4.2"
 rpassword = "7"
 hound = "3.5"
+# libopus 1.3.1 in Rust (no C build): the recordings of the history are Ogg Opus. Pinned: it is a translation.
+unsafe-libopus = "=0.2.0"
 cpal = "0.18"
 # The leak scan of a build (cue-cli): exact texts and fixed patterns over bytes.
 aho-corasick = "1"
