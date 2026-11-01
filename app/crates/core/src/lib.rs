@@ -5,6 +5,7 @@ pub mod history;
 pub mod paths;
 pub mod refine;
 pub mod settings;
+pub mod stats;
 pub mod translate;
 pub mod ui;
 pub mod usage;

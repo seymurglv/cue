@@ -69,6 +69,7 @@ fn main() {
             commands::autostart_set,
             commands::history_subscribe,
             commands::history_page,
+            commands::stats_get,
             commands::history_search,
             commands::history_copy,
             commands::history_paste,

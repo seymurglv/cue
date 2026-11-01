@@ -62,6 +62,7 @@ use cue_core::audio::{Silence, SilenceDetector};
 use cue_core::flow::{DictationId, Effect, Flow, InsertOutcome, Input, Outcome, PasteHow, SttError, TimerKind};
 use cue_core::history;
 use cue_core::refine::RefineContext;
+use cue_core::stats;
 use cue_core::settings::{self, AudioKeep, DropPosition, HistorySettings, Keep, Period, SettingChange, Settings};
 use cue_core::translate;
 use cue_core::ui::{Mode, TrayKind, UiAction, UiPhase, UiState};
@@ -1657,6 +1658,13 @@ impl Runtime {
         }
         // A retry refines or transcribes again, and keeps the text as it was heard anew.
         let raw = self.raw_text.take_if(|(t, _)| *t == id);
+        // Today counts the words of what a dictation or a translation wrote, before `commit_last` takes the text.
+        let words = match self.attempt.mode {
+            Mode::Dictate | Mode::Translate => {
+                self.final_text.as_ref().filter(|(t, _)| *t == id).map_or(0, |(_, text)| usage::count_words(text))
+            }
+            Mode::Ask => 0,
+        };
         let committed = match files::last_files(outcome) {
             LastFiles::Commit => {
                 // The history takes the text before `commit_last` moves it out (decision 2).
@@ -1680,7 +1688,7 @@ impl Runtime {
             return;
         }
         let ts = utc_now();
-        self.write_usage(outcome, &ts);
+        self.write_usage(outcome, &ts, words);
         // Only if this dictation's audio really became `last\audio.wav`; otherwise the previous one is there.
         if committed && self.settings.bench.save_recordings {
             self.save_for_bench(id, &ts);
@@ -1719,13 +1727,15 @@ impl Runtime {
         }
     }
 
-    fn write_usage(&mut self, outcome: Outcome, ts: &str) {
-        let rec = self.attempt.record(outcome, ts.to_owned(), &self.settings);
+    fn write_usage(&mut self, outcome: Outcome, ts: &str, words: u32) {
+        let mut rec = self.attempt.record(outcome, ts.to_owned(), &self.settings);
+        rec.words = words;
         self.append_usage(rec);
     }
 
     /// One usage.csv row, after the rows that could not be written before it.
-    fn append_usage(&mut self, rec: UsageRecord) {
+    fn append_usage(&mut self, mut rec: UsageRecord) {
+        rec.day = local_today();
         let (path, settings) = (&self.paths.usage, &self.settings);
         // Refine's model, or the one "Ask" answered with.
         if self.usage.warn_no_price(&settings.pricing, &rec.refine_model) {
@@ -2078,6 +2088,20 @@ pub(crate) fn local_today() -> String {
     now
 }
 
+/// Local time minus UTC now, in minutes: Today puts the rows written before usage.csv kept their local day on theirs.
+pub(crate) fn utc_offset_minutes() -> i32 {
+    // SAFETY: no arguments; each returns a SYSTEMTIME by value.
+    let (local, utc) = unsafe {
+        (windows::Win32::System::SystemInformation::GetLocalTime(), windows::Win32::System::SystemInformation::GetSystemTime())
+    };
+    let minutes = |t: &windows::Win32::Foundation::SYSTEMTIME| {
+        stats::days_from_civil(i64::from(t.wYear), u32::from(t.wMonth), u32::from(t.wDay)) * 1_440
+            + i64::from(t.wHour) * 60
+            + i64::from(t.wMinute)
+    };
+    i32::try_from(minutes(&local) - minutes(&utc)).unwrap_or(0)
+}
+
 /// The local time now, `YYYY-MM-DDTHH:MM:SS.mmm`: the time of a history entry, whose date names its day file.
 fn local_time() -> String {
     // SAFETY: no arguments; returns a SYSTEMTIME by value.
@@ -2199,6 +2223,13 @@ mod tests {
         let d = local_today();
         let shape = d.char_indices().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() });
         assert!(d.len() == 10 && shape, "{d}");
+    }
+
+    /// Time zones run from UTC−12 to UTC+14, in steps of 15 minutes.
+    #[test]
+    fn the_utc_offset_is_a_time_zone() {
+        let o = utc_offset_minutes();
+        assert!((-720..=840).contains(&o) && o % 15 == 0, "{o}");
     }
 
     /// The time of a history entry: the local date, then the time to the millisecond.

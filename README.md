@@ -153,7 +153,13 @@ from source.
   always did, and dragging never takes the focus from the app you are typing in. The Drop can be dragged only while
   idle, and it always stays on top of ordinary windows.
 - **The main window** opens from the tray icon: **Open CUE** in its menu, or a double click. It is one ordinary window
-  in the Windows theme; opening it again brings it forward, and closing it leaves CUE running.
+  in the Windows theme; opening it again brings it forward, and closing it leaves CUE running. Links at the top,
+  **Today** and **History**, scroll to their sections.
+  - **Today:** how many words you dictated today and how many minutes of typing that saved (at 40 words a minute), a
+    bar for each of the last 30 days (hover one for its date and words), your words a minute, how many days in a row
+    you have dictated, and your words in all. Counted are dictations and translations that wrote text. When the total
+    passes a round number (1,000, 10,000, 100,000 words…), a pill says so once, for that day. Rows of `usage.csv`
+    written before CUE 0.1.2 kept no word count: their words are estimated from the length of their audio.
   - **History:** every result of CUE, newest first, with its time, mode and app: dictations, translations, "Ask"
     answers (the question and the answer) and texts "Ask" wrote into a field; a translation and "Ask" show their mode
     as a small icon, a plain dictation none. The list stays short: today shows its latest 7 rows and the rest under
@@ -407,7 +413,7 @@ Everything else lives in `%LOCALAPPDATA%\CUE`:
 | `history\YYYY-MM-DD.jsonl` | The history the main window shows: one file per local day, one line of JSON per result (its time, mode, app and text, for "Ask" the question, and for a dictation or a translation the text as Soniox heard it, `raw`). Days older than `history.keep` are deleted on their own, and **Clear history** deletes them all. |
 | `history\audio\` | The recordings of the history's entries, one Ogg Opus file per entry (speech at 16 kbit/s, about 6 MB an hour), named by the entry's id. Older than `history.audio` (and never older than the history) they are deleted on their own; **Clear history**, Don't keep and the history turned off delete them all. A clear first renames the folder `audio.cleared-<n>`, then deletes it. |
 | `logs\cue.log.YYYY-MM-DD` | Daily log: events, per-stage timings, error kinds. No dictation text, no questions, answers or selected text, no history, no microphone names, no audio, no keys. Kept 7 days and 10 MB at most. **Open log** in the tray menu opens this folder. |
-| `usage.csv` | One row per attempt: time (UTC), audio length, transcription path, cost, model, tokens, latency, outcome, mode, web searches. A cache warm-up gets a row of its own. No text. |
+| `usage.csv` | One row per attempt: time (UTC), audio length, transcription path, cost, model, tokens, latency, outcome, mode, web searches, how many words it wrote and its local date. A cache warm-up gets a row of its own. No text. |
 | `bench\recordings\` | Recordings for the bench, only when `bench.save_recordings` is `true`. |
 | `bench\runs\<timestamp>\` | Bench runs: `results.json` and `report.html`. |
 
@@ -427,8 +433,9 @@ and per hour of audio, the average latency from the second key press to the past
 `settings.json`. A Retry is a second paid attempt and gets its own row; the Retry of a failed translation translates
 the saved text again, so its row has no audio.
 
-The last three columns of `usage.csv` are `mode`, `web_searches` and `search_usd`. `mode` is `dictate`, `translate`,
-`ask` or `warmup`.
+The columns `mode`, `web_searches` and `search_usd` came with the modes, and `words` and `day` with Today. `mode` is
+`dictate`, `translate`, `ask` or `warmup`; `words` is how many words a dictation or translation wrote (0 for anything
+else) and `day` the local date.
 - An `ask` row is one question: its audio, the tokens of `ask.model` (in the `refine_model` and token columns) and its
   web searches at $0.01 each (`web_searches`, `search_usd`). An answer you close while it is still printing is paid
   for as far as it came, its web searches included, and so is a question cancelled with `Esc`. Each follow-up gets a row of its own, and so does

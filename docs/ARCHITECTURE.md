@@ -788,6 +788,12 @@ card's `core:default` (`default.json`) does not cover them. The commands:
   check follows within 5 s);
 - `history_subscribe`, `history_page`, `history_search`, `history_copy`, `history_paste`, `history_clear`,
   `history_audio` (see Recordings);
+- `stats_get`: Today's numbers, `cue_core::stats::compute` over usage.csv — words by local day for the last 30 days,
+  today's words and the minutes they save at 40 words a minute, words a minute, days in a row, words in all and the
+  round number reached. Counted are `dictate` and `translate` rows with `inserted` or `no_field`; a row without `words`
+  is estimated from its audio at the speed measured on the rows that have them (150 words a minute without any), and
+  one without `day` takes its UTC date moved by the local offset now. The window asks on start, a second after each
+  new history entry, and when it comes back to the front;
 - `key_state`, `key_set`, `key_check` (Soniox and Anthropic only);
 - `mic_list`, `mic_preview`, `mic_access`;
 - the welcome window's `welcome_step`, `welcome_close`, `open_link` (see Welcome window).
@@ -1008,7 +1014,7 @@ written back as it was.
 An attempt is a recording and its transcription; Retry starts a second attempt of the same dictation, and each gets
 its own row in `%LOCALAPPDATA%\CUE\usage.csv`:
 `ts, audio_ms, stt_engine, stt_path, stt_usd, refine_model, input_tokens, cache_read_tokens, cache_write_tokens,
-output_tokens, refine_usd, latency_ms, outcome, mode, web_searches, search_usd`. `stt_path` is `stream`,
+output_tokens, refine_usd, latency_ms, outcome, mode, web_searches, search_usd, words, day`. `stt_path` is `stream`,
 `stream+batch` or `batch`; outcomes are `inserted`, `no_field`, `cancelled`, `empty`, `failed`, `discarded` (written
 only when audio ran past 380 ms) and `answered` (an "Ask" answer shown in full, a refusal too: paid for, nothing
 pasted). `mode` is `dictate`, `translate` or `ask` as the dictation's refine or question started (for an attempt that
@@ -1016,7 +1022,9 @@ ends before that, the mode it was recording in: the attempt follows a `ModeToggl
 or `warmup`. The Retry of a failed translation re-translates the saved text: a new row with no audio. A cache warm-up
 is a row of its own: its tokens and cost, no audio, latency 0, outcome `discarded`, mode `warmup`, and the model it
 warmed (`refine.model`, or `ask.model` for "Ask"). Rows written before the last three columns existed read as
-dictation, and the header of an existing file is never rewritten (new files get the 16-column header). Latency runs
+dictation, and the header of an existing file is never rewritten (new files get the 18-column header). `words` is how
+many words the attempt wrote (`usage::count_words` of the text of a dictation or translation; 0 for a question, a
+warm-up or one that wrote nothing) and `day` its local date; rows written before them are 13 or 16 columns wide. Latency runs
 from the second press to Ctrl+V (from Retry or Restore when used); the target for a ~30-word phrase is 1.5 s or less.
 Rows that fail to write, for example while the file is open in Excel, wait in memory and go out before the next one.
 `cue-cli usage` sums a UTC month: dictations are `inserted` plus `no_field` rows (an `answered` row is not one),

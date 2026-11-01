@@ -15,6 +15,10 @@
 //! is a row of its own (`warmup`, outcome `discarded`, no audio): it costs money but is not a dictation; `answered`
 //! (an "Ask" answer shown in full) is not a dictation either.
 //!
+//! The last two, `words` and `day`, came with the main window's Today (`stats`): how many words the attempt wrote
+//! (`count_words` of its text; 0 for one that wrote nothing, a question or a warm-up) and its local date. They hold no
+//! text either. Rows written before them have 13 or 16 columns, and the summary reads all three widths.
+//!
 //! `ts` is UTC, and the summary month is a UTC month too: that way it matches the providers' invoices.
 //!
 //! Every column is a number, a time, an outcome, an engine, a transcription path, a model or a mode. String fields are
@@ -97,6 +101,16 @@ pub struct UsageRecord {
     pub outcome: Outcome,
     pub mode: UsageMode,
     pub web_searches: u32,
+    /// How many words the attempt wrote ([`count_words`]); 0 when it wrote none, or was a question or a warm-up.
+    pub words: u32,
+    /// The local date of the attempt, `YYYY-MM-DD` (`ts` is UTC).
+    pub day: String,
+}
+
+/// The words of a text: whitespace-separated runs that hold a letter or a digit ("—" and "…" alone are not words).
+pub fn count_words(text: &str) -> u32 {
+    let n = text.split_whitespace().filter(|w| w.chars().any(char::is_alphanumeric)).count();
+    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -122,17 +136,19 @@ pub struct ModeTotal {
     pub usd: f64,
 }
 
-pub const HEADER: &str = "ts,audio_ms,stt_engine,stt_path,stt_usd,refine_model,input_tokens,cache_read_tokens,cache_write_tokens,output_tokens,refine_usd,latency_ms,outcome,mode,web_searches,search_usd";
+pub const HEADER: &str = "ts,audio_ms,stt_engine,stt_path,stt_usd,refine_model,input_tokens,cache_read_tokens,cache_write_tokens,output_tokens,refine_usd,latency_ms,outcome,mode,web_searches,search_usd,words,day";
 
 /// The bound of a "short" dictation for the latency target: ~30 words fit into 20 s of audio.
 pub const SHORT_AUDIO_MS: u64 = 20_000;
 
-const COLUMNS: usize = 16;
+pub(crate) const COLUMNS: usize = 18;
+/// A row written before Today: no `words`, `day`.
+pub(crate) const COLUMNS_V2: usize = 16;
 /// A row written before the modes: no `mode`, `web_searches`, `search_usd`.
-const COLUMNS_V1: usize = 13;
-const DICTATE: &str = "dictate";
-const INSERTED: &str = "inserted";
-const NO_FIELD: &str = "no_field";
+pub(crate) const COLUMNS_V1: usize = 13;
+pub(crate) const DICTATE: &str = "dictate";
+pub(crate) const INSERTED: &str = "inserted";
+pub(crate) const NO_FIELD: &str = "no_field";
 
 /// Value of the `outcome` column for a flow outcome. The summary relies on `inserted` and `no_field`,
 /// so the outcome string must come from here rather than be spelled out by hand.
@@ -209,7 +225,7 @@ fn csv_field(s: &str) -> Cow<'_, str> {
 /// One record, without a trailing newline.
 pub fn line(r: &UsageRecord, p: &Pricing) -> String {
     format!(
-        "{},{},{},{},{:.6},{},{},{},{},{},{:.6},{},{},{},{},{:.6}",
+        "{},{},{},{},{:.6},{},{},{},{},{},{:.6},{},{},{},{},{:.6},{},{}",
         csv_field(&r.ts),
         r.audio_ms,
         engine_name(r.stt_engine),
@@ -225,7 +241,9 @@ pub fn line(r: &UsageRecord, p: &Pricing) -> String {
         outcome_name(r.outcome),
         r.mode.as_str(),
         r.web_searches,
-        f64::from(r.web_searches) * p.web_search_usd
+        f64::from(r.web_searches) * p.web_search_usd,
+        r.words,
+        csv_field(&r.day)
     )
 }
 
@@ -273,7 +291,7 @@ impl Row {
         let usd = |s: &str| s.parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0);
         let (mode, search_usd) = match c.len() {
             COLUMNS_V1 => (DICTATE.to_owned(), 0.0),
-            COLUMNS => (std::mem::take(&mut c[13]), usd(&c[15])?),
+            COLUMNS_V2 | COLUMNS => (std::mem::take(&mut c[13]), usd(&c[15])?),
             _ => return None,
         };
         Some(Row {
@@ -346,7 +364,7 @@ impl Average {
 }
 
 /// One CSV line (RFC 4180, no newlines inside fields). `None`: the quoting is broken.
-fn split_record(line: &str) -> Option<Vec<String>> {
+pub(crate) fn split_record(line: &str) -> Option<Vec<String>> {
     let mut fields = Vec::new();
     let mut chars = line.chars().peekable();
     loop {
@@ -404,7 +422,26 @@ mod tests {
             outcome: Outcome::Inserted,
             mode: UsageMode::Dictate,
             web_searches: 0,
+            words: 12,
+            day: "2026-10-27".into(),
         }
+    }
+
+    #[test]
+    fn words_are_runs_with_a_letter_or_a_digit() {
+        assert_eq!(count_words("Привет, мир! 2 340 — ok…"), 5);
+        assert_eq!(count_words(" — … "), 0);
+        assert_eq!(count_words(""), 0);
+        assert_eq!(count_words("GitHub-репозиторий
+и	ещё"), 3);
+    }
+
+    #[test]
+    fn a_row_ends_with_its_words_and_day() {
+        let l = line(&rec(), &Pricing::default());
+        assert!(l.ends_with(",12,2026-10-27"), "{l}");
+        assert_eq!(split_record(&l).unwrap().len(), COLUMNS);
+        assert_eq!(split_record(HEADER).unwrap().len(), COLUMNS);
     }
 
     #[test]
@@ -431,7 +468,7 @@ mod tests {
         let l = line(&rec(), &Pricing::default());
         assert_eq!(l.split(',').count(), HEADER.split(',').count());
         assert!(l.starts_with("2026-10-27T09:00:00Z,30000,soniox,stream,0.001000,claude-haiku-5-5,1000,2000,0,200,"));
-        assert!(l.ends_with(",900,inserted,dictate,0,0.000000"), "{l}");
+        assert!(l.ends_with(",900,inserted,dictate,0,0.000000,12,2026-10-27"), "{l}");
     }
 
     // ---- Modes (spec 2 §10) ----
@@ -454,7 +491,23 @@ mod tests {
             outcome,
             mode: UsageMode::Dictate,
             web_searches: 0,
+            words: 3,
+            day: ts.get(..10).unwrap_or_default().into(),
         }
+    }
+
+    /// A file of earlier versions — rows of 13 and 16 columns — and today's rows read together: the old rows count as
+    /// they did.
+    #[test]
+    fn the_summary_reads_rows_of_every_width() {
+        let p = Pricing::default();
+        let v1 = "2026-11-01T10:00:00Z,1000,soniox,stream,0.000033,claude-haiku-5-5,10,0,0,5,0.000004,900,inserted";
+        let v2 = "2026-11-01T10:01:00Z,1000,soniox,stream,0.000033,claude-haiku-5-5,10,0,0,5,0.000004,900,inserted,dictate,0,0.000000";
+        let now = line(&rec_with("2026-11-01T10:02:00Z", Outcome::Inserted), &p);
+        let s = summarize(&[HEADER_V1, v1, v2, &now].join("\n"), "2026-11");
+        assert_eq!(s.dictations, 3);
+        assert_eq!((s.modes.len(), s.modes[0].mode.as_str(), s.modes[0].rows), (1, "dictate", 3));
+        assert!((s.modes[0].usd - (s.stt_usd + s.refine_usd)).abs() < 1e-12);
     }
 
     #[test]
@@ -477,7 +530,7 @@ mod tests {
         r.mode = UsageMode::Translate;
         r.web_searches = 2;
         let l = line(&r, &p);
-        assert!(l.ends_with(",inserted,translate,2,0.020000"), "{l}");
+        assert!(l.ends_with(",inserted,translate,2,0.020000,3,2026-11-01"), "{l}");
         let s = summarize(&format!("{HEADER}\n{l}\n"), "2026-11");
         assert!((s.search_usd - 0.02).abs() < 1e-9, "{}", s.search_usd);
         let row_usd = s.stt_usd + s.refine_usd + s.search_usd;
@@ -606,7 +659,7 @@ mod tests {
     #[test]
     fn outcome_is_written_by_its_stable_name() {
         let l = line(&with(Outcome::NoField, 0), &Pricing::default());
-        assert!(l.ends_with(",0,no_field,dictate,0,0.000000"), "{l}");
+        assert!(l.contains(",0,no_field,dictate,0,0.000000,"), "{l}");
         assert_eq!(summarize(&format!("{HEADER}\n{l}\n"), "2026-10").dictations, 1);
     }
 

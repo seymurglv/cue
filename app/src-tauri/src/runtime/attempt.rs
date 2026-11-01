@@ -252,6 +252,9 @@ impl Attempt {
             outcome,
             mode: self.mode.into(),
             web_searches: self.web_searches,
+            // The runtime fills both: the words of what was pasted, the local date it was written on.
+            words: 0,
+            day: String::new(),
         }
     }
 }
@@ -273,6 +276,8 @@ pub fn warmup_record(usage: claude::Usage, ts: String, s: &Settings, model: &str
         outcome: Outcome::Discarded,
         mode: UsageMode::Warmup,
         web_searches: 0,
+        words: 0,
+        day: String::new(),
     }
 }
 

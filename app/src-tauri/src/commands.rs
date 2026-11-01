@@ -18,6 +18,7 @@ use std::time::Duration;
 use cue_core::flow::Input;
 use cue_core::history;
 use cue_core::settings::SettingChange;
+use cue_core::stats::{self, Stats};
 use cue_engines::EngineError;
 use cue_engines::keys::{self, KeyName};
 use cue_platform_win::{focus, mic};
@@ -29,7 +30,7 @@ use crate::ipc::{CoreTx, DayView, EntryView, HistoryFeed, MAIN_LABEL, PageView, 
 use crate::micpreview;
 use crate::paths::Paths;
 use crate::runtime::recordings::{self, AudioLimit, Playable};
-use crate::runtime::{CoreEvent, MIC_SETTINGS, SettingsCmd, local_today, open_url};
+use crate::runtime::{CoreEvent, MIC_SETTINGS, SettingsCmd, local_today, open_url, utc_offset_minutes};
 
 /// How long a command waits for the core's answer about the settings.
 const CORE_WAIT: Duration = Duration::from_secs(3);
@@ -240,6 +241,18 @@ pub async fn history_page(
         let today = local_today();
         let playable = Playable::read(&audio, limit, &today);
         page(&dir, before.as_deref(), &today, &|id: &str| playable.has(id))
+    })
+    .await
+}
+
+/// Today's numbers, the main window's first section, counted from usage.csv; no file yet is all zeros.
+#[tauri::command]
+pub async fn stats_get(window: WebviewWindow, paths: State<'_, Paths>) -> Result<Stats, CmdError> {
+    guard(&window, "stats_get")?;
+    let path = paths.usage.clone();
+    blocking(move || {
+        let csv = std::fs::read_to_string(&path).unwrap_or_default();
+        stats::compute(&csv, &local_today(), utc_offset_minutes())
     })
     .await
 }
@@ -565,8 +578,9 @@ mod tests {
     use serde_json::json;
 
     /// Every command a window's page calls (`main`'s handler list, but for the Drop's and the card's own).
-    const COMMANDS: [&str; 20] = [
+    const COMMANDS: [&str; 21] = [
         "settings_get",
+        "stats_get",
         "settings_set",
         "autostart_get",
         "autostart_set",

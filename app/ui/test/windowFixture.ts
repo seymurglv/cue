@@ -72,6 +72,7 @@ export function stub(settings: api.SettingsView = view()): void {
     feeds.entry = cb;
   });
   core.historyPage.mockResolvedValue({ days: [], more: false });
+  core.statsGet.mockResolvedValue({ todayWords: 0, savedMinutes: 0, days: [], wpm: null, streak: 0, total: 0, milestone: null });
   core.historySearch.mockResolvedValue([]);
   core.historyCopy.mockResolvedValue(undefined);
   core.historyPaste.mockResolvedValue('pasted');

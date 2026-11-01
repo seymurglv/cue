@@ -90,6 +90,23 @@ export function historySubscribe(onEntry: (e: EntryView) => void): Promise<void>
   const channel = new Channel<EntryView>(onEntry);
   return invoke<void>('history_subscribe', { channel });
 }
+/** One local day of Today's bars. */
+export interface DayWords {
+  date: string;
+  words: number;
+}
+/** Today's numbers (`stats_get`): words today and the minutes they saved, the last 30 days oldest first, words a
+ *  minute (null without audio), days in a row, words in all, and the largest round number reached (null below 1 000). */
+export interface Stats {
+  todayWords: number;
+  savedMinutes: number;
+  days: DayWords[];
+  wpm: number | null;
+  streak: number;
+  total: number;
+  milestone: number | null;
+}
+export const statsGet = () => invoke<Stats>('stats_get');
 /** null — today and yesterday; a date — the days with entries before it. */
 export const historyPage = (before: string | null) => invoke<PageView>('history_page', { before });
 export const historySearch = (query: string) => invoke<DayView[]>('history_search', { query });

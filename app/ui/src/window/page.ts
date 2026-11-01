@@ -1,5 +1,6 @@
-// The main window's page (spec 3 §1–3): the header — the live mark and CUE on the left, the gear on the right — the
-// History section, and the settings tray that grows out of the gear. Ported from the approved design (stage 5).
+// The main window's page (spec 3 §1–3): the header — the live mark and CUE on the left, links to the sections and the
+// gear on the right — the Today and History sections, and the settings tray that grows out of the gear. A link scrolls
+// to its section; the link of the section under the header is the darker one. Ported from the approved design (stage 5).
 // The page draws nothing until the core has told it the settings: the language is SettingsView.lang (the window has
 // no language set before its script runs). It follows new history entries over its own channel, opened before the
 // first page is asked for.
@@ -15,6 +16,7 @@ import { CUE } from '../designParts';
 import { HistoryView } from './history';
 import { icon } from './icons';
 import { SettingsTray } from './settings';
+import { TodayView } from './today';
 import { TEXTS, isoDate, pickLang, type Lang, type WinText } from './text';
 
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
@@ -206,6 +208,7 @@ export class WindowPage implements Ctx {
   lang: Lang = 'en';
   settings: SettingsView | null = null;
   readonly history: HistoryView;
+  readonly numbers: TodayView;
   readonly tray: SettingsTray;
   readonly reduced: () => boolean;
   private readonly now: () => Date;
@@ -220,6 +223,7 @@ export class WindowPage implements Ctx {
     app.classList.add('app');
     this.menus = new Menus(app);
     this.history = new HistoryView(this);
+    this.numbers = new TodayView(this);
     this.tray = new SettingsTray(this, () => this.history.clear());
     const signal = this.off.signal;
     const dark = window.matchMedia?.(DARK);
@@ -242,6 +246,7 @@ export class WindowPage implements Ctx {
     // comes back if the welcome window took the preview meanwhile.
     window.addEventListener('focus', () => {
       this.history.followDate();
+      void this.numbers.load();
       this.tray.regained();
     }, { signal });
     // The microphone stays open only while its settings page is shown; recordings stop and give back their URLs.
@@ -255,6 +260,10 @@ export class WindowPage implements Ctx {
     return isoDate(this.now());
   }
 
+  /** The sections the header links to, in page order. */
+  private sections: HTMLElement[] = [];
+  private links: HTMLButtonElement[] = [];
+
   /** The settings and the history channel first (both before anything is drawn or asked for), then the first page. */
   async start(): Promise<void> {
     // A preview an earlier page of this window left running (it was reloaded) ends: the microphone is open only while
@@ -265,7 +274,10 @@ export class WindowPage implements Ctx {
         logFailed('reading the settings', e);
         return null;
       }),
-      api.historySubscribe((entry) => this.history.add(entry)).catch((e) => logFailed('following the history', e)),
+      api.historySubscribe((entry) => {
+        this.history.add(entry);
+        this.numbers.refreshSoon();
+      }).catch((e) => logFailed('following the history', e)),
     ]);
     this.settings = view;
     this.setLang(view?.lang);
@@ -275,12 +287,13 @@ export class WindowPage implements Ctx {
     api.onCoreState((s) => {
       if (s.phase === 'start' || s.phase === 'listen') this.history.recordingStarts();
     }).catch((e) => logFailed('following the recording state', e));
-    await this.history.load();
+    await Promise.all([this.history.load(), this.numbers.load()]);
   }
 
   /** Listeners off (the page is gone); the microphone preview ends, recordings stop. */
   dispose(): void {
     this.off.abort();
+    this.numbers.dispose();
     this.tray.stopPreview();
     this.history.release();
     this.looping = false;
@@ -344,14 +357,30 @@ export class WindowPage implements Ctx {
     logo.append('CUE');
     const gear = iconButton('ibt gear', 'gear', t.settings);
     gear.addEventListener('click', () => (this.tray.isOpen ? this.tray.close() : this.tray.open()));
-    bh.append(logo, gear);
     const col = h('div', 'bcol');
+    const todaySec = h('section', 'bsec');
+    todaySec.dataset.scr = 'today';
     const sec = h('section', 'bsec');
     sec.dataset.scr = 'history';
-    col.append(sec);
+    this.sections = [todaySec, sec];
+    const nav = h('nav', 'lk');
+    this.links = [
+      ['today', t.todayNav],
+      ['history', t.history],
+    ].map(([go, label]) => {
+      const b = h('button', '', label);
+      b.type = 'button';
+      b.dataset.go = go;
+      b.addEventListener('click', () => this.go(bsc, bh, go));
+      return b;
+    });
+    nav.append(...this.links);
+    bh.append(logo, nav, gear);
+    col.append(todaySec, sec);
     bsc.append(bh, col);
     bsc.addEventListener('scroll', () => {
       bh.classList.toggle('sc', bsc.scrollTop > 4);
+      this.markCurrent(bh);
       // A menu would stay where its button was.
       if (this.menus.isOpen && !this.tray.isOpen) this.closeMenu();
     });
@@ -360,10 +389,28 @@ export class WindowPage implements Ctx {
     tray.append(h('div', 'bin'));
     this.app.append(bsc, tray);
     this.logo = new (CUE().Morph)(logo.querySelector('g'), { state: 'idle' });
+    this.numbers.mount(todaySec);
     this.history.mount(sec);
+    this.markCurrent(bh);
     this.tray.mount(tray, gear);
     document.fonts?.ready?.then(() => this.tray.refit());
     this.animate();
+  }
+
+  /** A link's section comes up under the header: smoothly, at once with reduced motion. */
+  private go(bsc: HTMLElement, bh: HTMLElement, go: string): void {
+    const sec = this.sections.find((s) => s.dataset.scr === go);
+    if (!sec) return;
+    const top = go === this.sections[0]?.dataset.scr ? 0 : sec.offsetTop - bh.offsetHeight + 4;
+    bsc.scrollTo?.({ top, behavior: this.reduced() ? 'auto' : 'smooth' });
+  }
+
+  /** The link of the last section whose top has passed under the header is the current one. */
+  private markCurrent(bh: HTMLElement): void {
+    const line = bh.getBoundingClientRect().bottom + 1;
+    let current = this.sections[0]?.dataset.scr;
+    for (const s of this.sections) if (s.getBoundingClientRect().top <= line) current = s.dataset.scr;
+    for (const l of this.links) l.setAttribute('aria-current', String(l.dataset.go === current));
   }
 
   /** The mark breathes in its idle pose, frame by frame; with reduced motion it stands still. */

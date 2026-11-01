@@ -7,8 +7,24 @@ export type Lang = 'en' | 'ru';
 /** A key's state as its row shows it: the result of a check, saved but not checked, being checked. */
 export type KeyState = KeyCheck | 'saved' | 'checking';
 
+/** A word's forms by count: English one and many; Russian one (1, 21), few (2–4, 22–24) and many. */
+export type Forms = readonly [string, string] | readonly [string, string, string];
+
 export interface WinText {
   history: string;
+  /** Today: the header's link, and the sentence and the line of the section ({N} is a number, {W} its word). */
+  todayNav: string;
+  todayWords: string;
+  todaySaved: string;
+  todayWpm: string;
+  todayStreak: string;
+  todayTotal: string;
+  /** The milestone pill: {N} words, {P} pages of a book. */
+  milestone: string;
+  words: Forms;
+  minutes: Forms;
+  days: Forms;
+  pages: Forms;
   search: string;
   searchHint: string;
   /** The search's own button once it is open: it closes it. */
@@ -88,6 +104,17 @@ export interface WinText {
 
 export const en: WinText = {
   history: 'History',
+  todayNav: 'Today',
+  todayWords: 'Today — {N} {W}.',
+  todaySaved: "That's {N} {W} without the keyboard.",
+  todayWpm: '{N} {W} a minute',
+  todayStreak: '{N} {W} in a row',
+  todayTotal: '{N} {W} in all',
+  milestone: '{N} {W} — about {P} {PW} of a book',
+  words: ['word', 'words'],
+  minutes: ['minute', 'minutes'],
+  days: ['day', 'days'],
+  pages: ['page', 'pages'],
   search: 'Search',
   searchHint: 'Search the history',
   searchClose: 'Close search',
@@ -157,6 +184,17 @@ export const en: WinText = {
 
 export const ru: WinText = {
   history: 'История',
+  todayNav: 'Сегодня',
+  todayWords: 'Сегодня — {N} {W}.',
+  todaySaved: 'Это {N} {W} без клавиатуры.',
+  todayWpm: '{N} {W} в минуту',
+  todayStreak: '{N} {W} подряд',
+  todayTotal: '{N} {W} за всё время',
+  milestone: '{N} {W} — около {P} {PW} книги',
+  words: ['слово', 'слова', 'слов'],
+  minutes: ['минута', 'минуты', 'минут'],
+  days: ['день', 'дня', 'дней'],
+  pages: ['страница', 'страницы', 'страниц'],
   search: 'Поиск',
   searchHint: 'Найти в истории',
   searchClose: 'Закрыть поиск',
@@ -271,4 +309,19 @@ export function languageName(code: string, english: string, lang: Lang): string 
     // No such data: the English name.
   }
   return english;
+}
+
+/** The form of a word for `n`: English singular for 1; Russian by the last digits (21 слово, 22 слова, 25 слов, 11 слов). */
+export function plural(n: number, forms: Forms): string {
+  if (forms.length === 2) return n === 1 ? forms[0] : forms[1];
+  const d = Math.abs(n) % 100;
+  const u = d % 10;
+  if (u === 1 && d !== 11) return forms[0];
+  if (u >= 2 && u <= 4 && (d < 12 || d > 14)) return forms[1];
+  return forms[2];
+}
+
+/** A number as the language writes it: "2,340", "2 340". */
+export function formatNumber(n: number, lang: Lang): string {
+  return new Intl.NumberFormat(lang === 'ru' ? 'ru-RU' : 'en-US').format(n);
 }
