@@ -13,8 +13,10 @@ export interface WelcomeText {
   helloTitle: string;
   helloText: string;
   keysText: string;
-  /** Before the two links to the consoles. */
+  /** Before the link to the console. */
   keysWhere: string;
+  /** The Model step: the speech model downloads once, in the background. */
+  modelText: string;
   price: string;
   privacy: string;
   micText: string;
@@ -39,17 +41,18 @@ export interface WelcomeText {
 }
 
 export const en: WelcomeText = {
-  steps: { hello: 'Hello', keys: 'Keys', mic: 'Microphone', try: 'First dictation', done: 'Done' },
+  steps: { hello: 'Hello', keys: 'Key', model: 'Model', mic: 'Microphone', try: 'First dictation', done: 'Done' },
   back: 'Back',
   start: 'Start',
   next: 'Next',
   finish: 'Done',
   helloTitle: 'Speak — CUE writes',
   helloText: 'Press the keys and speak. The text appears where the caret is: in an email, a chat, a document.',
-  keysText: 'CUE works with your own Soniox and Anthropic accounts. Paste a key from each and press Check.',
-  keysWhere: 'Where to get them:',
-  price: 'Roughly $4–5 a month for an hour of speech a day.',
-  privacy: 'Sound goes to Soniox, text to Anthropic; the history stays on this computer only.',
+  keysText: 'CUE cleans up your speech with your own Anthropic account. Paste its key and press Check.',
+  keysWhere: 'Where to get it:',
+  modelText: 'CUE recognizes speech on this computer. The model downloads once — go on meanwhile.',
+  price: 'Recognition is free, on this computer; Anthropic bills only the cleanup.',
+  privacy: 'Sound stays on this computer; text goes to Anthropic for the cleanup; the history stays on this computer only.',
   micText: 'CUE listens only while it records — while the red light is on.',
   micWorks: 'It works',
   micBlocked: 'Windows is blocking CUE from using the microphone',
@@ -68,17 +71,18 @@ export const en: WelcomeText = {
 };
 
 export const ru: WelcomeText = {
-  steps: { hello: 'Привет', keys: 'Ключи', mic: 'Микрофон', try: 'Первая диктовка', done: 'Готово' },
+  steps: { hello: 'Привет', keys: 'Ключ', model: 'Модель', mic: 'Микрофон', try: 'Первая диктовка', done: 'Готово' },
   back: 'Назад',
   start: 'Начать',
   next: 'Дальше',
   finish: 'Готово',
   helloTitle: 'Говорите — CUE напишет',
   helloText: 'Нажмите клавиши и говорите. Текст появится там, где стоит курсор, — в почте, чате, документе.',
-  keysText: 'CUE работает с вашими аккаунтами Soniox и Anthropic. Вставьте ключ каждого и нажмите «Проверить».',
-  keysWhere: 'Где их взять:',
-  price: 'Примерно $4–5 в месяц за час речи в день.',
-  privacy: 'Звук уходит в Soniox, текст — в Anthropic; история хранится только на этом компьютере.',
+  keysText: 'CUE чистит речь через ваш аккаунт Anthropic. Вставьте его ключ и нажмите «Проверить».',
+  keysWhere: 'Где его взять:',
+  modelText: 'CUE распознаёт речь на этом компьютере. Модель скачивается один раз — можно идти дальше.',
+  price: 'Распознавание бесплатное, на этом компьютере; Anthropic берёт плату только за чистку.',
+  privacy: 'Звук остаётся на этом компьютере; текст уходит в Anthropic на чистку; история хранится только на этом компьютере.',
   micText: 'CUE слушает только во время записи — пока горит красная лампа.',
   micWorks: 'Работает',
   micBlocked: 'Windows не даёт CUE микрофон',

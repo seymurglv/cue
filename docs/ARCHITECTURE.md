@@ -4,9 +4,10 @@ CUE is a Tauri 2 app: a Rust core that runs in the background and makes every de
 Drop with its tray cards, the "Ask" card at the selection, the main window with the history and the settings, and the
 welcome window of the first start) rendered by WebView2. The Drop and the card only draw the state the core sends and
 report button clicks back; the main window reads the history and changes the settings through commands, the welcome
-window saves the keys and picks the microphone the same way, and the core stays the only one that writes the history and
-the settings. The dictation logic is a pure state machine, so it is tested without windows, a microphone, a network or a
-real clock.
+window saves the key and picks the microphone the same way, and the core stays the only one that writes the history and
+the settings. Speech is recognized on this computer by a speech model the core downloads once and keeps loaded (see
+Recognition); the network is needed only for that download and for Anthropic. The dictation logic is a pure state
+machine, so it is tested without windows, a microphone, a model, a network or a real clock.
 
 ## Crates
 
@@ -16,8 +17,12 @@ real clock.
   - `ui`: `UiState`, `UiPhase`, `Mode`, `ErrorCause`, `TrayKind`, `UiAction`, shared with TypeScript as JSON.
   - `refine`: the system prompt, the dictionary block, the user message, timeout and token budget, the sanity check,
     Markdown stripping, list tidying, and the join space before a paste.
-  - `translate`: the languages Soniox recognizes, the speech-language tally, the translation direction, the
-    instruction block, the timeout and the translation check.
+  - `translate`: the 60 languages a translation can go to, the translation direction, the instruction block, the
+    timeout and the translation check.
+  - `speech`: the rules of recognition: the alphabet of a dictation, a leak of the other alphabet, the speech language
+    of a translation, and where a long recording is cut into pieces.
+  - `model`: the speech model's files (`Manifest`: a Hugging Face repository at a fixed commit, each file's size and
+    SHA-256; `ULTRA`, the one CUE ships) and `ModelState`, the model's state as the windows show it.
   - `ask`: the "Ask" instruction and user message, the selection limit, where a written text goes, the buttons of an
     answer, its sources, the plain text for pasting, and `AnswerView`, the answer as the windows draw it.
   - `audio`: resampling to 16 kHz mono, voice level, the "microphone is silent" detector.
@@ -26,11 +31,14 @@ real clock.
     `audio_to_delete`, `prune_audio`, `sweep_audio_temps`, `clear_audio`).
   - `settings` (with `SettingChange`, one change from the main window), `usage` (CSV rows, costs, monthly summary),
     `paths`.
-- **`cue-engines`** (`app/crates/engines`): `stt` (session facade, ~100 ms chunks, batch fallback), `soniox`
-  (WebSocket stream) and `soniox::batch` (REST, with cleanup of uploads), `claude` (refine and translation requests
-  and responses, the cache warm-up), `ask` (the streaming "Ask" request, its event parser and decision, `run` and its
-  cache warm-up `warm`), `keys` (Windows Credential Manager), `check` (free key probes), `error`. `openrouter` holds
-  the server-sent-events reader "Ask" uses too, and otherwise serves only the `refine_compare` example.
+- **`cue-engines`** (`app/crates/engines`): `stt` (the session facade over the model on this computer, and Retry's
+  recognition of a saved WAV), `parakeet` (the model: `mel`, the log-mel features; `vocab`, the vocabulary and the
+  masks of one alphabet; `tdt`, TDT greedy decoding; `model`, the ONNX Runtime sessions and `Recognizer`), `download`
+  (the model's files: resumed, checked, renamed), `claude` (refine and translation requests and responses, the cache
+  warm-up), `ask` (the streaming "Ask" request, its event parser and decision, `run` and its cache warm-up `warm`),
+  `keys` (Windows Credential Manager, and the deletion of the Soniox key of earlier versions), `check` (free key
+  probes), `error`. `openrouter` holds the server-sent-events reader "Ask" uses too, and otherwise serves only the
+  `refine_compare` example.
 - **`cue-platform-win`** (`app/crates/platform-win`): `hook` and `chord` (keyboard, and the mouse while a Shift that
   switched the mode is held), `input` (`SendInput`, modifier state), `clipboard` (paste, and the `Ctrl + C` fallback
   of "Ask"), `focus` (UI Automation: the field, the text before the caret, the selection; and the window under the
@@ -40,7 +48,7 @@ real clock.
   the pages written here), `dropwin` (window styles, moves,
   the z-order guard), `placement` (the four places, the nearest place, monitors), `power`.
 - **`cue`** (`app/src-tauri`): startup, the `runtime` actor (with `runtime::ask`, the conversation of an open answer,
-  and `runtime::recordings`, the history's recordings),
+  `runtime::recordings`, the history's recordings, and `runtime::model`, the speech model's download, load and state),
   `ipc`, `drop_window`, `card_window`, `main_window`, `welcome_window` and `commands` (the main and welcome windows and
   their commands), `micpreview` (the microphone level of the settings and of the welcome window), `tray` and
   `trayicon`, `logging`; `nsis/` holds the installer's script and hooks.
@@ -48,8 +56,8 @@ real clock.
   `answer.ts` (the "Ask" answer, one view for the tray and the card), `markdown.ts` (its safe Markdown), `card.ts` and
   `cardPage.ts` (the card window), `strings.ts`, `window.html` with `window/` (the main window: `page.ts`,
   `history.ts`, `said.ts` (how an entry was said, and its player), `settings.ts`, `text.ts`, `icons.ts`, `api.ts`, and
-  `keys.ts` and `mic.ts`, the key and microphone
-  rows the welcome window shares), `welcome.html` with `welcome/` (`page.ts`, `steps.ts`, `text.ts`, `welcome.css`),
+  `model.ts`, `keys.ts` and `mic.ts`, the speech model's block and the key and microphone rows the welcome window
+  shares), `welcome.html` with `welcome/` (`page.ts`, `steps.ts`, `text.ts`, `welcome.css`),
   and `design/` (Drop, tray card, answer and animation code, styles including the main and welcome windows'
   `window.css`, the Bebas Neue and Montserrat ExtraBold fonts).
 - **`cue-cli`** (`app/crates/cli`: keys, usage and `leak-scan`, see Installer and release build) and **`cue-bench`**
@@ -61,11 +69,13 @@ real clock.
   preview's start and stop run in order with its window's end) and the welcome window's `welcome_step` (so its steps
   reach the core in order).
 - **`cue-core`**: the core actor, `Runtime::run`. All events arrive as `CoreEvent`s on one unbounded channel: hotkeys,
-  Drop actions, microphone frames, engine results, timers, sleep and lock, the main and welcome windows' settings
-  requests, the main window's history requests and the welcome window's hold of the hotkey. It runs on its own thread
-  (`block_on`) because it makes short blocking Windows calls (UI Automation up to 150 ms, Credential Manager). Network
-  calls and timers are tokio tasks that send their results back as events. A panic while handling one event is caught
-  and logged, and the core keeps running.
+  Drop actions, microphone frames, engine results, the speech model's download and load steps, timers, sleep and lock,
+  the main and welcome windows' settings and model requests, the main window's history requests and the welcome window's
+  hold of the hotkey. It runs on its own thread (`block_on`) because it makes short blocking Windows calls (UI
+  Automation up to 150 ms, Credential Manager). Network calls and timers are tokio tasks that send their results back as
+  events, and so are the model's download and the recognition sessions; recognition itself, the model's load and the
+  check of its files run on tokio's blocking threads, and one recognition uses 4 ONNX Runtime threads. A panic while
+  handling one event is caught and logged, and the core keeps running.
 - **`cue-keyboard`**: the `WH_KEYBOARD_LL` hook (and, while a Shift that toggled the mode is held, `WH_MOUSE_LL`: see
   Hotkey chord) with its own message loop at time-critical priority. The handler only classifies the key and sends a
   `HotkeyEvent`; `cue-hotkeys` forwards it to the core. The hook reads three atomics
@@ -114,8 +124,9 @@ real clock.
 `Shake`, `Tray`, `SetTimer`, `CancelTimer`, `HoldHintShown`, `Finished`) and the runtime executes them. Late results
 never reach `Flow`: every timer kind and every transcription, refine or "Ask" task has a generation number, microphone
 frames are tagged with the dictation id and dropped after `StopMic`, and a transcription result is accepted only after
-`FinishStt` or `TranscribeSaved`. A task that crashes still reports: transcription as a network error (so Retry is
-offered), refine as the raw text, a question as a failure with Retry, paste as "no field".
+`FinishStt` or `TranscribeSaved` (a failure reported while still recording, such as a model that did not download, is
+shown when the recording ends). A task that crashes still reports: recognition as a failure with Retry, refine as the
+raw text, a question as a failure with Retry, paste as "no field".
 
 **Modes.** `Flow` keeps the mode of the dictation (`Mode`: `Dictate`, `Translate`, `Ask`). `ChordDown(mode)` starts a
 dictation in the mode the chord picked. `ModeToggle` (a fresh Shift press) swaps dictation and translation ("Ask"
@@ -233,7 +244,7 @@ keeps the answer open with the error and Retry, and the question is kept.
 ### Recording
 
 The microphone opens on the first press. Frames are resampled to 16 kHz mono `i16` in 20 ms frames. Each
-frame goes to the WAV file (`last\current.wav`), to the Soniox stream, and, at most ~30 times a second while
+frame goes to the WAV file (`last\current.wav`), to the recognition session, and, at most ~30 times a second while
 listening, to the Drop as a voice level. Four seconds of digital silence from the start (below −70 dBFS: a muted or
 blocked microphone, not a quiet room) stop the recording and show the "Microphone is silent" card, as does a
 microphone that fails before any sound. One that fails after sound was heard ends the recording normally. At 8:00
@@ -251,29 +262,99 @@ open) shows the "Another microphone" card with both names, which go to the Drop 
 log. Each loss is told once (`state::MicTold`): it counts as told when the card goes out, and a recording that has the
 pinned device again, or a change of the microphone setting, forgets it. With nothing pinned no device list is read.
 
-### Transcription: Soniox stream and batch fallback
+### Recognition: Parakeet on this computer
 
-- The WebSocket to `stt-rt-v5` opens on the first press; audio queues in a channel until it connects. The key goes
-  only in the `Authorization` header. The first message is the config (PCM 16 kHz mono, `language_hints`, endpoint
-  detection off, the focused app's name as context); audio follows in ~100 ms binary frames, with keepalives in pauses.
-- On finish CUE sends 200 ms of silence, `finalize`, waits for the `<fin>` token, then ends the audio. The text is
-  built from final tokens.
-- Language identification is on for every dictation, stream and batch alike: the mode can still change after the
-  stream config is sent, and Soniox prices it into the hourly rate. Each token carries its language, and the speech
-  language is the one of the most words among the final tokens (`translate::LanguageTally`): a word starts at the
-  first letter after whitespace and belongs to the language of the token it starts in, so a word split over several
-  tokens counts once and a long foreign name does not outweigh a short phrase ("Открой Telegram" is Russian).
-  Punctuation starts no word; in scripts written without spaces (Chinese, Japanese, Thai, Lao, Khmer, Myanmar) every
-  character counts as a word; tokens without a known language are skipped; a tie goes to the language heard first.
-- The language hints are `stt.language_hints`, except for a translation with `translate.speech` fixed: then that code
-  is the only hint, on the stream, the batch fallback and Retry. The stream takes the mode the dictation started in.
-- If the stream has no result within 5 s of the second press, or fails for any reason other than the key or a cancel,
-  the saved WAV goes to the batch model `stt-async-v5`: upload, create a transcription, poll every 400 ms, fetch the
-  text, delete the transcription and the file. Deletions that fail (still processing, network, rate limit) are
-  retried in the background for about 15 minutes.
-- Retry after an error transcribes the saved WAV through the same batch path.
-- A key, balance or limit problem (401 / 402 / 403 / 429, or no key) becomes the "Soniox key problem" error; anything
-  else becomes "No connection". Both keep the recording for Retry.
+- **The model.** Parakeet Ultra: Moondream's post-trained NVIDIA Parakeet TDT 0.6B v3 (the same architecture and
+  tokenizer, 25 European languages with Russian and English among them, punctuation and capital letters in its
+  output), in the int8 ONNX export of `Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx`: `encoder-model.int8.onnx`,
+  `decoder_joint-model.int8.onnx` and `vocab.txt` (8,192 tokens and the blank `<blk>`). NVIDIA's own v3 export
+  (`istupakov/parakeet-tdt-0.6b-v3-onnx`) has the same file names and loads the same way; it is used only in the bench.
+- **Runtime.** ONNX Runtime through the `ort` crate, CPU only, linked statically into the program. Its prebuilt
+  library needs AVX2 and FMA, without which the process would die on its first instruction, so
+  `parakeet::model::processor_supported` is asked before anything loads (see The speech model). Each session runs
+  with graph optimization level 3 and 4 threads. The two sessions sit behind one lock: one recognition at a time.
+- **The session** (`stt::start(Engine::Local(slot))`) opens at `StartStt`, whether the model is ready or not. It only
+  keeps the frames; `finish` sends `Finish`, and the whole recording is recognized on a blocking thread. `Abort`, or a
+  dropped session, is a cancel. `finish` waits 120 s for a ready model (`RECOGNIZE_TIMEOUT`; a 9-minute dictation
+  takes well under a minute), and 30 minutes more while the model is still downloading or loading (`WAIT_FOR_MODEL`):
+  the session's recognizer is the model's slot (`ModelSlot`), which waits for the model and then recognizes, or
+  returns the failure that stopped it. Recognition of a 30-second dictation takes well under a second on a current
+  processor; the text comes only after the recording ends. A streaming mode (pieces recognized at pauses while
+  speaking) can come later behind the same session without changing the flow or the Drop.
+- **Features** (`parakeet::mel`, ported from parakeet-rs): the 128-band log-mel the way NeMo computes it for Parakeet:
+  pre-emphasis 0.97, a centered STFT (n_fft 512, a 400-sample Hann window, hop 160: 10 ms a frame), Slaney mel bands,
+  a log with an additive guard of 2^-24, then every band normalized over the piece. A wrong spectrogram makes the model
+  write nothing, so each step follows NeMo; an ignored test compares it with the export's own preprocessor
+  (`nemo128.onnx`).
+- **Decoding** (`parakeet::tdt`, ported from parakeet-rs): TDT greedy decoding over the encoder's output. At each
+  frame the decoder/joint (a 2-layer LSTM of 640) gives token logits and duration logits; the best allowed token is
+  emitted unless it is the blank, the decoder's state changes only when a token is emitted, and the best duration says
+  how many frames to move on; at most 10 tokens on one frame. The text is the tokens joined, "▁" a space, special
+  tokens written as nothing, and a number glued to a word given its space ("version 2"). Owning the decode loop is
+  what lets CUE keep one language a dictation (below).
+- **Long recordings** (`speech::pieces`): a recording longer than 60 s is cut into pieces of at most 60 s, each in the
+  middle of the quietest 200 ms between 45 and 60 s into it (the window moving in 50 ms steps), so a word is rarely
+  split. Each piece goes through the encoder; the pieces' texts are joined with a space.
+- **Retry** (`TranscribeSaved`) recognizes `current.wav` again, the same way. After a model failure it first lets the
+  model's download go on from where it stopped (`ModelKeeper::retry`), and recognition waits for the model.
+- **Errors** (`stt_error`): the model missing, not downloaded or damaged (`EngineError::Model`) is the Drop's "Model did
+  not download" with Retry; a processor without AVX2 (`Unsupported`) is "Processor not supported" without Retry;
+  anything else, an ONNX Runtime error or a crashed task included, is "Couldn't recognize" with Retry. Each keeps the
+  recording in `current.wav`. Recognition never needs the network.
+- The log gets the audio length, the recognition time and whether the other alphabet was masked out (`Recognized`'s
+  `Debug` shows the text's length alone), never the text.
+
+### One language a dictation
+
+The model detects the language itself and cannot be told one. CUE's rule: a dictation is in Russian or in English,
+never mixed (`cue_core::speech`). Letters are counted by alphabet (`Alphabet`: Cyrillic or Latin, by
+`translate::script_of`).
+
+- **Which alphabet** (`alphabet_of`): the one whose language's function words the text holds more of (fixed lists:
+  "the", "to", "it", "please"…; «и», «в», «не», «что»…), so Latin names and terms in a Russian sentence
+  ("запусти cargo test в Visual Studio Code") do not make it English; with as many of each, the one most letters are
+  in; none without letters of either (numbers only).
+- **A leak** (`leak`): the model writing part of a Russian phrase in English (a known weakness), or the other way
+  round. A leak is told from names and terms by the little words a sentence needs: when both alphabets hold at least
+  two function words of their language (`LEAK_WORDS`), the alphabet with fewer letters is masked out
+  (`Vocab::mask_of`: every token whose text is in that alphabet; special tokens never) and every piece is decoded
+  again over the same encoder output: the encoder does not run twice. Names and terms in the other alphabet
+  ("call Марисоль", one "the" in a film title) have no such words and stay as recognized; the cleanup and the
+  dictionary handle them.
+- **The speech language of a translation** (`speech_language`): the language of the pair, the target first and then
+  home, written in the text's alphabet (`translate::script_of_language`); none when neither is, and unknown speech
+  goes to the target. A fixed `translate.speech` wins. The recognition result carries no language of its own
+  (`SttOutput::language` is `None`), so the runtime reads it from the text when the result comes.
+
+### The speech model
+
+`runtime::model` keeps the model: its state, its background download and load, and the slot recognition waits on.
+The folder is `%LOCALAPPDATA%\CUE\models\parakeet-ultra-int8\` (`paths::model_dir`, named by the manifest's id).
+
+- **Download** (`cue_engines::download`, on a tokio task): every file the folder lacks comes from
+  `https://huggingface.co/<repo>/resolve/<commit>/<path>`, the commit fixed in `cue_core::model::ULTRA`, never
+  `main`; about 670 MB in all. A file is written as `<name>.part`; a part already there is resumed with an HTTP range
+  request (a server that ignores the range sends the whole file again). The finished part is checked against its size
+  and SHA-256 and only then renamed, so a file under its final name has always passed the check, and a folder with
+  every file at its size is ready (`download::ready`). A part larger than the file, or one that fails the hash, is
+  deleted and starts anew on the next try. The progress (bytes of the whole model) reaches the windows once a percent.
+  The request carries no key and nothing of the user's. The installer does not carry the model.
+- **States** (`ModelState`, `cue://model`): `missing`; `downloading` with `done` and `total` bytes; `loading`;
+  `ready` with its `total`; `failed` with the bytes already kept for the next try (a download that stopped, or files
+  that did not load); `unsupported`. At start (`ModelKeeper::start`, before the first event): a processor without AVX2
+  is `unsupported`, said once in the log and to every recognition; a ready folder loads; anything else downloads.
+  `Fetched` loads it (`Recognizer::load` on a blocking thread, the time in the log), and the loaded model stays in
+  memory, so a dictation never waits for a load once CUE has been running a few seconds. A load that fails checks every
+  file's hash again (`download::verify`), deletes the damaged ones and only then reports `failed`, so Retry downloads
+  just those. Retry, the windows' (`model_retry`) or a dictation's, acts only on `failed` or `missing`, and goes on from
+  the bytes already there.
+- **"Model is ready".** When the model becomes ready after a download in this run, the Drop shows the `modelReady`
+  card, but only at rest with no other card: a dictation that waited for the model shows its text instead.
+- The log gets the state's changes, the bytes and seconds of a download, the load time, how many files a check
+  deleted, and an error's text; never dictation text.
+
+At its first start this version deletes the Soniox key of earlier versions from Credential Manager
+(`keys::forget_soniox`, asked at every start, a no-op after the first); the log says when one was deleted.
 
 ### Refine (cleanup)
 
@@ -292,9 +373,9 @@ pinned device again, or a change of the microphone setting, forgets it. With not
   list) and the terms, one per line. The cache mark sits on the last system block, so the cached prefix covers the
   prompt and the list together; editing the list costs one cache write. Entries are trimmed, and empty, multi-line,
   overlong (over 60 characters) and repeated ones are dropped, at most 200 kept. With no usable term the request is
-  byte for byte the one without a dictionary. Soniox never gets the terms: it bills context tokens on every dictation.
+  byte for byte the one without a dictionary. Recognition never gets the terms: the model takes no vocabulary.
 - When the app is unknown (neither the query at the start of recording nor the one after the second press named it),
-  the request carries `<app>unknown app</app>`; Soniox gets no app context in that case.
+  the request carries `<app>unknown app</app>`.
 - The answer is used only when it is a complete `{"text": …}` object: a refusal, `max_tokens`, a timeout, a network
   error or a bad response all mean the raw transcript is pasted with the normal "Done". Explicit Markdown the speaker
   did not dictate is stripped, and stray commas and semicolons at the end of list items are removed.
@@ -309,13 +390,14 @@ pinned device again, or a change of the microphone setting, forgets it. With not
 ### Translation
 
 - **Direction** (`translate::output_language`). The speech language is `translate.speech` when fixed, else the one
-  Soniox heard most (see Transcription). Speech that is not in `translate.target` goes to the target; speech in the
-  target goes to the home language; unknown speech goes to the target; with no home language, speech in the target is
-  only cleaned up. The home language (`translate::resolve_home`) is decided at startup, and again when the main window
-  changes the target: `translate.home`, else the Windows display language, else the first language hint, skipping any
-  equal to the target. Settings example:
-  `"translate": { "target": "en", "home": "ru", "speech": "auto" }` sends Russian (or German) speech to English and
-  English speech to Russian.
+  the text's alphabet names (`speech::speech_language`, see One language a dictation). Speech that is not in
+  `translate.target` goes to the target; speech in the target goes to the home language; unknown speech goes to the
+  target; with no home language, speech in the target is only cleaned up. The home language
+  (`translate::resolve_home`) is decided at startup, and again when the main window changes the target:
+  `translate.home`, else the Windows display language, else Russian, then English, skipping any equal to the target.
+  Settings example: `"translate": { "target": "en", "home": "ru", "speech": "auto" }` sends Russian speech to English
+  and English speech to Russian. Speech outside the pair counts as the pair's language of its alphabet: German speech
+  reads as English there and goes to Russian, unless `translate.speech` says `de`.
 - **Request** (`claude::Job::Translate(code)`, `request_body_for`). The refine request as is, plus one more system block
   after the cache mark (`translate::instruction`): clean up the transcript by the rules above, then write the whole
   result in the target language (its English name), which replaces the rules to keep the spoken language and never
@@ -662,13 +744,15 @@ Core → window events: `cue://state` (phase, error cause, retry, paused, mode),
 or none), `cue://shake`, `cue://idle-hidden`, `cue://place`, `cue://answer` (the whole `AnswerView` of the open "Ask"
 answer, or none when it closes: sent at once for a new turn, an end or an opening, at most every 50 ms while words
 stream) and `cue://card-place` (for the card: which side of the selection, where the arrow is, how tall the card may
-grow), and `cue://mic-names` (for the Drop alone: the two names of the "Another microphone" card, sent just before
-it). Window → core commands: `drop_action` (`cancel`, `finish`, `undo`, `retry`, `dismiss`, `trayAction`,
-`trayClose`, and the answer's `answerInsert`, `answerBelow`, `answerReplace`, `answerCopy`, `answerRetry`,
-`answerClose`), `answer_source` (the number of a source chip clicked), `drop_hit_rects`, `drop_drag` (`start`, `end`),
-`drop_ready`, after which the core resends the current state, card, `idle-hidden`, place and open answer, and, from the
-card window, `card_hit_rects` and `card_ready`, after which the core resends the state, the card's place and the open
-answer. The place also comes in an initialization script, so the first frame is already laid out for it.
+grow), `cue://mic-names` (for the Drop alone: the two names of the "Another microphone" card, sent just before
+it), and `cue://model` (to every window: the speech model's `ModelState` whenever it changes; the main and welcome
+windows draw it, see The speech model). Window → core commands: `drop_action` (`cancel`, `finish`, `undo`, `retry`,
+`dismiss`, `trayAction`, `trayClose`, and the answer's `answerInsert`, `answerBelow`, `answerReplace`, `answerCopy`,
+`answerRetry`, `answerClose`), `answer_source` (the number of a source chip clicked), `drop_hit_rects`, `drop_drag`
+(`start`, `end`), `drop_ready`, after which the core resends the current state, card, `idle-hidden`, place and open
+answer, and, from the card window, `card_hit_rects` and `card_ready`, after which the core resends the state, the card's
+place and the open answer. The place also comes in an initialization script, so the first frame is already laid out for
+it.
 
 The windows get the text of an "Ask" question and its answer, the card's quote of the selection (`quote_of`, 40
 characters at most), and the titles and sites of its sources, to draw them; never a source's address. A click on a
@@ -683,7 +767,9 @@ into a circle of the same diameter. Tray cards keep their own sizes.
 
 Phases: `idle` (a thin strip; on hover the mark and the hotkey), `start`, `listen` (voice bars and no timer; cancel
 and done buttons on hover), `think` (three dots), `done` (a check, gone after 1.5 s), `empty`, `cancel` (Restore with
-a 3.6 s ring), `error` (amber "!", the cause on hover, Retry when available), `answer` (an "Ask" answer is open and
+a 3.6 s ring), `error` (amber "!", the cause on hover, Retry when available; the causes are `model` "Model did not
+download" and `translate` "Couldn't translate" with the network icon, `cpu` "Processor not supported", `stt`
+"Couldn't recognize" and `claudeKey` "Claude key problem"), `answer` (an "Ask" answer is open and
 nothing records: the Drop rests as in `idle`). The frame loop sleeps when nothing moves; with reduced motion turned on
 in Windows, states change instantly.
 
@@ -702,6 +788,7 @@ that opens close it, and hovering pauses the countdown ring:
 | Press and release | Got it | after 7 s |
 | One minute left | — | after 5 s |
 | Another microphone (the pinned one is not there; both names) | — | after 6 s |
+| Model is ready (the speech model finished downloading in the background) | — | after 5 s |
 
 A card button arrives as `trayAction`; the core acts on the last card it sent.
 
@@ -769,16 +856,16 @@ Quit exits with one. When it is destroyed, its history channel is dropped and a 
 The main and welcome windows' pages talk to the core through the app's own commands (`commands.rs`), and every one
 starts with `guard` and its own name. The main window is answered for every command but the welcome window's own
 (`welcome_step`, `welcome_close`, `open_link`); the welcome window only for what its steps need (`WELCOME_COMMANDS`:
-`settings_get`, `settings_set` with a microphone change alone, `key_state`, `key_set`, `key_check`, `mic_list`,
-`mic_preview`, `mic_access`, and its own); any other window gets `notMain` and a log line with its label and the
-command. The Drop's and the card's commands (`drop_action`, `answer_source`, `drop_ready`, `drop_drag`,
-`drop_hit_rects`, `card_ready`, `card_hit_rects`) answer those windows alone in the same way (`ipc::guard`) and do
-nothing for another. The Drop and the card draw what a model wrote, so no page of theirs may read the history, change
-a setting or touch a key. Errors are short codes (`core`, `notFound`, `badValue`, `badName`, `emptyKey`, `store`,
+`settings_get`, `settings_set` with a microphone change alone, `model_get`, `model_retry`, `key_state`, `key_set`,
+`key_check`, `mic_list`, `mic_preview`, `mic_access`, and its own); any other window gets `notMain` and a log line with
+its label and the command. The Drop's and the card's commands (`drop_action`, `answer_source`, `drop_ready`,
+`drop_drag`, `drop_hit_rects`, `card_ready`, `card_hit_rects`) answer those windows alone in the same way (`ipc::guard`)
+and do nothing for another. The Drop and the card draw what a model wrote, so no page of theirs may read the history,
+change a setting or touch a key. Errors are short codes (`core`, `notFound`, `badValue`, `badName`, `emptyKey`, `store`,
 `autostart`, `failed`), never text. The main and welcome windows have capabilities of their own
-(`capabilities/main.json`, `welcome.json`) with `core:event:allow-listen` alone, for `cue://mic-level` (and the
-welcome window's `cue://mic-failed`, and the main window's `cue://state`, which holds no text); the Drop's and the
-card's `core:default` (`default.json`) does not cover them. The commands:
+(`capabilities/main.json`, `welcome.json`) with `core:event:allow-listen` alone, for `cue://mic-level` and `cue://model`
+(and the welcome window's `cue://mic-failed`, and the main window's `cue://state`, which holds no text); the Drop's and
+the card's `core:default` (`default.json`) does not cover them. The commands:
 
 - `settings_get`, `settings_set` (one `SettingChange`, `{kind, value}`), answered by the core within 3 s with
   `SettingsView` (the history's period and its recordings', each `null` while unknown; the microphone; the
@@ -796,7 +883,9 @@ card's `core:default` (`default.json`) does not cover them. The commands:
   is estimated from its audio at the speed measured on the rows that have them (150 words a minute without any), and
   one without `day` takes its UTC date moved by the local offset now. The window asks on start, a second after each
   new history entry, and when it comes back to the front;
-- `key_state`, `key_set`, `key_check` (Soniox and Anthropic only);
+- `model_get` (the speech model's `ModelState`, answered by the core within 3 s) and `model_retry` (the download goes
+  on from where it stopped, then the model loads; the new state comes as `cue://model`);
+- `key_state`, `key_set`, `key_check` (Anthropic only: any other name is `badName`);
 - `mic_list`, `mic_preview`, `mic_access`;
 - the welcome window's `welcome_step`, `welcome_close`, `open_link` (see Welcome window).
 
@@ -804,8 +893,8 @@ card's `core:default` (`default.json`) does not cover them. The commands:
 
 `cue_core::history` keeps one file per local day in `%LOCALAPPDATA%\CUE\history`, `YYYY-MM-DD.jsonl`, one line of
 JSON per entry (`id`, `ts`, `mode`: `dictation`, `translation` or `ask`, `app`, `text`, `question` for "Ask", and
-`raw` for a dictation or a translation: the text as Soniox heard it, before cleanup or translation, taken at the top of
-`refine()` and with each attempt's end, so a retry keeps the one heard anew; its `Debug` shows lengths alone),
+`raw` for a dictation or a translation: the text as it was recognized, before cleanup or translation, taken at the top
+of `refine()` and with each attempt's end, so a retry keeps the one heard anew; its `Debug` shows lengths alone),
 appended in one write, so a day is never rewritten. `ts` is the local time to the millisecond; the id is `ts-n`, `n`
 counting the run's entries. A line that does not read as an entry is skipped, and only files named for a real date
 count, so nothing else in the folder is read or deleted. There is no database: a search reads the files.
@@ -887,15 +976,21 @@ core writes and deletes there (`runtime::recordings`).
 
 ### Settings tray
 
-The gear opens a tray with five pages: Keys, Microphone, Translation, History and General. Every change goes to the
+The gear opens a tray with six pages: Speech recognition, Keys, Microphone, Translation, History and General. Every
+change goes to the
 core at once (`settings_set` → `CoreEvent::Settings`), which applies it to its copy (`Settings::apply`), writes the
 whole file and answers with the settings as they are now (see Settings). After a `core` error the page reads them
 again.
 
-- **Keys**: a password field and Check for each. Check saves a typed key (`key_set`: Credential Manager, the service
-  `CUE`, where `cue-cli keys` keeps them; trimmed, an empty one refused) and empties the field, then checks the saved
-  key with the free probe of `cue_engines::check` (`key_check`, 10 s): works, key error (key, balance or limit),
-  couldn't check, no key. A key never leaves `commands.rs`, in a reply, an error or the log: only its mask
+- **Speech recognition**: the model's block (`window/model.ts`, the welcome window shows it too), drawn anew on every
+  `cue://model`: "Parakeet Ultra", its state in a few words (Ready, Loading, Downloading N %, Didn't download, Not
+  supported, Not downloaded; also the row's value on the first page), "Speech is recognized on this computer.", and,
+  while it downloads or once it failed, a thin bar and "N of M MB" with the numbers in Bebas; Retry (`model_retry`)
+  once it failed. There is no choice of engine. The page reads the state with `model_get` when the window opens.
+- **Keys**: a password field and Check for the Anthropic key. Check saves a typed key (`key_set`: Credential Manager,
+  the service `CUE`, where `cue-cli keys` keeps them; trimmed, an empty one refused) and empties the field, then checks
+  the saved key with the free probe of `cue_engines::check` (`key_check`, 10 s): works, key error (key, balance or
+  limit), couldn't check, no key. A key never leaves `commands.rs`, in a reply, an error or the log: only its mask
   (`keys::mask`). A saved key is used from the next request on, since keys are read on use.
 - **Microphone**: As in Windows or one of the devices `mic_list` names (with the one Windows uses by default), saved
   as `audio.device` and used from the next recording on (see Recording). A pinned one that is not connected shows as
@@ -908,7 +1003,7 @@ again.
   (`emit_to`; the page listens on its own webview window), only that window's "off" or end stops it, and a preview
   the other window starts replaces it, sending the window it was taken from a level of 0. The Microphone page starts
   its preview again when the main window has the focus again.
-- **Translation**: the target language, any of the 60 Soniox knows; the core decides the home language again.
+- **Translation**: the target language, any of the 60 CUE knows; the core decides the home language again.
 - **History**: how long the history is kept (`historyKeep`, see Retention; also the History row's value on the first
   page), how long recordings are kept (`historyAudio`: A day, A week, A month, Don't keep), each not set while
   unknown, and Clear history. A shorter period deletes the older ones at once; the page stops what plays and reads the
@@ -918,9 +1013,9 @@ again.
 
 ## Welcome window
 
-An ordinary window that walks through Hello, Keys, Microphone, First dictation and Done (`welcome_window`, label
-`welcome`, the page `welcome.html`). It opens at startup when the Soniox or the Anthropic key is missing from
-Credential Manager (a store that cannot be read is no missing key: a log line names the key), and with `--welcome`,
+An ordinary window that walks through Hello, Key, Model, Microphone, First dictation and Done (`welcome_window`, label
+`welcome`, the page `welcome.html`). It opens at startup when the Anthropic key is missing from Credential Manager (a
+store that cannot be read is no missing key: a log line says so), and with `--welcome`,
 matched exactly among the program's arguments (`args_os`). The check runs in `setup` right after the tray and before
 the hook starts, so the core holds the hotkey before any chord comes. As with the main window there is one at a time
 (its own `CREATING`, with `main_window::decide`), created when opened, destroyed when closed and built on
@@ -933,9 +1028,16 @@ logical px, centered, not resizable, and it takes the focus, so its first dictat
   start. In between the page moves the gate with its steps (`welcome_step`): held from its load, let go on First
   dictation, held again on any other step. A chord the hold ignores brings the window forward (`bring_forward`, which
   never creates one; see Hotkey chord).
-- **Keys**: the settings tray's key rows (`window/keys.ts`), read again on each entry. Next waits until both keys are
-  saved, none failed its check or waits for one, and no typed key waits in a field; leaving the step empties the
-  fields.
+- **Key**: the settings tray's key row (`window/keys.ts`), read again on each entry, with a link to the Anthropic
+  Console, the price line ("Recognition is free, on this computer; Anthropic bills only the cleanup.") and the privacy
+  line ("Sound stays on this computer; text goes to Anthropic for the cleanup; the history stays on this computer
+  only."). Next waits until the key is saved, has not failed its check and is not waiting for one, and no typed key
+  waits in the field; leaving the step empties the field.
+- **Model**: the settings tray's model block (`window/model.ts`), drawn anew on every `cue://model` (the page asks
+  `model_get` once at its load). The model has been downloading since CUE started (see The speech model), so the step
+  shows its progress, Retry when it failed, and moves on by itself when the model becomes ready while the step is
+  shown. Next is always there: the Microphone step can be done meanwhile, and a first dictation made before the model
+  is ready waits for it in Thinking like any other.
 - **Microphone**: the settings tray's microphone rows (`window/mic.ts`), with the level of a preview of this window's
   own from entering the step to leaving it. `mic_access` reads whether Windows denies the microphone: `Value` of
   `CapabilityAccessManager\ConsentStore\microphone` and of its `NonPackaged` key, under HKLM and HKCU, where one
@@ -945,7 +1047,7 @@ logical px, centered, not resizable, and it takes the focus, so its first dictat
 - **First dictation**: a text field kept in focus takes the paste of an ordinary dictation; the first text in it
   leads to Done 1.5 s later, with the number of words. Until then the field says it waits and the main button is not
   shown (its place kept).
-- **Links** go by name (`open_link`: `soniox`, `anthropic`, `micPrivacy`, exact), each to a fixed address, opened with
+- **Links** go by name (`open_link`: `anthropic`, `micPrivacy`, exact), each to a fixed address, opened with
   `ShellExecuteW` on `cue-open-link`, so no address of the page reaches the shell. `welcome_close` closes the window.
 - The page takes its language from `settings_get` (English or Russian, `welcome/text.ts`) and changes no setting but
   the microphone. Its headings use Montserrat ExtraBold, its keycaps Bebas Neue.
@@ -976,7 +1078,9 @@ reaches the one running.
 `%APPDATA%\CUE\settings.json` is read once at startup; after that the core owns its copy, and the main and welcome
 windows change it only through the core (`CoreEvent::Settings`, one `SettingChange` at a time, answered over a `oneshot`
 with the settings as they are then). Missing fields take defaults, unknown fields are ignored, a UTF-8 BOM is accepted,
-and any engine name reads as `soniox`. If the file cannot be read, CUE runs on defaults and never writes it during that
+and any engine name reads as `parakeet` (`stt.engine` has that one value; the fields of earlier engines,
+`soniox_model`, `soniox_async_model`, `language_hints` and the Soniox prices, are read past and never written again,
+so the next write drops them). If the file cannot be read, CUE runs on defaults and never writes it during that
 session: the window's changes hold until CUE quits, and the history's period is unknown (see Main window). Writes (the
 hold-hint counter, the Drop's place, the main window's changes) always write the whole file from the core's copy, so
 they never undo each other, and are atomic: a temp file in the same folder, then a rename. A change from the window
@@ -984,7 +1088,7 @@ takes effect at once: a new translation target decides the home language again, 
 tray menu and reloads the Drop and the card, a new period deletes the days and recordings it no longer keeps (all
 recordings when they are turned off), and a new microphone is
 opened by the next recording. The value already set, or one the settings refuse (a microphone name of more than 200
-characters, a translation code Soniox does not know, a period that is not one of the five), changes and writes nothing.
+characters, a translation code CUE does not know, a period that is not one of the five), changes and writes nothing.
 
 Default prices are not written to the file, so price fixes in code reach existing installs; once any price is edited,
 the whole block is written. `ui.language` (`auto`, `en`, `ru`, in any case and with spaces trimmed; any other value
@@ -1016,20 +1120,22 @@ written back as it was.
 An attempt is a recording and its transcription; Retry starts a second attempt of the same dictation, and each gets
 its own row in `%LOCALAPPDATA%\CUE\usage.csv`:
 `ts, audio_ms, stt_engine, stt_path, stt_usd, refine_model, input_tokens, cache_read_tokens, cache_write_tokens,
-output_tokens, refine_usd, latency_ms, outcome, mode, web_searches, search_usd, words, day`. `stt_path` is `stream`,
-`stream+batch` or `batch`; outcomes are `inserted`, `no_field`, `cancelled`, `empty`, `failed`, `discarded` (written
-only when audio ran past 380 ms) and `answered` (an "Ask" answer shown in full, a refusal too: paid for, nothing
-pasted). `mode` is `dictate`, `translate` or `ask` as the dictation's refine or question started (for an attempt that
-ends before that, the mode it was recording in: the attempt follows a `ModeToggle` or `ModeChange` the flow accepts),
-or `warmup`. The Retry of a failed translation re-translates the saved text: a new row with no audio. A cache warm-up
-is a row of its own: its tokens and cost, no audio, latency 0, outcome `discarded`, mode `warmup`, and the model it
-warmed (`refine.model`, or `ask.model` for "Ask"). Rows written before the last three columns existed read as
+output_tokens, refine_usd, latency_ms, outcome, mode, web_searches, search_usd, words, day`. A new row has
+`stt_engine` `parakeet`, `stt_path` `local` and `stt_usd` 0: recognition on this computer costs nothing, and the
+columns stay as they were. Rows of earlier versions (`soniox` with `stream`, `stream+batch` or `batch`) are read as
+text and keep the cost they were written with. Outcomes are `inserted`, `no_field`, `cancelled`, `empty`, `failed`,
+`discarded` (written only when audio ran past 380 ms) and `answered` (an "Ask" answer shown in full, a refusal too: paid
+for, nothing pasted). `mode` is `dictate`, `translate` or `ask` as the dictation's refine or question started (for an
+attempt that ends before that, the mode it was recording in: the attempt follows a `ModeToggle` or `ModeChange` the flow
+accepts), or `warmup`. The Retry of a failed translation re-translates the saved text: a new row with no audio. A cache
+warm-up is a row of its own: its tokens and cost, no audio, latency 0, outcome `discarded`, mode `warmup`, and the model
+it warmed (`refine.model`, or `ask.model` for "Ask"). Rows written before the last three columns existed read as
 dictation, and the header of an existing file is never rewritten (new files get the 18-column header). `words` is how
 many words the attempt wrote (`usage::count_words` of the text of a dictation or translation; 0 for a question, a
-warm-up or one that wrote nothing) and `day` its local date; rows written before them are 13 or 16 columns wide. Latency runs
-from the second press to Ctrl+V (from Retry or Restore when used); the target for a ~30-word phrase is 1.5 s or less.
-Rows that fail to write, for example while the file is open in Excel, wait in memory and go out before the next one.
-`cue-cli usage` sums a UTC month: dictations are `inserted` plus `no_field` rows (an `answered` row is not one),
+warm-up or one that wrote nothing) and `day` its local date; rows written before them are 13 or 16 columns wide. Latency
+runs from the second press to Ctrl+V (from Retry or Restore when used); the target for a ~30-word phrase is 1.5 s or
+less. Rows that fail to write, for example while the file is open in Excel, wait in memory and go out before the next
+one. `cue-cli usage` sums a UTC month: dictations are `inserted` plus `no_field` rows (an `answered` row is not one),
 average latency counts only `inserted` rows, and a separate average covers recordings of 20 s or less. The cost includes
 failed attempts and warm-ups; web search is shown only when there was some, and the rows and dollars of each `mode`
 value follow, in the order they first appear.
@@ -1107,10 +1213,12 @@ icon and path `!define`s); makensis stores none of them.
   error, no path), the length of an id a recording was asked for by when it is no entry id, where Paste again went
   (`pasted` or `clipboard`), which key was saved or checked, from which window, and the check's result, a microphone
   preview started or stopped (the window, whether a microphone is pinned), and that a pinned microphone was not there;
-  for the welcome window, at startup whether each key is saved,
+  for the welcome window, at startup whether the key is saved,
   missing or unreadable, whether `--welcome` asked for it and whether it opens, its opening, closing and coming
   forward, each step's hold of the hotkey, whether Windows allows the microphone, and the name of a link that did not
-  open. Never logged: dictation text, text before the caret, translations,
+  open; for the speech model, its state changes, the bytes and seconds of a download, the load time, the files a
+  check deleted, each recognition's audio length, time and whether the other alphabet was masked out, and whether the
+  Soniox key of an earlier version was deleted. Never logged: dictation text, text before the caret, translations,
   dictionary terms, questions, answers, selected text, written texts, history entries, microphone names, the addresses
   and titles of sources, where the selection is on screen, audio, API keys, response bodies. `Effect` and `Input` are
   never logged with `{:?}`, since their `Debug` prints text.
@@ -1124,20 +1232,31 @@ icon and path `!define`s); makensis stores none of them.
 - The history's text and its recordings go to the main window alone: its commands read the files, and new entries come
   over its own channel (see Main window). The microphone names of the "Another microphone" card go to the Drop alone,
   and the main and welcome windows get the device list.
-- Soniox uploads are deleted after use. The last dictation (`last\`), the history (`history\`, with its recordings in
-  `history\audio`) and bench recordings stay on this computer only.
+- Sound never leaves this computer: recognition runs on it, Retry included, and only text goes to Anthropic. The
+  model's download from Hugging Face carries no key and nothing of the user's. The last dictation (`last\`), the
+  history (`history\`, with its recordings in `history\audio`) and bench recordings stay on this computer only.
 
 ## Bench
 
 `cue-bench run` reads recordings saved by the app (`%LOCALAPPDATA%\CUE\bench\recordings`, a WAV plus a JSON with the
-app name), and for each one runs the Soniox stream at real-time pace and the batch model at the same time, then
-refines the stream text (or the batch text if the stream failed) with `refine.model` and every model in the price
-list. It uses the app's own code paths and `dictionary.terms`, so the request, sanity check and timeouts match. One
-warm-up call per model is excluded from the report but counted in spend. A `--max-usd` budget stops new paid calls;
-`Ctrl+C` finishes the work already sent, and before exiting the bench waits for Soniox cleanup. `results.json` and
-`report.html` are rewritten after each recording in `%LOCALAPPDATA%\CUE\bench\runs\<timestamp>`. The report is a
-single HTML page with blind A/B pairs for transcription and for refine, scores, latency and cost per dictation, and
-saves the answers as `choices.json`.
+app name) and compares the speech models on this computer: every folder in `%LOCALAPPDATA%\CUE\models\` that
+`Recognizer::load` accepts is one engine, named by its folder, the app's `parakeet-ultra-int8` first and the rest by
+name (another export with the same file names, such as NVIDIA's own v3 from `istupakov/parakeet-tdt-0.6b-v3-onnx`,
+goes next to it). A folder that does not load (a partial download, another export, a processor ONNX Runtime cannot
+run on) is skipped with a console line, and with no model at all the bench says where to put one. Each model is
+loaded once before the run and recognizes every whole recording in turn, on a blocking thread, the way the app does
+(the pieces and the alphabet mask included); its latency is the model's own recognition time, its cost $0, and the
+console line says when the other alphabet was masked out. When recognition starts, the connection to Anthropic is
+warmed up as the app does on the second press. The text of `parakeet-ultra-int8` (or, if it failed or is not
+there, of the first model that succeeded) is refined with `refine.model` and every model in the price list. It uses
+the app's own code paths and `dictionary.terms`, so the request, sanity check and timeouts match. One warm-up call per
+model is excluded from the report but counted in spend. A `--max-usd` budget stops new paid calls; `Ctrl+C` finishes
+the step under way (a recognition cannot be interrupted, and a refine request under way is already paid for) and
+leaves that recording out; a second one exits at once. `results.json` and `report.html` are rewritten after each
+recording in `%LOCALAPPDATA%\CUE\bench\runs\<timestamp>`. The report is a single HTML page with blind A/B pairs for
+recognition and for refine, scores, latency and cost per dictation, and saves the answers as `choices.json`; runs from
+before the local models keep their cloud prices. The bench decides between Ultra and v3 on real recordings before a
+release: if Ultra comes out worse, the pinned files in `cue_core::model` change to v3 and nothing else does.
 
 `refine_compare` (an example in `cue-engines`) works on text instead of recordings: a phrase file
 (`{id, app, raw, before_cursor?, to?}`) goes through OpenRouter models and the direct Haiku path with the app's prompt,

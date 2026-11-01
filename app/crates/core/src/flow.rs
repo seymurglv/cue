@@ -32,8 +32,12 @@ pub enum TimerKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SttError {
-    Network,
-    KeyProblem,
+    /// The speech model is not on this computer, or its files did not load: Retry downloads or checks it again.
+    Model,
+    /// ONNX Runtime cannot run on this processor (no AVX2): nothing to retry.
+    Unsupported,
+    /// Recognition itself failed: Retry recognizes the saved recording again.
+    Failed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -797,7 +801,7 @@ impl Flow {
             // question has none yet.
             fx.push(Effect::Finished { id: self.id, outcome: Outcome::Failed });
             self.retry_text = false;
-            self.phase = Phase::Error { cause: cause_of(error), retry: true };
+            self.phase = Phase::Error { cause: cause_of(error), retry: error != SttError::Unsupported };
             self.push_ui(fx);
             return false;
         }
@@ -1093,8 +1097,9 @@ impl Flow {
 
 fn cause_of(error: SttError) -> ErrorCause {
     match error {
-        SttError::Network => ErrorCause::Net,
-        SttError::KeyProblem => ErrorCause::SonioxKey,
+        SttError::Model => ErrorCause::Model,
+        SttError::Unsupported => ErrorCause::Cpu,
+        SttError::Failed => ErrorCause::Stt,
     }
 }
 
@@ -1365,15 +1370,28 @@ mod tests {
         let mut f = Flow::new(2, false);
         let id = recording(&mut f, 0);
         f.handle(I::ChordDown(Mode::Dictate), 5_000);
-        let fx = f.handle(I::SttFailed { id, error: SttError::Network }, 6_000);
+        let fx = f.handle(I::SttFailed { id, error: SttError::Failed }, 6_000);
         let ui = last_ui(&fx).unwrap();
-        assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::Net), true));
+        assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::Stt), true));
         assert!(has(&fx, &E::Finished { id, outcome: Outcome::Failed }));
         let fx = f.handle(I::Ui(UiAction::Retry), 9_000);
         assert!(has(&fx, &E::TranscribeSaved { id }));
         assert_eq!(phase(&fx), Some(UiPhase::Think));
-        let fx = f.handle(I::SttFailed { id, error: SttError::KeyProblem }, 9_500);
-        assert_eq!(last_ui(&fx).unwrap().error, Some(ErrorCause::SonioxKey));
+        let fx = f.handle(I::SttFailed { id, error: SttError::Model }, 9_500);
+        let ui = last_ui(&fx).unwrap();
+        assert_eq!((ui.error, ui.retry), (Some(ErrorCause::Model), true), "the model: Retry downloads it again");
+    }
+
+    /// A processor ONNX Runtime cannot run on: nothing to retry, the recording stays for the user to keep elsewhere.
+    #[test]
+    fn an_unsupported_processor_has_no_retry() {
+        let mut f = Flow::new(2, false);
+        let id = recording(&mut f, 0);
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
+        let fx = f.handle(I::SttFailed { id, error: SttError::Unsupported }, 6_000);
+        let ui = last_ui(&fx).unwrap();
+        assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::Cpu), false));
+        assert!(!has(&f.handle(I::Ui(UiAction::Retry), 7_000), &E::TranscribeSaved { id }));
     }
 
     #[test]
@@ -1394,13 +1412,13 @@ mod tests {
         let mut f = Flow::new(2, false);
         let id = recording(&mut f, 0);
         f.handle(I::ChordDown(Mode::Dictate), 5_000);
-        f.handle(I::SttFailed { id, error: SttError::Network }, 6_000);
+        f.handle(I::SttFailed { id, error: SttError::Failed }, 6_000);
         assert_eq!(phase(&f.handle(I::Ui(UiAction::Dismiss), 7_000)), Some(UiPhase::Idle));
         f.handle(I::ChordDown(Mode::Dictate), 10_000);
         let id2 = f.current_id();
         f.handle(I::Timer(TimerKind::StartingDone), 10_380);
         f.handle(I::ChordDown(Mode::Dictate), 15_000);
-        f.handle(I::SttFailed { id: id2, error: SttError::Network }, 16_000);
+        f.handle(I::SttFailed { id: id2, error: SttError::Failed }, 16_000);
         let fx = f.handle(I::ChordDown(Mode::Dictate), 20_000);
         assert!(has(&fx, &E::OpenMic { id: DictationId(id2.0 + 1) }));
     }
@@ -2013,13 +2031,13 @@ mod tests {
     fn early_stt_failure_is_shown_when_recording_ends() {
         let mut f = Flow::new(2, false);
         let id = recording(&mut f, 0);
-        assert!(f.handle(I::SttFailed { id, error: SttError::KeyProblem }, 2_000).is_empty(), "recording goes on");
+        assert!(f.handle(I::SttFailed { id, error: SttError::Model }, 2_000).is_empty(), "recording goes on");
         let fx = f.handle(I::ChordDown(Mode::Dictate), 5_000);
         assert!(has(&fx, &E::StopMic { id, keep: true }), "the recording is kept for \"retry\"");
         assert!(!has(&fx, &E::FinishStt { id }), "transcription has already ended");
         assert!(has(&fx, &E::Finished { id, outcome: Outcome::Failed }));
         let ui = last_ui(&fx).unwrap();
-        assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::SonioxKey), true));
+        assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::Model), true));
         assert!(has(&f.handle(I::Ui(UiAction::Retry), 6_000), &E::TranscribeSaved { id }));
     }
 
@@ -2039,7 +2057,7 @@ mod tests {
         let mut f = Flow::new(2, false);
         let id = thinking_with_raw(&mut f, 0, "раз");
         assert!(f.handle(I::SttFinal { id, text: "два".into() }, 5_400).is_empty(), "refine is not requested a second time");
-        assert!(f.handle(I::SttFailed { id, error: SttError::Network }, 5_450).is_empty());
+        assert!(f.handle(I::SttFailed { id, error: SttError::Failed }, 5_450).is_empty());
         f.handle(I::Refined { id, text: "Раз.".into(), outcome: RefineOutcome::Refined }, 5_500);
         assert!(f.handle(I::Refined { id, text: "Раз!".into(), outcome: RefineOutcome::Refined }, 5_550).is_empty());
         f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 5_600);
@@ -2181,7 +2199,7 @@ mod tests {
         assert!(f.handle(I::ModeToggle, 11_100).is_empty(), "cancelled");
         let id = recording(&mut f, 20_000);
         f.handle(I::ChordDown(Mode::Dictate), 25_000);
-        f.handle(I::SttFailed { id, error: SttError::Network }, 25_200);
+        f.handle(I::SttFailed { id, error: SttError::Failed }, 25_200);
         assert!(f.handle(I::ModeToggle, 25_300).is_empty(), "error");
         f.handle(I::Ui(UiAction::Dismiss), 25_400);
         f.handle(I::TogglePause, 26_000);
@@ -2324,7 +2342,7 @@ mod tests {
         let mut f = Flow::new(2, false);
         let id = recording_in(&mut f, 0, Mode::Translate);
         f.handle(I::ChordDown(Mode::Dictate), 5_000);
-        f.handle(I::SttFailed { id, error: SttError::Network }, 5_200);
+        f.handle(I::SttFailed { id, error: SttError::Failed }, 5_200);
         let fx = f.handle(I::Ui(UiAction::Retry), 6_000);
         assert!(has(&fx, &E::TranscribeSaved { id }));
     }
@@ -2353,7 +2371,7 @@ mod tests {
         f.handle(I::Refined { id, text: "привет".into(), outcome: RefineOutcome::RawFallback }, 6_000);
         let id2 = recording_in(&mut f, 10_000, Mode::Translate);
         f.handle(I::ChordDown(Mode::Dictate), 15_000);
-        f.handle(I::SttFailed { id: id2, error: SttError::Network }, 15_200);
+        f.handle(I::SttFailed { id: id2, error: SttError::Failed }, 15_200);
         let fx = f.handle(I::Ui(UiAction::Retry), 16_000);
         assert!(has(&fx, &E::TranscribeSaved { id: id2 }));
         assert!(!fx.iter().any(|e| matches!(e, E::RefineAgain { .. })));
@@ -2483,7 +2501,7 @@ mod tests {
         let first = answer_open(&mut f, 0);
         let id = follow_up(&mut f, 7_000);
         f.handle(I::ChordDown(Mode::Dictate), 9_000);
-        f.handle(I::SttFailed { id, error: SttError::Network }, 9_300);
+        f.handle(I::SttFailed { id, error: SttError::Failed }, 9_300);
         assert_eq!(f.ui_state().phase, UiPhase::Error);
         assert!(f.follow_up_under_way(first), "missed, with its Retry");
     }
@@ -2738,10 +2756,10 @@ mod tests {
         f.handle(I::AskAnswered { id: first }, 7_000);
         let id = follow_up(&mut f, 10_000);
         f.handle(I::ChordDown(Mode::Dictate), 12_000);
-        let fx = f.handle(I::SttFailed { id, error: SttError::Network }, 12_300);
+        let fx = f.handle(I::SttFailed { id, error: SttError::Failed }, 12_300);
         assert!(!fx.contains(&E::CloseAnswer) && has(&fx, &E::Finished { id, outcome: Outcome::Failed }));
         let ui = last_ui(&fx).unwrap();
-        assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::Net), true));
+        assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::Stt), true));
         assert!(f.answer_open() && f.esc_active());
         assert!(has(&f.handle(I::Ui(UiAction::Retry), 13_000), &E::TranscribeSaved { id }));
         let fx = f.handle(I::SttFinal { id, text: "а подробнее".into() }, 14_000);
@@ -2752,7 +2770,7 @@ mod tests {
         f.handle(I::AskAnswered { id: first }, 7_000);
         let id = follow_up(&mut f, 10_000);
         f.handle(I::ChordDown(Mode::Dictate), 12_000);
-        f.handle(I::SttFailed { id, error: SttError::Network }, 12_300);
+        f.handle(I::SttFailed { id, error: SttError::Failed }, 12_300);
         assert_eq!(phase(&f.handle(I::Esc, 13_000)), Some(UiPhase::Answer), "back to the answer, still open");
         assert!(f.answer_open());
         assert!(has(&f.handle(I::ChordDown(Mode::Dictate), 14_000), &E::OpenMic { id: DictationId(id.0 + 1) }), "another follow-up");
@@ -2812,7 +2830,7 @@ mod tests {
         f.handle(I::AskAnswered { id: first }, 7_000);
         let id = follow_up(&mut f, 10_000);
         f.handle(I::ChordDown(Mode::Dictate), 12_000);
-        f.handle(I::SttFailed { id, error: SttError::Network }, 12_300);
+        f.handle(I::SttFailed { id, error: SttError::Failed }, 12_300);
         let answer = UiState { phase: UiPhase::Answer, error: None, retry: false, paused: false, mode: Mode::Ask };
         assert_eq!(f.handle(I::Ui(UiAction::Dismiss), 13_000), vec![E::Ui(answer)]);
         assert!(f.answer_open());
@@ -3081,7 +3099,7 @@ mod tests {
                     10 => I::MicDead,
                     11 => I::SessionLocked,
                     12 => I::SttFinal { id, text },
-                    13 => I::SttFailed { id, error: if next(2) == 0 { SttError::Network } else { SttError::KeyProblem } },
+                    13 => I::SttFailed { id, error: if next(2) == 0 { SttError::Failed } else { SttError::Model } },
                     14 => I::Refined {
                         id,
                         text,
@@ -3278,7 +3296,7 @@ mod tests {
                     3 => I::Esc,
                     4 => I::Ui(actions[next(actions.len() as u64) as usize]),
                     5 => I::SttFinal { id, text },
-                    6 => I::SttFailed { id, error: SttError::Network },
+                    6 => I::SttFailed { id, error: SttError::Failed },
                     7 => I::AskOpened { id },
                     8 => I::AskAnswered { id },
                     9 => I::AskWrite { id, how: hows[next(3) as usize] },

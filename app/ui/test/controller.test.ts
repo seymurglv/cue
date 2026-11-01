@@ -21,7 +21,7 @@ const shown = () =>
     .sort();
 const hover = (inside: boolean) => document.querySelector('.drop')!.dispatchEvent(new MouseEvent(inside ? 'mouseenter' : 'mouseleave'));
 const CUE = () => (window as any).CUE;
-const KINDS: TrayKind[] = ['noField', 'micSilent', 'holdHint', 'lastMinute', 'micMissing'];
+const KINDS: TrayKind[] = ['noField', 'micSilent', 'holdHint', 'lastMinute', 'micMissing', 'modelReady'];
 
 beforeEach(() => {
   document.body.innerHTML = '<div id="stage"></div>';
@@ -76,7 +76,8 @@ describe('Dictionaries and language', () => {
     expect(en.tray.holdHint.act).toBe('Got it');
     expect(en.tray.lastMinute.title).toBe('One minute left');
     expect(en.error).toEqual({
-      net: 'No connection', sonioxKey: 'Soniox key problem', claudeKey: 'Claude key problem', translate: "Couldn't translate",
+      model: 'Model did not download', cpu: 'Processor not supported', stt: "Couldn't recognize",
+      claudeKey: 'Claude key problem', translate: "Couldn't translate",
     });
     expect(en.close).toBe('Close');
     expect(en.drop).toEqual({
@@ -91,9 +92,9 @@ describe('Dictionaries and language', () => {
   });
 
   it('the controller is English by default', () => {
-    ctl.apply({ ...base, phase: 'error', error: 'net', retry: true });
+    ctl.apply({ ...base, phase: 'error', error: 'model', retry: true });
     hover(true);
-    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('No connection');
+    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Model did not download');
     expect(document.querySelector('.drop .ib.soft')!.getAttribute('title')).toBe('Cancel · Esc');
     expect(document.querySelector('.drop .ib.soft')!.getAttribute('aria-label')).toBe('Cancel');
   });
@@ -127,7 +128,7 @@ describe('The Drop follows the core', () => {
   });
 
   it('network error — "retry" sends retry, the cross sends dismiss', () => {
-    ctl.apply({ ...base, phase: 'error', error: 'net', retry: true });
+    ctl.apply({ ...base, phase: 'error', error: 'model', retry: true });
     (document.querySelector('.drop .ib.solid[title="Retry"]') as HTMLButtonElement).click();
     (document.querySelector('.drop .ib.soft') as HTMLButtonElement).click();
     expect(sent).toEqual(['retry', 'dismiss']);
@@ -220,19 +221,26 @@ describe('Which Drop parts are visible in each state', () => {
   });
 
   it('network error: mark, cause icon, "retry"; on hover the cross and "No connection"', () => {
-    ctl.apply({ ...base, phase: 'error', error: 'net', retry: true });
+    ctl.apply({ ...base, phase: 'error', error: 'model', retry: true });
     expect(shown()).toEqual(['mk', 'retry', 'why']);
     hover(true);
     expect(shown()).toEqual(['bx', 'lab', 'mk', 'retry', 'why']);
-    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('No connection');
+    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Model did not download');
   });
 
-  it('Soniox key error: no cause icon, with "retry"', () => {
-    ctl.apply({ ...base, phase: 'error', error: 'sonioxKey', retry: true });
+  it('a failed recognition: no cause icon, with "retry"', () => {
+    ctl.apply({ ...base, phase: 'error', error: 'stt', retry: true });
     expect(shown()).toEqual(['mk', 'retry']);
     hover(true);
     expect(shown()).toEqual(['bx', 'lab', 'mk', 'retry']);
-    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Soniox key problem');
+    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe("Couldn't recognize");
+  });
+
+  it('an unsupported processor: no cause icon and no "retry"', () => {
+    ctl.apply({ ...base, phase: 'error', error: 'cpu', retry: false });
+    hover(true);
+    expect(shown()).toEqual(['bx', 'lab', 'mk']);
+    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Processor not supported');
   });
 
   it('a failed translation shows its own label and retry, with the network icon', () => {
@@ -257,15 +265,15 @@ describe('Which Drop parts are visible in each state', () => {
   });
 
   it('error → error with another cause (network → Claude key) redraws the icon, "retry" and the label', () => {
-    ctl.apply({ ...base, phase: 'error', error: 'net', retry: true });
+    ctl.apply({ ...base, phase: 'error', error: 'model', retry: true });
     expect(shown()).toEqual(['mk', 'retry', 'why']);
-    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('No connection');
+    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Model did not download');
     ctl.apply({ ...base, phase: 'error', error: 'claudeKey', retry: false });
     expect(shown()).toEqual(['mk']);
     expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Claude key problem');
-    ctl.apply({ ...base, phase: 'error', error: 'net', retry: true });
+    ctl.apply({ ...base, phase: 'error', error: 'model', retry: true });
     expect(shown()).toEqual(['mk', 'retry', 'why']);
-    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('No connection');
+    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Model did not download');
   });
 });
 
@@ -380,7 +388,7 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
   it('the same height in every state: idle on hover, start, recording, thinking, done, empty, cancelled, error', () => {
     const heights: Record<string, number> = {};
     for (const phase of ['start', 'listen', 'think', 'done', 'empty', 'cancel', 'error'] as const) {
-      ctl.apply({ ...base, phase, error: phase === 'error' ? 'net' : null });
+      ctl.apply({ ...base, phase, error: phase === 'error' ? 'model' : null });
       heights[phase] = size(drop(), 'height');
     }
     ctl.apply(base);
@@ -414,7 +422,7 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
   });
 
   it('derived sizes: buttons 0.7 h, small icons 0.5 h, keys and label text 0.9 of the 40 px drawing', () => {
-    ctl.apply({ ...base, phase: 'error', error: 'net', retry: true });
+    ctl.apply({ ...base, phase: 'error', error: 'model', retry: true });
     hover(true);
     expect(size(part('.ib'), 'width')).toBeCloseTo(0.7 * H, 6);
     expect(size(part('.ib'), 'height')).toBeCloseTo(0.7 * H, 6);
@@ -552,7 +560,7 @@ describe('The mark opens to its own size, the same in every state', () => {
       const c = new DropController(document.getElementById('stage')!, { send() {}, rects() {} });
       const mark = () => document.querySelector('.drop .mkw') as HTMLElement;
       for (const phase of ['start', 'listen', 'think', 'done', 'cancel', 'error', 'empty'] as const) {
-        c.apply({ ...base, phase, error: phase === 'error' ? 'net' : null });
+        c.apply({ ...base, phase, error: phase === 'error' ? 'model' : null });
         expect(mark().style.maxWidth, phase).toBe('23.6px');
       }
     } finally {
@@ -692,7 +700,7 @@ describe('Dragging the Drop', () => {
     tryDrag({ pointerType: 'pen' });
     tryDrag({ isPrimary: false });
     for (const phase of ['start', 'listen', 'think', 'done', 'empty', 'cancel', 'error'] as const) {
-      ctl.apply({ ...base, phase, error: phase === 'error' ? 'net' : null });
+      ctl.apply({ ...base, phase, error: phase === 'error' ? 'model' : null });
       tryDrag();
     }
     ctl.apply({ ...base, paused: true });
@@ -967,6 +975,14 @@ describe('Tray card', () => {
     expect(box.querySelector('.nbd')!.textContent).toBe(`Гарнитура "Jabra" не найден — пишу с ${ru.tray.micMissing.unnamed}`);
   });
 
+  it('modelReady card: the model icon, green, closes by itself in 5 s, no button', () => {
+    expect(TRAYS.modelReady).toEqual({ icon: 'model', tone: 'ok', act: null, ttl: 5000 });
+    ctl.tray('modelReady');
+    expect(document.querySelector('.tray .nhd b')!.textContent).toBe('Model is ready');
+    expect(document.querySelector('.tray .nic svg')).not.toBeNull();
+    expect(document.querySelector('.tray [data-act]')).toBeNull();
+  });
+
   it('micMissing card: microphone icon, amber, closes by itself in 6 s, no button', () => {
     expect(TRAYS.micMissing).toEqual({ icon: 'mic', tone: 'warn', act: null, ttl: 6000 });
     expect(en.tray.micMissing.body).toBe('<b>{WANTED}</b> not found — recording from <b>{USED}</b>');
@@ -1020,8 +1036,8 @@ describe('Russian interface', () => {
     ctl.apply({ ...base, phase: 'cancel' });
     hover(true);
     expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Отменено');
-    ctl.apply({ ...base, phase: 'error', error: 'sonioxKey', retry: true });
-    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Проблема с ключом Soniox');
+    ctl.apply({ ...base, phase: 'error', error: 'stt', retry: true });
+    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Не распознал');
     ctl.apply({ ...base, phase: 'error', error: 'translate', retry: true, mode: 'translate' });
     expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Не удалось перевести');
   });
@@ -1229,7 +1245,7 @@ describe('Quiet mode: frames stop when nothing on screen can change', () => {
   });
 
   it('an error goes quiet too (the mark is still after the shake); recording, thinking, done, cancelled do not', () => {
-    ctl.apply({ ...base, phase: 'error', error: 'net', retry: true });
+    ctl.apply({ ...base, phase: 'error', error: 'model', retry: true });
     expect(runUntilQuiet(0)).toBe(1008);
     for (const phase of ['listen', 'think', 'done', 'cancel', 'start', 'empty'] as const) {
       ctl.apply({ ...base, phase });

@@ -184,7 +184,8 @@ export class TodayView {
     this.tip?.classList.remove('on');
   }
 
-  /** Lines fly out of the number and fade, once; with reduced motion only the number pops. */
+  /** Lines and dots fly out of the number and fade, once, in the text's color (a signal color is never decoration);
+   *  with reduced motion only the number pops. */
   private burst(target: HTMLElement | null): void {
     if (!target) return;
     target.classList.remove('pop');
@@ -196,7 +197,6 @@ export class TodayView {
     const b = target.getBoundingClientRect();
     const cx = b.left - a.left + b.width / 2;
     const cy = b.top - a.top + b.height / 2;
-    const colors = ['var(--rec)', 'var(--ask)', 'var(--ok)', 'var(--warn)'];
     for (let i = 0; i < 18; i++) {
       const angle = (i / 18) * Math.PI * 2;
       const dist = 34 + (i % 5) * 9;
@@ -204,7 +204,7 @@ export class TodayView {
       const p = h('i', line ? 'bp' : 'bp dot');
       p.style.left = `${cx}px`;
       p.style.top = `${cy}px`;
-      p.style.background = line ? 'var(--text)' : colors[i % 4];
+      p.style.background = 'var(--text)';
       app.append(p);
       p.animate(
         [

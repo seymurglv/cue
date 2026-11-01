@@ -687,8 +687,8 @@ mod tests {
 
     // Numbers, the prompt, tags, hyphens.
 
-    /// The way Soniox returns it: capitalized and with a period.
-    fn soniox_like(raw: &str) -> String {
+    /// The way recognition returns it: capitalized and with a period.
+    fn as_recognized(raw: &str) -> String {
         let mut c = raw.chars();
         c.next().map(|f| f.to_uppercase().chain(c).collect::<String>() + ".").unwrap_or_default()
     }
@@ -733,7 +733,7 @@ mod tests {
         assert_eq!(NUMBER_DICTATIONS.len(), 31);
         for (raw, refined) in NUMBER_DICTATIONS {
             assert!(sanity_ok(raw, refined, &[], &s()), "false rejection: {raw} → {refined}");
-            assert!(sanity_ok(&soniox_like(raw), refined, &[], &s()), "false rejection (Soniox): {raw} → {refined}");
+            assert!(sanity_ok(&as_recognized(raw), refined, &[], &s()), "false rejection (as recognized): {raw} → {refined}");
         }
     }
 
@@ -750,7 +750,7 @@ mod tests {
         ];
         for (raw, refined) in ok {
             assert!(sanity_ok(raw, refined, &[], &s()), "false rejection: {raw} → {refined}");
-            assert!(sanity_ok(&soniox_like(raw), refined, &[], &s()), "false rejection (Soniox): {raw} → {refined}");
+            assert!(sanity_ok(&as_recognized(raw), refined, &[], &s()), "false rejection (as recognized): {raw} → {refined}");
         }
     }
 
@@ -782,7 +782,7 @@ mod tests {
         ];
         for (raw, refined) in bad {
             assert!(!sanity_ok(raw, refined, &[], &s()), "bad answer let through: {raw} → {refined}");
-            assert!(!sanity_ok(&soniox_like(raw), refined, &[], &s()), "bad answer let through (Soniox): {raw} → {refined}");
+            assert!(!sanity_ok(&as_recognized(raw), refined, &[], &s()), "bad answer let through (as recognized): {raw} → {refined}");
         }
     }
 
@@ -932,12 +932,12 @@ mod tests {
         ];
         for (raw, refined) in ok {
             assert!(sanity_ok(raw, refined, &[], &s()), "false rejection: {raw} → {refined}");
-            assert!(sanity_ok(&soniox_like(raw), refined, &[], &s()), "false rejection (Soniox): {raw} → {refined}");
+            assert!(sanity_ok(&as_recognized(raw), refined, &[], &s()), "false rejection (as recognized): {raw} → {refined}");
         }
         // An answer made only of digits and signs is still rejected.
         for (raw, refined) in [("сколько будет двадцать пять умножить на четыре", "25 × 4 = 100."), ("какой курс доллара", "92,5 ₽")] {
             assert!(!sanity_ok(raw, refined, &[], &s()), "bad answer let through: {raw} → {refined}");
-            assert!(!sanity_ok(&soniox_like(raw), refined, &[], &s()), "bad answer let through (Soniox): {raw} → {refined}");
+            assert!(!sanity_ok(&as_recognized(raw), refined, &[], &s()), "bad answer let through (as recognized): {raw} → {refined}");
         }
     }
 

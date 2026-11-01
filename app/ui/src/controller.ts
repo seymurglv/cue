@@ -89,8 +89,9 @@ export class DropController {
     const api = {
       mode: () => this.state.mode ?? 'dictate',
       // The cause icon: a failed translation shows the network one; the key problems show none.
-      err: () => (this.state.error === 'net' || this.state.error === 'translate' ? 'net' : 'key'),
-      errLabel: () => this.t.error[this.state.error ?? 'net'],
+      // The network icon where the network is the cause: the model's download, a translation.
+      err: () => (this.state.error === 'model' || this.state.error === 'translate' ? 'net' : 'key'),
+      errLabel: () => this.t.error[this.state.error ?? 'stt'],
       text: this.t.drop,
       retry: () => this.state.retry,
       lbl: () => 'icons',

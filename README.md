@@ -2,11 +2,12 @@
 
 CUE is a voice-dictation app for Windows 11. Press `Ctrl + Win`, speak, press the keys again (or hold them while you
 speak), and the text appears at the caret in whatever app you are typing in: fillers and false starts removed,
-punctuation added, your own words kept, in Russian, English or both mixed. Speech is transcribed by Soniox and tidied
-up by Claude, from Anthropic, with your own keys for both. Add `Shift` and the text comes out translated; add `Alt`
-instead and ask a question out loud, and the answer appears next to your work. CUE runs quietly in the background: a
-small indicator at the bottom of the screen (the Drop) shows what it is doing, and an icon next to the clock opens the
-main window, with the history of everything CUE wrote and the settings.
+punctuation added, your own words kept, in Russian or English. Speech is recognized on your computer by a speech model
+CUE downloads once (Parakeet Ultra), and the text is tidied up by Claude, from Anthropic, with your own key. Add
+`Shift` and the text comes out translated; add `Alt` instead and ask a question out loud, and the answer appears next
+to your work. CUE runs quietly in the background: a small indicator at the bottom of the screen (the Drop) shows what
+it is doing, and an icon next to the clock opens the main window, with the history of everything CUE wrote and the
+settings.
 
 ## Install
 
@@ -18,64 +19,75 @@ Download the installer, `CUE_<version>_x64-setup.exe`, from the latest release:
    Control is on (Windows Security → App & browser control), it blocks unsigned apps like CUE, and CUE will not run.
 2. The installer, in English or Russian, needs no administrator rights and asks for no license agreement. It installs
    CUE for you alone, into `%LOCALAPPDATA%\Programs\CUE`, adds it to the Start menu and downloads nothing: the
-   WebView2 runtime that CUE's windows use comes with Windows 11.
+   WebView2 runtime that CUE's windows use comes with Windows 11. The speech model is not in the installer: CUE
+   downloads it on its first start (see below).
 3. Its last page starts CUE and offers a desktop shortcut: both boxes are ticked, so untick **Create desktop
    shortcut** if you do not want one. A first install also turns on **Start at sign-in**; installing CUE again, or a
    newer version, keeps your choice. Ticking **Delete the application data** in any uninstall, including the one an
    upgrade runs first, makes the next install a first one. You can turn Start at sign-in off in the menu of the icon
    next to the clock, or in the main window's General settings.
 
-On its first start, and on every start while one of its two keys is missing, CUE opens a welcome window: Hello, Keys,
-Microphone, First dictation and Done. While it is open, `Ctrl + Win` works only at the First dictation step; at the
-others it brings the window forward. If you close it before both keys are saved, it comes back at the next start. To
+On its first start, and on every start while the Anthropic key is missing, CUE opens a welcome window: Hello, Key,
+Model, Microphone, First dictation and Done. While it is open, `Ctrl + Win` works only at the First dictation step; at
+the others it brings the window forward. If you close it before the key is saved, it comes back at the next start. To
 open it again at any time, even while CUE is running, press `Win + R` and run
 `"%LOCALAPPDATA%\Programs\CUE\cue.exe" --welcome`.
 
+At the same first start CUE downloads its speech model, Parakeet Ultra, about 670 MB, from Hugging Face into
+`%LOCALAPPDATA%\CUE\models`, in the background. The Model step shows its progress and moves on by itself when it is
+ready; you can go on to the other steps meanwhile. A download that stops (no network, the computer asleep) goes on
+from where it stopped when you press **Retry** (in the welcome window, the main window's **Speech recognition**
+settings, or the Drop). After that, recognition needs no network. The model needs a processor with AVX2 (2013 and
+later); on one without it, the Drop says "Processor not supported".
+
 ## Keys
 
-CUE uses your own accounts at two services, and each bills you directly for what you use:
+CUE uses your own account at one service, which bills you directly for what you use:
 
-- **Soniox** turns your speech into text. Sign in at the [Soniox Console](https://console.soniox.com), set up billing
-  and create an API key.
 - **Anthropic** cleans the text up, translates it and answers your questions, with Claude. Sign in at the
   [Anthropic Console](https://console.anthropic.com), set up billing and create an API key.
 
-Paste each key into the welcome window, or later into the main window's settings (**Keys**), and press **Check**: it
-saves the key and sends a free test request. The keys are kept in Windows Credential Manager; CUE's windows show only
-a mask of them.
+Speech recognition runs on your computer and costs nothing. Earlier versions of CUE also used Soniox, with a key of
+its own: this version does not, and deletes that key from Windows Credential Manager at its first start.
 
-Dictation and translation cost roughly $12–13 a month for an hour of speech a day with the default cleanup model,
-Claude Sonnet 5.5 (about $4–5 with Claude Haiku 5.5, see `refine.model`). Questions asked with
-`Ctrl + Win + Alt` cost more, and each web search one of them runs adds $0.01. CUE writes down what every dictation and
-question cost, on your computer only (`usage.csv`, see [Costs](#costs)).
+Paste the key into the welcome window, or later into the main window's settings (**Keys**), and press **Check**: it
+saves the key and sends a free test request. The key is kept in Windows Credential Manager; CUE's windows show only a
+mask of it.
+
+Dictation and translation cost roughly $8.50–9.50 a month for an hour of speech a day with the default cleanup model,
+Claude Sonnet 5.5 (under $1.50 with Claude Haiku 5.5, see `refine.model`): all of it is the cleanup. Questions asked
+with `Ctrl + Win + Alt` cost more, and each web search one of them runs adds $0.01. CUE writes down what every
+dictation and question cost, on your computer only (`usage.csv`, see [Costs](#costs)).
 
 ## Privacy
 
-- **Soniox** receives the sound of each dictation, translation and question, and the name of the app you are dictating
-  into. When the live connection fails, or you press **Retry**, the saved recording is sent to it again.
-- **Anthropic** receives the text: what Soniox heard, the app name and up to 500 characters before the caret, and for a
-  question also the text you selected. Nothing is read from password fields.
+- **Sound stays on this computer.** Each dictation, translation and question is recognized here, by the speech model;
+  no recording is sent anywhere, **Retry** included.
+- **Anthropic** receives the text: what the model recognized, the app name and up to 500 characters before the caret,
+  and for a question also the text you selected. Nothing is read from password fields.
 - The microphone is open only while CUE records, and while a window shows its level for you to check it.
 - Your history, with the recordings of what you said for the period you choose, settings, logs and the copy of your
-  last dictation stay on this computer. CUE has no telemetry: it connects only to Soniox and Anthropic, and the
-  installer sends nothing.
+  last dictation stay on this computer. CUE has no telemetry: it connects only to Anthropic, and to Hugging Face to
+  download the speech model (a plain download of fixed files: nothing of yours goes with it). The installer sends
+  nothing.
 
-Each service has its own policy on how long it keeps what it receives. Every detail is in
+Anthropic has its own policy on how long it keeps what it receives. Every detail is in
 [Privacy in detail](#privacy-in-detail).
 
 ## Uninstall
 
 Quit CUE from the menu of its icon next to the clock, then open Windows **Settings → Apps → Installed apps**, find
 **CUE** and choose **Uninstall**. This removes the program, its Start menu entry, its desktop shortcut and Start at
-sign-in. Your history, settings and keys stay, so installing CUE again picks up where you left off. The uninstaller's
-**Delete the application data** box removes only the cache of CUE's windows (the last folder below) and the installer's
-registry key (the last line). To remove everything:
+sign-in. Your history, settings, speech model and key stay, so installing CUE again picks up where you left off. The
+uninstaller's **Delete the application data** box removes only the cache of CUE's windows (the last folder below) and
+the installer's registry key (the last line). To remove everything:
 
-- the folder `%LOCALAPPDATA%\CUE`: the history and its recordings, the last dictation, the logs and the cost records;
+- the folder `%LOCALAPPDATA%\CUE`: the history and its recordings, the last dictation, the logs, the cost records and
+  the speech model (`models`, about 670 MB);
 - the folder `%APPDATA%\CUE`: the settings;
 - the folder `%LOCALAPPDATA%\app.cue.dictation`: the cache of CUE's windows;
-- the keys: in **Control Panel → Credential Manager → Windows Credentials**, remove `soniox.CUE` and `anthropic.CUE`
-  under Generic Credentials;
+- the key: in **Control Panel → Credential Manager → Windows Credentials**, remove `anthropic.CUE` under Generic
+  Credentials (the `soniox.CUE` of earlier versions is already gone: CUE deletes it at its first start);
 - the registry key `HKEY_CURRENT_USER\Software\seymurglv`, named after CUE's publisher, where the installer remembers
   the folder CUE was installed in and whether Start at sign-in was on: in Registry Editor.
 
@@ -126,21 +138,30 @@ from source.
     first (`ask.web_search`); facts that do not change, explanations and writing need no search.
 - **Translation** (`Ctrl + Win + Shift`). Speech that is not in your target language (`translate.target`, English
   by default) is translated into it; speech in the target language goes to your home language (`translate.home`, by
-  default the Windows display language). The speech language is the one most of your words were in, so
-  "Открой Telegram" counts as Russian. The cleanup of dictation applies too (fillers, lists, numbers, one line in
+  default the Windows display language). The speech language is told by its alphabet: the language of the pair
+  written in Cyrillic or in Latin letters, whichever your sentence is in, so "Открой Telegram" counts as Russian
+  (`translate.speech` fixes it instead). The cleanup of dictation applies too (fillers, lists, numbers, one line in
   terminals), and names from `dictionary.terms`, product names and code are kept as written; a self-correction,
   though, can come back turned around (see Known limitations). If the translation fails (no network, a timeout, or an
   answer that does not look like a translation), nothing is pasted: the Drop shows "Couldn't translate", and **Retry**
   translates the saved text again.
 - **Text at the caret in any app**, pasted through the clipboard. Your previous clipboard content comes back about
   half a second later, and dictated text is kept out of Windows clipboard history and the cloud clipboard.
-- **Russian, English, and both mixed** in one sentence.
+- **Speech recognized on this computer** by Parakeet Ultra, Moondream's post-trained version of NVIDIA's Parakeet TDT
+  0.6B v3, which writes punctuation and capital letters itself. The text comes once you finish: recognition of a
+  30-second dictation takes well under a second on a current processor, and the cleanup follows. While recording, the
+  Drop shows your voice level, never text. A dictation made before the model has finished downloading or loading is
+  kept: the Drop thinks until the model is ready, and the text is pasted then. When the model becomes ready after a
+  download, a quiet card says so: "Model is ready".
+- **Russian or English, one language a dictation.** Names and terms in the other alphabet stay as you said them
+  ("запусти cargo test в Visual Studio Code", "call Марисоль"); when the model writes part of a Russian sentence in
+  English (or the other way round), CUE recognizes it again in the dictation's own alphabet.
 - **Light-touch cleanup:** fillers, stutters and abandoned starts are removed, "Wednesday, no, Thursday" becomes
   "Thursday", punctuation and paragraphs are added, lists go on separate lines, numbers are written as digits.
   The tone adapts to the target app; in terminals the result always stays on one line, so nothing runs by itself.
-- **Safe fallbacks:** if cleanup is slow, refused or looks wrong, the raw transcript is pasted instead. If the
-  Soniox stream drops, the saved recording is transcribed as a whole. If there is no network, the recording is kept
-  and **Retry** sends it again.
+- **Safe fallbacks:** if cleanup is slow, refused or looks wrong, or there is no network, the raw transcript is pasted
+  instead. If recognition fails, the recording is kept and **Retry** recognizes it again; if the model did not
+  download, **Retry** downloads the rest of it first.
 - **`Esc`** cancels; **Restore** (for 3.6 s) brings the dictation back, and asks again a question cancelled before its
   answer showed, with the same selection. **`Ctrl + Win + V`** pastes the last result again, a translation included.
 - **Nowhere to paste?** When the focus is clearly not a text field (desktop, File Explorer's file list), the text
@@ -170,7 +191,7 @@ from source.
     **N more today**; every earlier day is one line under **Earlier** (its name, its two most used apps and how many
     entries it has) that opens in place, and older days come with **Show earlier**. Three or more entries in a row from one app, each within 10 minutes of the one before, make
     a stack: its newest entry on top, the app and the count on a chip that opens it. A click on an entry (or `Enter`)
-    shows how you said it: a dictation as Soniox heard it, the words CUE removed struck out and the ones it added or
+    shows how you said it: a dictation as it was recognized, the words CUE removed struck out and the ones it added or
     changed in green; a translation's speech; an "Ask" question; and its recording, with play and pause, while it is
     kept. Every entry opens to its whole text: one from before CUE kept how it was said says *not kept*, and a
     dictation CUE wrote just as it was heard says so. A recording plays only when you press it, and
@@ -179,8 +200,10 @@ from source.
     again**: the text goes into the window right under the main window (usually the one you were in before opening
     it), or into the clipboard when there is none. `Ctrl + Win + V`, a paste with an answer's button, a refusal and a
     failure add no entry, and **Paste again** does not change the last result.
-  - **Settings** (the gear): **Keys** (Soniox and Anthropic: paste a key and press **Check**, which saves it and sends
-    a free test request; the window shows only its mask), **Microphone** (As in Windows, or a device of your own, with
+  - **Settings** (the gear): **Speech recognition** (Parakeet Ultra and its state: Ready, Downloading with its percent,
+    its megabytes and a bar, or Didn't download with **Retry**, which goes on from where the download stopped; there is
+    no choice of engine), **Keys** (Anthropic: paste the key and press **Check**, which saves it and sends a free test
+    request; the window shows only its mask), **Microphone** (As in Windows, or a device of your own, with
     a live level), **Translation** (the target language of `Ctrl + Win + Shift`, any of the 60), **History** (**Keep
     history**: Forever, A year, A month (the default), A week or Don't keep, older days deleted on their own; **Keep
     recordings**: A day, A week (the default), A month or Don't keep, never longer than the history itself; a shorter
@@ -196,12 +219,13 @@ from source.
   switch at once.
 - **Usage accounting:** every dictation's cost is recorded locally, with its mode; `cue-cli usage` shows a monthly
   summary.
-- **Comparison bench** (a developer tool): runs your saved recordings through Soniox stream and batch and through
-  several Claude models, and builds a blind A/B report. A second one (`ask_compare`) asks a set of questions the way
-  "Ask" does and measures its decisions, speed and cost.
+- **Comparison bench** (a developer tool): runs your saved recordings through every speech model in CUE's models
+  folder and through several Claude models, and builds a blind A/B report. A second one (`ask_compare`) asks a set of
+  questions the way "Ask" does and measures its decisions, speed and cost.
 
-Not in this version: changing the hotkeys, a vocabulary for speech recognition itself (the dictionary guides only the
-cleanup, see Settings), macOS.
+Not in this version: changing the hotkeys, text appearing while you speak, a choice of speech models, recognition on
+the graphics card, a vocabulary for speech recognition itself (the dictionary guides only the cleanup, see Settings),
+macOS.
 
 ## Requirements for building
 
@@ -211,16 +235,19 @@ cleanup, see Settings), macOS.
 - Visual Studio Build Tools with the "Desktop development with C++" workload.
 - Microsoft Edge WebView2 Runtime (included with Windows 11).
 - Node.js 24 or newer, with npm (`"node": ">=24"` in `app/package.json`).
-- A Soniox API key and an Anthropic API key.
+- A processor with AVX2, for the speech model.
+- An Anthropic API key.
+
+The first build downloads ONNX Runtime's prebuilt library, which the `ort` crate links into the program, into
+`%LOCALAPPDATA%\ort.pyke.io`, once.
 
 ## API keys
 
 Keys live in Windows Credential Manager under the service name `CUE`. They are never written to files, never
-printed in full and never logged. Enter them once in the welcome window or the main window (Settings → Keys: paste
-the key and press **Check**), or with the command-line tool (input is hidden):
+printed in full and never logged. Enter the Anthropic key once in the welcome window or the main window (Settings →
+Keys: paste the key and press **Check**), or with the command-line tool (input is hidden):
 
 ```powershell
-cargo run -p cue-cli -- keys set soniox
 cargo run -p cue-cli -- keys set anthropic
 cargo run -p cue-cli -- keys show     # masked values, e.g. sk-ant…f3a9
 cargo run -p cue-cli -- keys check    # a free test request per key
@@ -299,7 +326,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cd app; npm test; npm run build
 ```
 
-The tests need no microphone, network or API keys (network code is tested against a local fake server).
+The tests need no microphone, network, API keys or speech model (network code, the model's download included, is
+tested against a local fake server). Three ignored tests in `cue-engines` check the real model: run them with
+`cargo test -p cue-engines -- --ignored` and `CUE_MODEL_DIR` set to a model folder (one of them also takes a
+recording in `CUE_TEST_WAV`, and the log-mel one the export's reference preprocessor `nemo128.onnx` in `CUE_NEMO128`).
 
 ## Settings
 
@@ -311,12 +341,7 @@ history is neither written nor cleaned up until a period is chosen in the window
 
 ```json
 {
-  "stt": {
-    "engine": "soniox",
-    "soniox_model": "stt-rt-v5",
-    "soniox_async_model": "stt-async-v5",
-    "language_hints": ["ru", "en"]
-  },
+  "stt": { "engine": "parakeet" },
   "refine": {
     "model": "claude-sonnet-5-5",
     "context_chars": 500,
@@ -329,8 +354,9 @@ history is neither written nor cleaned up until a period is chosen in the window
 }
 ```
 
-- `stt.soniox_model` / `soniox_async_model`: the real-time model and the batch model used for fallback and Retry.
-  `language_hints` are hints, not limits. `engine` has a single value today, `soniox`.
+- `stt.engine` has a single value, `parakeet`, the speech model on this computer; any other name reads as it. The
+  fields of earlier versions (`soniox_model`, `soniox_async_model`, `language_hints`, and the Soniox prices under
+  `pricing`) are ignored and dropped the next time CUE writes the file.
 - `refine.model`: the Claude model for cleanup and translation, `claude-sonnet-5-5` by default; `claude-haiku-5-5`
   is faster and cheaper and fixes fewer misheard words. `context_chars`: how much text before the caret is sent as context,
   for cleanup and for "Ask" alike (0 turns it off). `min_ratio`, `max_ratio`, `min_overlap`: the sanity check (see
@@ -363,28 +389,26 @@ history is neither written nor cleaned up until a period is chosen in the window
   file only when it is not `"bottom"`. Example: `"drop": { "position": "right" }`.
 - `dictionary.terms`: names and terms you often say, written as they should appear; the main window's Dictionary edits
   the same list. Example:
-  `"dictionary": { "terms": ["Soniox", "Claude Haiku", "GitHub"] }`. When the transcript clearly means one of them but
-  spells it differently, splits it or mixes alphabets (`Со niox`, `гитхаб`, `git hub`), the cleanup writes it as
+  `"dictionary": { "terms": ["Parakeet", "Claude Haiku", "GitHub"] }`. When the transcript clearly means one of them
+  but spells it differently, splits it or mixes alphabets (`Пара kit`, `гитхаб`, `git hub`), the cleanup writes it as
   listed. The list affects only the Claude cleanup, where it rides along with the cached system prompt and costs
-  almost nothing. It is not sent to Soniox as recognition context: Soniox bills context tokens on every dictation,
-  which would roughly double the cost of recognition. Entries are trimmed; empty ones, ones with a line break, ones
+  almost nothing; the speech model takes no vocabulary. Entries are trimmed; empty ones, ones with a line break, ones
   longer than 60 characters and exact repeats (case-sensitive) are skipped, and only the first 200 are used. A value
   that is not a list reads as an empty list. The block is kept in the file only when the list is not empty.
-- `translate`: the language pair of `Ctrl + Win + Shift`, as the ISO 639-1 codes of the 60 languages Soniox
-  recognizes (`en`, `ru`, `de`, `zh`, …). Case and surrounding spaces do not matter, and a locale name reads as its
-  language (`"ru-RU"` is `ru`).
+- `translate`: the language pair of `Ctrl + Win + Shift`, as the ISO 639-1 codes of the 60 languages CUE knows
+  (`en`, `ru`, `de`, `zh`, …). Case and surrounding spaces do not matter, and a locale name reads as its language
+  (`"ru-RU"` is `ru`).
   - `target` (default `en`): speech in any other language is translated into it. The main window's Translation
     settings set it too.
-  - `home`: speech in the target language is translated into it. By default the Windows display language, else the
-    first `stt.language_hints` entry; one equal to the target is skipped. With no home language, speech in the target
-    language is only cleaned up.
-  - `speech`: `"auto"` (the default) lets Soniox name the language of every word, and the language of most words
-    decides the direction. A code fixes the speech language and goes to Soniox as the only language hint of a
-    translation (dictation keeps `stt.language_hints`).
+  - `home`: speech in the target language is translated into it. By default the Windows display language, else
+    Russian (English when the target is Russian); one equal to the target is skipped. With no home language, speech in
+    the target language is only cleaned up.
+  - `speech`: `"auto"` (the default) tells the speech language by the recognized text's alphabet: the language of the
+    pair written in that alphabet, the target first. A code fixes the speech language, and with it the direction.
 
   An unknown code reads as the default, and defaults are not written to the file. Example for a Russian speaker who
-  writes to German colleagues: `"translate": { "target": "de", "home": "ru" }`. Russian (or English) speech is pasted
-  in German, German speech in Russian.
+  writes to German colleagues: `"translate": { "target": "de", "home": "ru" }`. Russian speech is pasted in German,
+  German speech in Russian; speech in Latin letters counts as German there, English included.
 - `ask`: the "Ask" mode.
   - `enabled` (default `true`): `false` turns "Ask" off, and `Ctrl + Win + Alt` then goes to Windows as is.
   - `web_search` (default `true`): `false` answers without searching the web.
@@ -398,10 +422,10 @@ history is neither written nor cleaned up until a period is chosen in the window
   Only `false` turns a switch off; any other wrong value (an empty or non-string model, `0`, `11` or `"3"` searches, a
   section that is not an object) reads as the default, and defaults are not written to the file. Example:
   `"ask": { "model": "claude-sonnet-5-5", "max_searches": 3 }`.
-- `pricing` (not written unless you change it): `soniox_rt_per_hour`, `soniox_async_per_hour`, and a `claude` list
-  of `{model, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok}` in USD. Defaults:
-  Soniox $0.12 / hour (stream) and $0.10 / hour (batch); Haiku 5.5 $0.10 / $0.50, Sonnet 5.5 $2 / $10,
-  Opus 5.5 $4 / $20 per million input / output tokens. `web_search_usd` ($0.01) prices one web search of "Ask".
+- `pricing` (not written unless you change it): a `claude` list of
+  `{model, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok}` in USD. Defaults: Haiku 5.5
+  $0.10 / $0.50, Sonnet 5.5 $2 / $10, Opus 5.5 $4 / $20 per million input / output tokens. `web_search_usd` ($0.01)
+  prices one web search of "Ask". Recognition on this computer has no price.
 
 Start at sign-in is not a setting: it is the Windows `Run` registry entry, toggled from the tray menu or the main
 window's General settings.
@@ -414,10 +438,11 @@ Everything else lives in `%LOCALAPPDATA%\CUE`:
 |---|---|
 | `last\audio.wav`, `last\result.txt` | The last successful dictation (16 kHz mono WAV and the final text), for `Ctrl + Win + V` and Copy. Replaced by the next one, and by an "Ask" result: a text written into a field keeps its question's recording as `audio.wav`; an answer pasted with its button has no audio, so the old `audio.wav` is deleted. |
 | `last\current.wav` | Audio of the dictation in progress; after a failure it waits there for Retry. Deleted when a dictation is cancelled or comes out empty, and when a question has been answered. |
-| `history\YYYY-MM-DD.jsonl` | The history the main window shows: one file per local day, one line of JSON per result (its time, mode, app and text, for "Ask" the question, and for a dictation or a translation the text as Soniox heard it, `raw`). Days older than `history.keep` are deleted on their own, and **Clear history** deletes them all. |
+| `history\YYYY-MM-DD.jsonl` | The history the main window shows: one file per local day, one line of JSON per result (its time, mode, app and text, for "Ask" the question, and for a dictation or a translation the text as it was recognized, `raw`). Days older than `history.keep` are deleted on their own, and **Clear history** deletes them all. |
 | `history\audio\` | The recordings of the history's entries, one Ogg Opus file per entry (speech at 16 kbit/s, about 6 MB an hour), named by the entry's id. Older than `history.audio` (and never older than the history) they are deleted on their own; **Clear history**, Don't keep and the history turned off delete them all. A clear first renames the folder `audio.cleared-<n>`, then deletes it. |
 | `logs\cue.log.YYYY-MM-DD` | Daily log: events, per-stage timings, error kinds. No dictation text, no questions, answers or selected text, no history, no microphone names, no audio, no keys. Kept 7 days and 10 MB at most. **Open log** in the tray menu opens this folder. |
-| `usage.csv` | One row per attempt: time (UTC), audio length, transcription path, cost, model, tokens, latency, outcome, mode, web searches, how many words it wrote and its local date. A cache warm-up gets a row of its own. No text. |
+| `usage.csv` | One row per attempt: time (UTC), audio length, recognition engine and path, cost, model, tokens, latency, outcome, mode, web searches, how many words it wrote and its local date. A cache warm-up gets a row of its own. No text. |
+| `models\parakeet-ultra-int8\` | The speech model, about 670 MB: `encoder-model.int8.onnx`, `decoder_joint-model.int8.onnx` and `vocab.txt`, downloaded once from a fixed commit of the Hugging Face repository `Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx`. Each file comes as `<name>.part`, resumes from where it stopped, and is renamed only once its SHA-256 matches the one in CUE's code; a file that does not match is deleted and downloaded again. |
 | `bench\recordings\` | Recordings for the bench, only when `bench.save_recordings` is `true`. |
 | `bench\runs\<timestamp>\` | Bench runs: `results.json` and `report.html`. |
 
@@ -431,13 +456,15 @@ cargo run -p cue-cli -- usage            # current month (UTC)
 cargo run -p cue-cli -- usage 2026-10
 ```
 
-The summary shows the number of dictations, minutes of audio, transcription and refine cost, the cost per dictation
+The summary shows the number of dictations, minutes of audio, transcription cost (0 for recognition on this computer;
+rows written by earlier versions keep the Soniox cost they were written with) and refine cost, the cost per dictation
 and per hour of audio, the average latency from the second key press to the paste (overall and for recordings of
 20 s or less), web search when there was some, and the rows and dollars of each mode. Prices come from
-`settings.json`. A Retry is a second paid attempt and gets its own row; the Retry of a failed translation translates
-the saved text again, so its row has no audio.
+`settings.json`. A Retry is a second attempt, whose cleanup is paid again, and gets its own row; the Retry of a
+failed translation translates the saved text again, so its row has no audio.
 
-The columns `mode`, `web_searches` and `search_usd` came with the modes, and `words` and `day` with Today. `mode` is
+New rows have `stt_engine` `parakeet`, `stt_path` `local` and `stt_usd` 0; the columns stay as they were. The
+columns `mode`, `web_searches` and `search_usd` came with the modes, and `words` and `day` with Today. `mode` is
 `dictate`, `translate`, `ask` or `warmup`; `words` is how many words a dictation or translation wrote (0 for anything
 else) and `day` the local date.
 - An `ask` row is one question: its audio, the tokens of `ask.model` (in the `refine_model` and token columns) and its
@@ -457,22 +484,29 @@ open the file directly; use **Data → From Text/CSV** and choose the comma deli
 
 ## Comparison bench
 
-The bench compares transcription and cleanup models on your own speech and shows how the sanity check behaves on
+The bench compares speech models and cleanup models on your own speech and shows how the sanity check behaves on
 it. It does not tune the thresholds.
 
 1. Set `"bench": { "save_recordings": true }` in `settings.json`, restart CUE and dictate as usual.
-2. Run it (needs the Soniox and Anthropic keys):
+2. Put the speech models to compare in `%LOCALAPPDATA%\CUE\models\`, one folder each: `parakeet-ultra-int8`, the app's
+   model, is there once CUE has downloaded it, and another export with the same file names (`encoder-model.int8.onnx`,
+   `decoder_joint-model.int8.onnx`, `vocab.txt`), such as NVIDIA's own v3 from `istupakov/parakeet-tdt-0.6b-v3-onnx`,
+   can go next to it in a folder of its own.
+3. Run it (needs the Anthropic key):
 
    ```powershell
    cargo run -p cue-bench -- run [--limit N] [--max-usd X]
    ```
 
-   Each recording is transcribed twice in parallel: Soniox stream at real-time pace and Soniox batch. The transcript
-   is then cleaned by `refine.model` and every model in the `pricing.claude` list, with the same request (including
-   `dictionary.terms`), sanity check and timeout as the app. `--max-usd` (default $1) stops new paid calls once
-   reached. The first `Ctrl+C` finishes the work already sent and stops; a second one exits at once. Results are saved
-   after every recording.
-3. Open `report.html` from the run folder. It shows blind A/B pairs for transcription and for refine, then the scores,
+   Every folder that loads is one speech model, named by its folder; a folder that does not load (a partial download,
+   another export) is skipped with a console line. Each model is loaded once and recognizes every recording in turn,
+   as the app does; its time is the model's own recognition time, its cost is $0, and its console line says when the
+   other alphabet was masked out (see One language a dictation in docs/ARCHITECTURE.md). The text of
+   `parakeet-ultra-int8` (or of the first model that succeeded, without it) is then cleaned by `refine.model` and
+   every model in the `pricing.claude` list, with the same request (including `dictionary.terms`), sanity check and
+   timeout as the app. `--max-usd` (default $1) stops new paid calls once reached. The first `Ctrl+C` finishes the step
+   under way and stops; a second one exits at once. Results are saved after every recording.
+4. Open `report.html` from the run folder. It shows blind A/B pairs for recognition and for refine, then the scores,
    latency and cost per dictation. **Save choices** downloads your answers as `choices.json`.
 
 `cargo run -p cue-bench -- report <run folder>` rebuilds `report.html` from `results.json`.
@@ -513,9 +547,9 @@ whether the model wrote such words (`text_before_search`) and the error codes of
 
 ## Privacy in detail
 
-- **Soniox** receives the audio of each dictation while you record, plus the name of the app you are dictating into
-  as context. On fallback or Retry, the saved WAV is uploaded to the batch API; CUE deletes the uploaded file and its
-  transcription right after use and retries the deletion in the background for about 15 minutes if it fails.
+- **Speech recognition** runs on this computer: no sound leaves it, while you record, on Retry or ever. The network
+  is needed only to download the model once, from Hugging Face (`huggingface.co`, files of a fixed commit; the
+  request carries no key and nothing of yours), and for Anthropic.
 - **Anthropic** receives the transcript, the app name, up to `refine.context_chars` (500) characters of text
   before the caret, and your `dictionary.terms`. Nothing is read from password fields, and the window title is never
   sent. A translation goes in the same cleanup request, with the target language added. While you record, CUE also
@@ -523,7 +557,7 @@ whether the model wrote such words (`text_before_search`) and the error codes of
   dictation starts four minutes or more after the last cleanup, CUE sends a cache warm-up: the cleanup request with
   your `dictionary.terms` and a one-character placeholder instead of a transcript, without the app name or any text
   before the caret, so the first cleanup after a pause reads the prompt from Anthropic's cache.
-- **"Ask"** sends Anthropic the question (as Soniox transcribed it), the selected text (up to 8,000 characters: a
+- **"Ask"** sends Anthropic the question (as it was recognized), the selected text (up to 8,000 characters: a
   longer selection goes as its start and its end), up to `refine.context_chars` (500) characters before the caret, the
   app name and today's local date; a follow-up sends only its question, with the conversation so far. With web search
   on, Anthropic searches the web for what the model asks it to. Nothing is read from password fields. When the "Ask"
@@ -551,12 +585,12 @@ whether the model wrote such words (`text_before_search`) and the error codes of
   its mask.
 - The microphone is open only while CUE is recording, and while the main window's Microphone settings or the welcome
   window's Microphone step show its level (only the level reaches that window; that audio is never kept).
-- **Stays on this computer:** the history with its recordings, the last dictation's audio and text, recordings saved
-  for the bench, settings, logs and usage rows. Logs and `usage.csv` never contain dictation text, questions, answers,
-  selected text, sources, the history or microphone names, nor any sound: a recording's line has its length and size
-  alone; a crash records only the thread and code location, not the panic message. A recording reaches the main window
-  alone, as the bytes of its file, and plays there from memory.
-- Check each provider's own data-retention policy for the audio and text they receive.
+- **Stays on this computer:** every sound CUE records, the history with its recordings, the last dictation's audio and
+  text, recordings saved for the bench, the speech model, settings, logs and usage rows. Logs and `usage.csv` never
+  contain dictation text, questions, answers, selected text, sources, the history or microphone names, nor any sound:
+  a recording's line has its length and size alone; a crash records only the thread and code location, not the panic
+  message. A recording reaches the main window alone, as the bytes of its file, and plays there from memory.
+- Check Anthropic's own data-retention policy for the text it receives.
 
 ## Known limitations
 
@@ -573,6 +607,16 @@ whether the model wrote such words (`text_before_search`) and the error codes of
   only. A short question answered with a bare number can be pasted; a translation made only of words the speech
   already has ("сделай git push" → "Git push."), or of a large number said in one word, fails and offers Retry. Other
   limits are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+- The speech language of a translation is told by its alphabet alone, so speech in a language outside the pair counts
+  as the pair's language written in the same letters: with the default pair (English and Russian), German speech
+  counts as English and is translated into Russian. `translate.speech` fixes the speech language.
+- Text appears only after you finish: the model recognizes the whole recording then, not while you speak.
+- A dictation is Russian or English. When both alphabets hold whole sentences (at least two of each language's little
+  words: "the", "to", «и», «что»…), the one with fewer letters is taken for a slip of the model, and the dictation is
+  recognized again without it, so a sentence said in the other language on purpose comes out spelled in the main
+  one's letters.
+- The speech model needs a processor with AVX2; on one without it, CUE cannot recognize speech ("Processor not
+  supported").
 - A translation can turn a self-correction around: "Отправь отчёт Олегу, точнее, Игорю" ("to Oleg, I mean Igor")
   came back as "…to Igor, I mean Oleg" in every bench run. The check cannot see it, so read a translated correction
   before sending it.
@@ -617,9 +661,11 @@ Cargo.toml                Cargo workspace
 LICENSE, NOTICE           Apache License 2.0, and the copyright notice
 app/
   package.json            front-end tooling: Vite, TypeScript, Vitest, Tauri CLI
-  crates/core/            cue-core: dictation state machine, settings, refine, translation and "Ask" rules, audio
-                          helpers, usage, the history files
-  crates/engines/         cue-engines: Soniox stream and batch, Claude refine, translation and "Ask", API keys and
+  crates/core/            cue-core: dictation state machine, settings, refine, translation and "Ask" rules, the
+                          speech rules (one language a dictation, long recordings cut), the speech model's files,
+                          audio helpers, usage, the history files
+  crates/engines/         cue-engines: speech recognition on this computer (Parakeet: log-mel, TDT decoding, ONNX
+                          Runtime) and the model's download, Claude refine, translation and "Ask", API keys and
                           checks
   crates/platform-win/    cue-platform-win: keyboard hook (and a mouse hook while a Shift that switched the mode is
                           held), clipboard paste and copy, focus and selection via UI Automation, microphone (a
@@ -636,13 +682,12 @@ scripts/build-release.ps1 the installer build
 ```
 
 `app/crates/platform-win/examples` and `app/crates/engines/examples` hold small probes for checking the keyboard
-hook, microphone, focus, paste, sleep events, the Drop's z-order (`zorder_probe`, run while CUE is running), Soniox
-and refine on a real machine
-(`cargo run -p <crate> --example <name>`). `refine_compare` (in `cue-engines`) runs a phrase file of your own through
-cleanup models with the app's prompt and checks; a phrase with `"to": "en"` is translated on the app's own path
-instead (see the example's header). `ask_compare` is the "Ask" bench (see above); `ask_probe` checks web search and the
-cache warm-up of "Ask", and `selection_probe` (in `cue-platform-win`) prints what CUE reads of the selection in an app
-and what the `Ctrl + C` fallback does there, never the text.
+hook, microphone, focus, paste, sleep events, the Drop's z-order (`zorder_probe`, run while CUE is running), refine
+and its cache warm-up on a real machine (`cargo run -p <crate> --example <name>`). `refine_compare` (in
+`cue-engines`) runs a phrase file of your own through cleanup models with the app's prompt and checks; a phrase with
+`"to": "en"` is translated on the app's own path instead (see the example's header). `ask_compare` is the "Ask" bench
+(see above); `ask_probe` checks web search and the cache warm-up of "Ask", and `selection_probe` (in `cue-platform-win`)
+prints what CUE reads of the selection in an app and what the `Ctrl + C` fallback does there, never the text.
 
 ## License
 
@@ -652,7 +697,16 @@ The Bebas Neue and Montserrat ExtraBold fonts in `app/ui/src/design/fonts` are d
 License 1.1 (see `OFL.txt` and `OFL-Montserrat.txt`).
 
 The program includes the Opus audio codec, libopus 1.3.1 in its Rust translation `unsafe-libopus` (BSD-3-Clause), and
-`arrayref` (BSD-2-Clause), which it uses: their licenses are in [NOTICE](NOTICE).
+`arrayref` (BSD-2-Clause), which it uses, and ONNX Runtime (MIT, by Microsoft), linked in through the `ort` crate
+(MIT or Apache-2.0, by pyke.io). Its log-mel features and TDT decoding are ported from
+[parakeet-rs](https://github.com/altunenes/parakeet-rs) (MIT or Apache-2.0, by Enes Altun). Their licenses are in
+[NOTICE](NOTICE).
+
+The speech model CUE downloads is not part of the program or the installer. It is
+[Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra) by Moondream, a post-trained version of
+[NVIDIA Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), in the int8 ONNX export
+[Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx); all
+three are licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). See [NOTICE](NOTICE).
 
 `app/src-tauri/nsis/installer.nsi` is the installer template of the Tauri CLI (Apache-2.0 OR MIT, by the Tauri
 contributors) with the default install folder changed, as its comment on that line says.

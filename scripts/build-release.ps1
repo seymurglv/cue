@@ -11,9 +11,13 @@ CARGO_TARGET_DIR, RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS are put back afterwards,
 
 The first installer build downloads NSIS and its Tauri plugin into %LOCALAPPDATA%\tauri, once.
 
+The installer carries DirectML.dll beside cue.exe: the speech model's runtime (ONNX Runtime, linked into the program)
+is built with DirectML and loads it at start, though CUE runs the model on the processor. Cargo copies the DLL into
+target\dist\release with the build; a config file written for the build into target\dist adds it to the installer's
+resources, and the Tauri CLI merges that file over tauri.conf.json, which is left as it is.
+
 -ScanBuild makes the same installer without compression, to look inside it: `cue-cli leak-scan` reads its files as
-they are. The setting reaches the Tauri CLI through a config file written for the build into target\dist, which the
-CLI merges over tauri.conf.json; tauri.conf.json is left as it is. That installer is moved to target\dist\scan. Both
+they are. The setting reaches the Tauri CLI through the same config file. That installer is moved to target\dist\scan. Both
 builds write the installer to the same place, so an installer already there is moved aside to target\dist\aside for
 the scan build and put back afterwards, whether the build succeeds or not: both installers stay, in either order. The
 program, target\dist\release\cue.exe, is the last build's: build the shipped installer last, and the program the scan
@@ -50,11 +54,16 @@ try {
     $env:CARGO_ENCODED_RUSTFLAGS = $remap -join [char]0x1f
 
     $tauriArgs = @('run', 'tauri', '--', 'build')
+    New-Item -ItemType Directory -Force -Path $dist | Out-Null
+    # Paths in the config are relative to app\src-tauri, like tauri.conf.json's own.
+    $bundle = @{ resources = @{ '../../target/dist/release/DirectML.dll' = 'DirectML.dll' } }
     if ($ScanBuild) {
-        New-Item -ItemType Directory -Force -Path $dist | Out-Null
-        $patch = Join-Path $dist 'scan-build.json'
-        Set-Content -LiteralPath $patch -Encoding ascii -Value '{"bundle":{"windows":{"nsis":{"compression":"none"}}}}'
-        $tauriArgs += @('--config', $patch)
+        $bundle.windows = @{ nsis = @{ compression = 'none' } }
+    }
+    $patch = Join-Path $dist 'build-config.json'
+    Set-Content -LiteralPath $patch -Encoding ascii -Value (@{ bundle = $bundle } | ConvertTo-Json -Depth 5 -Compress)
+    $tauriArgs += @('--config', $patch)
+    if ($ScanBuild) {
         if (Test-Path -LiteralPath $installer) {
             $asideDir = Join-Path $dist 'aside'
             New-Item -ItemType Directory -Force -Path $asideDir | Out-Null

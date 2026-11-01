@@ -83,6 +83,21 @@ export interface WinText {
   mic: string;
   translate: string;
   general: string;
+  /** Speech recognition (docs/specs/2026-11-02-settings-tray.md): its title; on the first page its value by the model's
+   *  state ({N} — percent; ready without the Anthropic key); on its page the model's line by state ({DONE}, {TOTAL} —
+   *  MB), Retry, and the note on where sound and text go. */
+  model: string;
+  modelName: string;
+  modelValue: { ready: string; noKey: string; loading: string; downloading: string; failed: string; unsupported: string; missing: string };
+  modelLine: { ready: string; downloading: string; failed: string; loading: string; unsupported: string; missing: string };
+  modelRetry: string;
+  modelNote: string;
+  /** Languages: its title and its value ({UI} — the interface language, {TO} — the translation's). */
+  languages: string;
+  languagesValue: string;
+  /** General's value: start at sign-in on, off. */
+  generalOn: string;
+  generalOff: string;
   keyHint: string;
   check: string;
   keyStates: Record<KeyState, string>;
@@ -112,7 +127,7 @@ export interface WinText {
 export const en: WinText = {
   history: 'History',
   dictionary: 'Dictionary',
-  dictHint: 'Words CUE must write right: names, terms, spellings of your own.',
+  dictHint: 'Words CUE must write right.',
   dictAdd: 'Word',
   dictNew: 'New word, Enter',
   dictRemove: 'Remove',
@@ -161,6 +176,31 @@ export const en: WinText = {
   back: 'Back',
   unsaved: "settings.json wasn't read — changes last until CUE quits",
   keys: 'Keys',
+  model: 'Speech recognition',
+  modelName: 'Parakeet Ultra',
+  modelValue: {
+    ready: 'Ready',
+    noKey: 'No Anthropic key',
+    loading: 'Loading',
+    downloading: '{N} %',
+    failed: 'Did not download',
+    unsupported: 'Not supported',
+    missing: 'Not downloaded',
+  },
+  modelLine: {
+    ready: 'Ready · {TOTAL} MB on this computer',
+    downloading: 'Downloading: {DONE} of {TOTAL} MB',
+    failed: 'Did not download · {DONE} of {TOTAL} MB',
+    loading: 'Loading',
+    unsupported: "This processor can't run it",
+    missing: 'Not downloaded',
+  },
+  modelRetry: 'Retry',
+  modelNote: 'Sound stays on this computer; text goes to Anthropic for the cleanup; the history stays on this computer only.',
+  languages: 'Languages',
+  languagesValue: '{UI} · into {TO}',
+  generalOn: 'Starts at sign-in',
+  generalOff: 'Manually',
   mic: 'Microphone',
   translate: 'Translation',
   general: 'General',
@@ -197,7 +237,7 @@ export const en: WinText = {
 export const ru: WinText = {
   history: 'История',
   dictionary: 'Словарь',
-  dictHint: 'Слова, которые CUE должен писать правильно: имена, термины, ваше написание.',
+  dictHint: 'Слова, которые CUE должен писать правильно.',
   dictAdd: 'Слово',
   dictNew: 'Новое слово, Enter',
   dictRemove: 'Удалить',
@@ -246,6 +286,31 @@ export const ru: WinText = {
   back: 'Назад',
   unsaved: 'settings.json не прочитан — изменения действуют до выхода',
   keys: 'Ключи',
+  model: 'Распознавание',
+  modelName: 'Parakeet Ultra',
+  modelValue: {
+    ready: 'Готово',
+    noKey: 'Нет ключа Anthropic',
+    loading: 'Загружается',
+    downloading: '{N} %',
+    failed: 'Не скачалась',
+    unsupported: 'Не поддерживается',
+    missing: 'Не скачана',
+  },
+  modelLine: {
+    ready: 'Готово · {TOTAL} МБ на этом компьютере',
+    downloading: 'Качается: {DONE} из {TOTAL} МБ',
+    failed: 'Не скачалась · {DONE} из {TOTAL} МБ',
+    loading: 'Загружается',
+    unsupported: 'Этот процессор её не запустит',
+    missing: 'Не скачана',
+  },
+  modelRetry: 'Повторить',
+  modelNote: 'Звук остаётся на этом компьютере; текст уходит в Anthropic для чистки; история — только на этом компьютере.',
+  languages: 'Языки',
+  languagesValue: '{UI} · на {TO}',
+  generalOn: 'Запуск при входе',
+  generalOff: 'Вручную',
   mic: 'Микрофон',
   translate: 'Перевод',
   general: 'Общие',

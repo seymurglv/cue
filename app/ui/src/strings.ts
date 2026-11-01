@@ -1,14 +1,14 @@
 // Interface texts in English (default) and Russian. The core picks the language once from the Windows UI language
 // and sets it in the Drop window before any script runs (window.__CUE_LANG__); the tray menu uses the same value.
 export type Lang = 'en' | 'ru';
-export type TrayKind = 'noField' | 'micSilent' | 'holdHint' | 'lastMinute' | 'micMissing';
-export type ErrorCause = 'net' | 'sonioxKey' | 'claudeKey' | 'translate';
+export type TrayKind = 'noField' | 'micSilent' | 'holdHint' | 'lastMinute' | 'micMissing' | 'modelReady';
+export type ErrorCause = 'model' | 'cpu' | 'stt' | 'claudeKey' | 'translate';
 
 export const KEY_NAME = 'Ctrl + Win';
 
 /** Look and timing of a tray card: the same in every language. */
 export interface TrayLook {
-  icon: 'copy' | 'mic' | 'key' | 'timer';
+  icon: 'copy' | 'mic' | 'key' | 'timer' | 'model';
   tone: '' | 'warn' | 'ask' | 'ok';
   /** Icon of the action button; null — the card has no button. */
   act: 'copy' | 'gear' | 'ok' | null;
@@ -22,6 +22,7 @@ export const TRAYS: Record<TrayKind, TrayLook> = {
   holdHint: { icon: 'key', tone: 'ask', act: 'ok', ttl: 7000 },
   lastMinute: { icon: 'timer', tone: 'warn', act: null, ttl: 5000 },
   micMissing: { icon: 'mic', tone: 'warn', act: null, ttl: 6000 },
+  modelReady: { icon: 'model', tone: 'ok', act: null, ttl: 5000 },
 };
 
 export interface TrayText {
@@ -104,10 +105,15 @@ export const en: Dict = {
       body: '<b>{WANTED}</b> not found — recording from <b>{USED}</b>',
       unnamed: 'the Windows microphone',
     },
+    modelReady: {
+      title: 'Model is ready',
+      body: 'Speech is recognized on this computer.',
+    },
   },
   error: {
-    net: 'No connection',
-    sonioxKey: 'Soniox key problem',
+    model: 'Model did not download',
+    cpu: 'Processor not supported',
+    stt: "Couldn't recognize",
     claudeKey: 'Claude key problem',
     translate: "Couldn't translate",
   },
@@ -166,10 +172,15 @@ export const ru: Dict = {
       body: '<b>{WANTED}</b> не найден — пишу с <b>{USED}</b>',
       unnamed: 'микрофона Windows',
     },
+    modelReady: {
+      title: 'Модель готова',
+      body: 'Речь распознаётся на этом компьютере.',
+    },
   },
   error: {
-    net: 'Нет сети',
-    sonioxKey: 'Проблема с ключом Soniox',
+    model: 'Модель не скачалась',
+    cpu: 'Процессор не подходит',
+    stt: 'Не распознал',
     claudeKey: 'Проблема с ключом Claude',
     translate: 'Не удалось перевести',
   },

@@ -8,18 +8,16 @@ pub const SERVICE: &str = "CUE";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyName {
-    Soniox,
     Anthropic,
     /// Comparing refine models through OpenRouter; the app does not read this key yet.
     OpenRouter,
 }
 
 impl KeyName {
-    pub const ALL: [KeyName; 3] = [KeyName::Soniox, KeyName::Anthropic, KeyName::OpenRouter];
+    pub const ALL: [KeyName; 2] = [KeyName::Anthropic, KeyName::OpenRouter];
 
     pub fn as_str(self) -> &'static str {
         match self {
-            KeyName::Soniox => "soniox",
             KeyName::Anthropic => "anthropic",
             KeyName::OpenRouter => "openrouter",
         }
@@ -90,6 +88,16 @@ pub fn get(name: KeyName) -> Result<String, EngineError> {
     lookup(name)?.ok_or_else(|| EngineError::KeyProblem(format!("no {} key", name.as_str())))
 }
 
+/// The Soniox key of versions before local recognition, deleted once: CUE does not use it any more. `true` if there
+/// was one.
+pub fn forget_soniox() -> Result<bool, EngineError> {
+    match keyring::Entry::new(SERVICE, "soniox").and_then(|e| e.delete_credential()) {
+        Ok(()) => Ok(true),
+        Err(keyring::Error::NoEntry) => Ok(false),
+        Err(e) => Err(EngineError::Service(format!("could not delete the soniox key: {e}"))),
+    }
+}
+
 /// Saves the key (without spaces at the edges). An empty key is not saved.
 pub fn set(name: KeyName, value: &str) -> Result<(), EngineError> {
     let value = prepare(value)?;
@@ -104,15 +112,15 @@ mod tests {
 
     #[test]
     fn parse_names() {
-        assert_eq!(KeyName::parse("soniox"), Some(KeyName::Soniox));
         assert_eq!(KeyName::parse("Anthropic"), Some(KeyName::Anthropic));
         assert_eq!(KeyName::parse("openrouter"), Some(KeyName::OpenRouter));
         assert_eq!(KeyName::parse(" OpenRouter "), Some(KeyName::OpenRouter));
         assert_eq!(KeyName::parse("openai"), None);
-        // The key of a dropped engine is gone: its name is like any unknown one.
+        // The keys of dropped engines are gone: their names are like any unknown one.
         assert_eq!(KeyName::parse("elevenlabs"), None);
+        assert_eq!(KeyName::parse("soniox"), None);
         // `keys show` prints a line for every key in `ALL`.
-        assert_eq!(KeyName::ALL.map(KeyName::as_str).as_slice(), ["soniox", "anthropic", "openrouter"]);
+        assert_eq!(KeyName::ALL.map(KeyName::as_str).as_slice(), ["anthropic", "openrouter"]);
     }
 
     #[test]
@@ -145,7 +153,7 @@ mod tests {
 
     #[test]
     fn read_outcome_present_missing_blank() {
-        let k = KeyName::Soniox;
+        let k = KeyName::OpenRouter;
         assert_eq!(read_outcome(k, Ok("  sk-key-123\r\n".into())), Ok(Some("sk-key-123".into())));
         assert_eq!(read_outcome(k, Err(keyring::Error::NoEntry)), Ok(None));
         assert_eq!(read_outcome(k, Ok(" \t".into())), Ok(None));
@@ -161,11 +169,11 @@ mod tests {
     #[test]
     fn read_outcome_bad_encoding_never_shows_secret() {
         let secret = b"sk-ant-SECRET-BYTES".to_vec();
-        let err = read_outcome(KeyName::Soniox, Err(keyring::Error::BadEncoding(secret))).unwrap_err();
+        let err = read_outcome(KeyName::OpenRouter, Err(keyring::Error::BadEncoding(secret))).unwrap_err();
         assert!(err.is_key_problem());
         for shown in [err.to_string(), format!("{err:?}")] {
             assert!(!shown.contains("SECRET") && !shown.contains("83, 69, 67"), "{shown}");
-            assert!(shown.contains("soniox"), "{shown}");
+            assert!(shown.contains("openrouter"), "{shown}");
         }
     }
 
@@ -175,6 +183,6 @@ mod tests {
         let EngineError::Service(msg) = &err else { panic!("expected Service, not {err:?}") };
         assert!(msg.contains("anthropic") && msg.contains("denied"), "{msg}");
         let too_long = keyring::Error::TooLong("password encoded as UTF-16".into(), 2560);
-        assert!(matches!(write_error(KeyName::Soniox, too_long), EngineError::Service(_)));
+        assert!(matches!(write_error(KeyName::OpenRouter, too_long), EngineError::Service(_)));
     }
 }

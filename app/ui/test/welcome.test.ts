@@ -50,6 +50,11 @@ const paste = (input: HTMLInputElement, value: string) => {
 const press = (e: Element) => !e.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
 /** The window has the focus again. */
 const regain = () => window.dispatchEvent(new Event('focus'));
+/** Megabytes as the model's row writes them (decimal), and the model's size (668 MB). */
+const MB = 1_000_000;
+const TOTAL = 667_729_022;
+/** The model's row on the Model step. */
+const mrow = () => pg().querySelector<HTMLElement>('.mrow')!;
 
 beforeEach(() => {
   vi.useFakeTimers({ now: NOW });
@@ -68,16 +73,16 @@ describe('The welcome window', () => {
     saved();
     page = await mount();
     const dots = () => $$('.dots i').map((d) => d.className);
-    expect($$('.dots i').map((d) => d.title)).toEqual(['Hello', 'Keys', 'Microphone', 'First dictation', 'Done']);
+    expect($$('.dots i').map((d) => d.title)).toEqual(['Hello', 'Key', 'Model', 'Microphone', 'First dictation', 'Done']);
     expect(step()).toBe('hello');
     expect(heading()).toBe('Speak — CUE writes');
-    expect(dots()).toEqual(['on', '', '', '', '']);
+    expect(dots()).toEqual(['on', '', '', '', '', '']);
     expect(back().hidden).toBe(true);
     expect(text(primary())).toBe('Start');
     await next();
     expect(step()).toBe('keys');
-    expect(heading()).toBe('Keys');
-    expect(dots()).toEqual(['ok', 'on', '', '', '']);
+    expect(heading()).toBe('Key');
+    expect(dots()).toEqual(['ok', 'on', '', '', '', '']);
     expect(back().hidden).toBe(false);
     expect(text(primary())).toBe('Next');
     click(back());
@@ -85,6 +90,15 @@ describe('The welcome window', () => {
     expect(step()).toBe('hello');
     expect(back().hidden).toBe(true);
     await next();
+    await next();
+    expect(step()).toBe('model');
+    expect(heading()).toBe('Model');
+    expect(text(pg().querySelector('.op'))).toBe('CUE recognizes speech on this computer. The model downloads once — go on meanwhile.');
+    expect(text(mrow().querySelector('.stx b'))).toBe('Parakeet Ultra');
+    expect(text(mrow().querySelector('.stx small.ok'))).toBe('Ready · 668 MB on this computer');
+    expect(dots()).toEqual(['ok', 'ok', 'on', '', '', '']);
+    expect(text(primary())).toBe('Next');
+    expect(primary().disabled).toBe(false);
     await next();
     expect(step()).toBe('mic');
     expect(heading()).toBe('Microphone');
@@ -102,7 +116,7 @@ describe('The welcome window', () => {
     click(back());
     await settle();
     expect(step()).toBe('mic');
-    expect(dots()).toEqual(['ok', 'ok', 'on', '', '']);
+    expect(dots()).toEqual(['ok', 'ok', 'ok', 'on', '', '']);
     expect(primary().classList.contains('wait')).toBe(false);
     expect(primary().disabled).toBe(false);
   });
@@ -110,7 +124,7 @@ describe('The welcome window', () => {
   it('First dictation waits in its field, not on a button', async () => {
     saved();
     page = await mount(false);
-    for (let i = 0; i < 3; i++) await next();
+    for (let i = 0; i < 4; i++) await next();
     expect(step()).toBe('try');
     // The field says it waits, and its border breathes.
     expect(field().placeholder).toBe('Waiting — press the keys');
@@ -128,7 +142,7 @@ describe('The welcome window', () => {
     // With reduced motion the field stands still.
     page.dispose();
     page = await mount(true);
-    for (let i = 0; i < 3; i++) await next();
+    for (let i = 0; i < 4; i++) await next();
     expect(field().placeholder).toBe('Waiting — press the keys');
     expect(field().classList.contains('wait')).toBe(false);
   });
@@ -141,10 +155,11 @@ describe('The welcome window', () => {
     expect(previews()).toEqual(['off']);
   });
 
-  it('Next on Keys stays off without both keys and on a key error', async () => {
+  it('Next on Keys stays off without the key and on a key error', async () => {
     page = await mount();
     await next();
-    expect(text($('small[data-state="soniox"]'))).toBe('No key');
+    expect($$('input[data-key]').map((i) => i.dataset.key)).toEqual(['anthropic']);
+    expect(text($('small[data-state="anthropic"]'))).toBe('No key');
     expect(primary().disabled).toBe(true);
     // A click on the disabled button goes nowhere.
     click(primary());
@@ -155,9 +170,6 @@ describe('The welcome window', () => {
       click($(`[data-check="${name}"]`));
       await settle();
     };
-    await typeKey('soniox', 'soniox-key-1234');
-    expect(text($('small[data-state="soniox"]'))).toBe('Works');
-    expect(primary().disabled).toBe(true);
     core.keyCheck.mockResolvedValueOnce('badKey');
     await typeKey('anthropic', 'sk-ant-wrong-5678');
     expect(text($('small[data-state="anthropic"]'))).toBe('Key error');
@@ -171,12 +183,13 @@ describe('The welcome window', () => {
     expect(primary().disabled).toBe(true);
     answer('works');
     await settle();
+    expect(text($('small[data-state="anthropic"]'))).toBe('Works');
     expect(primary().disabled).toBe(false);
     await next();
-    expect(step()).toBe('mic');
+    expect(step()).toBe('model');
   });
 
-  it('a key pasted over saved ones holds Next until it is checked', async () => {
+  it('a key pasted over the saved one holds Next until it is checked', async () => {
     saved();
     page = await mount();
     await next();
@@ -199,59 +212,156 @@ describe('The welcome window', () => {
     expect(text($('small[data-state="anthropic"]'))).toBe('Works');
     expect(primary().disabled).toBe(false);
     await next();
-    expect(step()).toBe('mic');
+    expect(step()).toBe('model');
   });
 
   it('a key never stays in the page after it is saved, only its mask', async () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     page = await mount();
     await next();
-    const input = $<HTMLInputElement>('input[data-key="soniox"]')!;
+    const input = $<HTMLInputElement>('input[data-key="anthropic"]')!;
     expect(input.type).toBe('password');
     expect(input.getAttribute('autocomplete')).toBe('off');
-    input.value = 'soniox-secret-4321';
+    input.value = 'sk-ant-secret-4321';
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     // Emptied at once, before the core answers.
     expect(input.value).toBe('');
     await settle();
-    expect(core.keySet).toHaveBeenCalledWith('soniox', 'soniox-secret-4321');
-    expect(input.placeholder).toBe('son…321');
+    expect(core.keySet).toHaveBeenCalledWith('anthropic', 'sk-ant-secret-4321');
+    expect(input.placeholder).toBe('sk-…321');
     expect(document.documentElement.outerHTML).not.toContain('secret');
     // A refused save: nothing in the page or the log either.
     core.keySet.mockRejectedValueOnce('store');
-    const other = $<HTMLInputElement>('input[data-key="anthropic"]')!;
-    other.value = 'sk-ant-hidden-8765';
+    input.value = 'sk-ant-hidden-8765';
     click($('[data-check="anthropic"]'));
     await settle();
-    expect(other.value).toBe('');
+    expect(input.value).toBe('');
     expect(document.documentElement.outerHTML).not.toContain('hidden-8765');
     expect(JSON.stringify(errors.mock.calls)).not.toContain('hidden-8765');
     // A key typed and not checked leaves with its step.
-    other.value = 'sk-ant-typed-1111';
+    input.value = 'sk-ant-typed-1111';
     click(back());
     await settle();
-    expect(other.value).toBe('');
+    expect(input.value).toBe('');
     expect(core.keySet).not.toHaveBeenCalledWith('anthropic', 'sk-ant-typed-1111');
   });
 
-  it('the links open the consoles, and the step says what it costs and where things go', async () => {
+  it('the link opens the Anthropic Console, and the step says what it costs and where things go', async () => {
     page = await mount();
     await next();
-    click($('[data-link="soniox"]'));
+    expect(text(pg().querySelector('.op'))).toBe(
+      'CUE cleans up your speech with your own Anthropic account. Paste its key and press Check.',
+    );
+    expect(text(pg().querySelector('.olinks'))).toBe('Where to get it: Anthropic Console');
+    expect($$('[data-link]').map((l) => l.dataset.link)).toEqual(['anthropic']);
     click($('[data-link="anthropic"]'));
-    expect(core.openLink.mock.calls).toEqual([['soniox'], ['anthropic']]);
+    expect(core.openLink.mock.calls).toEqual([['anthropic']]);
     expect($$('.onote').map(text)).toEqual([
-      'Roughly $4–5 a month for an hour of speech a day.',
-      'Sound goes to Soniox, text to Anthropic; the history stays on this computer only.',
+      'Recognition is free, on this computer; Anthropic bills only the cleanup.',
+      'Sound stays on this computer; text goes to Anthropic for the cleanup; the history stays on this computer only.',
     ]);
+  });
+
+  it('the Model step shows the download as it goes, in place: the percent, a bar and the bytes', async () => {
+    saved();
+    core.modelGet.mockResolvedValue({ state: 'downloading', done: 100 * MB, total: TOTAL });
+    page = await mount();
+    await next();
+    await next();
+    expect(step()).toBe('model');
+    expect(pg().querySelector('.sgrp.orows > .mrow')).not.toBeNull();
+    const row = mrow();
+    expect(row.dataset.model).toBe('downloading');
+    expect(text(row.querySelector('.stx b'))).toBe('Parakeet Ultra');
+    expect(text(row.querySelector('.mpct'))).toBe('14 %');
+    expect(text(row.querySelector('.mprog small'))).toBe('Downloading: 100 of 668 MB');
+    feeds.model({ state: 'downloading', done: 412 * MB + 5, total: TOTAL });
+    // The same row, changed where it is.
+    expect(mrow()).toBe(row);
+    expect(text(row.querySelector('.mpct'))).toBe('61 %');
+    expect(row.querySelector<HTMLElement>('.mbar i')!.style.transform).toMatch(/^scaleX\(0\.61\d*\)$/);
+    expect(text(row.querySelector('.mdone'))).toBe('412');
+    expect(text(row.querySelector('.mprog small'))).toBe('Downloading: 412 of 668 MB');
+    expect(row.querySelector('[data-model-retry]')).toBeNull();
+    // The step does not wait for the download: Next goes on meanwhile.
+    expect(text(primary())).toBe('Next');
+    expect(primary().disabled).toBe(false);
+    await next();
+    expect(step()).toBe('mic');
+  });
+
+  it('Retry on a failed download asks the core to download the model again', async () => {
+    saved();
+    page = await mount();
+    await next();
+    await next();
+    feeds.model({ state: 'failed', done: 200 * MB, total: TOTAL });
+    const row = mrow();
+    expect(row.dataset.model).toBe('failed');
+    const small = row.querySelector('.stx small')!;
+    expect(small.classList.contains('warn')).toBe(true);
+    expect(text(small)).toBe('Did not download · 200 of 668 MB');
+    const retry = row.querySelector<HTMLButtonElement>('[data-model-retry]')!;
+    expect(text(retry.querySelector('.lbl'))).toBe('Retry');
+    expect(core.modelRetry).not.toHaveBeenCalled();
+    click(retry);
+    await settle();
+    expect(core.modelRetry).toHaveBeenCalledTimes(1);
+    // Retry stays on the step, and Next is still there to press.
+    expect(step()).toBe('model');
+    expect(primary().disabled).toBe(false);
+  });
+
+  it('the model ready while the Model step is shown moves on to Microphone by itself', async () => {
+    saved();
+    core.modelGet.mockResolvedValue({ state: 'downloading', done: 10 * MB, total: TOTAL });
+    page = await mount();
+    expect(core.onModel).toHaveBeenCalledTimes(1);
+    expect(core.modelGet).toHaveBeenCalledTimes(1);
+    await next();
+    await next();
+    expect(step()).toBe('model');
+    feeds.model({ state: 'loading' });
+    await settle();
+    expect(step()).toBe('model');
+    expect(mrow().dataset.model).toBe('loading');
+    expect(text(mrow().querySelector('.stx small'))).toBe('Loading');
+    feeds.model({ state: 'ready', total: TOTAL });
+    await settle();
+    expect(step()).toBe('mic');
+    expect(heading()).toBe('Microphone');
+    // Back to the Model step: it shows the model ready and stays.
+    click(back());
+    await settle();
+    expect(step()).toBe('model');
+    expect(text(mrow().querySelector('.stx small.ok'))).toBe('Ready · 668 MB on this computer');
+    feeds.model({ state: 'ready', total: TOTAL });
+    await settle();
+    expect(step()).toBe('model');
+  });
+
+  it('the model ready on another step moves nothing', async () => {
+    saved();
+    core.modelGet.mockResolvedValue({ state: 'downloading', done: 10 * MB, total: TOTAL });
+    page = await mount();
+    await next();
+    expect(step()).toBe('keys');
+    feeds.model({ state: 'ready', total: TOTAL });
+    await settle();
+    expect(step()).toBe('keys');
+    // Its step then shows it ready, and waits for Next.
+    await next();
+    expect(step()).toBe('model');
+    expect(mrow().dataset.model).toBe('ready');
+    await next();
+    expect(step()).toBe('mic');
   });
 
   it('the microphone preview runs only on its step', async () => {
     saved();
     page = await mount();
     core.micPreview.mockClear();
-    await next();
-    await next();
+    for (let i = 0; i < 3; i++) await next();
     expect(previews()).toEqual(['on:windows']);
     const lit = () => $$('[data-meter] i.on').length;
     feeds.level(0.5);
@@ -276,8 +386,7 @@ describe('The welcome window', () => {
     saved();
     core.micList.mockResolvedValue({ names: ['Laptop Microphone', 'USB Microphone'], default: 'Laptop Microphone' });
     page = await mount();
-    await next();
-    await next();
+    for (let i = 0; i < 3; i++) await next();
     click($('[data-dd="mic"]'));
     expect($$('.menu [data-i] .mlb').map((e) => e.textContent)).toEqual([
       'As in Windows (Laptop Microphone)',
@@ -300,8 +409,7 @@ describe('The welcome window', () => {
     saved();
     core.micAccess.mockResolvedValue('denied');
     page = await mount();
-    await next();
-    await next();
+    for (let i = 0; i < 3; i++) await next();
     const hint = () => pg().querySelector<HTMLElement>('.ohint')!;
     expect(hint().hidden).toBe(false);
     expect(text(hint().querySelector('span'))).toBe('Windows is blocking CUE from using the microphone');
@@ -332,8 +440,7 @@ describe('The welcome window', () => {
     saved();
     core.micAccess.mockResolvedValue('denied');
     page = await mount();
-    await next();
-    await next();
+    for (let i = 0; i < 3; i++) await next();
     const hint = () => pg().querySelector<HTMLElement>('.ohint')!;
     feeds.failed();
     expect(hint().hidden).toBe(false);
@@ -376,8 +483,7 @@ describe('The welcome window', () => {
   it('First dictation keeps its field in focus, so the dictation is pasted into it', async () => {
     saved();
     page = await mount();
-    await next();
-    await next();
+    for (let i = 0; i < 3; i++) await next();
     // Before the step a press is the browser's as usual.
     expect(press(pg())).toBe(false);
     await next();
@@ -409,8 +515,7 @@ describe('The welcome window', () => {
   it('lets the hotkey go on First dictation and holds it again when leaving', async () => {
     saved();
     page = await mount();
-    await next();
-    await next();
+    for (let i = 0; i < 3; i++) await next();
     expect(step()).toBe('mic');
     expect(steps()).toEqual([false]);
     await next();
@@ -431,7 +536,7 @@ describe('The welcome window', () => {
   it('text in the field leads to Done with its words', async () => {
     saved();
     page = await mount();
-    for (let i = 0; i < 3; i++) await next();
+    for (let i = 0; i < 4; i++) await next();
     expect(document.activeElement).toBe(field());
     const keys = pg().querySelector('.keys')!;
     expect(keys.classList.contains('wait')).toBe(true);
@@ -459,7 +564,7 @@ describe('The welcome window', () => {
   it('Back during the wait for Done stays on the steps', async () => {
     saved();
     page = await mount();
-    for (let i = 0; i < 3; i++) await next();
+    for (let i = 0; i < 4; i++) await next();
     dictate('Hello');
     click(back());
     await settle();
@@ -471,7 +576,7 @@ describe('The welcome window', () => {
   it('Done closes the window', async () => {
     saved();
     page = await mount();
-    for (let i = 0; i < 3; i++) await next();
+    for (let i = 0; i < 4; i++) await next();
     dictate('Hello');
     vi.advanceTimersByTime(TYPED_TO_DONE_MS);
     await settle();
@@ -491,13 +596,13 @@ describe('The welcome window', () => {
         page?.dispose();
         page = await mount(reduced);
         expect($$('.pgv')).toHaveLength(1);
-        for (let i = 0; i < 3; i++) await next();
+        for (let i = 0; i < 4; i++) await next();
         dictate('Hello');
         vi.advanceTimersByTime(TYPED_TO_DONE_MS);
         await settle();
         expect(step()).toBe('done');
         // The steps slid with motion, and went at once without it.
-        expect($$('.pgv')).toHaveLength(reduced ? 1 : 5);
+        expect($$('.pgv')).toHaveLength(reduced ? 1 : 6);
         expect($$('.bp')).toHaveLength(0);
         vi.advanceTimersByTime(420);
         expect($$('.bp')).toHaveLength(reduced ? 0 : 30);
@@ -515,12 +620,17 @@ describe('The welcome window', () => {
     expect(heading()).toBe('Говорите — CUE напишет');
     expect(text(primary())).toBe('Начать');
     await next();
-    expect(heading()).toBe('Ключи');
-    expect(text($('[data-check="soniox"]'))).toBe('Проверить');
+    expect(heading()).toBe('Ключ');
+    expect(text($('[data-check="anthropic"]'))).toBe('Проверить');
+    expect(text(pg().querySelector('.olinks'))).toBe('Где его взять: Anthropic Console');
     expect($$('.onote').map(text)).toEqual([
-      'Примерно $4–5 в месяц за час речи в день.',
-      'Звук уходит в Soniox, текст — в Anthropic; история хранится только на этом компьютере.',
+      'Распознавание бесплатное, на этом компьютере; Anthropic берёт плату только за чистку.',
+      'Звук остаётся на этом компьютере; текст уходит в Anthropic на чистку; история хранится только на этом компьютере.',
     ]);
+    await next();
+    expect(heading()).toBe('Модель');
+    expect(text(mrow().querySelector('.stx small.ok'))).toBe('Готово · 668 МБ на этом компьютере');
+    expect(text(primary())).toBe('Дальше');
     await next();
     expect(text($('[data-dd="mic"] .ddv'))).toBe('Как в Windows');
     expect($('[data-dd="mic"]')!.getAttribute('aria-label')).toBe('Микрофон');
@@ -544,11 +654,10 @@ describe('The welcome window', () => {
       .toEqual([1, 2, 5, 21].map((n) => doneTitle(ru, n, 'ru')));
   });
 
-  it('keys are ready when both are saved and neither is refused', () => {
+  it('the key is ready when it is saved and not refused', () => {
     const rows = new KeyRows({ t: {} as any }, () => null, () => {});
     expect(keysReady(rows)).toBe(false);
     rows.read = true;
-    rows.keys.soniox.saved = true;
     expect(keysReady(rows)).toBe(false);
     rows.keys.anthropic.saved = true;
     expect(keysReady(rows)).toBe(true);
@@ -562,12 +671,12 @@ describe('The welcome window', () => {
     }
     // A key typed and not checked yet.
     const box = document.createElement('div');
-    box.innerHTML = '<input data-key="soniox">';
+    box.innerHTML = '<input data-key="anthropic">';
     const typed = new KeyRows({ t: {} as any }, () => box, () => {});
     typed.read = true;
-    typed.keys.soniox.saved = typed.keys.anthropic.saved = true;
+    typed.keys.anthropic.saved = true;
     expect(keysReady(typed)).toBe(true);
-    box.querySelector('input')!.value = 'soniox-typed-1357';
+    box.querySelector('input')!.value = 'sk-ant-typed-1357';
     expect(keysReady(typed)).toBe(false);
   });
 });

@@ -1,5 +1,5 @@
-//! The welcome window (spec 4a §1): hello, the keys, the microphone, a first dictation, done. It opens at a start when
-//! the Soniox or the Anthropic key is missing — the first start, or the keys removed since — and with `--welcome`, also
+//! The welcome window (spec 4a §1): hello, the key, the speech model, the microphone, a first dictation, done. It opens
+//! at a start when the Anthropic key is missing — the first start, or the key removed since — and with `--welcome`, also
 //! when a second launch brings it to the CUE already running. Like the main window (`main_window`) there is one at a
 //! time, created when opened and destroyed when closed, never built on the main thread. Windows draws its frame, in the
 //! Windows theme, with the close button alone; it takes the focus, so its first dictation is pasted into its own field.
@@ -40,8 +40,8 @@ pub enum KeyPresence {
 
 /// The window opens when it is asked for (`forced`) or a key is missing. A store that could not be read is not a
 /// missing key: no window for that (the main window's keys show the failure).
-pub fn should_welcome(soniox: KeyPresence, anthropic: KeyPresence, forced: bool) -> bool {
-    forced || soniox == KeyPresence::Missing || anthropic == KeyPresence::Missing
+pub fn should_welcome(anthropic: KeyPresence, forced: bool) -> bool {
+    forced || anthropic == KeyPresence::Missing
 }
 
 /// `--welcome` among a launch's arguments; CUE takes no others.
@@ -52,9 +52,9 @@ pub fn asks_welcome<S: AsRef<OsStr>>(args: impl IntoIterator<Item = S>) -> bool 
 /// At startup: the window opens if a key is missing, or when `forced` (`--welcome`). The log gets whether each key is
 /// there, never a key.
 pub fn open_at_start(app: &AppHandle, forced: bool) {
-    let (soniox, anthropic) = (presence(KeyName::Soniox), presence(KeyName::Anthropic));
-    let opens = should_welcome(soniox, anthropic, forced);
-    tracing::info!(?soniox, ?anthropic, forced, opens, "welcome window at startup");
+    let anthropic = presence(KeyName::Anthropic);
+    let opens = should_welcome(anthropic, forced);
+    tracing::info!(?anthropic, forced, opens, "welcome window at startup");
     if opens {
         open(app);
     }
@@ -189,30 +189,21 @@ mod tests {
     use tokio::sync::mpsc::UnboundedReceiver;
 
     #[test]
-    fn welcome_when_a_key_is_missing() {
-        assert!(should_welcome(Missing, Missing, false), "the first start");
-        assert!(should_welcome(Missing, Saved, false));
-        assert!(should_welcome(Saved, Missing, false));
-        assert!(should_welcome(Missing, Unreadable, false), "the other key not read: this one is still missing");
+    fn welcome_when_the_key_is_missing() {
+        assert!(should_welcome(Missing, false), "the first start");
+        assert!(!should_welcome(Saved, false));
     }
 
-    #[test]
-    fn no_welcome_when_both_keys_are_there() {
-        assert!(!should_welcome(Saved, Saved, false));
-    }
-
-    /// A store that failed says nothing about the keys: no window for that.
+    /// A store that failed says nothing about the key: no window for that.
     #[test]
     fn store_error_is_not_a_missing_key() {
-        assert!(!should_welcome(Unreadable, Saved, false));
-        assert!(!should_welcome(Saved, Unreadable, false));
-        assert!(!should_welcome(Unreadable, Unreadable, false));
+        assert!(!should_welcome(Unreadable, false));
     }
 
     #[test]
-    fn forced_welcome_opens_with_keys() {
-        for (soniox, anthropic) in [(Saved, Saved), (Unreadable, Unreadable), (Missing, Saved)] {
-            assert!(should_welcome(soniox, anthropic, true), "{soniox:?} {anthropic:?}");
+    fn forced_welcome_opens_with_the_key() {
+        for anthropic in [Saved, Unreadable, Missing] {
+            assert!(should_welcome(anthropic, true), "{anthropic:?}");
         }
     }
 

@@ -1,13 +1,13 @@
-// The key rows of the settings tray's Keys page and of the welcome window's Keys step: Soniox and Anthropic, each a
-// password field, "Check" and the key's state. A key is typed into the field, sent once to be saved and the field
+// The key row of the settings tray's Keys page and of the welcome window's Keys step: Anthropic's key, for the cleanup,
+// a password field, "Check" and the key's state. A key is typed into the field, sent once to be saved and the field
 // cleared: its value is not kept here and never logged, and only its mask comes back into the page.
 import * as api from './api';
 import type { KeyName } from './api';
 import { codeOf, h, logFailed, srow, type Ctx } from './page';
 import type { KeyState } from './text';
 
-export const KEYS: readonly KeyName[] = ['soniox', 'anthropic'];
-export const KEY_TITLE: Record<KeyName, string> = { soniox: 'Soniox', anthropic: 'Anthropic' };
+export const KEYS: readonly KeyName[] = ['anthropic'];
+export const KEY_TITLE: Record<KeyName, string> = { anthropic: 'Anthropic' };
 
 /** What the page knows of a key: saved or not, its mask, the result of its last check (null — none yet). */
 export interface KeyInfo {
@@ -18,7 +18,6 @@ export interface KeyInfo {
 
 export class KeyRows {
   readonly keys: Record<KeyName, KeyInfo> = {
-    soniox: { saved: false, mask: '', state: null },
     anthropic: { saved: false, mask: '', state: null },
   };
   /** The saved keys were read: until then a row shows no state. */

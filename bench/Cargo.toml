@@ -12,14 +12,10 @@ cue-engines.workspace = true
 cue-platform-win.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# `signal` is for Ctrl+C: the run is interrupted inside the runtime, so the Soniox cleanup gets a chance to start.
+# `signal` is for Ctrl+C: the first press is a stop request the run looks at between steps, not the end of the process.
 tokio = { workspace = true, features = ["signal"] }
 reqwest.workspace = true
 hound.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-
-[dev-dependencies]
-# Virtual time in the stream pacing test (`start_paused`).
-tokio = { workspace = true, features = ["test-util"] }

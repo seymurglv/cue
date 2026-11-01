@@ -30,8 +30,12 @@ pub enum Mode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ErrorCause {
-    Net,
-    SonioxKey,
+    /// The speech model is not downloaded or did not load.
+    Model,
+    /// This processor cannot run the speech model.
+    Cpu,
+    /// Recognition failed.
+    Stt,
     ClaudeKey,
     /// The translation failed (network, timeout, the check): nothing was pasted.
     Translate,
@@ -47,6 +51,8 @@ pub enum TrayKind {
     /// The pinned microphone is not there, and the recording goes on with the Windows one (spec 3 §3): its names come
     /// to the Drop just before the card.
     MicMissing,
+    /// The speech model finished downloading in the background: recognition works now.
+    ModelReady,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -85,10 +91,10 @@ mod tests {
 
     #[test]
     fn json_names_match_typescript() {
-        let s = UiState { phase: UiPhase::Error, error: Some(ErrorCause::SonioxKey), retry: true, paused: false, mode: Mode::Dictate };
+        let s = UiState { phase: UiPhase::Error, error: Some(ErrorCause::Model), retry: true, paused: false, mode: Mode::Dictate };
         assert_eq!(
             serde_json::to_string(&s).unwrap(),
-            r#"{"phase":"error","error":"sonioxKey","retry":true,"paused":false,"mode":"dictate"}"#
+            r#"{"phase":"error","error":"model","retry":true,"paused":false,"mode":"dictate"}"#
         );
         assert_eq!(serde_json::to_string(&TrayKind::NoField).unwrap(), r#""noField""#);
         assert_eq!(serde_json::from_str::<UiAction>(r#""trayAction""#).unwrap(), UiAction::TrayAction);
@@ -115,8 +121,9 @@ mod tests {
             assert_eq!(json(v), format!("\"{name}\""));
         }
         let causes = [
-            (ErrorCause::Net, "net"),
-            (ErrorCause::SonioxKey, "sonioxKey"),
+            (ErrorCause::Model, "model"),
+            (ErrorCause::Cpu, "cpu"),
+            (ErrorCause::Stt, "stt"),
             (ErrorCause::ClaudeKey, "claudeKey"),
             (ErrorCause::Translate, "translate"),
         ];
@@ -129,6 +136,7 @@ mod tests {
             (TrayKind::HoldHint, "holdHint"),
             (TrayKind::LastMinute, "lastMinute"),
             (TrayKind::MicMissing, "micMissing"),
+            (TrayKind::ModelReady, "modelReady"),
         ];
         for (v, name) in trays {
             assert_eq!(json(v), format!("\"{name}\""));

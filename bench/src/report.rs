@@ -1,8 +1,9 @@
 //! Bench report: one HTML page with blind pairs. The data is embedded into the template as JSON.
 use serde::{Deserialize, Serialize};
 
-/// `engine`: `soniox` is the stream at speech pace, `soniox-async` the batch call on the file. `error` is the engine
-/// error text (no dictation), and then `text` is empty.
+/// `engine` is the local speech model's folder name (`parakeet-ultra-int8` is the app's model); `latency_ms` is its
+/// recognition time and `cost_usd` is 0 — runs from before the local models keep their cloud prices. `error` is the
+/// engine error text (no dictation), and then `text` is empty.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SttRun {
     pub engine: String,
@@ -73,7 +74,7 @@ mod tests {
             file: r"C:\Users\Тест Тестов\AppData\Local\CUE\bench\recordings\2026-10-27T10-00-00Z-1.wav".into(),
             app: "Notepad".into(),
             audio_ms: 12_345,
-            stt: vec![SttRun { engine: "soniox".into(), text: stt_text.into(), latency_ms: 300, cost_usd: 0.0004, error: None }],
+            stt: vec![SttRun { engine: "parakeet-ultra-int8".into(), text: stt_text.into(), latency_ms: 300, cost_usd: 0.0, error: None }],
             refine: vec![RefineRun {
                 model: "claude-haiku-5-5".into(),
                 text: refine_text.into(),

@@ -262,6 +262,12 @@ impl Ui {
         }
     }
 
+    /// The speech model's state, to every window: the Drop's error shows its bytes, the main and welcome windows its
+    /// progress.
+    pub fn model(&self, state: cue_core::model::ModelState) {
+        self.emit("cue://model", state);
+    }
+
     pub fn shake(&self) {
         self.emit("cue://shake", ());
     }

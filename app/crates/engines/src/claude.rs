@@ -29,7 +29,7 @@ fn thinking_for(model: &str) -> Option<Value> {
 pub enum Job {
     /// Clean up in the spoken language (dictation).
     Clean,
-    /// Clean up and write in this language (a Soniox code, see `cue_core::translate`).
+    /// Clean up and write in this language (a code of `cue_core::translate::LANGUAGES`).
     Translate(&'static str),
 }
 

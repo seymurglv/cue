@@ -1,4 +1,4 @@
-//! Bench: the user's recordings → Soniox stream and batch → refine models from settings → a report with blind pairs.
+//! Bench: the user's recordings → every local speech model → refine models from settings → a report with blind pairs.
 //!
 //! cue-bench run [--limit N] [--max-usd X]    cue-bench report <run folder>
 //!
@@ -6,49 +6,47 @@
 //!   saves them when settings.json has `"bench": {"save_recordings": true}`. A run goes to `%LOCALAPPDATA%\CUE\bench\runs\<time>\`
 //!   (`results.json` and `report.html`, written after every recording): dictation text and audio stay only there, outside the repository.
 //!   Recordings are checked before the run: broken ones are skipped and do not count toward `--limit`.
-//! - Transcription: `soniox` is the stream at speech pace (latency from the end of audio to the final result, like "finalize" in the app),
-//!   `soniox-async` is a batch call on the same file (latency is the whole call); both run at once. At the end of audio, like the app
-//!   on the second press, the connection to Anthropic is warmed up (HEAD without a key).
-//! - Refine runs on the stream text (if the stream failed, on the batch text), each model in turn: the same request (with
-//!   `dictionary.terms`), sanity check and timeout as in the app (`claude::refine`). Models come from settings.json.
+//! - Transcription compares the speech models on this computer: every folder in `%LOCALAPPDATA%\CUE\models\` that loads
+//!   is one engine, named by the folder (`parakeet-ultra-int8` is the app's model; another export, such as NVIDIA's v3,
+//!   can be put next to it). Each model is loaded once before the run and recognizes every whole recording in turn;
+//!   latency is the model's own recognition time, the cost is $0. When transcription starts, like the app on the
+//!   second press, the connection to Anthropic is warmed up (HEAD without a key).
+//! - Refine runs on the text of `parakeet-ultra-int8` (if it failed or is not installed, on the first model that
+//!   succeeded), each model in turn: the same request (with `dictionary.terms`), sanity check and timeout as in the app
+//!   (`claude::refine`). Models come from settings.json.
 //! - Before the first measurement there is a warm-up: one request per model; it is not in the report, but it is in the spend.
 //! - Spending limit `--max-usd` (default $1): once reached, no new paid calls start; what was collected is saved.
-//! - Ctrl+C means "finish what was sent and stop": the current recording's stream is interrupted, its batch call
-//!   is awaited (dropped mid-upload, it could leave audio in Soniox under an id we never learn), refine for it
-//!   does not run, it is not in the results, no new recordings start. Before exiting (end, limit, Ctrl+C, error)
-//!   the bench waits for the recordings' cleanup in Soniox — the engine's whole retry schedule plus a 30 s margin ([`cleanup_wait`]).
-//!   The next Ctrl+C exits at once, with a warning.
+//! - Ctrl+C means "finish the current step and stop": the recognition or refine request under way finishes, nothing
+//!   new starts, the current recording is not in the results. The next Ctrl+C exits at once.
 //! - The console gets numbers, file names, durations, latencies, outcomes, tokens and prices; stderr gets engine
 //!   warnings (WARN). No dictation text and no keys there.
 mod report;
 
 use anyhow::{Context, Result, anyhow, bail};
+use cue_core::model::ULTRA;
 use cue_core::refine::RefineContext;
-use cue_core::settings::{Settings, SttEngineKind};
-use cue_core::usage::{SttPath, refine_cost, stt_cost, utc_timestamp};
+use cue_core::settings::Settings;
+use cue_core::usage::{refine_cost, utc_timestamp};
 use cue_engines::EngineError;
 use cue_engines::claude;
 use cue_engines::keys::{self, KeyName};
-use cue_engines::soniox::{self, SonioxConfig};
-use cue_engines::stt::{self, CHUNK_SAMPLES, Engine, Fallback, SAMPLES_PER_MS, SttOutput};
+use cue_engines::parakeet::model::{self as parakeet, Recognized, Recognizer};
+use cue_engines::stt::SAMPLES_PER_MS;
 use cue_platform_win::focus::UNKNOWN_APP;
 use report::{Item, RefineRun, SttRun};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const USAGE: &str = "cue-bench run [--limit N] [--max-usd X] | cue-bench report <run folder>";
 const DEFAULT_MAX_USD: f64 = 1.0;
-/// Names of the transcription paths in the report.
-const STREAM: &str = "soniox";
-const BATCH: &str = "soniox-async";
-/// How long we wait for the stream's final result after the end of audio — like the app (`STT_FINISH_TIMEOUT` in runtime.rs).
-const STT_FINISH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Connection warm-up timeout — like the app's (`WARM_TIMEOUT` in runtime.rs).
 const WARM_TIMEOUT: Duration = Duration::from_secs(5);
-/// Engine log: warnings only. At trace level tungstenite writes the whole handshake — with
-/// `Authorization: Bearer <key>`; the filter is fixed, an environment variable does not change it.
-const LOG_FILTER: &str = "warn,tungstenite=off,tokio_tungstenite=off";
+/// Engine log: warnings only. The filter is fixed, so no environment variable can turn on the HTTP stack's
+/// debug output, which would carry request headers.
+const LOG_FILTER: &str = "warn";
 const NO_RECORDINGS: &str = "no recordings: set \"bench\": {\"save_recordings\": true} in %APPDATA%\\CUE\\settings.json, \
                              restart CUE and dictate a few times";
 
@@ -160,6 +158,54 @@ fn readable(files: &[PathBuf], limit: Option<usize>, mut check: impl FnMut(&Path
         .collect()
 }
 
+/// What to do when no model loads: where the folders are and what a folder must hold.
+fn no_models(root: &Path) -> String {
+    format!(
+        "no speech model loads from {}: start CUE once so it downloads {}, or put a model folder there \
+         ({}, {}, {})",
+        root.display(),
+        ULTRA.name,
+        parakeet::ENCODER,
+        parakeet::DECODER,
+        parakeet::VOCAB
+    )
+}
+
+/// The model folders in `root`, the app's model first, the rest by name — the report's columns keep that order.
+/// Files are not models; whether a folder holds one is for the loader to say.
+fn model_dirs(root: &Path) -> Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!("{}", no_models(root)),
+        Err(e) => return Err(e).with_context(|| format!("models folder {}", root.display())),
+    };
+    let mut dirs: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_dir()).collect();
+    dirs.sort_by_key(|d| (file_name(d) != ULTRA.id, file_name(d)));
+    Ok(dirs)
+}
+
+/// A loaded speech model under its folder's name, which is its engine name in the report.
+struct Model<T> {
+    name: String,
+    recognizer: T,
+}
+
+/// Every folder `load` accepts, once, with a console line each: the load time, or why the folder is skipped (a
+/// partial download, a different export, a processor ONNX Runtime cannot run on).
+fn load_models<T>(dirs: &[PathBuf], mut load: impl FnMut(&Path) -> Result<T, EngineError>) -> Vec<Model<T>> {
+    let mut models = Vec::new();
+    for dir in dirs {
+        let name = file_name(dir);
+        let t0 = Instant::now();
+        let loaded = load(dir);
+        println!("{}", load_line(&name, loaded.as_ref().map(|_| ms(t0.elapsed()))));
+        if let Ok(recognizer) = loaded {
+            models.push(Model { name, recognizer });
+        }
+    }
+    models
+}
+
 /// Spending limit: a paid call starts only while the spend is below the limit. A call started before the limit
 /// may go past it — by the price of one call (cents).
 #[derive(Debug)]
@@ -186,31 +232,8 @@ fn ms(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Audio at speech pace: each 100 ms chunk is sent once it has "sounded" (from the start up to its last sample).
-/// Returns right after the last chunk — that is the end of audio, the second press in the app.
-async fn pace(pcm: &[i16], mut push: impl FnMut(Vec<i16>)) {
-    let start = tokio::time::Instant::now();
-    let mut sent = 0u64;
-    for chunk in pcm.chunks(CHUNK_SAMPLES) {
-        sent += chunk.len() as u64;
-        tokio::time::sleep_until(start + Duration::from_millis(sent / SAMPLES_PER_MS)).await;
-        push(chunk.to_vec());
-    }
-}
-
-/// Soniox stream at speech pace. Latency is from the end of audio to the `finish` result.
-async fn stream(engine: Engine, pcm: &[i16], http: &reqwest::Client) -> (Result<SttOutput, EngineError>, u64) {
-    let session = stt::start(engine);
-    pace(pcm, |chunk| session.push(chunk)).await;
-    // The end of audio is the "second press": like the app, the connection to Anthropic warms up by the time the text arrives.
-    drop(warm_at(http, claude::API_URL.to_owned()));
-    let t0 = Instant::now();
-    let r = session.finish(STT_FINISH_TIMEOUT).await;
-    (r, ms(t0.elapsed()))
-}
-
 /// Warm-up, like the app's `warm_up`: HEAD to the API address without a key and without text — for a TLS connection
-/// in the shared client's pool, so refine does not pay for the handshake after a long transcription. The response
+/// in the shared client's pool, so refine does not pay for the handshake after the transcription. The response
 /// (a refusal) is not needed; a failure is a log line.
 fn warm_at(http: &reqwest::Client, url: String) -> tokio::task::JoinHandle<()> {
     let http = http.clone();
@@ -221,72 +244,64 @@ fn warm_at(http: &reqwest::Client, url: String) -> tokio::task::JoinHandle<()> {
     })
 }
 
-/// Soniox batch call on the recording file. Latency is the whole call (upload, transcription, polling, cleanup), like the batch fallback.
-async fn batch(fallback: &Fallback, wav: &Path) -> (Result<SttOutput, EngineError>, u64) {
+/// A recognition result and the wall time of the call (the latency of a failure, which has no `took_ms`).
+type Heard = (Result<Recognized, EngineError>, u64);
+
+/// The whole recording through one model, on a blocking thread: the runtime stays free to see Ctrl+C meanwhile.
+async fn recognize(model: Arc<Recognizer>, pcm: Arc<[i16]>) -> Heard {
     let t0 = Instant::now();
-    let r = fallback.transcribe(wav).await;
+    let r = tokio::task::spawn_blocking(move || model.recognize(&pcm))
+        .await
+        // A panic's message may hold dictation text; the report gets a fixed one.
+        .unwrap_or_else(|_| Err(EngineError::Model("the recognition thread failed".into())));
     (r, ms(t0.elapsed()))
 }
 
-/// A transcription result and its latency.
-type Heard = (Result<SttOutput, EngineError>, u64);
-
-/// A request to stop — the first Ctrl+C.
-#[derive(Clone)]
-struct Stop(tokio::sync::watch::Receiver<bool>);
+/// A request to stop — the first Ctrl+C. It is looked at between steps: a recognition cannot be interrupted, and a
+/// refine request under way is already paid for.
+#[derive(Clone, Default)]
+struct Stop(Arc<AtomicBool>);
 
 impl Stop {
-    fn new() -> (tokio::sync::watch::Sender<bool>, Stop) {
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        (tx, Stop(rx))
+    fn request(&self) {
+        self.0.store(true, Ordering::Relaxed);
     }
 
     fn requested(&self) -> bool {
-        *self.0.borrow()
-    }
-
-    /// Wait for the request. If the sender is gone without sending it, the request will never come.
-    async fn wait(&self) {
-        if self.0.clone().wait_for(|stop| *stop).await.is_err() {
-            std::future::pending::<()>().await;
-        }
+        self.0.load(Ordering::Relaxed)
     }
 }
 
-/// The result of `fut` — or `None` if a stop request came first: then `fut` is dropped (and one not yet started is never started).
-async fn unless_stopped<T>(fut: impl Future<Output = T>, stop: &Stop) -> Option<T> {
-    if stop.requested() {
-        return None;
-    }
-    tokio::select! {
-        biased;
-        v = fut => Some(v),
-        () = stop.wait() => None,
-    }
-}
-
-/// Transcription of a recording: stream and batch at once. A stop request interrupts only the stream — dropping it
-/// leaves nothing in Soniox. The batch call is always awaited: dropped in the middle of `POST /files` or
-/// `POST /transcriptions`, it could leave audio or a transcription in Soniox whose ids we would never learn — there
-/// would be nothing to delete. The engine bounds its duration.
-async fn stt_phase(stream: impl Future<Output = Heard>, batch: impl Future<Output = Heard>, stop: &Stop) -> (Heard, Heard) {
-    let stream = async { unless_stopped(stream, stop).await.unwrap_or((Err(EngineError::Aborted), 0)) };
-    tokio::join!(stream, batch)
-}
-
-/// Engine result → report row. An error goes through the engine's `Display` (it holds no dictation text); the text is then empty.
-fn stt_run(engine: &str, (result, latency_ms): (Result<SttOutput, EngineError>, u64), cost_usd: f64) -> SttRun {
-    let (text, error) = match result {
-        Ok(o) => (o.text, None),
-        Err(e) => (String::new(), Some(e.to_string())),
+/// Engine result → report row and whether the other alphabet was masked out. An error goes through the engine's
+/// `Display` (it holds no dictation text); the text is then empty.
+fn stt_run(engine: &str, (result, elapsed_ms): Heard) -> (SttRun, bool) {
+    let (text, latency_ms, error, masked) = match result {
+        Ok(r) => (r.text, r.took_ms, None, r.masked),
+        Err(e) => (String::new(), elapsed_ms, Some(e.to_string()), false),
     };
-    SttRun { engine: engine.into(), text, latency_ms, cost_usd, error }
+    (SttRun { engine: engine.into(), text, latency_ms, cost_usd: 0.0, error }, masked)
 }
 
-/// Text for refine — as in the app: the stream text; if the stream failed, the batch text. The app does not refine
-/// empty text (outcome "empty") — neither does the bench.
-fn refine_input(stream: &SttRun, batch: &SttRun) -> Option<String> {
-    let source = [stream, batch].into_iter().find(|r| r.error.is_none())?;
+/// Transcription of a recording: each model in turn (`recognize(i)` is model `i` of `names`), a console line each.
+/// `None` if a stop request came between models: the recording is not complete.
+async fn stt_phase<Fut: Future<Output = Heard>>(names: &[String], stop: &Stop, mut recognize: impl FnMut(usize) -> Fut) -> Option<Vec<SttRun>> {
+    let mut runs = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        if stop.requested() {
+            return None;
+        }
+        let (run, masked) = stt_run(name, recognize(i).await);
+        println!("{}", stt_line(&run, masked));
+        runs.push(run);
+    }
+    Some(runs)
+}
+
+/// Text for refine — as in the app: the app's model's text; if it failed or is not installed, the first model that
+/// succeeded. The app does not refine empty text (outcome "empty") — neither does the bench.
+fn refine_input(runs: &[SttRun]) -> Option<String> {
+    let ok = |r: &&SttRun| r.error.is_none();
+    let source = runs.iter().filter(ok).find(|r| r.engine == ULTRA.id).or_else(|| runs.iter().find(ok))?;
     (!source.text.trim().is_empty()).then(|| source.text.clone())
 }
 
@@ -310,17 +325,22 @@ async fn refine_once(http: &reqwest::Client, key: &str, model: &str, raw: &str, 
     }
 }
 
-/// Refine for one recording: warm-up (if `warm_up`), then a measurement per model — in turn, while the limit allows.
-/// `call(model)` is one request. Returns the measurements (warm-up is not among them) and `Some(End::Budget)` if the limit was hit.
+/// Refine for one recording: warm-up (if `warm_up`), then a measurement per model — in turn, while the limit allows
+/// and no stop was requested. `call(model)` is one request. Returns the measurements (warm-up is not among them) and
+/// why the phase ended early: `Some(End::Budget)` or `Some(End::Interrupted)`.
 async fn refine_phase<'a, Fut: Future<Output = RefineRun>>(
     models: &'a [String],
     warm_up: bool,
     budget: &mut Budget,
+    stop: &Stop,
     mut call: impl FnMut(&'a str) -> Fut,
 ) -> (Vec<RefineRun>, Option<End>) {
     let warm: &[String] = if warm_up { models } else { &[] };
     let mut runs = Vec::new();
     for (model, warm) in warm.iter().map(|m| (m, true)).chain(models.iter().map(|m| (m, false))) {
+        if stop.requested() {
+            return (runs, Some(End::Interrupted));
+        }
         if !budget.allows() {
             return (runs, Some(End::Budget));
         }
@@ -348,13 +368,20 @@ enum End {
 
 // Console lines: only numbers, names, outcomes — no dictation text.
 
+fn load_line(name: &str, loaded: Result<u64, &EngineError>) -> String {
+    match loaded {
+        Ok(ms) => format!("speech model {name}: loaded in {ms} ms"),
+        Err(e) => format!("speech model {name}: skipped — {e}"),
+    }
+}
+
 fn item_line(n: usize, total: usize, name: &str, audio_ms: u64) -> String {
     format!("{n}/{total} · {name} · {:.1} s", audio_ms as f64 / 1000.0)
 }
 
-fn stt_line(r: &SttRun) -> String {
+fn stt_line(r: &SttRun, masked: bool) -> String {
     match &r.error {
-        None => format!("  {}: {} ms, ${:.5}", r.engine, r.latency_ms, r.cost_usd),
+        None => format!("  {}: {} ms, other alphabet masked: {}", r.engine, r.latency_ms, if masked { "yes" } else { "no" }),
         Some(e) => format!("  {}: failed — {e} ({} ms)", r.engine, r.latency_ms),
     }
 }
@@ -379,41 +406,16 @@ fn summary_line(done: usize, total: usize, spent: f64, max_usd: f64, end: End, r
     format!("{head}: recordings {done} of {total}, spent ${spent:.4}; report: {}", report.display())
 }
 
-/// Cleanup left undone in Soniox — only the count of recordings.
-fn cleanup_left_line(left: usize) -> Option<String> {
-    (left > 0).then(|| {
-        format!(
-            "Warning: Soniox cleanup did not finish for recordings: {left}. Their audio or transcription may remain \
-             in the Soniox account — delete them in the Soniox console."
-        )
-    })
-}
-
-/// Margin over the worst case of the engine's background cleanup: the wait must not end a moment before the last attempt.
-const CLEANUP_MARGIN: Duration = Duration::from_secs(30);
-
-/// How long the bench waits for the Soniox cleanup before exiting: the engine's whole retry schedule plus a margin.
-fn cleanup_wait() -> Duration {
-    soniox::cleanup_window() + CLEANUP_MARGIN
-}
-
-fn cleanup_wait_line(wait: Duration) -> String {
-    format!("cleaning up recordings in Soniox… (up to {} min; Ctrl+C to exit without waiting)", wait.as_secs().div_ceil(60))
-}
-
 /// The recording where we stopped.
 const INTERRUPTED_ITEM: &str = "  stopped by Ctrl+C: this recording is not in the results";
 
 /// The first Ctrl+C.
-const STOPPING: &str = "Ctrl+C: stopping — waiting for the recording already sent to Soniox and cleaning it up (it will \
-                        not be in the results); no new recordings will start. Ctrl+C again to exit at once, without cleanup.";
+const STOPPING: &str = "Ctrl+C: stopping after the current step — this recording will not be in the results, no new \
+                        recordings will start. Ctrl+C again to exit at once.";
 
-/// A second Ctrl+C while waiting for the sent recording: exit at once, do not wait for the cleanup — only the count.
-fn abandon_line(left: usize) -> String {
-    format!(
-        "Exiting without Soniox cleanup: recordings not cleaned up — {left}; a recording interrupted mid-upload may remain too. \
-         Delete the leftovers in the Soniox console."
-    )
+/// The second Ctrl+C: what was collected is already on disk, saved after every recording.
+fn exit_line(report: &Path) -> String {
+    format!("Exiting at once; recordings finished so far are in the report: {}", report.display())
 }
 
 /// Run folder name: UTC time without colons (Windows file names cannot contain them).
@@ -437,20 +439,21 @@ fn save(dir: &Path, items: &[Item]) -> Result<()> {
     Ok(())
 }
 
-/// Everything the run needs before the first paid call. No `Debug`: it holds keys.
+/// Everything the run needs before the first paid call. No `Debug`: it holds a key.
 struct Plan {
     settings: Settings,
     /// The run's recordings: readable and at most `--limit`. "n of N" comes from this list.
     files: Vec<PathBuf>,
+    speech: Vec<Model<Arc<Recognizer>>>,
     models: Vec<String>,
-    soniox_key: String,
     anthropic_key: String,
     /// One client for the whole run — as in the app: connections are reused.
     http: reqwest::Client,
     dir: PathBuf,
 }
 
-/// Settings, recordings, models, keys and the run folder — no paid calls yet.
+/// Settings, recordings, refine models, the key, the speech models and the run folder — no paid calls yet.
+/// The models load last of the checks: it takes seconds, and a missing key should not wait for it.
 fn prepare(limit: Option<usize>, max_usd: f64) -> Result<Plan> {
     let app_data = cue_core::paths::app_data().context("no %APPDATA% (or the path is not absolute)")?;
     let settings_file = cue_core::paths::settings_json(&app_data);
@@ -463,35 +466,42 @@ fn prepare(limit: Option<usize>, max_usd: f64) -> Result<Plan> {
         bail!("no recording is readable (skipped: {})", all.len());
     }
     let models = refine_models(&settings);
-    let soniox_key = key(KeyName::Soniox)?;
     let anthropic_key = key(KeyName::Anthropic)?;
+
+    // The same folder the app keeps its model in (`paths::model_dir`).
+    let models_root = cue_core::paths::local_dir(&base).join("models");
+    let speech = load_models(&model_dirs(&models_root)?, |d| Recognizer::load(d).map(Arc::new));
+    if speech.is_empty() {
+        bail!("{}", no_models(&models_root));
+    }
 
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     let dir = bench.join("runs").join(run_stamp(secs));
     std::fs::create_dir_all(&dir).with_context(|| format!("run folder {}", dir.display()))?;
     // An empty report right away: writing into the run folder is checked before the first paid request.
     save(&dir, &[])?;
-    let plan = Plan { settings, files, models, soniox_key, anthropic_key, http: reqwest::Client::new(), dir };
+    let plan = Plan { settings, files, speech, models, anthropic_key, http: reqwest::Client::new(), dir };
 
-    println!("recordings {}, refine models: {}; limit ${max_usd:.2}", plan.files.len(), plan.models.join(", "));
+    let speech_names: Vec<&str> = plan.speech.iter().map(|m| m.name.as_str()).collect();
+    println!(
+        "recordings {}, speech models: {}; refine models: {}; limit ${max_usd:.2}",
+        plan.files.len(),
+        speech_names.join(", "),
+        plan.models.join(", ")
+    );
     for m in plan.models.iter().filter(|m| plan.settings.pricing.claude_price(m).is_none()) {
         println!("model {m} has no price in settings.json — its spend counts as $0, the limit does not see it");
     }
     Ok(plan)
 }
 
-/// Recordings in turn: transcription, warm-up (once), refine. After every recording — results.json and report.html.
-/// On a stop request no new recordings start; for the current one the stream is interrupted, the batch is awaited,
-/// refine does not run (a running one is dropped). The current recording is not in the results: an interrupted stream
-/// would skew the failure count, an incomplete refine the choice count; its spend is counted in the total.
+/// Recordings in turn: transcription by every model, warm-up (once), refine. After every recording — results.json and
+/// report.html. On a stop request the step under way finishes and nothing new starts; the current recording is not in
+/// the results (a model it was not heard by would skew the failure count, an incomplete refine the choice count); its
+/// spend is counted in the total.
 async fn work(plan: &Plan, items: &mut Vec<Item>, budget: &mut Budget, stop: &Stop) -> Result<End> {
     let s = &plan.settings;
-    let fallback = Fallback {
-        http: plan.http.clone(),
-        soniox_key: plan.soniox_key.clone(),
-        model: s.stt.soniox_async_model.clone(),
-        hints: s.stt.language_hints.clone(),
-    };
+    let names: Vec<String> = plan.speech.iter().map(|m| m.name.clone()).collect();
     let mut warmed = false;
     for (n, file) in plan.files.iter().enumerate() {
         if stop.requested() {
@@ -511,21 +521,16 @@ async fn work(plan: &Plan, items: &mut Vec<Item>, budget: &mut Budget, stop: &St
         let audio_ms = rec.pcm.len() as u64 / SAMPLES_PER_MS;
         println!("{}", item_line(n + 1, plan.files.len(), &file_name(file), audio_ms));
 
-        let cfg = SonioxConfig {
-            model: s.stt.soniox_model.clone(),
-            language_hints: s.stt.language_hints.clone(),
-            // As in the app: "unknown" is not an app name, so there is no context.
-            app: (rec.app != UNKNOWN_APP).then(|| rec.app.clone()),
-            terms: vec![],
+        // The start of recognition is the "second press": like the app, the connection to Anthropic warms up by the time the text is there.
+        drop(warm_at(&plan.http, claude::API_URL.to_owned()));
+        let pcm: Arc<[i16]> = rec.pcm.into();
+        let phase = stt_phase(&names, stop, |i| recognize(plan.speech[i].recognizer.clone(), pcm.clone())).await;
+        let Some(stt) = phase else {
+            println!("{INTERRUPTED_ITEM}");
+            return Ok(End::Interrupted);
         };
-        let engine = Engine::Soniox { key: plan.soniox_key.clone(), cfg };
-        let (streamed, batched) = stt_phase(stream(engine, &rec.pcm, &plan.http), batch(&fallback, file), stop).await;
-        let stream_run = stt_run(STREAM, streamed, stt_cost(&s.pricing, SttEngineKind::Soniox, SttPath::Stream, audio_ms));
-        let batch_run = stt_run(BATCH, batched, stt_cost(&s.pricing, SttEngineKind::Soniox, SttPath::Batch, audio_ms));
-        budget.add(stream_run.cost_usd + batch_run.cost_usd);
-        println!("{}\n{}", stt_line(&stream_run), stt_line(&batch_run));
-        let raw = refine_input(&stream_run, &batch_run);
-        let mut item = Item { file: file.display().to_string(), app: rec.app.clone(), audio_ms, stt: vec![stream_run, batch_run], refine: vec![] };
+        let raw = refine_input(&stt);
+        let mut item = Item { file: file.display().to_string(), app: rec.app.clone(), audio_ms, stt, refine: vec![] };
 
         let mut end = None;
         if let Some(raw) = raw {
@@ -533,15 +538,16 @@ async fn work(plan: &Plan, items: &mut Vec<Item>, budget: &mut Budget, stop: &St
             // Warm-up on the first transcript, before the first measurement: a cold connection and the prompt cache write.
             let warm_up = !warmed;
             warmed = true;
-            let phase = refine_phase(&plan.models, warm_up, budget, |model| {
+            let (runs, phase_end) = refine_phase(&plan.models, warm_up, budget, stop, |model| {
                 refine_once(&plan.http, &plan.anthropic_key, model, &raw, &ctx, s)
-            });
-            let Some((runs, budget_end)) = unless_stopped(phase, stop).await else {
+            })
+            .await;
+            if phase_end == Some(End::Interrupted) {
                 println!("{INTERRUPTED_ITEM}");
                 return Ok(End::Interrupted);
-            };
+            }
             item.refine = runs;
-            end = budget_end;
+            end = phase_end;
         } else if stop.requested() {
             println!("{INTERRUPTED_ITEM}");
             return Ok(End::Interrupted);
@@ -564,47 +570,30 @@ async fn interrupted() {
     }
 }
 
-/// Before exiting, wait for the background Soniox cleanup ([`cleanup_wait`]). Ctrl+C exits without waiting.
-async fn wait_for_cleanup() {
-    if soniox::wait_cleanups(Duration::ZERO).await == 0 {
-        return;
-    }
-    let wait = cleanup_wait();
-    println!("{}", cleanup_wait_line(wait));
-    let left = tokio::select! {
-        left = soniox::wait_cleanups(wait) => left,
-        () = interrupted() => soniox::wait_cleanups(Duration::ZERO).await,
-    };
-    if let Some(line) = cleanup_left_line(left) {
-        eprintln!("{line}");
-    }
-}
-
 async fn run(limit: Option<usize>, max_usd: f64) -> Result<()> {
     let plan = prepare(limit, max_usd)?;
-    let (mut items, mut budget) = (Vec::new(), Budget::new(max_usd));
-    let (stop_tx, stop) = Stop::new();
-    // The first Ctrl+C is a stop request: `work` finishes what was sent to Soniox and returns on its own.
+    let (mut items, mut budget, stop) = (Vec::new(), Budget::new(max_usd), Stop::default());
+    // The first Ctrl+C is a stop request: `work` finishes the step under way and returns on its own.
     // The next one exits at once.
     let ctrl_c = async {
         interrupted().await;
-        let _ = stop_tx.send(true);
+        stop.request();
         println!("{STOPPING}");
         interrupted().await;
     };
+    let report = plan.dir.join("report.html");
     let end = tokio::select! {
         end = work(&plan, &mut items, &mut budget, &stop) => end,
         () = ctrl_c => {
-            // The run is already dropped: the abandoned batch call handed the cleanup of what it knows to the background; we do not wait for it.
-            eprintln!("{}", abandon_line(soniox::wait_cleanups(Duration::ZERO).await));
-            return Ok(());
+            // `work` is dropped at an await, never inside `save`, so the files on disk are whole. The process ends
+            // here rather than by returning: the runtime's shutdown would wait for a recognition under way.
+            println!("{}", exit_line(&report));
+            std::process::exit(130);
         }
     };
     if let Ok(end) = end {
-        println!("{}", summary_line(items.len(), plan.files.len(), budget.spent, max_usd, end, &plan.dir.join("report.html")));
+        println!("{}", summary_line(items.len(), plan.files.len(), budget.spent, max_usd, end, &report));
     }
-    // Whatever the outcome, the Soniox cleanup comes first; main prints the run error after it.
-    wait_for_cleanup().await;
     end.map(|_| ())
 }
 
@@ -621,7 +610,7 @@ fn write_report(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Engine warnings (refine fallback reasons, Soniox cleanup failures) go to stderr. Their texts hold no dictation.
+/// Engine warnings (refine fallback reasons, model load problems) go to stderr. Their texts hold no dictation.
 fn init_log() {
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -654,11 +643,9 @@ mod tests {
     use super::*;
     use cue_core::settings::{ModelPrice, Settings};
     use cue_engines::EngineError;
-    use cue_engines::stt::SttOutput;
     use cue_platform_win::focus::UNKNOWN_APP;
     use report::{RefineRun, SttRun};
     use std::path::{Path, PathBuf};
-    use std::time::Duration;
 
     fn args(list: &[&str]) -> anyhow::Result<Command> {
         parse_args(&list.iter().map(|s| s.to_string()).collect::<Vec<_>>())
@@ -812,103 +799,131 @@ mod tests {
         assert_eq!(readable(&files, None, |_: &Path| Ok(())).len(), 5);
     }
 
-    fn heard(text: &str) -> SttOutput {
-        SttOutput { text: text.into(), audio_ms: 1_000, language: None }
-    }
+    const V3: &str = "parakeet-v3-int8";
 
-    /// A guard inside a future: records the time since `t0` when it is dropped.
-    struct DroppedAt(tokio::time::Instant, std::sync::Arc<std::sync::Mutex<Option<Duration>>>);
-
-    impl Drop for DroppedAt {
-        fn drop(&mut self) {
-            *self.1.lock().unwrap() = Some(self.0.elapsed());
+    #[test]
+    fn model_folders_are_found_app_model_first_and_files_are_not_models() {
+        let root = temp_dir("models");
+        for d in [V3, "aaa-export", ULTRA.id, "zz-partial"] {
+            std::fs::create_dir(root.join(d)).unwrap();
         }
-    }
+        std::fs::write(root.join("notes.txt"), b"").unwrap();
+        let names = |v: &[PathBuf]| v.iter().map(|p| file_name(p)).collect::<Vec<_>>();
+        let dirs = model_dirs(&root).unwrap();
+        assert_eq!(names(&dirs), [ULTRA.id, "aaa-export", V3, "zz-partial"], "the app's model first, then by name");
 
-    #[tokio::test(start_paused = true)]
-    async fn stop_interrupts_the_stream_but_waits_for_the_batch() {
-        let (tx, stop) = Stop::new();
-        let t0 = tokio::time::Instant::now();
-        let dropped = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let guard = DroppedAt(t0, dropped.clone());
-        let stream = async move {
-            let _guard = guard;
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            (Ok(heard("stream")), 10_000)
-        };
-        let batch = async {
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            (Ok(heard("batch")), 3_000)
-        };
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            tx.send(true).unwrap();
+        // A folder the loader refuses (here: no vocabulary) is skipped; the rest keep their order and folder names.
+        for d in [V3, "aaa-export", ULTRA.id] {
+            std::fs::write(root.join(d).join(parakeet::VOCAB), d).unwrap();
+        }
+        let mut tried = Vec::new();
+        let models = load_models(&dirs, |d| {
+            tried.push(file_name(d));
+            std::fs::read_to_string(d.join(parakeet::VOCAB)).map_err(|e| EngineError::Model(e.to_string()))
         });
-        let (streamed, batched) = stt_phase(stream, batch, &stop).await;
-        assert_eq!(streamed.0, Err(EngineError::Aborted));
-        assert_eq!(batched, (Ok(heard("batch")), 3_000), "the batch call is not dropped — its result is awaited");
-        assert_eq!(t0.elapsed(), Duration::from_secs(3));
-        assert_eq!(*dropped.lock().unwrap(), Some(Duration::from_secs(1)), "the stream is interrupted right on request");
+        assert_eq!(tried, [ULTRA.id, "aaa-export", V3, "zz-partial"], "each folder is loaded once");
+        let loaded: Vec<(&str, &str)> = models.iter().map(|m| (m.name.as_str(), m.recognizer.as_str())).collect();
+        assert_eq!(loaded, [(ULTRA.id, ULTRA.id), ("aaa-export", "aaa-export"), (V3, V3)]);
+
+        // An empty folder is no error here — `prepare` says "no model loads"; a missing folder already says what to do.
+        let empty = temp_dir("no-models");
+        assert!(model_dirs(&empty).unwrap().is_empty());
+        std::fs::remove_dir(&empty).unwrap();
+        let e = model_dirs(&empty).unwrap_err().to_string();
+        assert!(e.contains("no speech model") && e.contains(parakeet::ENCODER) && e.contains(&empty.display().to_string()), "{e}");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn without_stop_both_recognitions_finish() {
-        let (_tx, stop) = Stop::new();
-        let stream = async { (Ok(heard("stream")), 300) };
-        let batch = async { (Ok(heard("batch")), 2_000) };
-        assert_eq!(stt_phase(stream, batch, &stop).await, ((Ok(heard("stream")), 300), (Ok(heard("batch")), 2_000)));
+    #[test]
+    fn load_lines_have_the_time_or_the_reason() {
+        assert_eq!(load_line(ULTRA.id, Ok(1_234)), "speech model parakeet-ultra-int8: loaded in 1234 ms");
+        let line = load_line(V3, Err(&EngineError::Unsupported("no AVX2".into())));
+        assert!(line.contains(V3) && line.contains("skipped") && line.contains("no AVX2"), "{line}");
+    }
+
+    fn recognized(text: &str, masked: bool) -> Recognized {
+        Recognized { text: text.into(), masked, audio_ms: 4_000, took_ms: 310 }
+    }
+
+    #[test]
+    fn stt_run_keeps_text_or_error() {
+        let (ok, masked) = stt_run(ULTRA.id, (Ok(recognized("привет", true)), 330));
+        assert_eq!(ok, SttRun { engine: ULTRA.id.into(), text: "привет".into(), latency_ms: 310, cost_usd: 0.0, error: None }, "latency is the model's own time");
+        assert!(masked);
+        let (failed, masked) = stt_run(V3, (Err(EngineError::Model("encoder: broken".into())), 45));
+        assert_eq!(failed, SttRun { engine: V3.into(), text: String::new(), latency_ms: 45, cost_usd: 0.0, error: Some("speech model: encoder: broken".into()) });
+        assert!(!masked);
+    }
+
+    #[tokio::test]
+    async fn every_model_hears_the_recording_until_a_stop() {
+        let names = vec![ULTRA.id.to_owned(), V3.to_owned()];
+        let stop = Stop::default();
+        let mut asked = Vec::new();
+        let runs = stt_phase(&names, &stop, |i| {
+            asked.push(i);
+            std::future::ready((Ok(recognized(&format!("text {i}"), false)), 300))
+        })
+        .await
+        .unwrap();
+        assert_eq!(asked, [0, 1]);
+        assert_eq!(runs.iter().map(|r| (r.engine.as_str(), r.text.as_str())).collect::<Vec<_>>(), [(ULTRA.id, "text 0"), (V3, "text 1")]);
+
+        // A stop during the first model: it finishes, the next one does not start, the recording is incomplete.
+        let mut asked = 0;
+        let phase = stt_phase(&names, &stop, |_| {
+            asked += 1;
+            stop.request();
+            std::future::ready((Ok(recognized("", false)), 300))
+        });
+        assert_eq!(phase.await, None);
+        assert_eq!(asked, 1);
     }
 
     fn priced(model: &str, cost_usd: f64) -> RefineRun {
         RefineRun { model: model.into(), cost_usd, ..refine_run("") }
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn refine_is_not_started_after_stop_and_a_running_one_is_dropped() {
+    #[tokio::test]
+    async fn refine_is_not_started_after_stop_and_the_one_under_way_finishes() {
         let models = vec!["claude-haiku-5-5".to_owned(), "claude-sonnet-5-5".to_owned()];
         let mut budget = Budget::new(1.0);
 
         // The stop request is already there (Ctrl+C during transcription) — not a single request.
-        let (tx, stop) = Stop::new();
-        tx.send(true).unwrap();
+        let stop = Stop::default();
+        stop.request();
         let mut calls = 0;
-        let phase = refine_phase(&models, true, &mut budget, |m| {
+        let (runs, end) = refine_phase(&models, true, &mut budget, &stop, |m| {
             calls += 1;
             std::future::ready(priced(m, 0.0))
-        });
-        assert!(unless_stopped(phase, &stop).await.is_none());
-        assert_eq!(calls, 0, "refine is not called");
+        })
+        .await;
+        assert_eq!((calls, runs.len(), end), (0, 0, Some(End::Interrupted)), "refine is not called");
 
-        // A stop request in the middle of a request — it is dropped, the next one is not started.
-        let (tx, stop) = Stop::new();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            tx.send(true).unwrap();
-        });
+        // A stop request during a request — that one is awaited and paid for, the next one is not started.
+        let stop = Stop::default();
         let mut calls = 0;
-        let phase = refine_phase(&models, false, &mut budget, |m| {
+        let (runs, end) = refine_phase(&models, false, &mut budget, &stop, |m| {
             calls += 1;
-            let run = priced(m, 0.0);
-            async move {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                run
-            }
-        });
-        assert!(unless_stopped(phase, &stop).await.is_none());
-        assert_eq!(calls, 1);
+            stop.request();
+            std::future::ready(priced(m, 0.25))
+        })
+        .await;
+        assert_eq!((calls, runs.len(), end), (1, 1, Some(End::Interrupted)));
+        assert!((budget.spent - 0.25).abs() < 1e-12, "its spend is counted: {}", budget.spent);
     }
 
     #[tokio::test]
     async fn refine_phase_warms_up_then_measures_within_budget() {
         let models = vec!["claude-haiku-5-5".to_owned(), "claude-sonnet-5-5".to_owned()];
-        let (_tx, stop) = Stop::new();
+        let stop = Stop::default();
         let mut called = Vec::new();
         let mut budget = Budget::new(1.0);
-        let phase = refine_phase(&models, true, &mut budget, |m| {
+        let (runs, end) = refine_phase(&models, true, &mut budget, &stop, |m| {
             called.push(m.to_owned());
             std::future::ready(priced(m, 0.1))
-        });
-        let (runs, end) = unless_stopped(phase, &stop).await.unwrap();
+        })
+        .await;
         assert_eq!(called, ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-sonnet-5-5"], "warm-up first");
         assert_eq!(runs.iter().map(|r| r.model.as_str()).collect::<Vec<_>>(), ["claude-haiku-5-5", "claude-sonnet-5-5"], "warm-up is not in the report");
         assert_eq!(end, None);
@@ -917,27 +932,12 @@ mod tests {
         // The limit ran out in the middle of the warm-up — no new requests, the result is "limit".
         let mut called = 0;
         let mut budget = Budget::new(0.5);
-        let (runs, end) = refine_phase(&models, true, &mut budget, |m| {
+        let (runs, end) = refine_phase(&models, true, &mut budget, &stop, |m| {
             called += 1;
             std::future::ready(priced(m, 0.3))
         })
         .await;
         assert_eq!((called, runs.len(), end), (2, 0, Some(End::Budget)));
-    }
-
-    #[test]
-    fn cleanup_wait_has_a_margin_and_one_wording() {
-        assert_eq!(cleanup_wait(), cue_engines::soniox::cleanup_window() + Duration::from_secs(30));
-        assert!(cleanup_wait_line(Duration::from_secs(995)).contains("up to 17 min"), "{}", cleanup_wait_line(Duration::from_secs(995)));
-        assert!(cleanup_wait_line(Duration::from_secs(960)).contains("up to 16 min"));
-    }
-
-    #[test]
-    fn abandon_line_has_a_count_only() {
-        for left in [0, 3] {
-            let line = abandon_line(left);
-            assert!(line.contains("Soniox") && line.contains(&left.to_string()), "{line}");
-        }
     }
 
     #[test]
@@ -959,35 +959,21 @@ mod tests {
     }
 
     #[test]
-    fn refine_takes_stream_text_then_batch() {
-        let ok = |t: &str| stt(STREAM, t, None);
-        let batch = |t: &str| stt(BATCH, t, None);
-        let failed = |e: &str| stt(STREAM, "", Some(e));
-        assert_eq!(refine_input(&ok("stream"), &batch("batch")).as_deref(), Some("stream"));
-        assert_eq!(refine_input(&failed("timeout"), &batch("batch")).as_deref(), Some("batch"), "the stream failed — the batch text");
-        assert_eq!(refine_input(&failed("timeout"), &stt(BATCH, "", Some("network"))), None);
-        // The stream gave empty text — for the app that is "empty", refine does not run.
-        assert_eq!(refine_input(&ok("  "), &batch("batch")), None);
-        assert_eq!(refine_input(&failed("network"), &batch(" ")), None);
-    }
-
-    #[test]
-    fn stt_run_keeps_text_or_error() {
-        let ok = stt_run(STREAM, (Ok(SttOutput { text: "привет".into(), audio_ms: 1_000, language: None }), 320), 0.5);
-        assert_eq!(ok, SttRun { engine: STREAM.into(), text: "привет".into(), latency_ms: 320, cost_usd: 0.5, error: None });
-        let failed = stt_run(BATCH, (Err(EngineError::Timeout), 5_000), 0.25);
-        assert_eq!(failed, SttRun { engine: BATCH.into(), text: String::new(), latency_ms: 5_000, cost_usd: 0.25, error: Some("timeout".into()) });
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn stream_is_paced_like_speech() {
-        let t0 = tokio::time::Instant::now();
-        let mut pushed = Vec::new();
-        // Two full 100 ms chunks and a 300-sample tail (18.75 ms).
-        pace(&[0; 3_500], |chunk| pushed.push((t0.elapsed(), chunk.len()))).await;
-        let ms = Duration::from_millis;
-        assert_eq!(pushed, [(ms(100), 1_600), (ms(200), 1_600), (ms(218), 300)], "a chunk is sent once it has sounded");
-        assert_eq!(t0.elapsed(), ms(218), "the end of audio is right after the last chunk, with no extra pause");
+    fn refine_takes_the_app_model_text_then_the_first_that_succeeded() {
+        let ultra = |t: &str| stt(ULTRA.id, t, None);
+        let v3 = |t: &str| stt(V3, t, None);
+        let other = |t: &str| stt("aaa-export", t, None);
+        let failed = |engine: &str| stt(engine, "", Some("speech model: broken"));
+        assert_eq!(refine_input(&[ultra("ultra"), v3("v3")]).as_deref(), Some("ultra"));
+        // The app's model is not first in the list — it is still the one refined.
+        assert_eq!(refine_input(&[other("other"), ultra("ultra")]).as_deref(), Some("ultra"));
+        assert_eq!(refine_input(&[failed(ULTRA.id), other("other"), v3("v3")]).as_deref(), Some("other"), "the app's model failed — the first that succeeded");
+        assert_eq!(refine_input(&[failed("aaa-export"), v3("v3")]).as_deref(), Some("v3"), "the app's model is not installed");
+        assert_eq!(refine_input(&[failed(ULTRA.id), failed(V3)]), None);
+        assert_eq!(refine_input(&[]), None);
+        // The app's model gave empty text — for the app that is "empty", refine does not run.
+        assert_eq!(refine_input(&[ultra("  "), v3("v3")]), None);
+        assert_eq!(refine_input(&[failed(ULTRA.id), v3(" "), other("other")]), None);
     }
 
     const SECRET: &str = "секретная диктовка";
@@ -1008,10 +994,12 @@ mod tests {
 
     #[test]
     fn console_lines_have_numbers_but_no_dictation_text() {
-        let line = stt_line(&stt(STREAM, SECRET, None));
-        assert!(!line.contains(SECRET) && line.contains("soniox") && line.contains("10 ms"), "{line}");
-        let line = stt_line(&stt(BATCH, "", Some("network: connection reset")));
-        assert!(line.contains("soniox-async") && line.contains("network: connection reset"), "{line}");
+        let line = stt_line(&stt(ULTRA.id, SECRET, None), false);
+        assert_eq!(line, "  parakeet-ultra-int8: 10 ms, other alphabet masked: no");
+        let line = stt_line(&stt(V3, SECRET, None), true);
+        assert!(!line.contains(SECRET) && line.contains(V3) && line.ends_with("masked: yes"), "{line}");
+        let line = stt_line(&stt(V3, "", Some("speech model: encoder: broken")), false);
+        assert!(line.contains(V3) && line.contains("failed — speech model: encoder: broken") && line.contains("10 ms"), "{line}");
         for line in [refine_line(&refine_run(SECRET)), warm_line(&refine_run(SECRET))] {
             assert!(!line.contains(SECRET), "{line}");
             assert!(line.contains("claude-haiku-5-5") && line.contains("1234 ms") && line.contains("Refined"), "{line}");
@@ -1035,10 +1023,10 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_notice_has_a_count_only() {
-        assert_eq!(cleanup_left_line(0), None);
-        let line = cleanup_left_line(2).unwrap();
-        assert!(line.contains('2') && line.contains("Soniox"), "{line}");
+    fn stop_wording_is_about_steps_and_the_exit_points_to_the_report() {
+        assert!(STOPPING.contains("current step") && STOPPING.contains("again"), "{STOPPING}");
+        let line = exit_line(Path::new(r"C:\x\report.html"));
+        assert!(line.contains("at once") && line.contains(r"C:\x\report.html"), "{line}");
     }
 
     /// A fake server on this computer: accepts one request, answers 405 and returns the request line.

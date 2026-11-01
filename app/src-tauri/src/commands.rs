@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use cue_core::flow::Input;
 use cue_core::history;
+use cue_core::model::ModelState;
 use cue_core::settings::SettingChange;
 use cue_core::stats::{self, Stats};
 use cue_engines::EngineError;
@@ -42,10 +43,12 @@ const SEARCH_LIMIT: usize = 200;
 const KEY_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long "Paste again" waits for the window under the main one to come in front.
 const BRING_TIMEOUT: Duration = Duration::from_millis(500);
-/// The commands the welcome window's page may call: what its steps need — the language, the keys, the microphone (of
-/// the settings it changes the microphone alone: `may_change`) — and its own (`WELCOME_ONLY`).
-const WELCOME_COMMANDS: [&str; 11] = [
+/// The commands the welcome window's page may call: what its steps need — the language, the key, the speech model, the
+/// microphone (of the settings it changes the microphone alone: `may_change`) — and its own (`WELCOME_ONLY`).
+const WELCOME_COMMANDS: [&str; 13] = [
     "settings_get",
+    "model_get",
+    "model_retry",
     "settings_set",
     "key_state",
     "key_set",
@@ -74,7 +77,7 @@ pub enum CmdError {
     /// A setting change the settings do not know, a link CUE does not have, or a recording asked for by a name that is
     /// no entry id.
     BadValue,
-    /// A key other than `soniox` and `anthropic`.
+    /// A key other than `anthropic`.
     BadName,
     /// An empty key is not saved.
     EmptyKey,
@@ -122,11 +125,10 @@ pub enum KeyCheck {
     Store,
 }
 
-/// Where the welcome window's links go, by the names its page gives (`open_link`): where to get each key, and the
+/// Where the welcome window's links go, by the names its page gives (`open_link`): where to get the key, and the
 /// Windows microphone settings.
 fn link(target: &str) -> Option<&'static str> {
     match target {
-        "soniox" => Some("https://console.soniox.com"),
         "anthropic" => Some("https://console.anthropic.com"),
         "micPrivacy" => Some(MIC_SETTINGS),
         _ => None,
@@ -161,6 +163,25 @@ fn guard_label(label: &str, command: &str) -> Result<(), CmdError> {
 /// The main window changes any setting; the welcome window, the microphone alone.
 fn may_change(label: &str, change: &SettingChange) -> bool {
     label == MAIN_LABEL || (label == WELCOME_LABEL && matches!(change, SettingChange::MicDevice(_)))
+}
+
+/// The speech model's state (spec "Local speech recognition"): ready, downloading with its bytes, failed.
+#[tauri::command]
+pub async fn model_get(window: WebviewWindow, core: State<'_, CoreTx>) -> Result<ModelState, CmdError> {
+    guard(&window, "model_get")?;
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    send(&core, CoreEvent::ModelGet(reply))?;
+    match tokio::time::timeout(CORE_WAIT, answer).await {
+        Ok(Ok(state)) => Ok(state),
+        _ => Err(CmdError::Core),
+    }
+}
+
+/// "Retry" on the speech model: its download goes on from where it stopped. The new state comes as `cue://model`.
+#[tauri::command]
+pub fn model_retry(window: WebviewWindow, core: State<'_, CoreTx>) -> Result<(), CmdError> {
+    guard(&window, "model_retry")?;
+    send(&core, CoreEvent::ModelRetry)
 }
 
 /// The settings as the core holds them (spec 3 §3).
@@ -537,7 +558,6 @@ async fn probe(name: KeyName, key: &str) -> Result<(), EngineError> {
         .build()
         .map_err(|e| EngineError::Network(e.to_string()))?;
     match name {
-        KeyName::Soniox => cue_engines::check::soniox(&http, key).await,
         KeyName::Anthropic => cue_engines::check::anthropic(&http, key).await,
         KeyName::OpenRouter => cue_engines::check::openrouter(&http, key).await,
     }
@@ -554,10 +574,10 @@ fn key_check_of(probed: &Result<Option<Result<(), EngineError>>, EngineError>) -
     }
 }
 
-/// The keys the window shows: Soniox and Anthropic.
+/// The key the window shows: Anthropic's, for the cleanup.
 fn key_name(name: &str) -> Result<KeyName, CmdError> {
     match KeyName::parse(name) {
-        Some(k @ (KeyName::Soniox | KeyName::Anthropic)) => Ok(k),
+        Some(k @ KeyName::Anthropic) => Ok(k),
         _ => Err(CmdError::BadName),
     }
 }
@@ -578,8 +598,10 @@ mod tests {
     use serde_json::json;
 
     /// Every command a window's page calls (`main`'s handler list, but for the Drop's and the card's own).
-    const COMMANDS: [&str; 21] = [
+    const COMMANDS: [&str; 23] = [
         "settings_get",
+        "model_get",
+        "model_retry",
         "stats_get",
         "settings_set",
         "autostart_get",
@@ -624,7 +646,7 @@ mod tests {
     /// never the history or start at sign-in; its own are no other window's.
     #[test]
     fn welcome_label_may_call_only_its_commands() {
-        let settings_and_keys = ["settings_get", "settings_set", "key_state", "key_set", "key_check"];
+        let settings_and_keys = ["settings_get", "settings_set", "model_get", "model_retry", "key_state", "key_set", "key_check"];
         let microphone = ["mic_list", "mic_preview", "mic_access"];
         let own = ["welcome_step", "welcome_close", "open_link"];
         for command in COMMANDS {
@@ -691,7 +713,7 @@ mod tests {
     /// settings; nothing else opens, an address least of all.
     #[test]
     fn open_link_accepts_only_known_targets() {
-        assert_eq!(link("soniox"), Some("https://console.soniox.com"));
+        assert_eq!(link("soniox"), None, "the Soniox key is gone");
         assert_eq!(link("anthropic"), Some("https://console.anthropic.com"));
         assert_eq!(link("micPrivacy"), Some("ms-settings:privacy-microphone"));
         for other in [
@@ -806,8 +828,8 @@ mod tests {
     }
 
     #[test]
-    fn the_window_shows_only_soniox_and_anthropic_keys() {
-        assert_eq!(key_name("soniox"), Ok(KeyName::Soniox));
+    fn the_window_shows_only_the_anthropic_key() {
+        assert_eq!(key_name("soniox"), Err(CmdError::BadName));
         assert_eq!(key_name("anthropic"), Ok(KeyName::Anthropic));
         assert_eq!(key_name("openrouter"), Err(CmdError::BadName));
         assert_eq!(key_name("openai"), Err(CmdError::BadName));

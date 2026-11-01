@@ -32,25 +32,19 @@ use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-/// How the attempt's audio was transcribed; the price depends on it.
+/// How the attempt's audio was transcribed. Rows of earlier versions name Soniox's paths (`stream`, `stream+batch`,
+/// `batch`); they are read as text and keep the cost they were written with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SttPath {
-    /// Soniox stream only.
-    Stream,
-    /// The stream broke off: the same audio once more as a Soniox async batch.
-    StreamThenBatch,
-    /// Soniox async batch only: "Retry" (saved audio). A stream that never connected
-    /// is also recorded as `Batch` on retry.
-    Batch,
+    /// On this computer: recognition costs nothing.
+    Local,
 }
 
 impl SttPath {
     /// Value of the `stt_path` column.
     pub fn as_str(self) -> &'static str {
         match self {
-            SttPath::Stream => "stream",
-            SttPath::StreamThenBatch => "stream+batch",
-            SttPath::Batch => "batch",
+            SttPath::Local => "local",
         }
     }
 }
@@ -164,20 +158,6 @@ pub fn outcome_name(o: Outcome) -> &'static str {
     }
 }
 
-/// The stream costs the engine's price, the batch the Soniox async price, "stream + batch" the sum of both.
-pub fn stt_cost(p: &Pricing, engine: SttEngineKind, path: SttPath, audio_ms: u64) -> f64 {
-    let hours = audio_ms as f64 / 3_600_000.0;
-    let stream = match engine {
-        SttEngineKind::Soniox => p.soniox_rt_per_hour,
-    };
-    let per_hour = match path {
-        SttPath::Stream => stream,
-        SttPath::StreamThenBatch => stream + p.soniox_async_per_hour,
-        SttPath::Batch => p.soniox_async_per_hour,
-    };
-    hours * per_hour
-}
-
 /// The cost of a refine request at the model's prices from settings.
 /// A model missing from the prices costs 0.0: the core has no log, so the warning (once, when `claude_price` is None)
 /// is written by the app itself.
@@ -208,7 +188,7 @@ pub fn utc_timestamp(unix_secs: u64) -> String {
 
 fn engine_name(e: SttEngineKind) -> &'static str {
     match e {
-        SttEngineKind::Soniox => "soniox",
+        SttEngineKind::Parakeet => "parakeet",
     }
 }
 
@@ -230,7 +210,7 @@ pub fn line(r: &UsageRecord, p: &Pricing) -> String {
         r.audio_ms,
         engine_name(r.stt_engine),
         r.stt_path.as_str(),
-        stt_cost(p, r.stt_engine, r.stt_path, r.audio_ms),
+        0.0,
         csv_field(&r.refine_model),
         r.input_tokens,
         r.cache_read_tokens,
@@ -411,8 +391,8 @@ mod tests {
         UsageRecord {
             ts: "2026-10-27T09:00:00Z".into(),
             audio_ms: 30_000,
-            stt_engine: SttEngineKind::Soniox,
-            stt_path: SttPath::Stream,
+            stt_engine: SttEngineKind::Parakeet,
+            stt_path: SttPath::Local,
             refine_model: "claude-haiku-5-5".into(),
             input_tokens: 1_000,
             cache_read_tokens: 2_000,
@@ -447,10 +427,6 @@ mod tests {
     #[test]
     fn costs() {
         let p = Pricing::default();
-        let hour = 3_600_000;
-        assert!((stt_cost(&p, SttEngineKind::Soniox, SttPath::Stream, hour) - 0.12).abs() < 1e-9);
-        assert!((stt_cost(&p, SttEngineKind::Soniox, SttPath::StreamThenBatch, hour) - 0.22).abs() < 1e-9, "stream + batch");
-        assert!((stt_cost(&p, SttEngineKind::Soniox, SttPath::Batch, hour) - 0.10).abs() < 1e-9, "batch");
         let c = refine_cost(&p, "claude-haiku-5-5", 1_000_000, 1_000_000, 0, 1_000_000);
         assert!((c - (0.10 + 0.01 + 0.50)).abs() < 1e-9);
         assert_eq!(refine_cost(&p, "unknown-model", 1_000, 0, 0, 1_000), 0.0);
@@ -467,7 +443,7 @@ mod tests {
     fn csv_line_has_no_text_and_all_columns() {
         let l = line(&rec(), &Pricing::default());
         assert_eq!(l.split(',').count(), HEADER.split(',').count());
-        assert!(l.starts_with("2026-10-27T09:00:00Z,30000,soniox,stream,0.001000,claude-haiku-5-5,1000,2000,0,200,"));
+        assert!(l.starts_with("2026-10-27T09:00:00Z,30000,parakeet,local,0.000000,claude-haiku-5-5,1000,2000,0,200,"));
         assert!(l.ends_with(",900,inserted,dictate,0,0.000000,12,2026-10-27"), "{l}");
     }
 
@@ -480,8 +456,8 @@ mod tests {
         UsageRecord {
             ts: ts.into(),
             audio_ms: 1_000,
-            stt_engine: SttEngineKind::Soniox,
-            stt_path: SttPath::Stream,
+            stt_engine: SttEngineKind::Parakeet,
+            stt_path: SttPath::Local,
             refine_model: "claude-haiku-5-5".into(),
             input_tokens: 10,
             cache_read_tokens: 900,
@@ -621,7 +597,7 @@ mod tests {
         assert_eq!(s.dictations, 2);
         assert!((s.audio_minutes - 1.0).abs() < 1e-9);
         assert_eq!(s.avg_latency_ms, 1_200);
-        assert!(s.stt_usd > 0.0 && s.refine_usd > 0.0);
+        assert!(s.stt_usd == 0.0 && s.refine_usd > 0.0, "recognition is free, the cleanup is paid");
         std::fs::remove_file(path).unwrap();
     }
 
@@ -663,23 +639,19 @@ mod tests {
         assert_eq!(summarize(&format!("{HEADER}\n{l}\n"), "2026-10").dictations, 1);
     }
 
-    /// Transcription path: stream, stream + batch, batch only; each has its own price.
+    /// Recognition on this computer costs nothing; a row of an earlier version keeps the cost it was written with.
     #[test]
-    fn stt_paths_have_stable_names_and_prices() {
-        let p = Pricing::default();
-        let hour = 3_600_000;
-        assert_eq!(SttPath::Stream.as_str(), "stream");
-        assert_eq!(SttPath::StreamThenBatch.as_str(), "stream+batch");
-        assert_eq!(SttPath::Batch.as_str(), "batch");
-        // Default prices are checked in `costs`; here, that each path takes its own price from settings:
-        // stream uses realtime, batch uses async, "stream + batch" uses both.
-        let edited = Pricing { soniox_rt_per_hour: 1.0, soniox_async_per_hour: 0.25, ..Pricing::default() };
-        let cost = |path| stt_cost(&edited, SttEngineKind::Soniox, path, hour);
-        assert!((cost(SttPath::Stream) - 1.0).abs() < 1e-9);
-        assert!((cost(SttPath::StreamThenBatch) - 1.25).abs() < 1e-9);
-        assert!((cost(SttPath::Batch) - 0.25).abs() < 1e-9);
-        let l = line(&UsageRecord { stt_path: SttPath::StreamThenBatch, ..rec() }, &p);
-        assert!(l.starts_with("2026-10-27T09:00:00Z,30000,soniox,stream+batch,0.001833,"), "{l}");
+    fn local_rows_cost_nothing_for_recognition_and_old_rows_keep_their_cost() {
+        assert_eq!(SttPath::Local.as_str(), "local");
+        let new = line(&rec(), &Pricing::default());
+        assert!(new.starts_with("2026-10-27T09:00:00Z,30000,parakeet,local,0.000000,"), "{new}");
+        let old = "2026-10-27T09:00:00Z,30000,soniox,stream+batch,0.001833,claude-haiku-5-5,1000,2000,0,200,0.000220,900,inserted";
+        let s = summarize(&format!("{HEADER}
+{old}
+{new}
+"), "2026-10");
+        assert_eq!(s.dictations, 2);
+        assert!((s.stt_usd - 0.001833).abs() < 1e-9, "{}", s.stt_usd);
     }
 
     /// A separate average latency for pastes with up to 20 s of audio: the latency target figure.
@@ -738,14 +710,12 @@ mod tests {
             output_tokens: 0,
             ..with(Outcome::Failed, 0)
         };
-        // "Retry" transcribes the saved audio as a batch only (TranscribeSaved), with no stream.
-        let retry = UsageRecord { stt_path: SttPath::Batch, ..with(Outcome::Inserted, 1_100) };
+        // "Retry" recognizes the saved audio again (TranscribeSaved).
+        let retry = with(Outcome::Inserted, 1_100);
         let s = summarize(&csv_of(&[failed.clone(), retry.clone()]), "2026-10");
         assert_eq!(s.dictations, 1);
         assert!((s.audio_minutes - 1.0).abs() < 1e-9, "audio of both attempts: {}", s.audio_minutes);
-        let half_minute_h = 30_000.0 / 3_600_000.0;
-        let stt = half_minute_h * (p.soniox_rt_per_hour + p.soniox_async_per_hour);
-        assert!((s.stt_usd - stt).abs() < 1e-6, "{} != {stt}", s.stt_usd);
+        assert_eq!(s.stt_usd, 0.0, "recognition on this computer");
         let refine = refine_cost(&p, &retry.refine_model, 1_000, 2_000, 0, 200);
         assert!((s.refine_usd - refine).abs() < 1e-6, "{} != {refine}", s.refine_usd);
         assert_eq!(s.avg_latency_ms, 1_100);
@@ -801,7 +771,7 @@ mod tests {
         let s = summarize(&csv, "2026-10");
         assert_eq!(s.dictations, 3, "only complete lines are counted");
         assert!((s.audio_minutes - 1.5).abs() < 1e-9);
-        assert!(s.stt_usd.is_finite() && s.stt_usd > 0.0);
+        assert!(s.refine_usd.is_finite() && s.refine_usd > 0.0);
     }
 
     #[test]

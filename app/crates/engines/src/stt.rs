@@ -1,19 +1,17 @@
-//! Transcription: shared types (audio comes as 16 kHz mono i16 frames), the streaming session facade
-//! and the batch fallback.
+//! Transcription: shared types (audio comes as 16 kHz mono i16 frames) and the session facade over the model on this
+//! computer.
 use std::future::Future;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 
 use crate::error::EngineError;
-use crate::soniox::SonioxConfig;
 
 /// Samples per millisecond at 16 kHz.
 pub const SAMPLES_PER_MS: u64 = 16;
-/// A frame sent to the service is ~100 ms: 1,600 samples at 16 kHz.
-pub const CHUNK_SAMPLES: usize = 1_600;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioMsg {
@@ -26,58 +24,29 @@ pub enum AudioMsg {
 pub struct SttOutput {
     pub text: String,
     pub audio_ms: u64,
-    /// The language of most of the speech (Soniox language identification), a Soniox code.
+    /// The speech's language code when the engine tells it; the model on this computer does not (the runtime reads
+    /// it from the text, `cue_core::speech::speech_language`).
     pub language: Option<String>,
 }
 
-pub fn pcm_bytes(pcm: &[i16]) -> Vec<u8> {
-    pcm.iter().flat_map(|s| s.to_le_bytes()).collect()
+/// What recognizes a whole recording on this computer: the speech model, or a stand-in in tests.
+pub trait Recognize: Send + Sync + 'static {
+    fn recognize(&self, pcm: &[i16]) -> Result<SttOutput, EngineError>;
 }
 
-/// Gathers incoming frames of any length (usually 20 ms) into chunks of exactly `size` samples.
-/// A remainder shorter than `size` waits for more frames or is taken by [`Chunker::flush`].
-#[derive(Debug)]
-pub struct Chunker {
-    buf: Vec<i16>,
-    size: usize,
-}
-
-impl Default for Chunker {
-    /// Chunks of ~100 ms.
-    fn default() -> Self {
-        Chunker::new(CHUNK_SAMPLES)
+impl Recognize for crate::parakeet::model::Recognizer {
+    fn recognize(&self, pcm: &[i16]) -> Result<SttOutput, EngineError> {
+        let r = crate::parakeet::model::Recognizer::recognize(self, pcm)?;
+        tracing::info!(audio_ms = r.audio_ms, took_ms = r.took_ms, masked = r.masked, "recognized on this computer");
+        // The language is told from the text by the runtime (`speech::speech_language`).
+        Ok(SttOutput { text: r.text, audio_ms: r.audio_ms, language: None })
     }
 }
 
-impl Chunker {
-    pub fn new(size: usize) -> Self {
-        assert!(size > 0, "chunk size must be greater than zero");
-        Chunker { buf: Vec::with_capacity(size), size }
-    }
-
-    /// Adds samples; returns the ready chunks (each exactly `size`), possibly none.
-    pub fn push(&mut self, pcm: &[i16]) -> Vec<Vec<i16>> {
-        self.buf.extend_from_slice(pcm);
-        let full = self.buf.len() - self.buf.len() % self.size;
-        let chunks = self.buf[..full].chunks(self.size).map(<[i16]>::to_vec).collect();
-        self.buf.drain(..full);
-        chunks
-    }
-
-    /// The remainder shorter than `size`, if any — before finalize / end of audio.
-    pub fn flush(&mut self) -> Option<Vec<i16>> {
-        (!self.buf.is_empty()).then(|| std::mem::take(&mut self.buf))
-    }
-}
-
-/// The fallback makes sense only if the problem is not the key and the recording was not cancelled.
-pub fn should_fallback(err: &EngineError) -> bool {
-    !matches!(err, EngineError::KeyProblem(_) | EngineError::Aborted)
-}
-
-/// Streaming engine: only Soniox for now (ElevenLabs was removed); an enum leaves room for a second one if it comes back.
+/// The engine of a session: the model on this computer, which keeps the frames and recognizes them at `finish` (a
+/// streaming mode can come behind the same session later).
 pub enum Engine {
-    Soniox { key: String, cfg: SonioxConfig },
+    Local(Arc<dyn Recognize>),
 }
 
 /// One streaming session. The connection opens right away; audio sent before it connects queues up in the channel.
@@ -89,8 +58,39 @@ pub struct SttSession {
 
 pub fn start(engine: Engine) -> SttSession {
     match engine {
-        Engine::Soniox { key, cfg } => SttSession::spawn(|rx| crate::soniox::run_rt(key, cfg, rx)),
+        Engine::Local(model) => SttSession::spawn(|rx| run_local(model, rx)),
     }
+}
+
+/// The local session: frames are kept until `Finish`, then the whole recording is recognized on a blocking thread.
+/// `Abort` or a dropped session is a cancel.
+async fn run_local(model: Arc<dyn Recognize>, mut rx: UnboundedReceiver<AudioMsg>) -> Result<SttOutput, EngineError> {
+    let mut pcm = Vec::new();
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            AudioMsg::Pcm(frame) => pcm.extend_from_slice(&frame),
+            AudioMsg::Finish => return recognize(model, pcm).await,
+            AudioMsg::Abort => break,
+        }
+    }
+    Err(EngineError::Aborted)
+}
+
+/// `pcm` recognized on a blocking thread: the model takes a few hundred milliseconds of CPU.
+pub async fn recognize(model: Arc<dyn Recognize>, pcm: Vec<i16>) -> Result<SttOutput, EngineError> {
+    tokio::task::spawn_blocking(move || model.recognize(&pcm)).await.unwrap_or_else(|e| Err(join_failure(&e)))
+}
+
+/// A saved recording (16 kHz mono 16-bit WAV, as CUE writes `current.wav`) recognized: "Retry".
+pub async fn recognize_wav(model: Arc<dyn Recognize>, wav: &Path) -> Result<SttOutput, EngineError> {
+    let wav = wav.to_owned();
+    let pcm = tokio::task::spawn_blocking(move || -> Result<Vec<i16>, EngineError> {
+        let reader = hound::WavReader::open(&wav).map_err(|e| EngineError::Protocol(format!("no recording: {e}")))?;
+        reader.into_samples::<i16>().collect::<Result<_, _>>().map_err(|e| EngineError::Protocol(format!("recording: {e}")))
+    })
+    .await
+    .unwrap_or_else(|e| Err(join_failure(&e)))?;
+    recognize(model, pcm).await
 }
 
 impl SttSession {
@@ -144,66 +144,11 @@ fn join_failure(e: &JoinError) -> EngineError {
     EngineError::Protocol(what.into())
 }
 
-/// Soniox batch transcription of the saved recording — both as the fallback and for retry.
-/// No `Debug`: it holds the key.
-#[derive(Clone)]
-pub struct Fallback {
-    pub http: reqwest::Client,
-    pub soniox_key: String,
-    pub model: String,
-    pub hints: Vec<String>,
-}
-
-impl Fallback {
-    pub async fn transcribe(&self, wav_path: &Path) -> Result<SttOutput, EngineError> {
-        let wav = tokio::fs::read(wav_path).await.map_err(|e| EngineError::Protocol(format!("no recording: {e}")))?;
-        crate::soniox::transcribe_file(&self.http, &self.soniox_key, &self.model, &self.hints, wav).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::sync::oneshot;
     use tokio::time::Instant;
-
-    #[test]
-    fn chunker_joins_20ms_frames_into_100ms() {
-        let mut c = Chunker::default();
-        for i in 0..4 {
-            assert!(c.push(&[i; 320]).is_empty(), "frame {i}: under 100 ms, too early");
-        }
-        let out = c.push(&[4; 320]);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].len(), CHUNK_SAMPLES);
-        // Sample order is kept.
-        assert_eq!(&out[0][..2], &[0, 0]);
-        assert_eq!(out[0][320], 1);
-        assert_eq!(out[0][CHUNK_SAMPLES - 1], 4);
-        assert_eq!(c.flush(), None, "no remainder after an exact chunk");
-    }
-
-    #[test]
-    fn chunker_splits_long_frames_and_keeps_remainder() {
-        let mut c = Chunker::new(4);
-        let out = c.push(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-        assert_eq!(out, vec![vec![1, 2, 3, 4], vec![5, 6, 7, 8]]);
-        assert_eq!(c.push(&[11]), Vec::<Vec<i16>>::new());
-        assert_eq!(c.push(&[12, 13]), vec![vec![9, 10, 11, 12]]);
-        assert_eq!(c.flush(), Some(vec![13]));
-        assert_eq!(c.flush(), None, "the remainder is handed out once");
-        assert!(c.push(&[]).is_empty());
-    }
-
-    #[test]
-    fn fallback_rules() {
-        assert!(should_fallback(&EngineError::Network("x".into())));
-        assert!(should_fallback(&EngineError::Service("x".into())));
-        assert!(should_fallback(&EngineError::Timeout));
-        assert!(should_fallback(&EngineError::Protocol("x".into())));
-        assert!(!should_fallback(&EngineError::KeyProblem("x".into())));
-        assert!(!should_fallback(&EngineError::Aborted));
-    }
 
     /// Fake engine: counts the audio it receives and returns its duration on `Finish`.
     async fn counting(mut rx: UnboundedReceiver<AudioMsg>) -> Result<SttOutput, EngineError> {
@@ -220,10 +165,60 @@ mod tests {
         Err(EngineError::Aborted)
     }
 
+    /// A stand-in model: the text says how many samples it got.
+    struct Counting;
+    impl Recognize for Counting {
+        fn recognize(&self, pcm: &[i16]) -> Result<SttOutput, EngineError> {
+            Ok(SttOutput { text: format!("{} samples", pcm.len()), audio_ms: pcm.len() as u64 / SAMPLES_PER_MS, language: None })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_local_session_recognizes_every_frame_at_finish() {
+        let s = start(Engine::Local(Arc::new(Counting)));
+        s.push(vec![0; 1_600]);
+        s.push(vec![0; 320]);
+        let out = s.finish(Duration::from_secs(5)).await.unwrap();
+        assert_eq!((out.text.as_str(), out.audio_ms), ("1920 samples", 120));
+    }
+
+    #[tokio::test]
+    async fn a_local_session_aborted_recognizes_nothing() {
+        struct Never;
+        impl Recognize for Never {
+            fn recognize(&self, _: &[i16]) -> Result<SttOutput, EngineError> {
+                panic!("an aborted recording was recognized")
+            }
+        }
+        let s = start(Engine::Local(Arc::new(Never)));
+        s.push(vec![0; 320]);
+        s.abort();
+        let (tx, rx) = unbounded_channel();
+        drop(tx);
+        assert_eq!(run_local(Arc::new(Never), rx).await, Err(EngineError::Aborted), "a dropped session is a cancel");
+    }
+
+    #[tokio::test]
+    async fn a_saved_recording_is_recognized_from_its_wav() {
+        let path = std::env::temp_dir().join(format!("cue-stt-{}.wav", std::process::id()));
+        let spec = hound::WavSpec { channels: 1, sample_rate: 16_000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let mut w = hound::WavWriter::create(&path, spec).unwrap();
+        for _ in 0..1_600 {
+            w.write_sample(0i16).unwrap();
+        }
+        w.finalize().unwrap();
+        let out = recognize_wav(Arc::new(Counting), &path).await.unwrap();
+        assert_eq!(out.text, "1600 samples");
+        std::fs::remove_file(&path).unwrap();
+        let e = recognize_wav(Arc::new(Counting), &path).await.unwrap_err();
+        let EngineError::Protocol(m) = &e else { panic!("expected Protocol, not {e:?}") };
+        assert!(m.starts_with("no recording") && !m.contains("cue-stt"), "the path stays out of the error: {m}");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn finish_returns_engine_result() {
         let s = SttSession::spawn(counting);
-        s.push(vec![0; CHUNK_SAMPLES]);
+        s.push(vec![0; 1_600]);
         s.push(vec![0; 320]);
         let out = s.finish(Duration::from_secs(5)).await;
         assert_eq!(out, Ok(SttOutput { text: "готово".into(), audio_ms: 120, language: None }));
@@ -325,25 +320,5 @@ mod tests {
         s.push(vec![1; 4]);
         drop(s);
         assert_eq!(seen.await.unwrap(), vec![AudioMsg::Pcm(vec![1; 4])]);
-    }
-
-    #[tokio::test]
-    async fn fallback_without_recording_is_protocol() {
-        // A proxy to nowhere: had it come to the network, the request would not leave this computer.
-        let http = reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
-            .build()
-            .unwrap();
-        let fb = Fallback { http, soniox_key: "test-key".into(), model: "stt-async-v5".into(), hints: vec![] };
-        // Our own freshly created folder: the file surely is not there (`create_dir` fails if the folder exists).
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("cue-stt-test-{}-{nanos}", std::process::id()));
-        std::fs::create_dir(&dir).unwrap();
-        let path = dir.join("no-recording.wav");
-        let e = fb.transcribe(&path).await.unwrap_err();
-        std::fs::remove_dir(&dir).unwrap();
-        let EngineError::Protocol(m) = &e else { panic!("expected Protocol, not {e:?}") };
-        assert!(m.starts_with("no recording"), "{m}");
-        assert!(!m.contains(path.to_str().unwrap()) && !m.contains("no-recording"), "path in the error: {m}");
     }
 }

@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::time::Instant;
 
 /// A request the fake service saw.
 #[derive(Clone, Debug)]
@@ -64,26 +63,8 @@ impl FakeApi {
         self.seen().iter().map(|r| format!("{} {}", r.method, r.path)).collect()
     }
 
-    pub fn count(&self, call: &str) -> usize {
-        self.calls().iter().filter(|c| *c == call).count()
-    }
-
     pub fn body(&self, i: usize) -> Vec<u8> {
         self.seen.lock().unwrap()[i].body.clone()
-    }
-
-    /// Every request has the header `name: value`.
-    pub fn every_request_has(&self, name: &str, value: &str) -> bool {
-        self.seen().iter().all(|r| r.header(name).contains(&value))
-    }
-
-    /// Waits (no longer than 2 s) until there are `n` requests `call`.
-    pub async fn wait_for(&self, call: &str, n: usize) {
-        let t0 = Instant::now();
-        while self.count(call) < n {
-            assert!(t0.elapsed() < Duration::from_secs(2), "{call}: fewer than {n} within 2 s");
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
     }
 }
 

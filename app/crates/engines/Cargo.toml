@@ -12,13 +12,18 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 futures-util.workspace = true
-tokio-tungstenite.workspace = true
 reqwest.workspace = true
 keyring.workspace = true
 tracing.workspace = true
+realfft.workspace = true
+ort.workspace = true
+hound.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+# A response built without the network, in tests of reading replies.
+http = "1"
 cpal.workspace = true
 # Virtual time in session tests (`start_paused`): deadlines are checked exactly, independent of machine load.
 tokio = { workspace = true, features = ["test-util"] }

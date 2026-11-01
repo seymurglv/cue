@@ -9,23 +9,22 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Transcription engine. There is only one now; the type stays for the `stt.engine` field in settings.json and the
-/// `stt_engine` column in usage.csv. Any other name in the file (including ones from earlier versions) reads as Soniox.
+/// Transcription engine: Parakeet on this computer, the only one. The type stays for the `stt.engine` field in
+/// settings.json and the `stt_engine` column in usage.csv. Any other name in the file (Soniox and ElevenLabs of earlier
+/// versions) reads as Parakeet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SttEngineKind {
     #[default]
     #[serde(other)]
-    Soniox,
+    Parakeet,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// The fields of earlier engines (`soniox_model`, `language_hints` and the rest) are read past and never written again.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SttSettings {
     pub engine: SttEngineKind,
-    pub soniox_model: String,
-    pub soniox_async_model: String,
-    pub language_hints: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -134,7 +133,7 @@ impl<'de> Deserialize<'de> for DropSettings {
 
 /// Names and terms the user often says (product names, people, jargon), written as they should appear. Only the
 /// refine request gets them, as a cached block after the system prompt (`refine::terms_prompt`, which also drops
-/// unusable entries); Soniox does not: it bills context tokens on every dictation.
+/// unusable entries); recognition does not take them.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DictionarySettings {
@@ -168,7 +167,8 @@ pub struct TranslateSettings {
     /// The other language of the pair.
     #[serde(deserialize_with = "language_or_nothing", skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
-    /// The speech language, passed to Soniox as the only hint; `auto` (or nothing) — Soniox detects it.
+    /// The speech language, which fixes the direction of a translation; `auto` (or nothing) — the text's alphabet
+    /// tells it (`speech::speech_language`).
     #[serde(deserialize_with = "language_or_nothing", skip_serializing_if = "Option::is_none")]
     pub speech: Option<String>,
 }
@@ -187,7 +187,7 @@ impl TranslateSettings {
     }
 }
 
-/// A language code Soniox knows, normalized ("RU" → "ru"); anything else (`"auto"`, an unknown code, a number, `null`)
+/// A language code CUE knows (`translate::LANGUAGES`), normalized ("RU" → "ru"); anything else (`"auto"`, an unknown code, a number, `null`)
 /// reads as nothing, so a typo never makes the file unreadable.
 fn language_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
@@ -547,7 +547,7 @@ pub enum SettingChange {
     HistoryKeep(Keep),
     /// A device name; `None` or a blank name — the Windows microphone.
     MicDevice(Option<String>),
-    /// A language code Soniox knows.
+    /// A language code CUE knows.
     TranslateTarget(String),
     UiLanguage(UiLanguage),
     /// A word for the dictionary, put first; see [`Settings::apply`] for what is refused.
@@ -561,7 +561,7 @@ fn period_or_refuse<'de, D: Deserializer<'de>, K: PeriodName>(deserializer: D) -
     value.as_str().and_then(K::from_name).ok_or_else(|| serde::de::Error::custom("unknown history period"))
 }
 
-/// Like `AudioSettings`: a log shows only the length of a device name, and a language code only when Soniox knows it.
+/// Like `AudioSettings`: a log shows only the length of a device name, and a language code only when CUE knows it.
 impl std::fmt::Debug for SettingChange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -582,7 +582,7 @@ impl std::fmt::Debug for SettingChange {
 impl Settings {
     /// Applies one change from the main window; `true` if a value changed (then the core writes the file). A value
     /// the settings would not hold is refused (`false`, nothing changes): a microphone name longer than
-    /// `MAX_DEVICE_CHARS` characters, a translation language Soniox does not know. Values are kept the way reading the
+    /// `MAX_DEVICE_CHARS` characters, a translation language CUE does not know. Values are kept the way reading the
     /// file keeps them: a microphone name trimmed, a blank one as the Windows microphone, the default translation
     /// language (`en`) as no value. A period set here makes an unknown one known. A dictionary word is trimmed and put
     /// first; refused are one the refine request could not take (`refine::is_term`), one already there in any case,
@@ -643,8 +643,6 @@ pub struct ModelPrice {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Pricing {
-    pub soniox_rt_per_hour: f64,
-    pub soniox_async_per_hour: f64,
     pub claude: Vec<ModelPrice>,
     /// One server-side web search of "Ask" (spec 2 §10).
     pub web_search_usd: f64,
@@ -692,17 +690,6 @@ pub enum SettingsError {
     Parse(#[from] serde_json::Error),
 }
 
-impl Default for SttSettings {
-    fn default() -> Self {
-        Self {
-            engine: SttEngineKind::Soniox,
-            soniox_model: "stt-rt-v5".into(),
-            soniox_async_model: "stt-async-v5".into(),
-            language_hints: vec!["ru".into(), "en".into()],
-        }
-    }
-}
-
 impl Default for RefineSettings {
     fn default() -> Self {
         Self { model: "claude-sonnet-5-5".into(), context_chars: 500, min_ratio: 0.35, max_ratio: 1.25, min_overlap: 0.7 }
@@ -717,8 +704,6 @@ fn price(model: &str, input: f64, output: f64, cache_read: f64) -> ModelPrice {
 impl Default for Pricing {
     fn default() -> Self {
         Self {
-            soniox_rt_per_hour: 0.12,
-            soniox_async_per_hour: 0.10,
             claude: vec![
                 price("claude-haiku-5-5", 0.10, 0.50, 0.01),
                 price("claude-sonnet-5-5", 2.0, 10.0, 0.10),
@@ -834,10 +819,7 @@ mod tests {
     #[test]
     fn defaults_are_as_documented() {
         let s = Settings::default();
-        assert_eq!(s.stt.engine, SttEngineKind::Soniox);
-        assert_eq!(s.stt.soniox_model, "stt-rt-v5");
-        assert_eq!(s.stt.soniox_async_model, "stt-async-v5");
-        assert_eq!(s.stt.language_hints, vec!["ru", "en"]);
+        assert_eq!(s.stt.engine, SttEngineKind::Parakeet);
         assert_eq!(s.refine.model, "claude-sonnet-5-5");
         assert_eq!(s.refine.context_chars, 500);
         assert_eq!((s.refine.min_ratio, s.refine.max_ratio, s.refine.min_overlap), (0.35, 1.25, 0.7));
@@ -846,7 +828,6 @@ mod tests {
         assert_eq!(s.ui.language, UiLanguage::Auto);
         assert_eq!(s.drop.position, DropPosition::Bottom);
         assert!(s.dictionary.terms.is_empty());
-        assert_eq!(s.pricing.soniox_rt_per_hour, 0.12);
         let haiku = s.pricing.claude_price("claude-haiku-5-5").unwrap();
         assert_eq!((haiku.input_per_mtok, haiku.output_per_mtok), (0.10, 0.50));
         assert!(s.pricing.claude_price("claude-sonnet-5-5").is_some());
@@ -868,18 +849,17 @@ mod tests {
         let p = tmp("partial.json");
         std::fs::write(&p, r#"{"stt":{"soniox_model":"stt-rt-v6","future_stt":true},"refine":{"model":"claude-sonnet-5-5"},"future":1}"#).unwrap();
         let s = load(&p).unwrap();
-        assert_eq!(s.stt.engine, SttEngineKind::Soniox);
-        assert_eq!(s.stt.soniox_model, "stt-rt-v6");
-        assert_eq!(s.stt.soniox_async_model, "stt-async-v5");
+        assert_eq!(s.stt.engine, SttEngineKind::Parakeet);
         assert_eq!(s.refine.model, "claude-sonnet-5-5");
         assert_eq!(s.refine.context_chars, 500);
         std::fs::remove_file(p).unwrap();
     }
 
-    /// A file from earlier versions: fields of a removed engine (name, model, price) and values the user changed.
-    /// It loads without error, the engine is Soniox, everything else is kept; after a save the old fields are gone.
+    /// A file from earlier versions: fields of removed engines (Soniox, ElevenLabs: names, models, hints, prices) and
+    /// values the user changed. It loads without error, the engine is Parakeet, everything else is kept; after a save
+    /// the old fields are gone.
     #[test]
-    fn legacy_file_with_removed_engine_loads_as_soniox_and_keeps_other_values() {
+    fn legacy_file_with_removed_engines_loads_as_parakeet_and_keeps_other_values() {
         let dir = tmp("legacy");
         let p = dir.join("settings.json");
         std::fs::create_dir_all(&dir).unwrap();
@@ -911,40 +891,38 @@ mod tests {
         let s = load(&p).expect("a file from earlier versions must load");
 
         let mut expected = Settings::default();
-        expected.stt.soniox_model = "stt-rt-v6".into();
-        expected.stt.language_hints = vec!["ru".into()];
         expected.refine.model = "claude-sonnet-5-5".into();
         expected.refine.context_chars = 300;
         expected.hold_hints_left = 0;
         expected.bench.save_recordings = true;
-        expected.pricing.soniox_rt_per_hour = 0.15;
         expected.pricing.claude = vec![price("claude-haiku-5-5", 0.10, 0.50, 0.01)];
-        assert_eq!(s.stt.engine, SttEngineKind::Soniox);
+        assert_eq!(s.stt.engine, SttEngineKind::Parakeet);
         assert_eq!(s, expected);
 
         save(&s, &p).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
-        assert!(!text.contains("elevenlabs"), "old fields are still in the file: {text}");
+        assert!(!text.contains("elevenlabs") && !text.contains("soniox"), "old fields are still in the file: {text}");
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(json["stt"]["engine"], "soniox");
+        assert_eq!(json["stt"]["engine"], "parakeet");
         assert_eq!(load(&p).unwrap(), expected);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn unknown_engine_name_falls_back_to_soniox() {
+    fn unknown_engine_name_falls_back_to_parakeet() {
         let p = tmp("unknown-engine.json");
         std::fs::write(&p, r#"{"stt":{"engine":"something-new"},"hold_hints_left":1}"#).unwrap();
         let s = load(&p).expect("an unknown engine is no reason for a load error");
-        assert_eq!(s.stt.engine, SttEngineKind::Soniox);
+        assert_eq!(s.stt.engine, SttEngineKind::Parakeet);
         assert_eq!(s.hold_hints_left, 1);
         std::fs::remove_file(p).unwrap();
     }
 
     #[test]
-    fn engine_is_written_and_read_as_soniox() {
-        assert_eq!(serde_json::to_string(&SttEngineKind::Soniox).unwrap(), r#""soniox""#);
-        assert_eq!(serde_json::from_str::<SttEngineKind>(r#""soniox""#).unwrap(), SttEngineKind::Soniox);
+    fn engine_is_written_and_read_as_parakeet() {
+        assert_eq!(serde_json::to_string(&SttEngineKind::Parakeet).unwrap(), r#""parakeet""#);
+        assert_eq!(serde_json::from_str::<SttEngineKind>(r#""parakeet""#).unwrap(), SttEngineKind::Parakeet);
+        assert_eq!(serde_json::from_str::<SttEngineKind>(r#""soniox""#).unwrap(), SttEngineKind::Parakeet);
     }
 
     #[test]
@@ -972,7 +950,7 @@ mod tests {
         // A first write, then an overwrite on top of the existing file.
         save(&Settings::default(), &p).unwrap();
         let mut s = Settings::default();
-        s.stt.soniox_model = "stt-rt-v6".into();
+        s.refine.context_chars = 300;
         s.bench.save_recordings = true;
         save(&s, &p).unwrap();
         assert_eq!(load(&p).unwrap(), s);
@@ -1017,7 +995,7 @@ mod tests {
         let dir = tmp("edited-pricing");
         let p = dir.join("settings.json");
         let mut s = Settings::default();
-        s.pricing.soniox_rt_per_hour = 0.5;
+        s.pricing.web_search_usd = 0.5;
         save(&s, &p).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
         assert!(json.get("pricing").is_some());
@@ -1040,7 +1018,7 @@ mod tests {
     #[test]
     fn invalid_utf8_is_a_parse_error() {
         let p = tmp("badutf8.json");
-        std::fs::write(&p, b"{\"stt\":{\"soniox_model\":\"\xff\xfe\"}}").unwrap();
+        std::fs::write(&p, b"{\"refine\":{\"model\":\"\xff\xfe\"}}").unwrap();
         assert!(matches!(load(&p), Err(SettingsError::Parse(_))));
         std::fs::remove_file(p).unwrap();
     }
@@ -1394,7 +1372,7 @@ mod tests {
 
         // A file of an earlier version, with values the user changed and none of the new sections.
         let mut earlier = Settings::default();
-        earlier.stt.language_hints = vec!["ru".into()];
+        earlier.refine.context_chars = 300;
         earlier.hold_hints_left = 0;
         earlier.ui.language = UiLanguage::Ru;
         earlier.translate.target = Some("de".into());

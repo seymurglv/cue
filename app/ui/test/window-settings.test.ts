@@ -23,6 +23,10 @@ const open = async () => {
   await settle();
 };
 const previews = () => core.micPreview.mock.calls.map(([on, device]) => (on ? `on:${device ?? 'windows'}` : 'off'));
+const saved = () => core.keyState.mockResolvedValue({ saved: true, mask: 'sk-…789' });
+/** Megabytes as the model's row writes them (decimal), and the model's size (668 MB). */
+const MB = 1_000_000;
+const TOTAL = 667_729_022;
 
 beforeEach(() => {
   vi.useFakeTimers({ now: NOW });
@@ -45,22 +49,23 @@ describe('The settings tray', () => {
     expect($('.gear')!.classList.contains('hid')).toBe(true);
     expect(title()).toBe('Settings');
     expect($$('.btray .trw').map((r) => r.querySelector('span:not(.si)')!.textContent)).toEqual([
-      'Keys',
+      'Speech recognition',
       'Microphone',
-      'Translation',
+      'Languages',
       'History',
       'General',
     ]);
-    // Each row with its value.
+    expect($$('.btray .trw').map((r) => r.dataset.sub)).toEqual(['model', 'mic', 'languages', 'history', 'general']);
+    // Each row with its value (no key saved: Speech recognition says so).
     expect($$('.btray .trw em').map((e) => e.textContent)).toEqual([
-      'No keys',
+      'No Anthropic key',
       'As in Windows',
-      'English',
+      'Auto · into English',
       'A month',
-      'Auto',
+      'Manually',
     ]);
-    await sub('translate');
-    expect(title()).toBe('Translation');
+    await sub('languages');
+    expect(title()).toBe('Languages');
     key('Escape');
     expect(title()).toBe('Settings');
     expect(tray().classList.contains('open')).toBe(true);
@@ -94,29 +99,30 @@ describe('The settings tray', () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     page = await mount();
     await open();
-    await sub('keys');
-    const input = $<HTMLInputElement>('input[data-key="soniox"]')!;
+    await sub('model');
+    expect($$('input[data-key]').map((i) => i.dataset.key)).toEqual(['anthropic']);
+    const input = $<HTMLInputElement>('input[data-key="anthropic"]')!;
     expect(input.type).toBe('password');
     expect(input.getAttribute('autocomplete')).toBe('off');
     expect(input.placeholder).toBe('Paste the key');
     input.value = 'sk-secret-123';
-    click($('[data-check="soniox"]'));
+    click($('[data-check="anthropic"]'));
     // Emptied at once, before the core answers.
     expect(input.value).toBe('');
     await settle();
-    expect(core.keySet).toHaveBeenCalledWith('soniox', 'sk-secret-123');
-    expect(core.keyCheck).toHaveBeenCalledWith('soniox');
+    expect(core.keySet).toHaveBeenCalledWith('anthropic', 'sk-secret-123');
+    expect(core.keyCheck).toHaveBeenCalledWith('anthropic');
     expect(input.value).toBe('');
     expect(input.placeholder).toBe('sk-…123');
-    expect(text($('small[data-state="soniox"]'))).toBe('Works');
+    expect(text($('small[data-state="anthropic"]'))).toBe('Works');
     // A refused save: the key never reaches the log.
     core.keySet.mockRejectedValueOnce('store');
     input.value = 'sk-other-456';
-    click($('[data-check="soniox"]'));
+    click($('[data-check="anthropic"]'));
     await settle();
     expect(input.value).toBe('');
     expect(core.keyCheck).toHaveBeenCalledTimes(1);
-    expect(text($('small[data-state="soniox"]'))).toBe("Couldn't check");
+    expect(text($('small[data-state="anthropic"]'))).toBe("Couldn't check");
     const logged = JSON.stringify(errors.mock.calls);
     expect(logged).not.toContain('secret');
     expect(logged).not.toContain('other-456');
@@ -125,40 +131,232 @@ describe('The settings tray', () => {
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     expect(input.value).toBe('');
     await settle();
-    expect(core.keySet).toHaveBeenLastCalledWith('soniox', 'sk-third-789');
+    expect(core.keySet).toHaveBeenLastCalledWith('anthropic', 'sk-third-789');
     errors.mockRestore();
   });
 
   it('key states read works and key error', async () => {
-    core.keyState.mockImplementation(async (name) => ({ saved: true, mask: name === 'soniox' ? 'abc…xyz' : 'sk-…789' }));
-    core.keyCheck.mockImplementation(async (name) => (name === 'soniox' ? 'works' : 'badKey'));
+    core.keyState.mockResolvedValue({ saved: true, mask: 'sk-…789' });
+    core.keyCheck.mockResolvedValue('badKey');
     page = await mount();
     await open();
-    expect(text($('.btray em[data-val="keys"]'))).toBe('Soniox, Anthropic');
-    await sub('keys');
-    expect(text($('small[data-state="soniox"]'))).toBe('Saved');
-    expect($<HTMLInputElement>('input[data-key="anthropic"]')!.placeholder).toBe('sk-…789');
-    click($('[data-check="soniox"]'));
-    click($('[data-check="anthropic"]'));
-    expect(text($('small[data-state="soniox"]'))).toBe('Checking…');
-    expect($<HTMLButtonElement>('[data-check="soniox"]')!.disabled).toBe(true);
-    await settle();
-    // Empty fields: the saved keys are checked, nothing is saved.
-    expect(core.keySet).not.toHaveBeenCalled();
-    const soniox = $('small[data-state="soniox"]')!;
+    expect(text($('.btray em[data-val="model"]'))).toBe('Ready');
+    await sub('model');
     const anthropic = $('small[data-state="anthropic"]')!;
-    expect(text(soniox)).toBe('Works');
-    expect(soniox.classList.contains('ok')).toBe(true);
+    expect(text(anthropic)).toBe('Saved');
+    expect($<HTMLInputElement>('input[data-key="anthropic"]')!.placeholder).toBe('sk-…789');
+    click($('[data-check="anthropic"]'));
+    expect(text(anthropic)).toBe('Checking…');
+    expect($<HTMLButtonElement>('[data-check="anthropic"]')!.disabled).toBe(true);
+    await settle();
+    // An empty field: the saved key is checked, nothing is saved.
+    expect(core.keySet).not.toHaveBeenCalled();
+    expect(core.keyCheck).toHaveBeenCalledWith('anthropic');
     expect(text(anthropic)).toBe('Key error');
     expect(anthropic.classList.contains('warn')).toBe(true);
+    expect(anthropic.classList.contains('ok')).toBe(false);
     // The other states.
-    core.keyCheck.mockResolvedValueOnce('unchecked').mockResolvedValueOnce('missing');
-    click($('[data-check="soniox"]'));
+    core.keyCheck.mockResolvedValueOnce('works').mockResolvedValueOnce('unchecked').mockResolvedValueOnce('missing');
+    click($('[data-check="anthropic"]'));
     await settle();
-    expect(text(soniox)).toBe("Couldn't check");
-    click($('[data-check="soniox"]'));
+    expect(text(anthropic)).toBe('Works');
+    expect(anthropic.classList.contains('ok')).toBe(true);
+    expect(anthropic.classList.contains('warn')).toBe(false);
+    click($('[data-check="anthropic"]'));
     await settle();
-    expect(text(soniox)).toBe('No key');
+    expect(text(anthropic)).toBe("Couldn't check");
+    click($('[data-check="anthropic"]'));
+    await settle();
+    expect(text(anthropic)).toBe('No key');
+  });
+
+  it('the Speech recognition row shows the model state and follows it', async () => {
+    saved();
+    page = await mount();
+    expect(core.modelGet).toHaveBeenCalledTimes(1);
+    expect(core.onModel).toHaveBeenCalledTimes(1);
+    await open();
+    const em = () => $<HTMLElement>('.btray em[data-val="model"]')!;
+    const value = () => text(em());
+    expect(value()).toBe('Ready');
+    expect(em().classList.contains('warn')).toBe(false);
+    feeds.model({ state: 'failed', done: 412 * MB, total: TOTAL });
+    expect(value()).toBe('Did not download');
+    expect(em().classList.contains('warn')).toBe(true);
+    feeds.model({ state: 'loading' });
+    expect(value()).toBe('Loading');
+    expect(em().classList.contains('warn')).toBe(false);
+    feeds.model({ state: 'unsupported' });
+    expect(value()).toBe('Not supported');
+    expect(em().classList.contains('warn')).toBe(true);
+    feeds.model({ state: 'missing' });
+    expect(value()).toBe('Not downloaded');
+    feeds.model({ state: 'ready', total: TOTAL });
+    expect(value()).toBe('Ready');
+    // A state heard while the tray is closed shows when it opens.
+    key('Escape');
+    feeds.model({ state: 'downloading', done: 67 * MB, total: TOTAL });
+    await open();
+    expect(value()).toBe('10 %');
+  });
+
+  it('while the model downloads, its row shows the percent in Bebas and a line under it, changed in place', async () => {
+    saved();
+    page = await mount();
+    await open();
+    const row = $<HTMLElement>('.btray [data-sub="model"]')!;
+    const em = row.querySelector('em')!;
+    expect(row.querySelector('.tline')).toBeNull();
+    expect(em.classList.contains('num')).toBe(false);
+    feeds.model({ state: 'downloading', done: 412 * MB, total: TOTAL });
+    expect(text(em)).toBe('61 %');
+    expect(em.classList.contains('num')).toBe(true);
+    expect(em.classList.contains('warn')).toBe(false);
+    const line = row.querySelector<HTMLElement>('.tline')!;
+    expect(line.querySelector<HTMLElement>('i')!.style.transform).toMatch(/^scaleX\(0\.61\d*\)$/);
+    // The next step of the download: the same row, the same line, a new scale and number.
+    feeds.model({ state: 'downloading', done: 600 * MB, total: TOTAL });
+    expect($('.btray [data-sub="model"]')).toBe(row);
+    expect(row.querySelectorAll('.tline')).toHaveLength(1);
+    expect(row.querySelector('.tline')).toBe(line);
+    expect(line.querySelector<HTMLElement>('i')!.style.transform).toMatch(/^scaleX\(0\.89\d*\)$/);
+    expect(text(em)).toBe('89 %');
+    // Done: the line goes, the value is a word again.
+    feeds.model({ state: 'ready', total: TOTAL });
+    expect(row.querySelector('.tline')).toBeNull();
+    expect(em.classList.contains('num')).toBe(false);
+    expect(text(em)).toBe('Ready');
+  });
+
+  it('the model ready without the Anthropic key says the key is missing, until it is saved', async () => {
+    page = await mount();
+    await open();
+    const em = () => $<HTMLElement>('.btray em[data-val="model"]')!;
+    expect(text(em())).toBe('No Anthropic key');
+    expect(em().classList.contains('warn')).toBe(true);
+    // A failed download comes first.
+    feeds.model({ state: 'failed', done: 1 * MB, total: TOTAL });
+    expect(text(em())).toBe('Did not download');
+    feeds.model({ state: 'ready', total: TOTAL });
+    expect(text(em())).toBe('No Anthropic key');
+    // The key saved on its page: the first page says Ready.
+    await sub('model');
+    $<HTMLInputElement>('input[data-key="anthropic"]')!.value = 'sk-ant-new-1234';
+    click($('[data-check="anthropic"]'));
+    await settle();
+    key('Escape');
+    expect(text(em())).toBe('Ready');
+    expect(em().classList.contains('warn')).toBe(false);
+  });
+
+  it('the Speech recognition page: the model row, the Anthropic key and the note', async () => {
+    saved();
+    core.modelGet.mockResolvedValue({ state: 'downloading', done: 412 * MB, total: TOTAL });
+    page = await mount();
+    await open();
+    await sub('model');
+    expect(title()).toBe('Speech recognition');
+    const rows = $$('.btray .sgrp > .srow');
+    expect(rows.map((r) => (r.classList.contains('mrow') ? 'model' : r.dataset.key))).toEqual(['model', 'anthropic']);
+    expect(text($('.btray .tft'))).toBe(
+      'Sound stays on this computer; text goes to Anthropic for the cleanup; the history stays on this computer only.',
+    );
+    const mrow = () => $<HTMLElement>('.btray .mrow')!;
+    const row = mrow();
+    expect(row.dataset.model).toBe('downloading');
+    expect(text(row.querySelector('.stx b'))).toBe('Parakeet Ultra');
+    expect(text(row.querySelector('.sc .mpct'))).toBe('61 %');
+    expect(text(row.querySelector('.mprog small'))).toBe('Downloading: 412 of 668 MB');
+    expect(row.querySelector<HTMLElement>('.mbar i')!.style.transform).toMatch(/^scaleX\(0\.61\d*\)$/);
+    expect(row.querySelector('[data-model-retry]')).toBeNull();
+    // The download goes on: the row changes where it is.
+    feeds.model({ state: 'downloading', done: 470 * MB, total: TOTAL });
+    expect(mrow()).toBe(row);
+    expect(text(row.querySelector('.mpct'))).toBe('70 %');
+    expect(text(row.querySelector('.mdone'))).toBe('470');
+    expect(text(row.querySelector('.mprog small'))).toBe('Downloading: 470 of 668 MB');
+    // Failed: the row is drawn again, with Retry; the key row stays.
+    feeds.model({ state: 'failed', done: 500 * MB, total: TOTAL });
+    expect(title()).toBe('Speech recognition');
+    expect(mrow()).not.toBe(row);
+    expect(mrow().dataset.model).toBe('failed');
+    expect(text(mrow().querySelector('.stx small.warn'))).toBe('Did not download · 500 of 668 MB');
+    expect(mrow().querySelector('.mpct')).toBeNull();
+    expect($('.btray .srow[data-key="anthropic"]')).not.toBeNull();
+    const retry = mrow().querySelector<HTMLButtonElement>('[data-model-retry]')!;
+    expect(text(retry.querySelector('.lbl'))).toBe('Retry');
+    click(retry);
+    await settle();
+    expect(core.modelRetry).toHaveBeenCalledTimes(1);
+    // Ready: green, with its size; no bar, no percent, no Retry.
+    feeds.model({ state: 'ready', total: TOTAL });
+    expect(text(mrow().querySelector('.stx small.ok'))).toBe('Ready · 668 MB on this computer');
+    expect(mrow().querySelector('.mbar')).toBeNull();
+    expect(mrow().querySelector('.mpct')).toBeNull();
+    expect(mrow().querySelector('[data-model-retry]')).toBeNull();
+    // Back on the first page, the row says so too.
+    key('Escape');
+    expect(text($('.btray em[data-val="model"]'))).toBe('Ready');
+  });
+
+  it('Languages shows the interface language and the translation, and holds both controls', async () => {
+    stub(view({ uiLanguage: 'en', translateTarget: 'ru' }));
+    page = await mount();
+    await open();
+    const value = () => text($('.btray em[data-val="languages"]'));
+    expect(value()).toBe('English · into Russian');
+    await sub('languages');
+    expect(title()).toBe('Languages');
+    const rows = $$('.btray .srow');
+    expect(rows.map((r) => text(r.querySelector('.stx b')))).toEqual(['Interface language', 'Translate into']);
+    const seg = [...rows[0].querySelectorAll('.segc button')];
+    expect(seg.map((b) => b.textContent)).toEqual(['Auto', 'English', 'Русский']);
+    expect(seg.map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'true', 'false']);
+    expect(text(rows[1].querySelector('[data-dd="target"] .ddv'))).toBe('Russian');
+    click($('[data-dd="target"]'));
+    click($$('.menu [data-i]').find((b) => b.textContent === 'German')!);
+    await settle();
+    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'translateTarget', value: 'de' });
+    expect(text($('[data-dd="target"] .ddv'))).toBe('German');
+    key('Escape');
+    expect(value()).toBe('English · into German');
+    // In Russian the target is written in lower case after «на».
+    page.dispose();
+    stub(view({ lang: 'ru', uiLanguage: 'ru', translateTarget: 'en' }));
+    page = await mount();
+    await open();
+    expect(value()).toBe('Русский · на английский');
+    await sub('languages');
+    expect(title()).toBe('Языки');
+    expect($$('.btray .srow .stx b').map(text)).toEqual(['Язык интерфейса', 'Переводить на']);
+  });
+
+  it('General holds only start at sign-in, and its value follows the switch', async () => {
+    page = await mount();
+    await open();
+    const value = () => text($('.btray em[data-val="general"]'));
+    expect(value()).toBe('Manually');
+    await sub('general');
+    expect(title()).toBe('General');
+    expect($$('.btray .srow').map((r) => text(r.querySelector('.stx b')))).toEqual(['Start at sign-in']);
+    expect($('.btray .segc')).toBeNull();
+    click($('[data-sw="autostart"]'));
+    await settle();
+    expect(core.autostartSet).toHaveBeenCalledWith(true);
+    key('Escape');
+    expect(value()).toBe('Starts at sign-in');
+    // Read again on every opening: changed elsewhere, the value shows it.
+    key('Escape');
+    core.autostartGet.mockResolvedValue(false);
+    await open();
+    expect(value()).toBe('Manually');
+    // In Russian too.
+    page.dispose();
+    stub(view({ lang: 'ru', uiLanguage: 'ru' }));
+    core.autostartGet.mockResolvedValue(true);
+    page = await mount();
+    await open();
+    expect(value()).toBe('Запуск при входе');
   });
 
   it('the heading line stays from page to page, and a page is filled in where it is', async () => {
@@ -212,7 +410,7 @@ describe('The settings tray', () => {
     // Other pages never open the microphone.
     core.micPreview.mockClear();
     click($('.btray [data-tback]'));
-    await sub('keys');
+    await sub('model');
     key('Escape');
     await sub('general');
     expect(previews()).toEqual([]);
@@ -230,7 +428,7 @@ describe('The settings tray', () => {
     click($('.btray [data-tback]'));
     core.micPreview.mockClear();
     window.dispatchEvent(new Event('focus'));
-    await sub('keys');
+    await sub('model');
     window.dispatchEvent(new Event('focus'));
     key('Escape');
     key('Escape');
@@ -346,13 +544,13 @@ describe('The settings tray', () => {
     expect(items.map((b) => b.getAttribute('aria-checked'))).toEqual(['false', 'false', 'true']);
   });
 
-  it('translation menu lists 60 languages named in the window language', async () => {
+  it('the translation menu on Languages lists 60 languages named in the window language', async () => {
     stub(view({ lang: 'ru', uiLanguage: 'ru' }));
     page = await mount();
     await open();
-    expect(text($('.btray em[data-val="translate"]'))).toBe('Английский');
-    await sub('translate');
-    expect(title()).toBe('Перевод');
+    expect(text($('.btray em[data-val="languages"]'))).toBe('Русский · на английский');
+    await sub('languages');
+    expect(title()).toBe('Языки');
     click($('[data-dd="target"]'));
     const labels = $$('.menu [data-i] .mlb').map((e) => e.textContent!);
     expect(labels).toHaveLength(60);
@@ -373,7 +571,7 @@ describe('The settings tray', () => {
     expect(text($('.bsec h3'))).toBe('History');
     expect(document.documentElement.lang).toBe('en');
     await open();
-    await sub('general');
+    await sub('languages');
     const seg = $$('.segc button');
     expect(seg.map((b) => b.textContent)).toEqual(['Auto', 'English', 'Русский']);
     expect(seg.map((b) => b.getAttribute('aria-pressed'))).toEqual(['true', 'false', 'false']);
@@ -386,7 +584,7 @@ describe('The settings tray', () => {
     expect(text($('.hr .htx'))).toBe('Kept.');
     // The tray stays open on its page, in the new language.
     expect(tray().classList.contains('open')).toBe(true);
-    expect(title()).toBe('Общие');
+    expect(title()).toBe('Языки');
     expect($$('.segc button').map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'false', 'true']);
     expect($('.gear')!.getAttribute('aria-label')).toBe('Настройки');
     key('Escape');
@@ -597,7 +795,7 @@ describe('The settings tray', () => {
     core.settingsSet.mockRejectedValueOnce('core');
     core.settingsGet.mockResolvedValueOnce(view({ translateTarget: 'fr' }));
     await open();
-    await sub('translate');
+    await sub('languages');
     click($('[data-dd="target"]'));
     click($$('.menu [data-i]').find((b) => b.textContent === 'French')!);
     await settle();

@@ -66,7 +66,7 @@ export type SettingChange =
   | { kind: 'dictAdd'; value: string }
   | { kind: 'dictRemove'; value: string };
 
-export type KeyName = 'soniox' | 'anthropic';
+export type KeyName = 'anthropic';
 /** Whether a key is saved and its mask; never the key. */
 export interface KeyView {
   saved: boolean;
@@ -82,7 +82,7 @@ export type PasteAgain = 'pasted' | 'clipboard';
 /** Whether Windows lets CUE use the microphone. */
 export type MicAccess = 'allowed' | 'denied';
 /** The welcome window's links, by name. */
-export type LinkTarget = 'soniox' | 'anthropic' | 'micPrivacy';
+export type LinkTarget = 'anthropic' | 'micPrivacy';
 
 export const settingsGet = () => invoke<SettingsView>('settings_get');
 export const settingsSet = (change: SettingChange) => invoke<SettingsView>('settings_set', { change });
@@ -148,6 +148,22 @@ export async function onMicLevel(cb: (level: number) => void): Promise<void> {
  *  0 comes just before. */
 export async function onMicFailed(cb: () => void): Promise<void> {
   await getCurrentWebviewWindow().listen<null>('cue://mic-failed', () => cb());
+}
+
+/** The speech model on this computer (`cue://model`): downloading with its bytes, loading, ready, failed (`done` bytes
+ *  are kept for Retry), or a processor it cannot run on. */
+export type ModelState =
+  | { state: 'missing' }
+  | { state: 'downloading'; done: number; total: number }
+  | { state: 'loading' }
+  | { state: 'ready'; total: number }
+  | { state: 'failed'; done: number; total: number }
+  | { state: 'unsupported' };
+export const modelGet = () => invoke<ModelState>('model_get');
+/** Retry the model's download from where it stopped; the new state comes as `cue://model`. */
+export const modelRetry = () => invoke<void>('model_retry');
+export async function onModel(cb: (s: ModelState) => void): Promise<void> {
+  await getCurrentWebviewWindow().listen<ModelState>('cue://model', (e) => cb(e.payload));
 }
 
 /** What the core is doing, as every window hears it: `start` and `listen` — a recording is on. */

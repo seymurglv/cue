@@ -11,10 +11,11 @@ import './welcome.css';
 import '../design/cue.js';
 import '../design/drop.js';
 import * as api from '../window/api';
-import type { KeyName, LinkTarget, MicAccess, SettingChange, SettingsView } from '../window/api';
+import type { KeyName, LinkTarget, MicAccess, ModelState, SettingChange, SettingsView } from '../window/api';
 import { CUE } from '../designParts';
 import { KeyRows } from '../window/keys';
 import { MicRows } from '../window/mic';
+import { modelRow, stepModelRow } from '../window/model';
 import { Menus, codeOf, h, logFailed, relRect, type MenuItem } from '../window/page';
 import { TEXTS, pickLang, type Lang, type WinText } from '../window/text';
 import { STEPS, keysReady, stepPage, wordCount, type Step } from './steps';
@@ -63,6 +64,8 @@ export class WelcomePage {
   text: WelcomeText = WELCOME_TEXTS.en;
   lang: Lang = 'en';
   settings: SettingsView | null = null;
+  /** The speech model's state, followed from `cue://model`. */
+  model: ModelState | null = null;
   readonly keys: KeyRows;
   readonly mic: MicRows;
   readonly reduced: () => boolean;
@@ -154,6 +157,9 @@ export class WelcomePage {
     this.text = WELCOME_TEXTS[this.lang];
     document.documentElement.lang = this.lang;
     this.build();
+    // The model downloads while the steps go on: its step redraws its block, and moves on by itself once it is ready.
+    api.onModel((m) => this.followModel(m)).catch((e) => logFailed('following the speech model', e));
+    api.modelGet().then((m) => this.followModel(m), (e) => logFailed('reading the speech model', e));
     // For the page's whole life: the window may listen but not stop listening. Only the Microphone step uses them.
     api.onMicLevel((level) => {
       if (this.step === 'mic') this.mic.level(level);
@@ -259,7 +265,7 @@ export class WelcomePage {
       // The field's border breathes while it waits; with reduced motion it stands still.
       if (!this.reduced()) pg.querySelector('textarea[data-field]')?.classList.add('wait');
       this.focusField();
-    } else this.done(pg);
+    } else if (step === 'done') this.done(pg);
   }
 
   /** The Microphone step's preview starts, and Windows' access and its microphones are read. */
@@ -322,7 +328,7 @@ export class WelcomePage {
    *  so Back does not move. */
   private paintPrimary(): void {
     const x = this.text;
-    const label = { hello: x.start, keys: x.next, mic: this.blocked() ? x.next : x.micWorks, try: null, done: x.finish }[
+    const label = { hello: x.start, keys: x.next, model: x.next, mic: this.blocked() ? x.next : x.micWorks, try: null, done: x.finish }[
       this.step
     ];
     const lbl = this.pri.querySelector<HTMLElement>('.lbl')!;
@@ -437,6 +443,16 @@ export class WelcomePage {
     if (!hint) return;
     hint.hidden = !this.blocked();
     this.paintPrimary();
+  }
+
+  /** The model's new state: its step's block drawn again, and the step left by itself once the model is ready. */
+  private followModel(m: ModelState): void {
+    const was = this.model?.state;
+    this.model = m;
+    const row = this.shown('model')?.querySelector('.mrow');
+    if (!row) return;
+    if (!stepModelRow(row, m)) row.replaceWith(modelRow(this.t, m));
+    if (m.state === 'ready' && was !== 'ready') this.go(this.at + 1);
   }
 
   /** The microphone rows again: the list came, or the choice changed. */

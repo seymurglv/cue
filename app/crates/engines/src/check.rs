@@ -1,8 +1,6 @@
-//! API key checks via free probe requests: the Soniox file list, the Anthropic model list,
-//! the OpenRouter key info.
+//! API key checks via free probe requests: the Anthropic model list, the OpenRouter key info.
 use crate::error::{checked, net, EngineError};
 
-const SONIOX_FILES: &str = "https://api.soniox.com/v1/files";
 const ANTHROPIC_MODELS: &str = "https://api.anthropic.com/v1/models";
 /// Key info (limit, spend) — free, no model request.
 const OPENROUTER_KEY: &str = "https://openrouter.ai/api/v1/key";
@@ -16,11 +14,6 @@ async fn probe(req: reqwest::RequestBuilder, key: &str) -> Result<(), EngineErro
         Err(e) => Err(net(e)),
     };
     res.map_err(|e| e.redact(key))
-}
-
-/// Soniox key: the list of uploaded files.
-pub async fn soniox(http: &reqwest::Client, key: &str) -> Result<(), EngineError> {
-    probe(http.get(SONIOX_FILES).bearer_auth(key), key).await
 }
 
 /// Anthropic key: the model list.

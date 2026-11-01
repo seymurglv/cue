@@ -4,14 +4,12 @@
 //! An attempt is a recording (`OpenMic`) and its transcription. "Retry" (`TranscribeSaved`) starts a new attempt
 //! of the same dictation: each one costs money, so each gets its own row with its own outcome (`Finished` arrives
 //! twice).
-//! A retry resets the attempt's fields (refine tokens, latencies, the path: `Batch`, batch transcription of the saved
-//! audio only) and keeps the audio and the app: it is the same audio from the same app.
+//! A retry resets the attempt's fields (refine tokens, latencies) and keeps the audio and the app: it is the same audio
+//! from the same app, recognized again.
 //! "Retry" after a failed translation (`RefineAgain`) is a new attempt on the saved text: its row has no audio (the
 //! first attempt paid for it), and the app and the speech language stay.
 //! The `latency` runs from the second press (`FinishStt`) to Ctrl+V; after "retry", from the retry; if the dictation
 //! was restored after Esc ("restore"), from "restore": time spent in "Cancelled" is not CUE's latency.
-//! An attempt without a stream (no Soniox key, the stream never connected) still bills the audio at the stream price:
-//! an overestimate in a rare failure, accepted.
 //! A refine cache warm-up is not an attempt but has a row of its own (`warmup_record`).
 //! An "Ask" attempt adds its request's tokens and searches (and those of a request aborted by Esc before "restore"
 //! asked again); its latency runs to the first words (an answer) or to Ctrl+V (a write); a follow-up is an attempt of
@@ -30,14 +28,14 @@ use cue_engines::stt::SAMPLES_PER_MS;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Attempt {
     pub id: DictationId,
-    /// The app in focus when the recording started (Soniox context, bench). Never written to the log.
+    /// The app in focus when the recording started (the refine context, the history). Never written to the log.
     pub app: String,
     samples: u64,
     pub stt_path: SttPath,
     /// The mode the dictation records in (it follows a Shift toggle while recording: [`Attempt::follow_mode`]), then
     /// the one its refine runs in. Retries keep it.
     pub mode: Mode,
-    /// The language of most of the speech from the transcription (a Soniox code): which way a translation goes.
+    /// The language of most of the speech from the recognized text (`speech::speech_language`): which way a translation goes.
     /// A retry clears it: the new transcription gives its own; a retry of the translation keeps it.
     pub speech_language: Option<String>,
     refine: claude::Usage,
@@ -74,7 +72,7 @@ impl Attempt {
             id,
             app: String::new(),
             samples: 0,
-            stt_path: SttPath::Stream,
+            stt_path: SttPath::Local,
             mode: Mode::Dictate,
             speech_language: None,
             refine: claude::Usage::default(),
@@ -121,7 +119,6 @@ impl Attempt {
     /// "Retry": a new attempt on the same audio. The audio, the app and the mode stay.
     pub fn retry(&mut self, now: u64) {
         *self = Self { app: std::mem::take(&mut self.app), samples: self.samples, mode: self.mode, ..Self::new(self.id) };
-        self.stt_path = SttPath::Batch;
         self.finish_at = Some(now);
         self.latency_from = Some(now);
     }
@@ -266,7 +263,7 @@ pub fn warmup_record(usage: claude::Usage, ts: String, s: &Settings, model: &str
         ts,
         audio_ms: 0,
         stt_engine: s.stt.engine,
-        stt_path: SttPath::Stream,
+        stt_path: SttPath::Local,
         refine_model: model.to_owned(),
         input_tokens: usage.input_tokens,
         cache_read_tokens: usage.cache_read_input_tokens,
@@ -383,7 +380,7 @@ mod tests {
         }
         assert_eq!(a.audio_ms(), 2_000, "100 frames of 20 ms");
         a.finish_stt(10_000);
-        a.stt_done(SttPath::Stream, 10_350);
+        a.stt_done(SttPath::Local, 10_350);
         a.refine_started(10_350);
         a.refine_done(usage(120, 15), RefineOutcome::Refined, 11_000);
         a.insert_started(11_000);
@@ -395,7 +392,7 @@ mod tests {
         let r = a.record(Outcome::Inserted, "2026-10-27T10:00:00Z".into(), &s);
         assert_eq!(r.ts, "2026-10-27T10:00:00Z");
         assert_eq!(r.audio_ms, 2_000);
-        assert_eq!(r.stt_path, SttPath::Stream);
+        assert_eq!(r.stt_path, SttPath::Local);
         assert_eq!(r.refine_model, s.refine.model);
         assert_eq!((r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens), (120, 15, 7, 3));
         assert_eq!(r.latency_ms, 1_090);
@@ -409,21 +406,20 @@ mod tests {
         a.app = "Outlook".into();
         a.add_audio(16 * 4_000);
         a.finish_stt(5_000);
-        // The stream broke off, and the batch fallback failed too.
-        a.stt_done(SttPath::StreamThenBatch, 9_000);
+        // Recognition failed.
+        a.stt_done(SttPath::Local, 9_000);
         let failed = a.record(Outcome::Failed, "t1".into(), &s);
-        assert_eq!((failed.stt_path, failed.audio_ms, failed.latency_ms), (SttPath::StreamThenBatch, 4_000, 0));
+        assert_eq!((failed.stt_path, failed.audio_ms, failed.latency_ms), (SttPath::Local, 4_000, 0));
         assert_eq!(failed.outcome, Outcome::Failed);
 
         a.retry(20_000);
         assert_eq!(a.stages(), Stages::default(), "the previous attempt's latencies do not carry over to the retry");
-        a.stt_done(SttPath::Batch, 21_000);
+        a.stt_done(SttPath::Local, 21_000);
         a.refine_started(21_000);
         a.refine_done(usage(50, 9), RefineOutcome::Refined, 21_500);
         a.insert_started(21_500);
         a.inserted(21_550);
         let ok = a.record(Outcome::Inserted, "t2".into(), &s);
-        assert_eq!(ok.stt_path, SttPath::Batch, "a retry is batch transcription only");
         assert_eq!(ok.audio_ms, 4_000, "the same audio");
         assert_eq!((ok.input_tokens, ok.output_tokens), (50, 9));
         assert_eq!(ok.latency_ms, 1_550, "from \"retry\" to Ctrl+V");
@@ -436,7 +432,7 @@ mod tests {
         let s = Settings::default();
         let mut a = Attempt::new(DictationId(1));
         a.finish_stt(1_000);
-        a.stt_done(SttPath::Stream, 1_200);
+        a.stt_done(SttPath::Local, 1_200);
         a.speech_language = Some("ru".into());
         a.refine_started(1_200);
         a.refine_done(usage(80, 8), RefineOutcome::RawKeyProblem, 1_300);
@@ -445,7 +441,6 @@ mod tests {
         assert_eq!((r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens), (0, 0, 0, 0));
         assert_eq!(a.refine_outcome, None);
         assert_eq!(a.speech_language, None, "the new transcription gives its own speech language");
-        assert_eq!(r.stt_path, SttPath::Batch);
     }
 
     #[test]
@@ -455,7 +450,7 @@ mod tests {
         a.app = "Telegram Desktop".into();
         a.add_audio(16 * 3_000);
         a.finish_stt(1_000);
-        a.stt_done(SttPath::Stream, 1_300);
+        a.stt_done(SttPath::Local, 1_300);
         a.speech_language = Some("ru".into());
         a.refine_started(1_300);
         a.refine_done(usage(90, 30), RefineOutcome::RawFallback, 2_000);
@@ -637,7 +632,7 @@ mod tests {
         let mut a = Attempt::new(DictationId(2));
         a.add_audio(16 * 700);
         a.finish_stt(3_000);
-        a.stt_done(SttPath::Stream, 3_300);
+        a.stt_done(SttPath::Local, 3_300);
         let r = a.record(Outcome::Cancelled, "t".into(), &s);
         assert_eq!((r.latency_ms, r.audio_ms, r.outcome), (0, 700, Outcome::Cancelled));
         assert_eq!(a.stages(), Stages { stt: Some(300), refine: None, insert: None, latency: 0 });
@@ -648,7 +643,7 @@ mod tests {
         let s = Settings::default();
         let mut a = Attempt::new(DictationId(5));
         a.finish_stt(1_000); // Esc while recording: the text is still transcribed
-        a.stt_done(SttPath::Stream, 1_300);
+        a.stt_done(SttPath::Local, 1_300);
         a.undo(4_000); // "restore" after 3 s
         a.refine_started(4_000);
         a.refine_done(usage(10, 2), RefineOutcome::Refined, 4_500);
@@ -696,7 +691,7 @@ mod tests {
         a.app = "Secret App".into();
         a.add_audio(16 * 1_280);
         a.finish_stt(1_000);
-        a.stt_done(SttPath::Stream, 1_287);
+        a.stt_done(SttPath::Local, 1_287);
         let line = logged(Outcome::Empty, &a);
         assert!(line.contains("outcome=\"empty\"") && line.contains("audio_ms=1280"), "{line}");
         assert!(line.contains("stt_ms=287") && line.contains("latency_ms=0"), "{line}");

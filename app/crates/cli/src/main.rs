@@ -10,7 +10,7 @@ use cue_core::usage::Summary;
 use cue_engines::EngineError;
 use cue_engines::keys::{self, KeyName};
 
-const USAGE: &str = "cue-cli keys set <soniox|anthropic|openrouter>\ncue-cli keys show\ncue-cli keys check\n\
+const USAGE: &str = "cue-cli keys set <anthropic|openrouter>\ncue-cli keys show\ncue-cli keys check\n\
                      cue-cli usage [YYYY-MM]\ncue-cli leak-scan <file or folder>...";
 
 fn usage() -> ! {
@@ -151,7 +151,6 @@ async fn main() -> Result<()> {
                 // The key is not in a check error's text: `cue_engines::check` strips it out.
                 let probed = match keys::lookup(k) {
                     Ok(Some(key)) => Ok(Some(match k {
-                        KeyName::Soniox => cue_engines::check::soniox(&http, &key).await,
                         KeyName::Anthropic => cue_engines::check::anthropic(&http, &key).await,
                         KeyName::OpenRouter => cue_engines::check::openrouter(&http, &key).await,
                     })),
@@ -207,21 +206,21 @@ mod tests {
 
     #[test]
     fn show_line_missing_key_is_dash() {
-        assert_eq!(show_line(KeyName::Soniox, &Ok(None)), "soniox      —");
+        assert_eq!(show_line(KeyName::OpenRouter, &Ok(None)), "openrouter  —");
     }
 
     #[test]
     fn show_line_store_failure_is_visible() {
-        let err = EngineError::Service("could not read the soniox key: boom".into());
+        let err = EngineError::Service("could not read the openrouter key: boom".into());
         assert_eq!(
-            show_line(KeyName::Soniox, &Err(err)),
-            "soniox      error: service unavailable: could not read the soniox key: boom"
+            show_line(KeyName::OpenRouter, &Err(err)),
+            "openrouter  error: service unavailable: could not read the openrouter key: boom"
         );
     }
 
     #[test]
     fn check_line_working_key() {
-        assert_eq!(check_line(KeyName::Soniox, &Ok(Some(Ok(())))), "soniox      works");
+        assert_eq!(check_line(KeyName::OpenRouter, &Ok(Some(Ok(())))), "openrouter  works");
     }
 
     #[test]
@@ -235,7 +234,7 @@ mod tests {
 
     #[test]
     fn check_line_timeout_is_visible() {
-        assert_eq!(check_line(KeyName::Soniox, &Ok(Some(Err(EngineError::Timeout)))), "soniox      timeout");
+        assert_eq!(check_line(KeyName::OpenRouter, &Ok(Some(Err(EngineError::Timeout)))), "openrouter  timeout");
     }
 
     #[test]
@@ -245,10 +244,10 @@ mod tests {
 
     #[test]
     fn check_line_store_failure_is_visible() {
-        let err = EngineError::Service("could not read the soniox key: boom".into());
+        let err = EngineError::Service("could not read the openrouter key: boom".into());
         assert_eq!(
-            check_line(KeyName::Soniox, &Err(err)),
-            "soniox      error: service unavailable: could not read the soniox key: boom"
+            check_line(KeyName::OpenRouter, &Err(err)),
+            "openrouter  error: service unavailable: could not read the openrouter key: boom"
         );
     }
 

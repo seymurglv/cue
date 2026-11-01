@@ -64,6 +64,8 @@ fn main() {
             ipc::card_ready,
             ipc::answer_source,
             commands::settings_get,
+            commands::model_get,
+            commands::model_retry,
             commands::settings_set,
             commands::autostart_get,
             commands::autostart_set,

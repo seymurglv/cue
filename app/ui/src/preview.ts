@@ -48,7 +48,7 @@ const drops: any[] = [];
 
 function api(fx: any) {
   return {
-    mode: () => 'dictate', err: () => fx.err ?? 'net', errLabel: () => (fx.err === 'key' ? t.error.sonioxKey : t.error.net),
+    mode: () => 'dictate', err: () => fx.err ?? 'net', errLabel: () => (fx.err === 'key' ? t.error.stt : t.error.model),
     retry: () => fx.err !== 'key', lbl: () => fx.lbl ?? 'icons', os: () => 'win', text: t.drop, voice: new CUE.Voice(),
     onEsc() {}, onPress() {}, onAction() {},
   };

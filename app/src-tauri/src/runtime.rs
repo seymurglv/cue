@@ -16,9 +16,7 @@
 //!   (`state::InsertWatch`);
 //! - "retry" is a new attempt of the same dictation: `Finished` arrives twice, each attempt gets its own usage.csv
 //!   row with its own outcome; a retry resets the tokens, latencies and transcription path, the audio and the app
-//!   stay (`attempt`). After a failed translation "retry" refines the saved text again, and its row has no audio.
-//!   An attempt without a stream (no Soniox key, the stream did not connect) is billed at the stream price: an
-//!   overestimate in a rare failure, accepted;
+//!   stay (`attempt`). After a failed translation "retry" refines the saved text again, and its row has no audio;
 //! - the last-dictation files (`last\`) change only on success (`files`); the last text is also kept in memory;
 //! - a prompt cache warm-up (refine's `warm_cache`, "Ask"'s `warm_ask_cache`) is paid for and gets a usage.csv row of
 //!   its own (`warmup`);
@@ -31,7 +29,7 @@
 //!   committed, an "Ask" turn when it ends; never in the way of the result: a disk error is one log line, and nothing
 //!   is written while the history is off. While its period is unknown (settings.json not read, or a value CUE does not
 //!   know) the history is neither written nor cleaned up, until the main window sets it. The new entry goes to the main
-//!   window only. A dictation's or a translation's entry keeps the text as Soniox heard it (`raw_text`), and each
+//!   window only. A dictation's or a translation's entry keeps the text as it was recognized (`raw_text`), and each
 //!   entry its recording, for the period the user chose (`recordings`): the sound is taken on the core thread — a
 //!   dictation's only once `last\audio.wav` really is its own and the entry is written, an "Ask" question's as the
 //!   question goes out, while `current.wav` is its own recording (a follow-up may start recording before its answer
@@ -47,6 +45,7 @@ mod ask;
 mod attempt;
 mod files;
 mod insert;
+mod model;
 pub(crate) mod recordings;
 mod state;
 mod tasks;
@@ -61,9 +60,11 @@ use cue_core::ask::{AnswerPlace, AskContext, MAX_SELECTION_CHARS, SelectionKind,
 use cue_core::audio::{Silence, SilenceDetector};
 use cue_core::flow::{DictationId, Effect, Flow, InsertOutcome, Input, Outcome, PasteHow, SttError, TimerKind};
 use cue_core::history;
+use cue_core::model::ModelState;
 use cue_core::refine::RefineContext;
 use cue_core::stats;
 use cue_core::settings::{self, AudioKeep, DropPosition, HistorySettings, Keep, Period, SettingChange, Settings};
+use cue_core::speech;
 use cue_core::translate;
 use cue_core::ui::{Mode, TrayKind, UiAction, UiPhase, UiState};
 use cue_core::usage::{self, SttPath, UsageRecord};
@@ -71,8 +72,7 @@ use cue_engines::EngineError;
 use cue_engines::ask as engine_ask;
 use cue_engines::claude::{self, Job, RefineResult};
 use cue_engines::keys::{self, KeyName};
-use cue_engines::soniox::SonioxConfig;
-use cue_engines::stt::{self, Engine, Fallback, SttOutput, SttSession};
+use cue_engines::stt::{self, Engine, SttOutput, SttSession};
 use cue_platform_win::cardplace::{self, CARD};
 use cue_platform_win::chord::HotkeyEvent;
 use cue_platform_win::clipboard::{WinKeys, cloud_clipboard_uploads, may_paste};
@@ -98,6 +98,7 @@ use recordings::{AudioLimit, Recordings, Snapshot};
 use state::{
     CacheWarm, InsertWatch, LevelGate, MicGate, MicTold, ShownOnce, TaskSlot, Timers, ViewGate, ViewSend, WarmUp,
 };
+use model::{ModelEvent, ModelKeeper};
 use tasks::{ask_panicked, guarded, refine_panicked, stt_panicked};
 
 /// Timeout for each UI Automation query.
@@ -111,8 +112,6 @@ const COPY_WAIT: Duration = Duration::from_secs(2);
 /// Text before the caret on insert: the join (`join_for_insert`) needs only its end. A short read is a
 /// quick query that is rarely late (a late one answers "unknown").
 const INSERT_CONTEXT_CHARS: usize = 16;
-/// How long we wait for the Soniox stream result after the second press; then batch transcription of the recording.
-const STT_FINISH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Insert watchdog: the insert thread finishes within ~7 s (see `insert::spawn_inserter`).
 const INSERT_WATCHDOG: Duration = Duration::from_secs(10);
 /// Warm-up: a request with no key and no text, just for a TLS connection in the shared client's pool. The response
@@ -159,6 +158,12 @@ pub enum CoreEvent {
     Settings { cmd: SettingsCmd, reply: tokio::sync::oneshot::Sender<SettingsView> },
     /// "Clear history" in the main window: every day of the history goes, with every recording.
     HistoryClear,
+    /// A step of the speech model's download or load.
+    Model(ModelEvent),
+    /// A window asks for the speech model's state.
+    ModelGet(tokio::sync::oneshot::Sender<ModelState>),
+    /// "Retry" on the speech model in the main or the welcome window.
+    ModelRetry,
     /// A history entry's text from the main window (decision 3): "Paste again" into `target`, the window that was under
     /// the main one and is now in front, or "Copy" (`None`) — the clipboard. Neither is a new result: the last result
     /// (Ctrl+Win+V) and the history stay as they are.
@@ -183,12 +188,10 @@ pub fn input_of(ev: HotkeyEvent) -> Input {
     }
 }
 
-/// The Soniox stream of the recording in progress. The key is needed again for the batch fallback.
-/// No `Debug`: it holds the key.
+/// The recognition session of the recording in progress: it keeps the frames and recognizes them at the second press.
 struct Stream {
     id: DictationId,
     session: SttSession,
-    key: String,
 }
 
 pub struct Runtime {
@@ -231,8 +234,10 @@ pub struct Runtime {
     /// The silence detector said "there is sound" at least once: if the microphone fails, what was said is processed.
     heard: bool,
     stream: Option<Stream>,
-    /// The transcription result in flight (stream + fallback, or "retry"): `AbortStt` cancels it too.
-    /// Without a task (there was no stream) it is `None`: the result was sent at once.
+    /// The speech model: its state, its download and load, the slot recognition waits on.
+    model: ModelKeeper,
+    /// The recognition in flight (at the second press, or "retry"): `AbortStt` cancels it too. Without a task (there
+    /// was no session) it is `None`: the result was sent at once.
     stt_task: TaskSlot<Option<JoinHandle<()>>>,
     refine_task: TaskSlot<JoinHandle<()>>,
     /// The focused field, queried right after the second press, for the refine context.
@@ -240,7 +245,7 @@ pub struct Runtime {
     insert_watch: InsertWatch,
     /// The bare final text of the dictation (no join, line breaks not replaced), for `last\result.txt`.
     final_text: Option<(DictationId, String)>,
-    /// The text of the dictation as Soniox heard it, before refine cleaned it up or translated it: its history entry
+    /// The text of the dictation as it was recognized, before refine cleaned it up or translated it: its history entry
     /// keeps it. The user's text: only lengths ever reach the log.
     raw_text: Option<(DictationId, String)>,
     /// The last text given to the user: "Copy" and Ctrl+Win+V take it from here, after a restart from disk.
@@ -301,6 +306,7 @@ impl Runtime {
             }
         };
         let translate_home = pair_now(&settings);
+        let model = ModelKeeper::new(paths.model.clone());
         let history = HistoryLog::new(paths.history.clone(), Recordings::new(paths.history_audio.clone()));
         // Alt picks "Ask" only when it is on (spec 2 §9); the hook reads the switch on every key.
         hook::ASK_ENABLED.store(settings.ask.enabled(), Ordering::Relaxed);
@@ -331,6 +337,7 @@ impl Runtime {
             silence: SilenceDetector::new(),
             heard: false,
             stream: None,
+            model,
             stt_task: TaskSlot::default(),
             refine_task: TaskSlot::default(),
             refine_focus: None,
@@ -379,6 +386,9 @@ impl Runtime {
             tracing::warn!("history: recordings period unknown, none is recorded until it is set");
         }
         self.history.start(&self.settings.history, &local_today());
+        self.model.start(&self.tx, &self.http);
+        self.ui.model(self.model.state());
+        forget_soniox_key();
         while let Some(ev) = rx.recv().await {
             // A crash in one event does not stop the core; the panic hook logs where it happened.
             if catch_unwind(AssertUnwindSafe(|| self.on_event(ev))).is_err() {
@@ -404,7 +414,7 @@ impl Runtime {
         at.saturating_duration_since(self.t0).as_millis() as u64
     }
 
-    /// `StartStt` runs last in its batch: the UI Automation query (the app name for Soniox)
+    /// `StartStt` runs last in its batch: the UI Automation query (the app name for the refine context)
     /// does not delay showing the Drop or the timers. Meanwhile microphone frames wait in the core queue.
     fn feed(&mut self, input: Input) {
         let now = self.now();
@@ -480,6 +490,7 @@ impl Runtime {
                 self.emit_state(&s);
                 self.send_mic_names(self.tray);
                 self.ui.tray(self.tray);
+                self.ui.model(self.model.state());
                 self.ui.resend_idle_hidden();
                 self.ui.resend_place();
                 if let Some(c) = self.conversation.as_ref().filter(|c| c.opened) {
@@ -550,6 +561,22 @@ impl Runtime {
             CoreEvent::DropMoved(place) => {
                 self.settings.drop.position = place;
                 self.save_settings();
+            }
+            CoreEvent::Model(event) => {
+                let told = self.model.on_event(event, &self.tx);
+                self.ui.model(self.model.state());
+                // "Model is ready" after a download, only on a Drop at rest: a dictation that waited shows its text instead.
+                if told && self.tray.is_none() && self.flow.ui_state().phase == UiPhase::Idle {
+                    self.tray = Some(TrayKind::ModelReady);
+                    self.ui.tray(self.tray);
+                }
+            }
+            CoreEvent::ModelGet(reply) => {
+                let _ = reply.send(self.model.state());
+            }
+            CoreEvent::ModelRetry => {
+                self.model.retry(&self.tx, &self.http);
+                self.ui.model(self.model.state());
             }
             CoreEvent::Settings { cmd, reply } => {
                 if let SettingsCmd::Set(change) = cmd {
@@ -663,14 +690,17 @@ impl Runtime {
         let input = match result {
             Ok(out) => {
                 if self.attempt.id == id {
-                    self.attempt.speech_language = out.language;
+                    // The model tells no language: the speech's language is read from the text's alphabet.
+                    let pair = (self.settings.translate.target(), self.translate_home);
+                    self.attempt.speech_language = out
+                        .language
+                        .or_else(|| speech::speech_language(&out.text, pair.0, pair.1).map(str::to_owned));
                 }
                 Input::SttFinal { id, text: out.text }
             }
             Err(e) => {
-                tracing::warn!(stt_path = path.as_str(), "transcription failed: {e}");
-                let error = if e.is_key_problem() { SttError::KeyProblem } else { SttError::Network };
-                Input::SttFailed { id, error }
+                tracing::warn!(stt_path = path.as_str(), "recognition failed: {e}");
+                Input::SttFailed { id, error: stt_error(&e) }
             }
         };
         self.feed(input);
@@ -873,17 +903,10 @@ impl Runtime {
         if let Some(old) = self.stream.take() {
             old.session.abort();
         }
-        let Ok(key) = soniox_key() else { return };
-        let cfg = SonioxConfig {
-            model: self.settings.stt.soniox_model.clone(),
-            // The starting mode: Shift may still toggle it while recording, which language identification covers.
-            language_hints: soniox_hints(self.flow.mode(), &self.settings),
-            // "Unknown" is not an app name: no context.
-            app: known_app(&self.attempt.app).map(str::to_owned),
-            terms: vec![],
-        };
-        let session = stt::start(Engine::Soniox { key: key.clone(), cfg });
-        self.stream = Some(Stream { id, session, key });
+        // The session keeps the frames whether the model is ready or not: a dictation made while it downloads waits for
+        // it at the second press.
+        let session = stt::start(Engine::Local(self.model.slot()));
+        self.stream = Some(Stream { id, session });
     }
 
     fn finish_stt(&mut self, id: DictationId) {
@@ -899,32 +922,22 @@ impl Runtime {
         self.warm_up();
         self.prefetch_focus(id);
         let tx = self.tx.clone();
-        let Some(Stream { session, key, .. }) = self.stream.take_if(|s| s.id == id) else {
-            // The stream was not started (no Soniox key, or the key store failed; the reason is already in the log).
+        let Some(Stream { session, .. }) = self.stream.take_if(|s| s.id == id) else {
+            // No session was started for this dictation: a flow bug, reported as a failed recognition with Retry.
             let old = self.stt_task.start(id, |task| {
-                let result = Err(EngineError::KeyProblem("transcription stream not started: no Soniox key".into()));
-                let _ = tx.send(CoreEvent::SttDone { id, task, result, path: SttPath::Stream });
+                let result = Err(EngineError::Model("no recognition session".into()));
+                let _ = tx.send(CoreEvent::SttDone { id, task, result, path: SttPath::Local });
                 None
             });
             abort_stt_task(old);
             return;
         };
-        let fallback = self.fallback(key);
-        let wav = self.paths.current_wav();
+        let timeout = self.model.timeout();
         let old = self.stt_task.start(id, |task| {
             Some(tokio::spawn(async move {
-                let body = async {
-                    match session.finish(STT_FINISH_TIMEOUT).await {
-                        Err(e) if stt::should_fallback(&e) => {
-                            tracing::warn!("transcription stream: {e}; transcribing the whole recording");
-                            (fallback.transcribe(&wav).await, SttPath::StreamThenBatch)
-                        }
-                        other => (other, SttPath::Stream),
-                    }
-                };
-                // If the task crashed: "No connection" and "retry"; the attempt's audio stays in current.wav.
-                let (result, path) = guarded("transcription", body, || (Err(stt_panicked()), SttPath::Stream)).await;
-                let _ = tx.send(CoreEvent::SttDone { id, task, result, path });
+                // If the task crashed: an error with Retry; the attempt's audio stays in current.wav.
+                let result = guarded("recognition", session.finish(timeout), || Err(stt_panicked())).await;
+                let _ = tx.send(CoreEvent::SttDone { id, task, result, path: SttPath::Local });
             }))
         });
         abort_stt_task(old);
@@ -934,7 +947,7 @@ impl Runtime {
         if let Some(s) = self.stream.take_if(|s| s.id == id) {
             s.session.abort();
         }
-        // A cancelled task drops both the wait for the stream and the fallback (which cleans up its own Soniox upload).
+        // A cancelled task drops the recognition too: its result is not needed.
         abort_stt_task(self.stt_task.take_for(id));
     }
 
@@ -945,33 +958,24 @@ impl Runtime {
         }
         self.warm_up();
         self.prefetch_focus(id);
-        let fallback = soniox_key().map(|key| self.fallback(key));
+        // Retry after the model failed: its download goes on first, and recognition waits for it.
+        self.model.retry(&self.tx, &self.http);
+        self.ui.model(self.model.state());
+        let (slot, timeout) = (self.model.slot(), self.model.timeout());
         let wav = self.paths.current_wav();
         let tx = self.tx.clone();
         let old = self.stt_task.start(id, |task| {
             Some(tokio::spawn(async move {
                 let body = async {
-                    match fallback {
-                        Ok(fb) => fb.transcribe(&wav).await,
-                        Err(e) => Err(e),
-                    }
+                    tokio::time::timeout(timeout, stt::recognize_wav(slot, &wav)).await.unwrap_or(Err(EngineError::Timeout))
                 };
-                let result = guarded("retry transcription", body, || Err(stt_panicked())).await;
-                let _ = tx.send(CoreEvent::SttDone { id, task, result, path: SttPath::Batch });
+                let result = guarded("retry recognition", body, || Err(stt_panicked())).await;
+                let _ = tx.send(CoreEvent::SttDone { id, task, result, path: SttPath::Local });
             }))
         });
         abort_stt_task(old);
     }
 
-    fn fallback(&self, soniox_key: String) -> Fallback {
-        Fallback {
-            http: self.http.clone(),
-            soniox_key,
-            model: self.settings.stt.soniox_async_model.clone(),
-            // The mode at the second press or the retry: the one the dictation ends with.
-            hints: soniox_hints(self.flow.mode(), &self.settings),
-        }
-    }
 
     /// Connect to Anthropic ahead of time: when recording starts and on the second press (in parallel with
     /// transcription), at most once every 20 s (right away after sleep) and only if there is a key: refine does not pay
@@ -1627,7 +1631,7 @@ impl Runtime {
                     tracing::warn!("microphone settings did not open: {e}");
                 }
             }
-            Some(TrayKind::HoldHint | TrayKind::LastMinute | TrayKind::MicMissing) | None => {}
+            Some(TrayKind::HoldHint | TrayKind::LastMinute | TrayKind::MicMissing | TrayKind::ModelReady) | None => {}
         }
     }
 
@@ -1995,9 +1999,11 @@ fn write_settings(settings: &Settings, path: &Path, can_save: bool) {
 }
 
 /// The other language of the translation pair (spec 2 §9): `translate.home`, else the Windows display language
-/// (`windows`, a locale name), else a language hint — never the target itself. `None`: no other language was found.
+/// (`windows`, a locale name), else Russian or English — never the target itself. `None`: no other language was found.
 fn translate_pair(s: &Settings, windows: Option<&str>) -> Option<&'static str> {
-    translate::resolve_home(s.translate.home.as_deref(), windows, &s.stt.language_hints, s.translate.target())
+    // The languages CUE is made for stand in when Windows names none.
+    let hints = ["ru".to_owned(), "en".to_owned()];
+    translate::resolve_home(s.translate.home.as_deref(), windows, &hints, s.translate.target())
 }
 
 /// The translation pair of the settings as they are now, with this Windows' display language. The log gets the codes.
@@ -2014,8 +2020,8 @@ fn stored_app(app: &str) -> String {
 }
 
 /// What refine does with the dictation. A translation goes the way the speech language says (spec 2 §5,
-/// `translate::output_language`): the language fixed in `translate.speech`, else the one Soniox heard most (`heard`; a
-/// code CUE does not know counts as unknown speech). Dictation and "Ask" are cleaned up.
+/// `translate::output_language`): the language fixed in `translate.speech`, else the one the text was heard in
+/// (`heard`, from its alphabet; a code CUE does not know counts as unknown speech). Dictation and "Ask" are cleaned up.
 fn job_for(
     mode: Mode,
     fixed: Option<&'static str>,
@@ -2032,12 +2038,13 @@ fn job_for(
     }
 }
 
-/// Soniox language hints: a fixed speech language for translation goes to Soniox as the only hint (spec 2 §5);
-/// otherwise the hints from the settings. Language identification stays on either way (`soniox::start_message`).
-fn soniox_hints(mode: Mode, s: &Settings) -> Vec<String> {
-    match (mode, s.translate.speech()) {
-        (Mode::Translate, Some(code)) => vec![code.to_owned()],
-        _ => s.stt.language_hints.clone(),
+/// A recognition failure as the flow tells it: the model missing or damaged (Retry downloads it), a processor it cannot
+/// run on (no Retry), anything else (Retry recognizes the saved recording again).
+fn stt_error(e: &EngineError) -> SttError {
+    match e {
+        EngineError::Model(_) => SttError::Model,
+        EngineError::Unsupported(_) => SttError::Unsupported,
+        _ => SttError::Failed,
     }
 }
 
@@ -2157,17 +2164,14 @@ fn abort_stt_task(task: Option<Option<JoinHandle<()>>>) {
     }
 }
 
-/// The Soniox key. No key, or the key store failed: for the flow this is a "Soniox key problem"
-/// (closer to the truth than "no connection"); the reason goes to the log (the key name and the kind of failure,
-/// not the value).
-fn soniox_key() -> Result<String, EngineError> {
-    keys::get(KeyName::Soniox).map_err(|e| {
-        tracing::warn!("Soniox key: {e}");
-        match e {
-            EngineError::KeyProblem(_) => e,
-            other => EngineError::KeyProblem(other.to_string()),
-        }
-    })
+/// The Soniox key of earlier versions is deleted from Windows Credential Manager: CUE does not use it any more. Every
+/// start asks; after the first there is none. The log gets whether one was deleted.
+fn forget_soniox_key() {
+    match keys::forget_soniox() {
+        Ok(true) => tracing::info!("the Soniox key of an earlier version was deleted"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("{e}"),
+    }
 }
 
 #[cfg(test)]
@@ -2177,13 +2181,11 @@ mod tests {
     use cue_engines::ask::{AskEnd, AskFailure, AskResult, AskUsage, Step};
 
     #[test]
-    fn a_fixed_speech_language_is_the_only_hint_in_translation() {
-        let mut s = Settings::default();
-        assert_eq!(soniox_hints(Mode::Translate, &s), ["ru", "en"], "auto: the hints from the settings");
-        s.translate.speech = Some("de".into());
-        assert_eq!(soniox_hints(Mode::Translate, &s), ["de"]);
-        assert_eq!(soniox_hints(Mode::Dictate, &s), ["ru", "en"], "a dictation keeps the hints from the settings");
-        assert_eq!(soniox_hints(Mode::Ask, &s), ["ru", "en"]);
+    fn recognition_failures_tell_the_flow_what_retry_does() {
+        assert_eq!(stt_error(&EngineError::Model("x".into())), SttError::Model);
+        assert_eq!(stt_error(&EngineError::Unsupported("x".into())), SttError::Unsupported);
+        assert_eq!(stt_error(&EngineError::Timeout), SttError::Failed);
+        assert_eq!(stt_error(&EngineError::Protocol("x".into())), SttError::Failed);
     }
 
     #[test]
@@ -2191,8 +2193,8 @@ mod tests {
         let tr = |fixed, heard, home| job_for(Mode::Translate, fixed, heard, "en", home);
         assert_eq!(tr(None, Some("ru"), Some("ru")), Job::Translate("en"));
         assert_eq!(tr(None, Some("en"), Some("ru")), Job::Translate("ru"), "target speech goes home");
-        assert_eq!(tr(None, Some("en-US"), Some("ru")), Job::Translate("ru"), "Soniox's code goes through `known`");
-        assert_eq!(tr(Some("ru"), Some("en"), Some("ru")), Job::Translate("en"), "the fixed language beats Soniox's");
+        assert_eq!(tr(None, Some("en-US"), Some("ru")), Job::Translate("ru"), "a code goes through `known`");
+        assert_eq!(tr(Some("ru"), Some("en"), Some("ru")), Job::Translate("en"), "the fixed language beats the heard one");
         assert_eq!(tr(Some("en"), Some("ru"), Some("ru")), Job::Translate("ru"));
         assert_eq!(tr(None, Some("xx"), Some("ru")), Job::Translate("en"), "an unknown code is unknown speech");
         assert_eq!(tr(None, None, Some("ru")), Job::Translate("en"));
@@ -2756,7 +2758,7 @@ mod tests {
             SettingChange::UiLanguage(settings::UiLanguage::Auto),
             SettingChange::MicDevice(None),
             SettingChange::MicDevice(Some("   ".into())),
-            // Refused: a language Soniox does not know, a name no microphone has.
+            // Refused: a language CUE does not know, a name no microphone has.
             SettingChange::TranslateTarget("xx".into()),
             SettingChange::MicDevice(Some("m".repeat(201))),
         ];

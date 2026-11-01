@@ -287,6 +287,9 @@ export class WindowPage implements Ctx {
     this.setLang(view?.lang);
     this.build();
     api.onMicLevel((level) => this.tray.level(level)).catch((e) => logFailed('following the microphone level', e));
+    // The speech model's state: asked once, then followed.
+    api.onModel((m) => this.tray.setModel(m)).catch((e) => logFailed('following the speech model', e));
+    api.modelGet().then((m) => this.tray.setModel(m), (e) => logFailed('reading the speech model', e));
     // A recording CUE starts must not take in a recording of the history playing aloud.
     api.onCoreState((s) => {
       if (s.phase === 'start' || s.phase === 'listen') this.history.recordingStarts();

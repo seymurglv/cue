@@ -23,6 +23,7 @@ const IC={
  copy:SV('<rect x="7" y="7" width="9.5" height="10" rx="2"/><path d="M13 7V5a2 2 0 0 0-2-2H5.5a2 2 0 0 0-2 2v6.5a2 2 0 0 0 2 2H7"/>'),
  key:SV('<rect x="2.8" y="5.5" width="14.4" height="9" rx="2"/><path d="M6 8.6h.01M9 8.6h.01M12 8.6h.01M14.4 8.6h.01M6.8 11.6h6.4"/>'),
  timer:SV('<circle cx="10" cy="11" r="6"/><path d="M10 8v3.2l2 1.3M8 2.8h4"/>'),
+ model:SV('<path d="M10 2.8l6.2 3.5v7.4L10 17.2l-6.2-3.5V6.3z"/><path d="M3.8 6.3 10 9.8l6.2-3.5M10 9.8v7.4"/>'),
  gear:SV('<circle cx="10" cy="10" r="2.6"/><path d="M10 2.5v2.2M10 15.3v2.2M2.5 10h2.2M15.3 10h2.2M4.7 4.7l1.5 1.5M13.8 13.8l1.5 1.5M4.7 15.3l1.5-1.5M13.8 6.2l1.5-1.5"/>')
 };
 /* Windows key logo for the idle hint: four squares in 10 × 10, current color */

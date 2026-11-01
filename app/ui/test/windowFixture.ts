@@ -50,11 +50,13 @@ export const feeds: {
   level: (l: number) => void;
   failed: () => void;
   state: (s: api.CoreState) => void;
+  model: (m: api.ModelState) => void;
 } = {
   entry: () => {},
   level: () => {},
   failed: () => {},
   state: () => {},
+  model: () => {},
 };
 
 /** Answers of a core that holds `settings` and changes them as asked. */
@@ -103,6 +105,11 @@ export function stub(settings: api.SettingsView = view()): void {
   });
   core.onCoreState.mockImplementation(async (cb) => {
     feeds.state = cb;
+  });
+  core.modelGet.mockResolvedValue({ state: 'ready', total: 667_729_022 });
+  core.modelRetry.mockResolvedValue(undefined);
+  core.onModel.mockImplementation(async (cb) => {
+    feeds.model = cb;
   });
   core.welcomeStep.mockResolvedValue(undefined);
   core.welcomeClose.mockResolvedValue(undefined);

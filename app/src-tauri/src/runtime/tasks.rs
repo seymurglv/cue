@@ -21,7 +21,7 @@ pub async fn guarded<T>(what: &'static str, body: impl Future<Output = T>, on_pa
     }
 }
 
-/// Transcription crashed: for the flow this is a network failure, so "No connection" and "retry" from the saved audio.
+/// Recognition crashed: for the flow this is a failed recognition, with "retry" from the saved audio.
 pub fn stt_panicked() -> EngineError {
     EngineError::Network("transcription task failed".into())
 }
@@ -65,10 +65,10 @@ mod tests {
     }
 
     #[test]
-    fn panicked_stt_is_network_failure_with_retry() {
+    fn panicked_stt_is_a_failure_with_retry() {
         let e = stt_panicked();
-        assert!(!e.is_key_problem(), "\"No connection\", not \"key problem\"");
-        assert!(matches!(e, EngineError::Network(_)), "{e:?}");
+        // Not the model's failure (Retry would download it) and not the processor's (no Retry): a plain failure.
+        assert!(!matches!(e, EngineError::Model(_) | EngineError::Unsupported(_)), "{e:?}");
         assert!(!e.to_string().contains("test"), "the panic message does not reach the error");
     }
 

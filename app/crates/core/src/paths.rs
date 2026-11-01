@@ -1,5 +1,5 @@
-//! CUE directories: `%LOCALAPPDATA%\CUE` (last dictation, log, usage.csv, bench, history and its recordings) and
-//! `%APPDATA%\CUE` (settings).
+//! CUE directories: `%LOCALAPPDATA%\CUE` (last dictation, log, usage.csv, bench, history and its recordings, the
+//! speech model) and `%APPDATA%\CUE` (settings).
 //! Paths are built by pure functions from a base directory; only `local_app_data` and `app_data` read
 //! environment variables.
 use std::ffi::OsString;
@@ -28,6 +28,11 @@ pub fn history_dir(local_app_data: &Path) -> PathBuf {
 /// `<base>\CUE\history\audio`: the recordings of the history's entries, one file each (`crate::history::audio_file`).
 pub fn history_audio_dir(local_app_data: &Path) -> PathBuf {
     history_dir(local_app_data).join("audio")
+}
+
+/// `<base>\CUE\models\<id>`: a speech model's files (`crate::model::Manifest::id`), downloaded once.
+pub fn model_dir(local_app_data: &Path, id: &str) -> PathBuf {
+    local_dir(local_app_data).join("models").join(id)
 }
 
 /// `%LOCALAPPDATA%`. `None` if the variable is missing, empty or a relative path
@@ -63,6 +68,8 @@ mod tests {
         let csv = usage_csv(&base);
         assert_eq!(csv.parent(), Some(dir.as_path()));
         assert_eq!(csv.file_name().unwrap(), "usage.csv");
+        let model = model_dir(&base, "parakeet-ultra-int8");
+        assert_eq!(model, dir.join("models").join("parakeet-ultra-int8"));
         let bench = bench_dir(&base);
         assert_eq!(bench.parent(), Some(dir.as_path()));
         assert_eq!(bench.file_name().unwrap(), "bench");

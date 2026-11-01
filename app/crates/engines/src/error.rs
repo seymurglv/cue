@@ -1,6 +1,5 @@
 //! Engine errors. What matters for the flow is one thing: a key / balance / limit problem, or anything else.
 use serde::de::DeserializeOwned;
-use tokio_tungstenite::tungstenite::Error as WsError;
 
 /// How many characters of an HTTP refusal body we keep in the error: the gist is visible, the whole page is not.
 const MAX_BODY_CHARS: usize = 200;
@@ -19,6 +18,12 @@ pub enum EngineError {
     Timeout,
     #[error("aborted")]
     Aborted,
+    /// The speech model is missing, damaged or failed to load or run.
+    #[error("speech model: {0}")]
+    Model(String),
+    /// ONNX Runtime cannot run on this processor.
+    #[error("processor not supported: {0}")]
+    Unsupported(String),
 }
 
 impl EngineError {
@@ -36,39 +41,7 @@ impl EngineError {
         matches!(self, EngineError::KeyProblem(_))
     }
 
-    /// WebSocket failure (connect, send, receive) → error kind. Shared by the streaming engines.
-    /// A server refusal during the handshake maps by HTTP status ([`EngineError::from_status`]);
-    /// a dropped connection and transport failures are network; a protocol violation is protocol.
-    /// Frame contents never reach the text: they may hold dictation text.
-    pub(crate) fn from_ws(e: WsError) -> Self {
-        Self::from_ws_redacted(e, "")
-    }
-
-    /// Like [`EngineError::from_ws`], for opening a connection whose request carried the key:
-    /// `secret` is cut out of the refusal body **before** truncation to [`MAX_BODY_CHARS`],
-    /// otherwise a piece of the key at the truncation boundary would survive.
-    pub(crate) fn from_ws_redacted(e: WsError, secret: &str) -> Self {
-        use tokio_tungstenite::tungstenite::error::ProtocolError;
-        match e {
-            WsError::Http(resp) => {
-                let body = resp.body().as_deref().map(String::from_utf8_lossy).unwrap_or_default();
-                let status = resp.status();
-                EngineError::refusal(status.as_u16(), status.canonical_reason(), &body, secret)
-            }
-            // tungstenite puts the frame bytes themselves into this error.
-            WsError::Utf8(_) => EngineError::Protocol("frame text is not UTF-8".into()),
-            WsError::Io(_)
-            | WsError::Tls(_)
-            | WsError::ConnectionClosed
-            | WsError::AlreadyClosed
-            | WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
-                EngineError::Network(e.to_string())
-            }
-            e => EngineError::Protocol(e.to_string()),
-        }
-    }
-
-    /// HTTP refusal from a service (WebSocket handshake or REST response) → error by status `code`.
+    /// HTTP refusal from a service (a REST response) → error by status `code`.
     /// The text holds the start of the body without `secret` (cut out **before** truncation to [`MAX_BODY_CHARS`]);
     /// an empty body gives the standard status reason `reason`. The status is a number: tungstenite and reqwest
     /// have their own `http` dependencies, and their versions need not match.
@@ -85,7 +58,8 @@ impl EngineError {
             EngineError::KeyProblem(s) => EngineError::KeyProblem(hide(&s, secret)),
             EngineError::Service(s) => EngineError::Service(hide(&s, secret)),
             EngineError::Protocol(s) => EngineError::Protocol(hide(&s, secret)),
-            other @ (EngineError::Timeout | EngineError::Aborted) => other,
+            // Local errors never carry a key.
+            other @ (EngineError::Timeout | EngineError::Aborted | EngineError::Model(_) | EngineError::Unsupported(_)) => other,
         }
     }
 }
@@ -142,52 +116,8 @@ mod tests {
         assert_eq!(EngineError::from_status(400, "x"), EngineError::Protocol("400: x".into()));
     }
 
-    fn http_refusal(status: u16, body: Option<&str>) -> WsError {
-        let resp = tokio_tungstenite::tungstenite::http::Response::builder()
-            .status(status)
-            .body(body.map(|b| b.as_bytes().to_vec()))
-            .unwrap();
-        WsError::Http(Box::new(resp))
-    }
-
-    #[test]
-    fn ws_handshake_refusal_maps_by_status() {
-        let e = EngineError::from_ws(http_refusal(401, Some(r#"{"error_message":"bad key"}"#)));
-        assert!(e.is_key_problem());
-        assert!(e.to_string().contains("401") && e.to_string().contains("bad key"), "{e}");
-        let e = EngineError::from_ws(http_refusal(503, None));
-        assert_eq!(e, EngineError::Service("503: Service Unavailable".into()));
-        let e = EngineError::from_ws(http_refusal(400, Some(&"x".repeat(1_000))));
-        let EngineError::Protocol(msg) = &e else { panic!("expected Protocol, not {e:?}") };
-        assert!(msg.chars().count() < 300, "response body is truncated: {} characters", msg.len());
-    }
-
-    #[test]
-    fn ws_transport_failures_are_network() {
-        use tokio_tungstenite::tungstenite::error::ProtocolError;
-        let io = WsError::Io(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset"));
-        assert!(matches!(EngineError::from_ws(io), EngineError::Network(_)));
-        let reset = WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake);
-        assert!(matches!(EngineError::from_ws(reset), EngineError::Network(_)));
-        assert!(matches!(EngineError::from_ws(WsError::ConnectionClosed), EngineError::Network(_)));
-        assert!(matches!(EngineError::from_ws(WsError::AlreadyClosed), EngineError::Network(_)));
-        let bad = WsError::Protocol(ProtocolError::MaskedFrameFromServer);
-        assert!(matches!(EngineError::from_ws(bad), EngineError::Protocol(_)));
-    }
-
-    #[test]
-    fn handshake_body_is_redacted_before_truncation() {
-        let key = "sk-STRADDLE-0123456789";
-        // The key starts 8 characters before the body truncation boundary.
-        let body = format!("{}{key} tail", "x".repeat(MAX_BODY_CHARS - 8));
-        let e = EngineError::from_ws_redacted(http_refusal(401, Some(&body)), key);
-        assert!(e.is_key_problem());
-        assert!(!e.to_string().contains("sk-STRA"), "a piece of the key at the truncation boundary: {e}");
-    }
-
     #[test]
     fn rest_refusal_is_redacted_before_truncation() {
-        // The `checked` path: the same refusal handling as the handshake.
         let key = "sk-STRADDLE-0123456789";
         let body = format!("{}{key} tail", "x".repeat(MAX_BODY_CHARS - 8));
         let e = EngineError::refusal(402, Some("Payment Required"), &body, key);
@@ -198,9 +128,9 @@ mod tests {
         assert_eq!(EngineError::refusal(599, None, "", key), EngineError::Service("599: ".into()));
     }
 
-    /// A success response with body `body`, without the network (in tests reqwest and tungstenite share one `http`).
+    /// A success response with body `body`, without the network.
     fn ok_response(body: &'static str) -> reqwest::Response {
-        tokio_tungstenite::tungstenite::http::Response::new(body).into()
+        http::Response::new(body).into()
     }
 
     #[tokio::test]
@@ -221,14 +151,6 @@ mod tests {
     #[test]
     fn net_failure_is_network() {
         assert_eq!(net("error sending request"), EngineError::Network("error sending request".into()));
-    }
-
-    #[test]
-    fn ws_utf8_error_does_not_carry_payload() {
-        // tungstenite puts the frame bytes themselves into Utf8; that could be dictation text.
-        let e = EngineError::from_ws(WsError::Utf8("секретная диктовка".into()));
-        assert!(matches!(e, EngineError::Protocol(_)));
-        assert!(!e.to_string().contains("секрет"), "{e}");
     }
 
     #[test]

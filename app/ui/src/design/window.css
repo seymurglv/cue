@@ -212,6 +212,7 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 /* without the section links the gear is pushed to the right by itself */
 .gear{margin-left:auto;transition:opacity .2s,color .2s}
 /* Dictionary: words as chips, the newest first; "+ Word" grows into a field; a chip's cross shows on hover */
+.bsec>h3:not(:has(.hsb))::after{content:"";order:5;flex:1;height:1px;background:var(--line)}
 .bsec>h3 em{font-style:normal;font-family:"Bebas Neue",sans-serif;font-weight:400;font-size:15px;color:var(--muted);padding-top:2px}
 .dhint{margin:0 0 10px;font-size:12px;color:var(--muted)}
 .dhint svg{display:inline-block;width:12px;height:12px;vertical-align:-2px;color:var(--ok)}
@@ -323,6 +324,36 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .trw .si svg{width:16px;height:16px}
 .trw em{flex:1;min-width:0;text-align:right;font-style:normal;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .trw>svg{width:12px;height:12px;color:var(--faint)}
-.tft{margin-top:6px;padding:9px 4px 0;border-top:1px solid var(--line);font-size:11px;color:var(--muted)}
+.tft{margin-top:6px;padding:9px 4px 0;border-top:1px solid var(--line);font-size:11px;line-height:1.4;color:var(--muted)}
+/* Speech recognition (docs/specs/2026-11-02-settings-tray.md): the first page's value in amber or Bebas, a 2 px line
+   under the row while the model downloads; on its page the model's row wraps to take its bar and its bytes. */
+.trw{position:relative}
+.trw em.warn{color:var(--warn)}
+.trw em.num{font-family:"Bebas Neue",sans-serif;font-size:15px;letter-spacing:.03em;color:var(--text);font-variant-numeric:tabular-nums;padding-top:2px}
+.tline,.mbar{display:block;height:2px;border-radius:1px;background:color-mix(in srgb,var(--text) 12%,transparent);overflow:hidden}
+.tline{position:absolute;left:30px;right:26px;bottom:3px}
+.tline i,.mbar i{display:block;height:100%;background:var(--text);transform-origin:left;transition:transform .5s var(--e-out)}
+.mrow{flex-wrap:wrap}
+.mrow .num{font-family:"Bebas Neue",sans-serif;font-weight:400;letter-spacing:.03em;font-variant-numeric:tabular-nums}
+.mrow small .num{display:inline;font-size:13px}
+.mrow .mpct{font-size:15px;color:var(--text)}
+.mprog{flex-basis:100%}
+.mprog .mbar{margin-top:6px}
+.mprog small{display:block;margin-top:5px;font-size:11px;color:var(--muted)}
+.mprog small .num{color:var(--text)}
+/* the keyboard's focus on every other control: the same soft plate as on the icon buttons (one step darker where the
+   control has a fill of its own) and dark text, never the system's ring; a plate wider than a bare text button is a
+   spread shadow, so nothing moves */
+.app :is(.btn2,.dd,.sw,.segc button,.trw,.menu button,.bmore button,.dnb,.dx):focus-visible{outline:0}
+.app .btn2:focus-visible{background:color-mix(in srgb,var(--text) 13%,transparent)}
+.app .dd:focus-visible{background:color-mix(in srgb,var(--text) 8%,var(--card))}
+.app .sw:focus-visible{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--text) 60%,transparent),0 0 0 4px color-mix(in srgb,var(--text) 8%,transparent)}
+.app .sw[aria-checked=true]:focus-visible{box-shadow:0 0 0 4px color-mix(in srgb,var(--text) 8%,transparent)}
+.app .segc button:focus-visible{background:color-mix(in srgb,var(--text) 8%,transparent);color:var(--text)}
+.app :is(.trw,.menu button):focus-visible{background:color-mix(in srgb,var(--text) 8%,transparent)}
+.app .bmore button:focus-visible{border-radius:5px;background:color-mix(in srgb,var(--text) 8%,transparent);box-shadow:0 0 0 4px color-mix(in srgb,var(--text) 8%,transparent);color:var(--text)}
+.app .dnew:has(.dnb:focus-visible){background:color-mix(in srgb,var(--text) 8%,transparent)}
+.app .dnb:focus-visible{color:var(--text)}
+.app .dx:focus-visible{border-radius:50%;background:color-mix(in srgb,var(--text) 8%,transparent);color:var(--text)}
 
 @media (prefers-reduced-motion: reduce){*{animation:none!important;transition-duration:.001s!important}.ibt:active svg{scale:none}}

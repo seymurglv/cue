@@ -2,16 +2,17 @@
 // 6). The page (page.ts) moves between them and does what they do; Keys and Microphone show the settings tray's own
 // rows (window/keys.ts, window/mic.ts). Texts go in as text.
 import { CUE } from '../designParts';
-import type { LinkTarget } from '../window/api';
+import type { LinkTarget, ModelState } from '../window/api';
 import { icon } from '../window/icons';
 import { KEYS, type KeyRows } from '../window/keys';
 import type { MicRows } from '../window/mic';
+import { modelRow } from '../window/model';
 import { h } from '../window/page';
-import type { Lang } from '../window/text';
+import type { Lang, WinText } from '../window/text';
 import { doneTitle, type WelcomeText } from './text';
 
-export type Step = 'hello' | 'keys' | 'mic' | 'try' | 'done';
-export const STEPS: readonly Step[] = ['hello', 'keys', 'mic', 'try', 'done'];
+export type Step = 'hello' | 'keys' | 'model' | 'mic' | 'try' | 'done';
+export const STEPS: readonly Step[] = ['hello', 'keys', 'model', 'mic', 'try', 'done'];
 
 /** The Windows key's logo, as on the Drop's key hint. */
 const WIN_LOGO =
@@ -37,6 +38,10 @@ export interface StepParts {
   readonly lang: Lang;
   readonly keys: KeyRows;
   readonly mic: MicRows;
+  /** The settings tray's texts (the model's block). */
+  readonly t: WinText;
+  /** The speech model's state as `cue://model` last said. */
+  readonly model: ModelState | null;
   /** The words of the first dictation. */
   readonly words: number;
 }
@@ -90,9 +95,15 @@ export function stepPage(step: Step, p: StepParts): HTMLElement {
       const rows = h('div', 'sgrp orows');
       rows.append(...KEYS.map((k) => p.keys.row(k)));
       const links = h('div', 'olinks');
-      links.append(`${x.keysWhere} `, link('soniox', 'Soniox Console'), ' · ', link('anthropic', 'Anthropic Console'));
+      links.append(`${x.keysWhere} `, link('anthropic', 'Anthropic Console'));
       pg.append(h('div', 'ohd', x.steps.keys), h('div', 'op', x.keysText), rows, links, h('div', 'onote', x.price));
       pg.append(h('div', 'onote', x.privacy));
+      break;
+    }
+    case 'model': {
+      const block = h('div', 'sgrp orows');
+      block.append(modelRow(p.t, p.model));
+      pg.append(h('div', 'ohd', x.steps.model), h('div', 'op', x.modelText), block);
       break;
     }
     case 'mic': {

@@ -8,7 +8,7 @@
 //! - `phrases.json` is an array of `{id, app, raw, before_cursor?, to?}`; `out.json` gets all calls and the summary.
 //! - Models are OpenRouter ids (`openai/gpt-6-luna`) and `claude-haiku-5-5` — the app's current path (Anthropic direct,
 //!   `claude::refine`, total time only). By default, the built-in candidate set (`DEFAULT_MODELS`).
-//! - `to` translates the phrase into that language, as `Ctrl + Win + Shift` does in the app: a Soniox code
+//! - `to` translates the phrase into that language, as `Ctrl + Win + Shift` does in the app: a language code
 //!   (`translate::known`; `"EN"` reads as `en`, an unknown code stops the run before any request). It runs only on the
 //!   direct path (`claude::translate`, the translation check, the 4 s timeout); the OpenRouter models skip such a phrase,
 //!   and `out.json` lists it under `skipped` ("translation is direct-only"). Each call in `out.json` carries `to`
@@ -124,7 +124,7 @@ struct Phrase {
     /// `to` as written in the file; [`read_phrases`] checks it and fills [`Phrase::to`].
     #[serde(default, rename = "to")]
     to_code: Option<String>,
-    /// Translate into this language instead of cleaning up: the Soniox code (`translate::known`), the form the app
+    /// Translate into this language instead of cleaning up: the language code (`translate::known`), the form the app
     /// sends.
     #[serde(skip)]
     to: Option<&'static str>,
@@ -152,7 +152,7 @@ fn read_phrases(path: &Path) -> anyhow::Result<Vec<Phrase>> {
             None => None,
             Some(code) => Some(
                 translate::known(code)
-                    .with_context(|| format!("{}: phrase {} has `to` that is not a Soniox language code", path.display(), p.id))?,
+                    .with_context(|| format!("{}: phrase {} has `to` that is not a language code CUE knows", path.display(), p.id))?,
             ),
         };
         phrases[i].to = to;
@@ -274,6 +274,7 @@ fn error_kind(f: &Failure) -> String {
         EngineError::Service(_) => "stream_error",
         EngineError::Protocol(_) => "stream_protocol",
         EngineError::Aborted => "aborted",
+        EngineError::Model(_) | EngineError::Unsupported(_) => "local",
     }
     .to_owned()
 }

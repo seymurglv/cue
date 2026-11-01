@@ -1,30 +1,32 @@
-// The settings tray (spec 3 §3): it grows out of the gear (the gear turns into its close button) and folds back into
-// it. Its first page lists Keys, Microphone, Translation, History (how long the history and its recordings are kept,
-// and clearing it) and General with their values; one of them at a time slides in, the chevron goes back; Esc goes
+// The settings tray (spec 3 §3, regrouped in docs/specs/2026-11-02-settings-tray.md): it grows out of the gear (the gear
+// turns into its close button) and folds back into it. Its first page lists Speech recognition (the model on this
+// computer, window/model.ts, and the Anthropic key), Microphone, Languages (the interface's and the translation's),
+// History (how long the history and its recordings are kept, and clearing it) and General with their values; one of them at a time slides in, the chevron goes back; Esc goes
 // back, then closes. Every change goes to the core at once.
 // Going from page to page, the heading line stays: its title changes letter by letter and the chevron grows in front
 // of it; only the rows below slide. The height eases to the new page without overshooting, and nothing scrolls while
 // the pages pass (a scroll bar showing for a moment would narrow the rows). A page whose values come later (the
 // microphones, new settings) is filled in where it is, even while it is still sliding in.
-// The Keys page holds the key rows of keys.ts, the Microphone page the microphone rows of mic.ts (the welcome window
+// Speech recognition holds the key row of keys.ts, the Microphone page the microphone rows of mic.ts (the welcome window
 // shows them too); the microphone's level is listened to only while that page is shown.
 import * as api from './api';
 import { AUDIO_KEEPS, KEEPS, type AudioKeep, type Keep, type KeyName, type UiLanguage } from './api';
 import { CUE } from '../designParts';
 import { icon, type IconName } from './icons';
-import { KEYS, KEY_TITLE, KeyRows } from './keys';
+import { KeyRows } from './keys';
 import { MicRows } from './mic';
+import { bar, modelRow, modelValue, stepModelRow } from './model';
 import { dropDown, h, iconButton, logFailed, relRect, srow, type Ctx } from './page';
-import { fill, languageName } from './text';
+import { languageName } from './text';
 
 export { matchMic } from './mic';
 
-type Sub = 'keys' | 'mic' | 'translate' | 'history' | 'general';
-const SUBS: readonly Sub[] = ['keys', 'mic', 'translate', 'history', 'general'];
+type Sub = 'model' | 'mic' | 'languages' | 'history' | 'general';
+const SUBS: readonly Sub[] = ['model', 'mic', 'languages', 'history', 'general'];
 const SUB_ICON: Record<Sub, IconName> = {
-  keys: 'apiKey',
+  model: 'wave',
   mic: 'micOn',
-  translate: 'globe',
+  languages: 'globe',
   history: 'clock',
   general: 'half',
 };
@@ -72,6 +74,8 @@ export class SettingsTray {
   private readonly keys: KeyRows;
   private readonly mic: MicRows;
   private autostart: boolean | null = null;
+  /** The speech model's state, as `cue://model` last said (null — not heard yet). */
+  private model: api.ModelState | null = null;
   /** "Clear history" was pressed once and waits for the second press. */
   private clearTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -80,14 +84,41 @@ export class SettingsTray {
     private readonly ctx: Ctx,
     private readonly clearHistory: () => Promise<void>,
   ) {
+    // The key's state shows in Speech recognition's value ("No Anthropic key") and on its page.
     this.keys = new KeyRows(ctx, () => this.current, () => {
-      const em = this.current?.querySelector('em[data-val="keys"]');
-      if (em) em.textContent = this.value('keys');
+      this.paintModelValue();
       this.fit();
     });
     this.mic = new MicRows(ctx, () => this.current, () => {
       if (this.sub === 'mic') this.redraw();
     });
+  }
+
+  /** The speech model's new state: its value on the first page; on its page a download goes on in place, any other
+   *  change draws the model's row again. */
+  setModel(state: api.ModelState): void {
+    this.model = state;
+    this.paintModelValue();
+    if (this.sub !== 'model') return;
+    const row = this.current?.querySelector('.mrow');
+    if (row && !stepModelRow(row, state)) row.replaceWith(modelRow(this.ctx.t, state));
+    this.fit();
+  }
+
+  /** The first page's Speech recognition value: its text, amber or Bebas, and the line under the row while the model
+   *  downloads. */
+  private paintModelValue(page: ParentNode | null = this.current): void {
+    const row = page?.querySelector<HTMLElement>('[data-sub="model"]');
+    if (!row) return;
+    const v = modelValue(this.ctx.t, this.model, this.keys.read && !this.keys.keys.anthropic.saved);
+    const em = row.querySelector('em')!;
+    em.textContent = v.text;
+    em.classList.toggle('warn', v.warn);
+    em.classList.toggle('num', v.progress !== null);
+    const old = row.querySelector('.tline');
+    if (v.progress === null) old?.remove();
+    else if (old) old.querySelector<HTMLElement>('i')!.style.transform = `scaleX(${Math.min(1, v.progress)})`;
+    else row.append(bar('tline', v.progress));
   }
 
   /** Takes the page's tray box and gear; an open tray stays open on its page (the page was built again). */
@@ -134,6 +165,8 @@ export class SettingsTray {
     el.classList.add('open');
     this.gear.classList.add('hid');
     void this.keys.readAll();
+    // General's value says whether CUE starts at sign-in.
+    void this.readAutostart();
   }
 
   close(): void {
@@ -361,22 +394,25 @@ export class SettingsTray {
         row.insertAdjacentHTML('beforeend', icon('chev'));
         pg.append(row);
       }
+      this.paintModelValue(pg);
       if (this.ctx.settings && !this.ctx.settings.saved) pg.append(h('div', 'tft', t.unsaved));
       return pg;
     }
     const g = h('div', 'sgrp');
-    if (sub === 'keys') g.append(...KEYS.map((k) => this.keys.row(k)));
-    else if (sub === 'mic') g.append(...this.mic.rows());
-    else if (sub === 'translate') g.append(srow(t.translateTo, null, dropDown('target', this.value('translate'))).row);
+    pg.append(g);
+    if (sub === 'model') {
+      g.append(modelRow(t, this.model), this.keys.row('anthropic'));
+      pg.append(h('div', 'tft', t.modelNote));
+    } else if (sub === 'mic') g.append(...this.mic.rows());
+    else if (sub === 'languages') g.append(...this.languageRows());
     else if (sub === 'history') g.append(...this.historyRows());
     else g.append(...this.generalRows());
-    pg.append(g);
     return pg;
   }
 
   private title(sub: Sub): string {
     const t = this.ctx.t;
-    return { keys: t.keys, mic: t.mic, translate: t.translate, history: t.history, general: t.general }[sub];
+    return { model: t.model, mic: t.mic, languages: t.languages, history: t.history, general: t.general }[sub];
   }
 
   /** A section's value on the first page. */
@@ -384,25 +420,48 @@ export class SettingsTray {
     const t = this.ctx.t;
     const s = this.ctx.settings;
     switch (sub) {
-      case 'keys': {
-        if (!this.keys.read) return '';
-        const missing = KEYS.filter((k) => !this.keys.keys[k].saved);
-        if (missing.length === KEYS.length) return t.noKeys;
-        if (missing.length) return fill(t.noKey, KEY_TITLE[missing[0]]);
-        return KEYS.map((k) => KEY_TITLE[k]).join(', ');
-      }
+      case 'model':
+        // Drawn with its look by `paintModelValue`.
+        return '';
       case 'mic':
         return this.mic.label();
-      case 'translate': {
+      case 'languages':
         if (!s) return '';
-        const english = s.languages.find(([c]) => c === s.translateTarget)?.[1] ?? s.translateTarget;
-        return languageName(s.translateTarget, english, this.ctx.lang);
-      }
+        return t.languagesValue.replace('{UI}', t.uiLanguages[s.uiLanguage] ?? '').replace('{TO}', () => {
+          const name = this.targetName();
+          return this.ctx.lang === 'ru' ? name.toLocaleLowerCase('ru') : name;
+        });
       case 'history':
         return s ? this.keepLabel() : '';
       case 'general':
-        return s ? t.uiLanguages[s.uiLanguage] ?? '' : '';
+        return this.autostart === null ? '' : this.autostart ? t.generalOn : t.generalOff;
     }
+  }
+
+  /** The translation's language as the interface names it. */
+  private targetName(): string {
+    const s = this.ctx.settings;
+    if (!s) return '';
+    const english = s.languages.find(([c]) => c === s.translateTarget)?.[1] ?? s.translateTarget;
+    return languageName(s.translateTarget, english, this.ctx.lang);
+  }
+
+  /* ---------- languages ---------- */
+
+  /** The interface's language, then the one a translation goes into. */
+  private languageRows(): HTMLElement[] {
+    const t = this.ctx.t;
+    const seg = h('span', 'segc');
+    seg.append(h('span', 'thb'));
+    const cur = this.ctx.settings?.uiLanguage;
+    for (const l of UI_LANGUAGES) {
+      const b = h('button', '', t.uiLanguages[l]);
+      b.type = 'button';
+      b.dataset.v = l;
+      b.setAttribute('aria-pressed', String(l === cur));
+      seg.append(b);
+    }
+    return [srow(t.uiLanguage, null, seg).row, srow(t.translateTo, null, dropDown('target', this.targetName())).row];
   }
 
   /* ---------- history ---------- */
@@ -500,17 +559,7 @@ export class SettingsTray {
     sw.setAttribute('aria-checked', String(!!this.autostart));
     sw.setAttribute('aria-label', t.autostart);
     sw.disabled = this.autostart === null;
-    const seg = h('span', 'segc');
-    seg.append(h('span', 'thb'));
-    const cur = this.ctx.settings?.uiLanguage;
-    for (const l of UI_LANGUAGES) {
-      const b = h('button', '', t.uiLanguages[l]);
-      b.type = 'button';
-      b.dataset.v = l;
-      b.setAttribute('aria-pressed', String(l === cur));
-      seg.append(b);
-    }
-    return [srow(t.autostart, null, sw).row, srow(t.uiLanguage, null, seg).row];
+    return [srow(t.autostart, null, sw).row];
   }
 
   private async readAutostart(): Promise<void> {
@@ -534,6 +583,8 @@ export class SettingsTray {
   }
 
   private paintAutostart(): void {
+    const em = this.current?.querySelector('em[data-val="general"]');
+    if (em) em.textContent = this.value('general');
     const sw = this.current?.querySelector<HTMLButtonElement>('[data-sw="autostart"]');
     if (!sw) return;
     sw.setAttribute('aria-checked', String(!!this.autostart));
