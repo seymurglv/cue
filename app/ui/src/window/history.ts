@@ -10,7 +10,7 @@
 // buttons), or Enter or Space on it, opens it: its whole text, how it was said and its recording (said.ts). Every entry
 // opens, so each can be checked: one kept before CUE kept how it was said says so, and one CUE left as it was heard
 // says that. The search grows out of the
-// magnifier on the "History" line; what it finds is never stacked, and an entry it found only in how it was said opens
+// magnifier on the "History" line, the magnifier riding into it; what it finds is never stacked, and an entry it found only in how it was said opens
 // by itself, the place marked. Stacks and entries opened stay open when the list is drawn again. Every recording
 // pauses when CUE starts recording: what plays aloud would go into it.
 // Text goes in as text: an entry may hold anything a model wrote.
@@ -161,8 +161,8 @@ export class HistoryView {
     this.sec = sec;
     sec.textContent = '';
     // The search lives on the heading's line: the hairline after "History" and the magnifier at its end. Opening, the
-    // magnifier's own background stretches left over the line into the field (one eased motion; nothing under it
-    // moves), and the magnifier turns into a cross that closes it.
+    // field grows left out of the magnifier over the line (one eased motion; nothing under it moves), the magnifier
+    // rides on its leading edge into it, and a cross that closes it comes up where the magnifier was.
     const h3 = h('h3', '', t.history);
     this.bsr = h('div', 'hsb');
     this.bsr.classList.toggle('open', this.searchOpen);
@@ -174,11 +174,12 @@ export class HistoryView {
     this.input.value = this.query;
     this.input.addEventListener('input', () => this.typed());
     field.append(this.input);
-    this.find = iconButton('ibt sm hsbt', 'search', t.search);
-    this.find.insertAdjacentHTML('beforeend', icon('x'));
+    const loupe = h('span', 'hsl');
+    loupe.innerHTML = icon('search');
+    this.find = iconButton('ibt hsbt', 'x', t.search);
     this.find.addEventListener('click', () => this.toggleSearch());
     this.labelFind();
-    this.bsr.append(field, this.find);
+    this.bsr.append(field, loupe, this.find);
     h3.append(this.bsr);
 
     this.list = h('div', 'bhist');

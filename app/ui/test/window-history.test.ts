@@ -137,11 +137,13 @@ describe('The history', () => {
     core.historySearch.mockResolvedValue([{ date: TODAY, entries: [morning] }]);
     page = await mount();
     expect(rows()).toHaveLength(2);
-    // The search lives on the heading's line: the magnifier opens it, and turns into its close button.
+    // The search lives on the heading's line: the button over the magnifier opens it, the magnifier rides into the
+    // field, and the button shows the cross that closes it.
     const find = $('.bsec>h3 .hsb .hsbt')!;
     expect(find.getAttribute('aria-label')).toBe('Search');
     expect(find.getAttribute('aria-expanded')).toBe('false');
-    expect(find.querySelectorAll('svg')).toHaveLength(2);
+    expect(find.querySelectorAll('svg')).toHaveLength(1);
+    expect($('.hsb .hsl svg')).not.toBeNull();
     click(find);
     expect($('.hsb')!.classList.contains('open')).toBe(true);
     expect(find.getAttribute('aria-label')).toBe('Close search');

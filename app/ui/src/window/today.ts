@@ -132,7 +132,7 @@ export class TodayView {
     if (fresh && celebrate) mark(m, today);
     if (m !== null && (fresh || (seen?.n === m && seen.date === today))) {
       const pill = h('span', 'ms');
-      pill.innerHTML = icon('ask');
+      pill.innerHTML = icon('pages');
       const pages = Math.round(m / PAGE_WORDS);
       const text = t.milestone
         .replace('{N}', '\u0000')

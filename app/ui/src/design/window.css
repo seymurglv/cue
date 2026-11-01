@@ -42,6 +42,15 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .ibt.sm{width:24px;height:24px;border-radius:6px}
 .ibt.sm svg{width:14px;height:14px}
 .ibt.done{color:var(--ok)}
+/* the keyboard's focus on an icon button: the soft plate and a dark glyph, not the system's ring */
+.ibt:focus-visible{outline:0;background:color-mix(in srgb,var(--text) 8%,transparent);color:var(--text)}
+/* icon buttons in headers — the gear, the tray's back and close, the search's cross — are the glyph alone: under the
+   pointer it darkens, pressed it gives a little; the target is 40 px round the 28 px button */
+.gear,.tph .ibt,.hsb .hsbt{position:relative}
+.gear::before,.tph .ibt::before,.hsb .hsbt::before{content:"";position:absolute;inset:-6px}
+.gear:hover,.tph .ibt:hover,.hsb .hsbt:hover{background:none;color:var(--text)}
+.gear svg,.tph .ibt svg,.hsb .hsbt svg{transition:scale .2s var(--e-out)}
+.gear:active svg,.tph .ibt:active svg,.hsb .hsbt:active svg{scale:.88}
 .btn2{display:inline-flex;align-items:center;gap:4px;height:26px;padding:0 10px 0 6px;border-radius:999px;background:color-mix(in srgb,var(--text) 7%,transparent);font-size:12px;font-weight:500;white-space:nowrap}
 .btn2 svg{width:14px;height:14px}
 .btn2:hover{background:color-mix(in srgb,var(--text) 11%,transparent)}
@@ -201,7 +210,7 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .logo{display:flex;align-items:center;gap:7px;font-family:"Bebas Neue",sans-serif;font-size:22px;letter-spacing:.05em;line-height:1;padding-top:2px}
 .logo svg{width:20px;height:20px;overflow:visible;margin-top:-2px}
 /* without the section links the gear is pushed to the right by itself */
-.gear{margin-left:auto;transition:opacity .2s}
+.gear{margin-left:auto;transition:opacity .2s,color .2s}
 /* Dictionary: words as chips, the newest first; "+ Word" grows into a field; a chip's cross shows on hover */
 .bsec>h3 em{font-style:normal;font-family:"Bebas Neue",sans-serif;font-weight:400;font-size:15px;color:var(--muted);padding-top:2px}
 .dhint{margin:0 0 10px;font-size:12px;color:var(--muted)}
@@ -233,7 +242,8 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .lk button{font-size:13px;color:var(--muted);transition:color .2s}
 .lk button:hover,.lk button[aria-current=true]{color:var(--text)}
 .lk button:focus-visible{outline:0;text-decoration:underline;text-underline-offset:4px}
-/* Today: numbers in Bebas inside the sentence, 30 bars, a quiet line; a milestone pill once */
+/* Today: numbers in Bebas inside the sentence, 30 bars, a quiet line; a milestone once, a quiet pill with a hairline
+   and an open book: quieter than the numbers above it, it rises into place */
 .lede{font-size:13px;line-height:1.5;font-weight:600;margin:2px 0 14px}
 .lede .num{font-family:"Bebas Neue",sans-serif;font-weight:400;font-size:34px;line-height:1;letter-spacing:.015em;vertical-align:-3px}
 .num.pop{display:inline-block;animation:numPop .7s var(--e-spring)}
@@ -245,11 +255,11 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .bstat{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
 .bstat .num{font-family:"Bebas Neue",sans-serif;font-size:15px;letter-spacing:.02em;color:var(--text);padding-top:1px}
 .msr{margin-top:10px}
-.ms{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 9px 0 6px;border-radius:999px;background:var(--graphite);color:#fff;font-size:11px;font-weight:500;white-space:nowrap;animation:msIn .8s var(--e-spring) both}
+.ms{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px 0 8px;border-radius:999px;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--text) 12%,transparent);color:var(--muted);font-size:12px;white-space:nowrap;animation:msIn .6s var(--e-out) both}
 .ms svg{width:12px;height:12px}
-.ms b{font-family:"Bebas Neue",sans-serif;font-weight:400;font-size:15px;letter-spacing:.03em;padding-top:1px}
-[data-theme=dark] .ms,[data-theme=dark] .tip{box-shadow:inset 0 0 0 .5px rgba(255,255,255,.16)}
-@keyframes msIn{from{opacity:0;transform:scale(.5)}}
+.ms b{font-family:"Bebas Neue",sans-serif;font-weight:400;font-size:15px;letter-spacing:.03em;padding-top:1px;color:var(--text)}
+[data-theme=dark] .tip{box-shadow:inset 0 0 0 .5px rgba(255,255,255,.16)}
+@keyframes msIn{from{opacity:0;transform:translateY(4px)}}
 .tip{position:absolute;z-index:50;pointer-events:none;padding:5px 9px 6px;border-radius:8px;background:var(--graphite);color:#fff;box-shadow:0 8px 20px -8px rgba(0,0,0,.4),inset 0 0 0 .5px rgba(255,255,255,.16);font-size:11px;line-height:1.3;white-space:nowrap;transform:translate(-50%,calc(-100% - 8px)) scale(.96);opacity:0;transition:opacity .15s,transform .2s var(--e-out)}
 .tip.on{opacity:1;transform:translate(-50%,calc(-100% - 8px))}
 .tip b{display:block;font-family:"Bebas Neue",sans-serif;font-weight:400;font-size:16px;letter-spacing:.02em}
@@ -259,26 +269,28 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .bcol{max-width:540px;margin:0 auto;padding:0 20px 90px}
 .bsec{padding-top:22px}
 .bsec>h3{display:flex;align-items:center;gap:10px;margin:0 0 10px;font-size:13px;font-weight:600}
-/* the search on the heading's line. Closed: the hairline and the magnifier. Open: the magnifier's own background
-   stretches left over the line into a soft field — one eased motion, no overshoot, nothing under it moves — and the
-   magnifier turns into a cross. The field is the window's control look: a soft fill like the icon buttons' hover,
-   radius 7, a thin ring while it has the focus, its own placeholder. */
-.hsb{position:relative;flex:1;min-width:0;height:24px;margin:-4px -4px -4px 0;display:flex;justify-content:flex-end}
-.hsb::before{content:"";position:absolute;left:0;right:32px;top:50%;height:1px;background:var(--line);transition:opacity .3s var(--e-out)}
+/* the search on the heading's line. Closed: the hairline and the magnifier. Open: one 28 px field grows left out of
+   the magnifier over the line — one eased motion, no overshoot, nothing under it moves — the magnifier riding on its
+   leading edge into it, and a cross comes up where the magnifier was. The field is the Dictionary's "+ Word" field: a
+   pill with a ring, darker while it has the focus. The cross has no plate of its own; under the pointer the glyph
+   darkens. */
+.hsb{position:relative;flex:1;min-width:0;height:28px;margin:-6px -6px -6px 0;display:flex;justify-content:flex-end}
+.hsb::before{content:"";position:absolute;left:0;right:34px;top:50%;height:1px;background:var(--line);transition:opacity .3s var(--e-out)}
 .hsb.open::before{opacity:0;transition-duration:.16s}
-.hsf{position:absolute;top:0;bottom:0;right:0;width:24px;overflow:hidden;border-radius:6px;background:transparent;transition:width .4s var(--e-sm),top .4s var(--e-sm),bottom .4s var(--e-sm),border-radius .4s var(--e-sm),background-color .2s,box-shadow .2s}
-.hsb.open .hsf{width:100%;top:-2px;bottom:-2px;border-radius:7px;background:color-mix(in srgb,var(--text) 6%,transparent)}
-.hsb.open:focus-within .hsf{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--text) 9%,transparent)}
+.hsf{position:absolute;top:0;bottom:0;right:0;width:28px;overflow:hidden;border-radius:14px;transition:width .42s var(--e-sm),box-shadow .2s}
+.hsb.open .hsf{width:100%;box-shadow:inset 0 0 0 1px var(--faint)}
+.hsb.open:focus-within .hsf{box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--text) 45%,transparent)}
+.hsl{position:absolute;z-index:2;top:7px;left:calc(100% - 21px);color:var(--muted);pointer-events:none;transition:left .42s var(--e-sm),color .2s}
+.hsl svg{width:14px;height:14px}
+.hsb.open .hsl{left:11px}
+.hsb:not(.open):has(.hsbt:is(:hover,:focus-visible)) .hsl{color:var(--text)}
 /* the text rides on the field's leading edge and fades in on the way */
-.hsf input{position:absolute;left:0;right:28px;top:0;bottom:0;width:auto;min-width:0;padding:0 0 0 11px;border:0;outline:0;background:none;font-size:12px;font-weight:400;color:var(--text);opacity:0;visibility:hidden;transition:opacity .1s,visibility 0s .1s}
+.hsf input{position:absolute;left:0;right:28px;top:0;bottom:0;width:auto;min-width:0;padding:0 0 0 31px;border:0;outline:0;background:none;font-size:12px;font-weight:400;color:var(--text);opacity:0;visibility:hidden;transition:opacity .1s,visibility 0s .1s}
 .hsf input::placeholder{color:var(--muted);opacity:1}
 .hsb.open .hsf input{opacity:1;visibility:visible;transition:opacity .24s .1s}
 .hsb .hsbt{position:relative;z-index:1;margin:0}
-.hsb .hsbt svg{position:absolute;left:5px;top:5px;transition:opacity .18s,transform .3s var(--e-out)}
-.hsb .hsbt svg+svg{opacity:0;transform:scale(.6)}
-.hsb.open .hsbt svg:first-child{opacity:0;transform:scale(.6)}
-.hsb.open .hsbt svg+svg{opacity:1;transform:none}
-.hsb.open .hsbt:hover{background:color-mix(in srgb,var(--text) 8%,transparent)}
+.hsb .hsbt svg{width:14px;height:14px;opacity:0;transform:scale(.6);transition:opacity .18s,transform .3s var(--e-out),scale .2s var(--e-out)}
+.hsb.open .hsbt svg{opacity:1;transform:none}
 .bmore{display:flex;align-items:center;gap:12px;margin-top:8px;font-size:12px;color:var(--muted)}
 .bmore button{color:var(--muted)}
 .bmore button:hover{color:var(--text)}
@@ -313,4 +325,4 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .trw>svg{width:12px;height:12px;color:var(--faint)}
 .tft{margin-top:6px;padding:9px 4px 0;border-top:1px solid var(--line);font-size:11px;color:var(--muted)}
 
-@media (prefers-reduced-motion: reduce){*{animation:none!important;transition-duration:.001s!important}}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition-duration:.001s!important}.ibt:active svg{scale:none}}
