@@ -16,11 +16,12 @@ const OWN = {
   half: SV('<circle cx="10" cy="10" r="6.6"/><path d="M10 3.4v13.2a6.6 6.6 0 0 0 0-13.2z" fill="currentColor" stroke="none"/>'),
   apiKey: SV('<circle cx="6.8" cy="13.2" r="3.4"/><path d="m9.2 10.8 7-7M13.6 6.4l2 2M11.6 8.4l1.6 1.6"/>'),
   clock: SV('<circle cx="10" cy="10" r="7"/><path d="M10 6.2V10l2.6 1.7"/>'),
+  plus: SV('<path d="M10 4.6v10.8M4.6 10h10.8"/>'),
   play: '<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M7 5.2v9.6l7.6-4.8z" fill="currentColor"/></svg>',
   pause: SV('<path d="M7.5 5.5v9M12.5 5.5v9"/>'),
 };
 
-export type IconName = keyof typeof OWN | 'x' | 'ok' | 'tr' | 'ask' | 'copy' | 'gear';
+export type IconName = keyof typeof OWN | 'x' | 'ok' | 'tr' | 'ask' | 'copy' | 'gear' | 'book';
 
 let all: Record<string, string> | null = null;
 

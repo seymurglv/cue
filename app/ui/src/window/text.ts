@@ -12,6 +12,13 @@ export type Forms = readonly [string, string] | readonly [string, string, string
 
 export interface WinText {
   history: string;
+  /** The Dictionary section: its heading (also the header's link), the line under it, the add button, the field's
+   *  placeholder, a word's remove button. */
+  dictionary: string;
+  dictHint: string;
+  dictAdd: string;
+  dictNew: string;
+  dictRemove: string;
   /** Today: the header's link, and the sentence and the line of the section ({N} is a number, {W} its word). */
   todayNav: string;
   todayWords: string;
@@ -104,6 +111,11 @@ export interface WinText {
 
 export const en: WinText = {
   history: 'History',
+  dictionary: 'Dictionary',
+  dictHint: 'Words CUE must write right: names, terms, spellings of your own.',
+  dictAdd: 'Word',
+  dictNew: 'New word, Enter',
+  dictRemove: 'Remove',
   todayNav: 'Today',
   todayWords: 'Today — {N} {W}.',
   todaySaved: "That's {N} {W} without the keyboard.",
@@ -184,6 +196,11 @@ export const en: WinText = {
 
 export const ru: WinText = {
   history: 'История',
+  dictionary: 'Словарь',
+  dictHint: 'Слова, которые CUE должен писать правильно: имена, термины, ваше написание.',
+  dictAdd: 'Слово',
+  dictNew: 'Новое слово, Enter',
+  dictRemove: 'Удалить',
   todayNav: 'Сегодня',
   todayWords: 'Сегодня — {N} {W}.',
   todaySaved: 'Это {N} {W} без клавиатуры.',

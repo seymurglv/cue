@@ -32,6 +32,7 @@ export function view(over: Partial<api.SettingsView> = {}): api.SettingsView {
     lang: 'en',
     languages: LANGUAGES,
     saved: true,
+    dictionary: [],
     ...over,
   };
 }
@@ -62,6 +63,16 @@ export function stub(settings: api.SettingsView = view()): void {
   let now = settings;
   core.settingsGet.mockImplementation(async () => now);
   core.settingsSet.mockImplementation(async (c) => {
+    // The dictionary as the core keeps it: a new word first (a repeat in any case refused), a word removed as written.
+    if (c.kind === 'dictAdd') {
+      const taken = now.dictionary.some((w) => w.toLowerCase() === c.value.trim().toLowerCase());
+      if (!taken) now = { ...now, dictionary: [c.value.trim(), ...now.dictionary] };
+      return now;
+    }
+    if (c.kind === 'dictRemove') {
+      now = { ...now, dictionary: now.dictionary.filter((w) => w !== c.value) };
+      return now;
+    }
     now = { ...now, [c.kind]: c.value };
     if (c.kind === 'uiLanguage') now.lang = c.value === 'ru' ? 'ru' : 'en';
     return now;

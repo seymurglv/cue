@@ -54,13 +54,17 @@ export interface SettingsView {
   lang: string;
   languages: [string, string][];
   saved: boolean;
+  /** The dictionary's words, the newest first. */
+  dictionary: string[];
 }
 export type SettingChange =
   | { kind: 'historyKeep'; value: Keep }
   | { kind: 'historyAudio'; value: AudioKeep }
   | { kind: 'micDevice'; value: string | null }
   | { kind: 'translateTarget'; value: string }
-  | { kind: 'uiLanguage'; value: UiLanguage };
+  | { kind: 'uiLanguage'; value: UiLanguage }
+  | { kind: 'dictAdd'; value: string }
+  | { kind: 'dictRemove'; value: string };
 
 export type KeyName = 'soniox' | 'anthropic';
 /** Whether a key is saved and its mask; never the key. */

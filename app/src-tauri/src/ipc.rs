@@ -43,6 +43,8 @@ pub struct SettingsView {
     pub lang: &'static str,
     pub languages: &'static [(&'static str, &'static str)],
     pub saved: bool,
+    /// The dictionary's words as settings.json keeps them, the newest first.
+    pub dictionary: Vec<String>,
 }
 
 impl SettingsView {
@@ -56,6 +58,7 @@ impl SettingsView {
             lang: lang.code(),
             languages: translate::LANGUAGES,
             saved,
+            dictionary: s.dictionary.terms.clone(),
         }
     }
 }
@@ -71,6 +74,7 @@ impl std::fmt::Debug for SettingsView {
             .field("lang", &self.lang)
             .field("languages", &self.languages.len())
             .field("saved", &self.saved)
+            .field("dictionary", &self.dictionary.len())
             .finish()
     }
 }
@@ -408,7 +412,7 @@ mod tests {
         let mut names: Vec<&str> = view.as_object().unwrap().keys().map(String::as_str).collect();
         names.sort_unstable();
         let expected =
-            ["historyAudio", "historyKeep", "lang", "languages", "micDevice", "saved", "translateTarget", "uiLanguage"];
+            ["dictionary", "historyAudio", "historyKeep", "lang", "languages", "micDevice", "saved", "translateTarget", "uiLanguage"];
         assert_eq!(names, expected);
         let defaults = [
             ("historyKeep", json!("month")),
@@ -418,6 +422,7 @@ mod tests {
             ("uiLanguage", json!("auto")),
             ("lang", json!("en")),
             ("saved", json!(true)),
+            ("dictionary", json!([])),
         ];
         for (name, value) in defaults {
             assert_eq!(view[name], value, "{name}");

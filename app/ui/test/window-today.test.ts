@@ -111,7 +111,7 @@ describe('The header', () => {
     HTMLElement.prototype.scrollTo = scrollTo as never;
     page = await mount();
     const links = $$('.bh .lk button');
-    expect(links.map((l) => l.textContent)).toEqual(['Today', 'History']);
+    expect(links.map((l) => l.textContent)).toEqual(['Today', 'History', 'Dictionary']);
     click(links[1]);
     expect(scrollTo).toHaveBeenCalledTimes(1);
     click(links[0]);

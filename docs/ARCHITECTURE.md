@@ -783,7 +783,9 @@ card's `core:default` (`default.json`) does not cover them. The commands:
 - `settings_get`, `settings_set` (one `SettingChange`, `{kind, value}`), answered by the core within 3 s with
   `SettingsView` (the history's period and its recordings', each `null` while unknown; the microphone; the
   translation target; the interface language and the language it resolves to; the 60 languages; whether the file is
-  written);
+  written; the dictionary's words). The Dictionary section sends `dictAdd` (the word trimmed and put first; refused
+  when `refine::is_term` would not take it, when it is there in any case, or when the list holds `refine::MAX_TERMS`)
+  and `dictRemove` (the word as written); a log shows only a word's length;
 - `autostart_get`, `autostart_set` (the autostart plugin's Run key, changed only when it differs; the tray menu's
   check follows within 5 s);
 - `history_subscribe`, `history_page`, `history_search`, `history_copy`, `history_paste`, `history_clear`,

@@ -2,6 +2,7 @@
 //! sits, the user's dictionary, the translation pair, "Ask", the pinned microphone, how long the history keeps its days
 //! and their recordings, prices for usage accounting. The main window changes a setting one at a time
 //! (`SettingChange`).
+use crate::refine;
 use crate::translate;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::io::Write;
@@ -549,6 +550,10 @@ pub enum SettingChange {
     /// A language code Soniox knows.
     TranslateTarget(String),
     UiLanguage(UiLanguage),
+    /// A word for the dictionary, put first; see [`Settings::apply`] for what is refused.
+    DictAdd(String),
+    /// A word out of the dictionary, as it is written there.
+    DictRemove(String),
 }
 
 fn period_or_refuse<'de, D: Deserializer<'de>, K: PeriodName>(deserializer: D) -> Result<K, D::Error> {
@@ -567,6 +572,9 @@ impl std::fmt::Debug for SettingChange {
             }
             Self::TranslateTarget(code) => f.debug_tuple("TranslateTarget").field(&translate::known(code)).finish(),
             Self::UiLanguage(language) => f.debug_tuple("UiLanguage").field(language).finish(),
+            // A word of the dictionary may be a name: only its length.
+            Self::DictAdd(word) => f.debug_struct("DictAdd").field("chars", &word.chars().count()).finish(),
+            Self::DictRemove(word) => f.debug_struct("DictRemove").field("chars", &word.chars().count()).finish(),
         }
     }
 }
@@ -576,7 +584,9 @@ impl Settings {
     /// the settings would not hold is refused (`false`, nothing changes): a microphone name longer than
     /// `MAX_DEVICE_CHARS` characters, a translation language Soniox does not know. Values are kept the way reading the
     /// file keeps them: a microphone name trimmed, a blank one as the Windows microphone, the default translation
-    /// language (`en`) as no value. A period set here makes an unknown one known.
+    /// language (`en`) as no value. A period set here makes an unknown one known. A dictionary word is trimmed and put
+    /// first; refused are one the refine request could not take (`refine::is_term`), one already there in any case,
+    /// and any once the dictionary holds `refine::MAX_TERMS` words. Removing takes the word as it is written.
     pub fn apply(&mut self, change: SettingChange) -> bool {
         match change {
             SettingChange::HistoryAudio(keep) => set_if_changed(&mut self.history.audio, Period::Set(keep)),
@@ -593,6 +603,21 @@ impl Settings {
                 set_if_changed(&mut self.translate.target, (code != DEFAULT_TARGET).then(|| code.to_owned()))
             }
             SettingChange::UiLanguage(language) => set_if_changed(&mut self.ui.language, language),
+            SettingChange::DictAdd(word) => {
+                let word = word.trim();
+                let terms = &mut self.dictionary.terms;
+                let taken = terms.iter().any(|t| t.trim().to_lowercase() == word.to_lowercase());
+                if !refine::is_term(word) || taken || terms.len() >= refine::MAX_TERMS {
+                    return false;
+                }
+                terms.insert(0, word.to_owned());
+                true
+            }
+            SettingChange::DictRemove(word) => {
+                let before = self.dictionary.terms.len();
+                self.dictionary.terms.retain(|t| *t != word);
+                self.dictionary.terms.len() != before
+            }
         }
     }
 }
@@ -1717,5 +1742,30 @@ mod tests {
         let unknown = SettingChange::TranslateTarget("my secret".into());
         assert!(!format!("{unknown:?}").contains("secret"));
         assert!(format!("{:?}", SettingChange::TranslateTarget("de".into())).contains("de"));
+        for change in [SettingChange::DictAdd("Jane Doe".into()), SettingChange::DictRemove("Jane Doe".into())] {
+            assert!(!format!("{change:?}").contains("Jane"), "a dictionary word may be a name");
+        }
+    }
+
+    /// The window's dictionary: a word goes first, trimmed; a repeat in any case, an empty or too long one, one with a
+    /// line break and any past the limit are refused; removing takes the word as written.
+    #[test]
+    fn dictionary_words_are_added_first_and_removed() {
+        let mut s = Settings::default();
+        assert!(s.apply(SettingChange::DictAdd("  Kubernetes ".into())));
+        assert!(s.apply(SettingChange::DictAdd("Soniox".into())));
+        assert_eq!(s.dictionary.terms, ["Soniox", "Kubernetes"]);
+        for refused in ["kubernetes", "SONIOX", "", "   ", "a\nb", "a\u{2028}b"] {
+            assert!(!s.apply(SettingChange::DictAdd(refused.into())), "{refused:?}");
+        }
+        assert!(!s.apply(SettingChange::DictAdd("x".repeat(refine::MAX_TERM_CHARS + 1))));
+        assert!(s.apply(SettingChange::DictAdd("я".repeat(refine::MAX_TERM_CHARS))), "characters, not bytes");
+        assert!(!s.apply(SettingChange::DictRemove("soniox".into())), "removing takes the word as written");
+        assert!(s.apply(SettingChange::DictRemove("Soniox".into())));
+        assert_eq!(s.dictionary.terms.len(), 2);
+        s.dictionary.terms = (0..refine::MAX_TERMS).map(|i| format!("w{i}")).collect();
+        assert!(!s.apply(SettingChange::DictAdd("one more".into())), "the dictionary is full");
+        let change: SettingChange = serde_json::from_value(serde_json::json!({ "kind": "dictAdd", "value": "GitHub" })).unwrap();
+        assert_eq!(change, SettingChange::DictAdd("GitHub".into()));
     }
 }

@@ -75,13 +75,18 @@ pub fn usable_terms(terms: &[String]) -> Vec<&str> {
         if usable.len() == MAX_TERMS {
             break;
         }
-        // U+2028 and U+2029 are line breaks too, though not control characters.
-        let one_line = !term.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'));
-        if !term.is_empty() && one_line && term.chars().count() <= MAX_TERM_CHARS && !usable.contains(&term) {
+        if is_term(term) && !usable.contains(&term) {
             usable.push(term);
         }
     }
     usable
+}
+
+/// A trimmed entry the request can take: not empty, on one line, at most [`MAX_TERM_CHARS`] characters.
+pub fn is_term(term: &str) -> bool {
+    // U+2028 and U+2029 are line breaks too, though not control characters.
+    let one_line = !term.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'));
+    !term.is_empty() && one_line && term.chars().count() <= MAX_TERM_CHARS
 }
 
 /// The dictionary block: a second system block after the unchanged `SYSTEM_PROMPT`. `None` when no usable term is

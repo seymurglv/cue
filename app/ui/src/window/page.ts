@@ -17,6 +17,7 @@ import { HistoryView } from './history';
 import { icon } from './icons';
 import { SettingsTray } from './settings';
 import { TodayView } from './today';
+import { DictionaryView } from './dictionary';
 import { TEXTS, isoDate, pickLang, type Lang, type WinText } from './text';
 
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
@@ -209,6 +210,7 @@ export class WindowPage implements Ctx {
   settings: SettingsView | null = null;
   readonly history: HistoryView;
   readonly numbers: TodayView;
+  readonly dict: DictionaryView;
   readonly tray: SettingsTray;
   readonly reduced: () => boolean;
   private readonly now: () => Date;
@@ -224,6 +226,7 @@ export class WindowPage implements Ctx {
     this.menus = new Menus(app);
     this.history = new HistoryView(this);
     this.numbers = new TodayView(this);
+    this.dict = new DictionaryView(this);
     this.tray = new SettingsTray(this, () => this.history.clear());
     const signal = this.off.signal;
     const dark = window.matchMedia?.(DARK);
@@ -263,6 +266,7 @@ export class WindowPage implements Ctx {
   /** The sections the header links to, in page order. */
   private sections: HTMLElement[] = [];
   private links: HTMLButtonElement[] = [];
+  private scroller: HTMLElement | null = null;
 
   /** The settings and the history channel first (both before anything is drawn or asked for), then the first page. */
   async start(): Promise<void> {
@@ -341,6 +345,7 @@ export class WindowPage implements Ctx {
       this.build();
     } else {
       this.tray.settingsChanged();
+      this.dict.render();
     }
     if (audioChanged) this.history.release();
     if (keepChanged || audioChanged) void this.history.reload();
@@ -351,6 +356,7 @@ export class WindowPage implements Ctx {
     const t = this.t;
     this.app.textContent = '';
     const bsc = h('div', 'bsc');
+    this.scroller = bsc;
     const bh = h('header', 'bh');
     const logo = h('span', 'logo');
     logo.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><g></g></svg>';
@@ -362,11 +368,14 @@ export class WindowPage implements Ctx {
     todaySec.dataset.scr = 'today';
     const sec = h('section', 'bsec');
     sec.dataset.scr = 'history';
-    this.sections = [todaySec, sec];
+    const dictSec = h('section', 'bsec');
+    dictSec.dataset.scr = 'dictionary';
+    this.sections = [todaySec, sec, dictSec];
     const nav = h('nav', 'lk');
     this.links = [
       ['today', t.todayNav],
       ['history', t.history],
+      ['dictionary', t.dictionary],
     ].map(([go, label]) => {
       const b = h('button', '', label);
       b.type = 'button';
@@ -376,7 +385,7 @@ export class WindowPage implements Ctx {
     });
     nav.append(...this.links);
     bh.append(logo, nav, gear);
-    col.append(todaySec, sec);
+    col.append(todaySec, sec, dictSec);
     bsc.append(bh, col);
     bsc.addEventListener('scroll', () => {
       bh.classList.toggle('sc', bsc.scrollTop > 4);
@@ -391,6 +400,7 @@ export class WindowPage implements Ctx {
     this.logo = new (CUE().Morph)(logo.querySelector('g'), { state: 'idle' });
     this.numbers.mount(todaySec);
     this.history.mount(sec);
+    this.dict.mount(dictSec);
     this.markCurrent(bh);
     this.tray.mount(tray, gear);
     document.fonts?.ready?.then(() => this.tray.refit());
@@ -405,11 +415,16 @@ export class WindowPage implements Ctx {
     bsc.scrollTo?.({ top, behavior: this.reduced() ? 'auto' : 'smooth' });
   }
 
-  /** The link of the last section whose top has passed under the header is the current one. */
+  /** The link of the last section whose top has passed under the header is the current one; scrolled to the end, the
+   *  last section's (a short one can never reach the header). */
   private markCurrent(bh: HTMLElement): void {
     const line = bh.getBoundingClientRect().bottom + 1;
     let current = this.sections[0]?.dataset.scr;
     for (const s of this.sections) if (s.getBoundingClientRect().top <= line) current = s.dataset.scr;
+    const sc = this.scroller;
+    if (sc && sc.scrollTop > 4 && sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 2) {
+      current = this.sections[this.sections.length - 1]?.dataset.scr;
+    }
     for (const l of this.links) l.setAttribute('aria-current', String(l.dataset.go === current));
   }
 
@@ -428,7 +443,8 @@ export class WindowPage implements Ctx {
     requestAnimationFrame(frame);
   }
 
-  /** Esc: an open menu closes; in the tray, back to its first page, then closed; then the history's search closes. */
+  /** Esc: an open menu closes; in the tray, back to its first page, then closed; then the field of a new dictionary word
+   *  closes, then the history's search. */
   private onKey(e: KeyboardEvent): void {
     if (e.key !== 'Escape') return;
     if (this.menus.isOpen) {
@@ -436,7 +452,7 @@ export class WindowPage implements Ctx {
       e.preventDefault();
       return;
     }
-    if (this.tray.esc() || this.history.esc()) e.preventDefault();
+    if (this.tray.esc() || this.dict.esc() || this.history.esc()) e.preventDefault();
   }
 }
 

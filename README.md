@@ -154,12 +154,16 @@ from source.
   idle, and it always stays on top of ordinary windows.
 - **The main window** opens from the tray icon: **Open CUE** in its menu, or a double click. It is one ordinary window
   in the Windows theme; opening it again brings it forward, and closing it leaves CUE running. Links at the top,
-  **Today** and **History**, scroll to their sections.
+  **Today**, **History** and **Dictionary**, scroll to their sections.
   - **Today:** how many words you dictated today and how many minutes of typing that saved (at 40 words a minute), a
     bar for each of the last 30 days (hover one for its date and words), your words a minute, how many days in a row
     you have dictated, and your words in all. Counted are dictations and translations that wrote text. When the total
     passes a round number (1,000, 10,000, 100,000 words…), a pill says so once, for that day. Rows of `usage.csv`
     written before CUE 0.1.2 kept no word count: their words are estimated from the length of their audio.
+  - **Dictionary:** the names and terms CUE must write right, as chips, the newest first (`dictionary.terms`, see
+    Settings). **+ Word** opens a field: type a word and press `Enter` to add it (a repeat in any case, an empty one or
+    one longer than 60 characters is refused); the cross on a chip, shown on hover, removes it. The cleanup uses the
+    change from the next dictation on.
   - **History:** every result of CUE, newest first, with its time, mode and app: dictations, translations, "Ask"
     answers (the question and the answer) and texts "Ask" wrote into a field; a translation and "Ask" show their mode
     as a small icon, a plain dictation none. The list stays short: today shows its latest 7 rows and the rest under
@@ -196,9 +200,8 @@ from source.
   several Claude models, and builds a blind A/B report. A second one (`ask_compare`) asks a set of questions the way
   "Ask" does and measures its decisions, speed and cost.
 
-Not in this version: changing the hotkeys, editing the dictionary in the window (`dictionary.terms` is set in
-`settings.json`), a vocabulary for speech recognition itself (`dictionary.terms` guides only the cleanup, see
-Settings), macOS.
+Not in this version: changing the hotkeys, a vocabulary for speech recognition itself (the dictionary guides only the
+cleanup, see Settings), macOS.
 
 ## Requirements for building
 
@@ -358,7 +361,8 @@ history is neither written nor cleaned up until a period is chosen in the window
   (centered, 12 px below the top of the screen), `"left"` or `"right"` (halfway up, 12 px from the edge). Dragging the
   Drop sets it. Case and surrounding spaces do not matter; any other value means `"bottom"`. The value is kept in the
   file only when it is not `"bottom"`. Example: `"drop": { "position": "right" }`.
-- `dictionary.terms`: names and terms you often say, written as they should appear. Example:
+- `dictionary.terms`: names and terms you often say, written as they should appear; the main window's Dictionary edits
+  the same list. Example:
   `"dictionary": { "terms": ["Soniox", "Claude Haiku", "GitHub"] }`. When the transcript clearly means one of them but
   spells it differently, splits it or mixes alphabets (`Со niox`, `гитхаб`, `git hub`), the cleanup writes it as
   listed. The list affects only the Claude cleanup, where it rides along with the cached system prompt and costs
