@@ -88,6 +88,20 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .hday{font-size:11px;font-weight:600;color:var(--muted);margin:16px 0 4px}
 .hgrp:first-child .hday{margin-top:2px}
 .hl{display:flex;flex-direction:column;margin:0 -8px}
+/* the list stays short: the rest of today and every earlier day grow out of their line and fold back into it */
+.hfold{height:0;overflow:hidden;visibility:hidden;transition:height .5s var(--e-sm),visibility 0s .5s}
+.hfold.open{height:auto;visibility:visible;transition:height .5s var(--e-sm)}
+.hmt{display:flex;width:calc(100% + 16px);margin:2px -8px 0;padding:8px;border-radius:8px;font-size:12px;line-height:20px;color:var(--muted);text-align:left;transition:background .2s,color .2s}
+.hmt:hover,.hdl:hover{background:color-mix(in srgb,var(--text) 4%,transparent)}
+.hmt:hover{color:var(--text)}
+.hearl{margin-top:20px}
+.hdl{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;column-gap:10px;align-items:center;width:calc(100% + 16px);margin:0 -8px;padding:8px;border-radius:8px;font-size:13px;line-height:20px;color:var(--text);text-align:left;transition:background .2s}
+.hdapps{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hdl .hcnt{margin:0}
+.hdl svg{width:12px;height:12px;color:var(--muted);transition:transform .45s var(--e-spring)}
+.hfd.open>.hdl svg{transform:rotate(90deg)}
+.hfd.open>.hdl .hcnt{background:color-mix(in srgb,var(--text) 13%,transparent);color:var(--text)}
+.hmt:focus-visible,.hdl:focus-visible{outline:0;box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--text) 40%,transparent)}
 .hr{position:relative;display:grid;grid-template-columns:38px 20px 1fr auto;column-gap:10px;align-items:start;padding:8px;border-radius:8px;transition:background .2s}
 .hr:hover{background:color-mix(in srgb,var(--text) 4%,transparent)}
 .hr.new{animation:rowIn .6s var(--e-spring),rowHl 2.6s var(--e-out)}

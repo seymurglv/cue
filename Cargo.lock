@@ -822,7 +822,7 @@ dependencies = [
 
 [[package]]
 name = "cue"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "cue-core",
@@ -845,7 +845,7 @@ dependencies = [
 
 [[package]]
 name = "cue-bench"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "cue-core",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "cue-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "cue-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -886,7 +886,7 @@ dependencies = [
 
 [[package]]
 name = "cue-engines"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "cpal",
@@ -904,7 +904,7 @@ dependencies = [
 
 [[package]]
 name = "cue-platform-win"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cpal",
  "cue-core",

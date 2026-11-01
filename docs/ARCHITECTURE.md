@@ -283,7 +283,9 @@ pinned device again, or a change of the microphone setting, forgets it. With not
   Password fields are never read; the app name comes from the executable's file description, never the window title.
 - The request: the system prompt as a cached block, a user message with `<app>`, `<before_cursor>` and `<transcript>`
   tags (closing tags inside the data are defused), effort `low`, thinking disabled where the model allows it, and a
-  JSON schema that forces `{"text": …}`. Timeout: 3 s plus 1 s per 100 words.
+  JSON schema that forces `{"text": …}`. Timeout: 3 s plus 1 s per 100 words. A timeout, a network failure or an
+  overloaded service (HTTP 500, 502, 503, 504, 529) is asked once more with twice the time; the raw text is pasted
+  only when that request fails too. Key, limit and balance refusals are not asked again.
 - The user's dictionary (`dictionary.terms`) goes in a second system block after the unchanged prompt: a short rule
   (write a listed name exactly as listed when the speech clearly means it, even if the transcript spells it
   differently, splits it or mixes alphabets; add none the user did not say and change no other word because of the

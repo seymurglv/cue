@@ -2,6 +2,9 @@
 // and paste again; how long it is kept, and clearing it, are on the settings tray's History page. New entries come over
 // the window's channel and appear at the top of their day; one already shown (the channel and the first page can both
 // bring it) is not shown twice.
+// The list stays short however much was said: today shows its latest TODAY_SHOWN rows (a stack is one), the rest of
+// the day grows out of the line "N more today" under them; every day before today is one line under "Earlier" — its
+// name, its apps and how many entries it has — that opens in place. What a search found is shown whole.
 // A run of entries from one app, each a few minutes after the one before, is one stack: its newest entry on top, a chip
 // "Telegram 5" and two sheet edges under it; the chip and the edges open it in place. A click on an entry (not on its
 // buttons), or Enter or Space on it, opens it: its whole text, how it was said and its recording (said.ts). Every entry
@@ -18,6 +21,10 @@ import { flash, h, iconButton, logFailed, type Ctx } from './page';
 import { Player, appendDiff, appendHeard, findHit } from './said';
 import { dayLabel, daysBefore } from './text';
 
+/** Today's rows shown before "N more today" (a stack is one row). */
+export const TODAY_SHOWN = 7;
+/** A folded day's line names this many of its apps, the most used first, then "+N". */
+const DAY_APPS = 2;
 /** A search runs this long after the last key. */
 export const SEARCH_PAUSE_MS = 150;
 /** Entries of one app make a stack from this many on, */
@@ -71,6 +78,16 @@ export function stackRuns(entries: readonly EntryView[]): EntryView[][] {
   return out;
 }
 
+/** A folded day's apps: the most used first (a tie — the one used last), at most DAY_APPS named, the rest as "+N";
+ *  entries without a known app are not counted. */
+export function dayApps(entries: readonly EntryView[]): string {
+  const uses = new Map<string, number>();
+  for (const e of entries) if (e.app) uses.set(e.app, (uses.get(e.app) ?? 0) + 1);
+  const apps = [...uses.keys()].sort((a, b) => uses.get(b)! - uses.get(a)!);
+  const named = apps.slice(0, DAY_APPS).join(', ');
+  return apps.length > DAY_APPS ? `${named} +${apps.length - DAY_APPS}` : named;
+}
+
 /** Newest first: ids start with the entry's time. */
 const newestFirst = (a: EntryView, b: EntryView) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
 
@@ -112,6 +129,9 @@ export class HistoryView {
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   /** The local date the day headings were drawn for ("Today", "Yesterday"). */
   private drawnFor = '';
+  /** The rest of today is shown (after "N more today"), and the days before today opened, by date. */
+  private todayAll = false;
+  private readonly openDays = new Set<string>();
   /** Stacks opened, by their oldest entry (a new entry on top keeps a stack open). */
   private readonly openStacks = new Set<string>();
   /** Entries opened to show how they were said. */
@@ -282,7 +302,14 @@ export class HistoryView {
     const q = this.results !== null ? this.query.trim() : '';
     const focused = this.focusedRow();
     this.list.textContent = '';
-    for (const d of days) this.list.append(this.group(d, q));
+    let headed = this.results !== null;
+    for (const d of days) {
+      if (!headed && d.date !== this.drawnFor) {
+        this.list.append(h('div', 'hday hearl', this.ctx.t.earlierDays));
+        headed = true;
+      }
+      this.list.append(this.group(d, q));
+    }
     this.refocus(focused);
     this.releaseDropped();
     this.earlierBtn.hidden = this.results !== null || !this.more;
@@ -310,19 +337,102 @@ export class HistoryView {
     }
   }
 
-  /** A day: what a search found as it is; the ordinary list with its stacks. */
+  /** A day: what a search found as it is; today with its latest rows and the rest folded under them; a day before
+   *  today folded into its line. Whatever holds an opened entry is drawn open. */
   private group(d: DayView, q = ''): HTMLElement {
+    const t = this.ctx.t;
     const g = h('div', 'hgrp');
     g.dataset.day = d.date;
-    g.append(h('div', 'hday', dayLabel(d.date, this.ctx.today(), this.ctx.t, this.ctx.lang)));
+    const label = dayLabel(d.date, this.ctx.today(), t, this.ctx.lang);
     const hl = h('div', 'hl');
+    const holdsOpened = (entries: readonly EntryView[]) => entries.some((e) => this.opened.has(e.id));
     if (this.results !== null) {
+      g.append(h('div', 'hday', label));
       for (const e of d.entries) hl.append(this.row(e, q));
-    } else {
-      for (const run of stackRuns(d.entries)) hl.append(run.length > 1 ? this.stack(run) : this.row(run[0], ''));
+      g.append(hl);
+      return g;
     }
-    g.append(hl);
+    const runs = stackRuns(d.entries);
+    const draw = (run: EntryView[]) => (run.length > 1 ? this.stack(run) : this.row(run[0], ''));
+    if (d.date === this.ctx.today()) {
+      g.append(h('div', 'hday', label));
+      const rest = runs.slice(TODAY_SHOWN);
+      for (const run of runs.slice(0, TODAY_SHOWN)) hl.append(draw(run));
+      g.append(hl);
+      if (rest.length) {
+        const open = this.todayAll || rest.some(holdsOpened);
+        const fold = this.fold(open);
+        for (const run of rest) fold.firstElementChild!.append(draw(run));
+        g.append(fold);
+        if (!open) {
+          const more = h('button', 'hmt', t.moreToday.replace('{N}', String(rest.reduce((n, r) => n + r.length, 0))));
+          more.type = 'button';
+          more.dataset.moreToday = '';
+          g.append(more);
+        }
+      }
+      return g;
+    }
+    // A day before today: its line, and its entries drawn only once it opens.
+    const open = this.openDays.has(d.date) || holdsOpened(d.entries);
+    g.classList.add('hfd');
+    g.classList.toggle('open', open);
+    const line = h('button', 'hdl');
+    line.type = 'button';
+    line.dataset.dayLine = '';
+    line.setAttribute('aria-expanded', String(open));
+    line.setAttribute('aria-label', t.dayEntries.replace('{N}', String(d.entries.length)).replace('{DAY}', () => label));
+    line.append(h('span', 'hdn', label), h('span', 'hdapps', dayApps(d.entries)), h('span', 'hcnt', String(d.entries.length)));
+    line.insertAdjacentHTML('beforeend', icon('chev'));
+    const fold = this.fold(open);
+    if (open) for (const run of runs) fold.firstElementChild!.append(draw(run));
+    g.append(line, fold);
     return g;
+  }
+
+  /** A part that grows out of the line above it (its height from 0) and folds back into it. */
+  private fold(open: boolean): HTMLElement {
+    const f = h('div', 'hfold');
+    f.classList.toggle('open', open);
+    const inner = h('div', 'hl');
+    f.append(inner);
+    return f;
+  }
+
+  /** "N more today": the rest of today grows under the latest rows, and the line goes. */
+  private showToday(more: HTMLElement): void {
+    this.todayAll = true;
+    const fold = more.parentElement?.querySelector<HTMLElement>('.hfold');
+    if (fold) {
+      void fold.offsetHeight;
+      fold.classList.add('open');
+    }
+    more.remove();
+  }
+
+  /** A day before today opens in place (its entries drawn now) or folds back into its line; folding it closes the
+   *  entries opened in it. */
+  private toggleDay(line: HTMLElement): void {
+    const g = line.closest<HTMLElement>('.hgrp');
+    const date = g?.dataset.day ?? '';
+    const day = this.days.find((d) => d.date === date);
+    const fold = g?.querySelector<HTMLElement>('.hfold');
+    if (!g || !day || !fold) return;
+    const on = !g.classList.contains('open');
+    if (on) {
+      this.openDays.add(date);
+      const inner = fold.firstElementChild!;
+      if (!inner.childElementCount) {
+        for (const run of stackRuns(day.entries)) inner.append(run.length > 1 ? this.stack(run) : this.row(run[0], ''));
+      }
+      void fold.offsetHeight;
+    } else {
+      this.openDays.delete(date);
+      for (const r of fold.querySelectorAll<HTMLElement>('.hr.open')) this.closeEntry(r);
+    }
+    g.classList.toggle('open', on);
+    fold.classList.toggle('open', on);
+    line.setAttribute('aria-expanded', String(on));
   }
 
   /** The newest entry on top, the chip with the app and the count, two sheet edges under it; the rest hidden until it
@@ -491,6 +601,16 @@ export class HistoryView {
     const s = t.closest<HTMLElement>('.hchip, .hedge')?.closest<HTMLElement>('.hstk');
     if (s) {
       this.toggleStack(s);
+      return;
+    }
+    const more = t.closest<HTMLElement>('[data-more-today]');
+    if (more) {
+      this.showToday(more);
+      return;
+    }
+    const line = t.closest<HTMLElement>('[data-day-line]');
+    if (line) {
+      this.toggleDay(line);
       return;
     }
     // Inside how it was said (its text may be selected, its player pressed) or on a button: not the row's.
@@ -701,6 +821,8 @@ export class HistoryView {
     this.opened.clear();
     this.found.clear();
     this.openStacks.clear();
+    this.openDays.clear();
+    this.todayAll = false;
     this.live.clear();
     if (this.results !== null) this.results = [];
     this.render();

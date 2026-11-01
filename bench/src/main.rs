@@ -707,11 +707,11 @@ mod tests {
     #[test]
     fn models_from_settings_refine_model_first_without_duplicates() {
         let s = Settings::default();
-        assert_eq!(refine_models(&s), ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]);
+        assert_eq!(refine_models(&s), ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5"]);
 
         let mut s = Settings::default();
-        s.refine.model = "claude-sonnet-5-5".into();
-        assert_eq!(refine_models(&s), ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5"], "the refine model comes first");
+        s.refine.model = "claude-opus-5-5".into();
+        assert_eq!(refine_models(&s), ["claude-opus-5-5", "claude-haiku-5-5", "claude-sonnet-5-5"], "the refine model comes first");
 
         // A refine model without a price is still listed; a repeat in prices and an empty name are skipped.
         let mut s = Settings::default();
@@ -721,7 +721,7 @@ mod tests {
 
         let mut s = Settings::default();
         s.pricing.claude.clear();
-        assert_eq!(refine_models(&s), ["claude-haiku-5-5"]);
+        assert_eq!(refine_models(&s), ["claude-sonnet-5-5"]);
     }
 
     #[test]

@@ -680,7 +680,7 @@ impl Default for SttSettings {
 
 impl Default for RefineSettings {
     fn default() -> Self {
-        Self { model: "claude-haiku-5-5".into(), context_chars: 500, min_ratio: 0.35, max_ratio: 1.25, min_overlap: 0.7 }
+        Self { model: "claude-sonnet-5-5".into(), context_chars: 500, min_ratio: 0.35, max_ratio: 1.25, min_overlap: 0.7 }
     }
 }
 
@@ -813,7 +813,7 @@ mod tests {
         assert_eq!(s.stt.soniox_model, "stt-rt-v5");
         assert_eq!(s.stt.soniox_async_model, "stt-async-v5");
         assert_eq!(s.stt.language_hints, vec!["ru", "en"]);
-        assert_eq!(s.refine.model, "claude-haiku-5-5");
+        assert_eq!(s.refine.model, "claude-sonnet-5-5");
         assert_eq!(s.refine.context_chars, 500);
         assert_eq!((s.refine.min_ratio, s.refine.max_ratio, s.refine.min_overlap), (0.35, 1.25, 0.7));
         assert_eq!(s.hold_hints_left, 2);

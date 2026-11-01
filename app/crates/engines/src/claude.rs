@@ -248,6 +248,15 @@ fn request_timeout_ms(model: &str, raw: &str, job: Job) -> u64 {
     base + if thinking_for(model).is_none() { THINKING_TIME_HEADROOM_MS } else { 0 }
 }
 
+/// The second request gets this many times the first one's timeout.
+const RETRY_TIMEOUT_FACTOR: u64 = 2;
+
+/// A refusal that a second request may not get: the service is overloaded or failed on its side. Key, limit and
+/// balance problems (4xx) are not asked again.
+fn is_transient(status: u16) -> bool {
+    matches!(status, 500 | 502 | 503 | 504 | 529)
+}
+
 /// [`refine`] or [`translate`] against the URL `url`; tests substitute their own service.
 #[allow(clippy::too_many_arguments)]
 async fn refine_at(
@@ -264,17 +273,27 @@ async fn refine_at(
     let Some(key) = key else {
         return raw_fallback(raw, RefineOutcome::RawKeyProblem, Usage::default(), "no Anthropic key");
     };
-    let send = messages_post(http, url, key)
-        .timeout(std::time::Duration::from_millis(request_timeout_ms(model, raw, job)))
-        .json(&request_body_for(model, raw, ctx, terms, job))
-        .send()
-        .await;
-    let resp = match send {
-        Ok(r) => r,
-        Err(e) => {
-            let why = if e.is_timeout() { "timeout" } else { "network" };
-            return raw_fallback(raw, RefineOutcome::RawFallback, Usage::default(), why);
+    let body = request_body_for(model, raw, ctx, terms, job);
+    let timeout = request_timeout_ms(model, raw, job);
+    // A timeout, a network failure or an overloaded service is asked once more, with twice the time: the raw text is
+    // pasted only when the second request fails too.
+    let (mut resp, mut why) = (None, String::new());
+    for ms in [timeout, timeout * RETRY_TIMEOUT_FACTOR] {
+        if !why.is_empty() {
+            tracing::info!("refine: {why}, asking again");
         }
+        match messages_post(http, url, key).timeout(std::time::Duration::from_millis(ms)).json(&body).send().await {
+            Ok(r) if !is_transient(r.status().as_u16()) => {
+                resp = Some(r);
+                break;
+            }
+            Ok(r) => why = format!("HTTP {}", r.status().as_u16()),
+            Err(e) => why = if e.is_timeout() { "timeout" } else { "network" }.to_owned(),
+        }
+    }
+    // A transient refusal is never a key problem (`classify_http`), so both failed requests mean `RawFallback`.
+    let Some(resp) = resp else {
+        return raw_fallback(raw, RefineOutcome::RawFallback, Usage::default(), &why);
     };
     let status = resp.status().as_u16();
     if status != 200 {
@@ -698,15 +717,58 @@ mod tests {
 
     #[tokio::test]
     async fn refine_http_refusal_returns_raw_text() {
-        for (code, outcome) in [
-            (401, RefineOutcome::RawKeyProblem),
-            (402, RefineOutcome::RawKeyProblem),
-            (529, RefineOutcome::RawFallback),
-        ] {
+        for (code, outcome) in [(400, RefineOutcome::RawFallback), (401, RefineOutcome::RawKeyProblem), (402, RefineOutcome::RawKeyProblem)] {
             let body = format!(r#"{{"type":"error","error":{{"message":"BODY-MARK привет {KEY}"}}}}"#);
-            let (r, lines, _api) = refine_with(Some(KEY), move |_, _, _| reply(code, &body)).await;
+            let (r, lines, api) = refine_with(Some(KEY), move |_, _, _| reply(code, &body)).await;
             assert_eq!((r.text.as_str(), r.outcome, r.usage), (RAW, outcome, Usage::default()), "HTTP {code}");
+            assert_eq!(api.calls().len(), 1, "HTTP {code} is not asked again");
             assert_one_warning(&lines, &format!("HTTP {code}"));
+        }
+    }
+
+    /// Two log lines of a request asked again: the first failure (INFO) and the final outcome (WARN).
+    fn assert_asked_again(lines: &[String], why: &str) {
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].starts_with("INFO") && lines[0].contains(why) && lines[0].contains("asking again"), "{}", lines[0]);
+        assert_one_warning(&lines[1..], why);
+    }
+
+    #[tokio::test]
+    async fn refine_asks_an_overloaded_service_again() {
+        for code in [500, 502, 503, 504, 529] {
+            let (r, lines, api) = refine_with(Some(KEY), move |_, _, n| {
+                if n == 0 { reply(code, r#"{"type":"error"}"#) } else { reply(200, &message("Привет, как дела?", "end_turn")) }
+            })
+            .await;
+            assert_eq!((r.text.as_str(), r.outcome, r.usage), ("Привет, как дела?", RefineOutcome::Refined, USAGE), "HTTP {code}");
+            assert_eq!(api.calls().len(), 2, "HTTP {code}");
+            assert_eq!(api.body(0), api.body(1), "the same request goes again");
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(lines[0].starts_with("INFO") && lines[0].contains(&format!("HTTP {code}")), "{}", lines[0]);
+        }
+    }
+
+    #[tokio::test]
+    async fn refine_returns_raw_text_when_the_second_request_fails_too() {
+        let (r, lines, api) = refine_with(Some(KEY), |_, _, _| reply(529, r#"{"type":"error"}"#)).await;
+        assert_eq!((r.text.as_str(), r.outcome, r.usage), (RAW, RefineOutcome::RawFallback, Usage::default()));
+        assert_eq!(api.calls().len(), 2, "asked once more, not more");
+        assert_asked_again(&lines, "HTTP 529");
+    }
+
+    #[tokio::test]
+    async fn refine_asks_again_after_a_network_failure() {
+        let (r, lines, api) =
+            refine_with(Some(KEY), |_, _, n| if n == 0 { Reply::Close } else { reply(200, &message("Привет, как дела?", "end_turn")) }).await;
+        assert_eq!((r.text.as_str(), r.outcome), ("Привет, как дела?", RefineOutcome::Refined));
+        assert_eq!(api.calls().len(), 2);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+    }
+
+    #[test]
+    fn limits_and_bad_requests_are_not_asked_again() {
+        for code in [400, 401, 402, 403, 404, 429] {
+            assert!(!is_transient(code), "HTTP {code}");
         }
     }
 
@@ -721,9 +783,10 @@ mod tests {
 
     #[tokio::test]
     async fn refine_network_failure_returns_raw_text() {
-        let (r, lines, _api) = refine_with(Some(KEY), |_, _, _| Reply::Close).await;
+        let (r, lines, api) = refine_with(Some(KEY), |_, _, _| Reply::Close).await;
         assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawFallback));
-        assert_one_warning(&lines, "network");
+        assert_eq!(api.calls().len(), 2);
+        assert_asked_again(&lines, "network");
     }
 
     #[tokio::test]

@@ -551,9 +551,9 @@ mod tests {
     #[test]
     fn a_dictation_row_keeps_the_refine_model_and_no_searches() {
         let mut s = Settings::default();
-        s.ask.model = Some("claude-sonnet-5-5".into());
+        s.ask.model = Some("claude-opus-5-5".into());
         let r = Attempt::new(DictationId(1)).record(Outcome::Inserted, "t".into(), &s);
-        assert_eq!((r.refine_model.as_str(), r.web_searches), ("claude-haiku-5-5", 0));
+        assert_eq!((r.refine_model.as_str(), r.web_searches), ("claude-sonnet-5-5", 0));
     }
 
     /// Esc before the answer showed, then "restore": the question goes again on the same attempt, and its row counts

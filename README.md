@@ -10,6 +10,9 @@ main window, with the history of everything CUE wrote and the settings.
 
 ## Install
 
+Download the installer, `CUE_<version>_x64-setup.exe`, from the latest release:
+[github.com/seymurglv/cue/releases/latest](https://github.com/seymurglv/cue/releases/latest).
+
 1. Run the installer, `CUE_<version>_x64-setup.exe`. CUE is not code-signed, so Windows shows "Windows protected your
    PC": click **More info**, then **Run anyway**. Windows asks this again for every new version of CUE. If Smart App
    Control is on (Windows Security → App & browser control), it blocks unsigned apps like CUE, and CUE will not run.
@@ -41,7 +44,8 @@ Paste each key into the welcome window, or later into the main window's settings
 saves the key and sends a free test request. The keys are kept in Windows Credential Manager; CUE's windows show only
 a mask of them.
 
-Dictation and translation cost roughly $4–5 a month for an hour of speech a day. Questions asked with
+Dictation and translation cost roughly $12–13 a month for an hour of speech a day with the default cleanup model,
+Claude Sonnet 5.5 (about $4–5 with Claude Haiku 5.5, see `refine.model`). Questions asked with
 `Ctrl + Win + Alt` cost more, and each web search one of them runs adds $0.01. CUE writes down what every dictation and
 question cost, on your computer only (`usage.csv`, see [Costs](#costs)).
 
@@ -152,8 +156,9 @@ from source.
   in the Windows theme; opening it again brings it forward, and closing it leaves CUE running.
   - **History:** every result of CUE, newest first, with its time, mode and app: dictations, translations, "Ask"
     answers (the question and the answer) and texts "Ask" wrote into a field; a translation and "Ask" show their mode
-    as a small icon, a plain dictation none. Today and yesterday first, earlier days
-    with **Show earlier**. Three or more entries in a row from one app, each within 10 minutes of the one before, make
+    as a small icon, a plain dictation none. The list stays short: today shows its latest 7 rows and the rest under
+    **N more today**; every earlier day is one line under **Earlier** (its name, its two most used apps and how many
+    entries it has) that opens in place, and older days come with **Show earlier**. Three or more entries in a row from one app, each within 10 minutes of the one before, make
     a stack: its newest entry on top, the app and the count on a chip that opens it. A click on an entry (or `Enter`)
     shows how you said it: a dictation as Soniox heard it, the words CUE removed struck out and the ones it added or
     changed in green; a translation's speech; an "Ask" question; and its recording, with play and pause, while it is
@@ -304,7 +309,7 @@ history is neither written nor cleaned up until a period is chosen in the window
     "language_hints": ["ru", "en"]
   },
   "refine": {
-    "model": "claude-haiku-5-5",
+    "model": "claude-sonnet-5-5",
     "context_chars": 500,
     "min_ratio": 0.35,
     "max_ratio": 1.25,
@@ -317,7 +322,8 @@ history is neither written nor cleaned up until a period is chosen in the window
 
 - `stt.soniox_model` / `soniox_async_model`: the real-time model and the batch model used for fallback and Retry.
   `language_hints` are hints, not limits. `engine` has a single value today, `soniox`.
-- `refine.model`: the Claude model for cleanup. `context_chars`: how much text before the caret is sent as context,
+- `refine.model`: the Claude model for cleanup and translation, `claude-sonnet-5-5` by default; `claude-haiku-5-5`
+  is faster and cheaper and fixes fewer misheard words. `context_chars`: how much text before the caret is sent as context,
   for cleanup and for "Ask" alike (0 turns it off). `min_ratio`, `max_ratio`, `min_overlap`: the sanity check (see
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
 - `hold_hints_left`: how many more times the "Press and release" card appears after a held chord.

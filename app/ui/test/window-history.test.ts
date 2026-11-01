@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { $, $$, NOW, TODAY, YESTERDAY, click, core, entry, feeds, key, mount, oggFile, settle, stub, text, type } from './windowFixture';
 import type { WindowPage } from '../src/window/page';
+import { TODAY_SHOWN, dayApps } from '../src/window/history';
 
 vi.mock('../src/window/api', async (importOriginal) => {
   const real = await importOriginal<typeof import('../src/window/api')>();
@@ -21,6 +22,10 @@ const firstPage = (more = false) => ({
 });
 const rows = () => $$('.hr');
 const rowTexts = () => rows().map((r) => r.querySelector('.htx')!.textContent);
+/** The days as drawn: today's heading, then each earlier day's line. */
+const dayNames = () => $$('.hgrp :is(.hday, .hdn)').map((d) => d.textContent);
+/** An earlier day's line, by its name. */
+const dayLine = (name: string) => $$('.hdl').find((l) => l.querySelector('.hdn')!.textContent === name)!;
 
 let page: WindowPage | null = null;
 
@@ -61,7 +66,7 @@ describe('The history', () => {
     // The channel is open before the first page is asked for.
     expect(core.historySubscribe.mock.invocationCallOrder[0]).toBeLessThan(core.historyPage.mock.invocationCallOrder[0]);
     expect(core.historyPage).toHaveBeenCalledWith(null);
-    expect($$('.hgrp .hday').map((d) => d.textContent)).toEqual(['Today', 'Yesterday']);
+    expect(dayNames()).toEqual(['Today', 'Yesterday']);
     const today = $$('.hgrp')[0];
     expect([...today.querySelectorAll('.ht')].map((t) => t.textContent)).toEqual(['09:15', '08:02']);
     // App and question muted before the text; the mode as a badge, none for a plain dictation: its place stays empty,
@@ -72,6 +77,10 @@ describe('The history', () => {
     expect(first.querySelector('.ha')!.childElementCount).toBe(0);
     const ask = rows()[1];
     expect(ask.querySelector('.ha > .aski')!.getAttribute('title')).toBe('Ask');
+    // Yesterday is one line under "Earlier" until it opens.
+    expect(text($('.hearl'))).toBe('Earlier');
+    expect(rows()).toHaveLength(2);
+    click(dayLine('Yesterday'));
     expect(rows()[2].querySelector('.ha > .hmi')!.getAttribute('title')).toBe('Translation');
     expect(ask.querySelector('.hq')!.textContent).toBe('Swarm or Kubernetes?');
     expect(ask.querySelector('.htx')!.getAttribute('title')).toBe('Swarm or Kubernetes?\n\nSwarm is simpler.');
@@ -127,7 +136,7 @@ describe('The history', () => {
   it('search waits for a pause and clearing restores the list', async () => {
     core.historySearch.mockResolvedValue([{ date: TODAY, entries: [morning] }]);
     page = await mount();
-    expect(rows()).toHaveLength(3);
+    expect(rows()).toHaveLength(2);
     // The search lives on the heading's line: the magnifier opens it, and turns into its close button.
     const find = $('.bsec>h3 .hsb .hsbt')!;
     expect(find.getAttribute('aria-label')).toBe('Search');
@@ -161,7 +170,7 @@ describe('The history', () => {
     expect(text($('.hempty'))).toBe('Nothing found');
     // Cleared: the ordinary list at once, no search.
     type(input, '');
-    expect(rows()).toHaveLength(3);
+    expect(rows()).toHaveLength(2);
     expect($('.hr mark')).toBeNull();
     expect($('.hempty')!.hidden).toBe(true);
     await vi.advanceTimersByTimeAsync(500);
@@ -176,7 +185,7 @@ describe('The history', () => {
     expect($('.hsb')!.classList.contains('open')).toBe(false);
     expect(find.getAttribute('aria-label')).toBe('Search');
     expect(input.value).toBe('');
-    expect(rows()).toHaveLength(3);
+    expect(rows()).toHaveLength(2);
   });
 
   it('search marks ё and е alike', async () => {
@@ -206,7 +215,8 @@ describe('The history', () => {
     click(earlier);
     await settle();
     expect(core.historyPage).toHaveBeenLastCalledWith(YESTERDAY);
-    expect($$('.hgrp .hday').map((d) => d.textContent)).toEqual(['Today', 'Yesterday', 'Saturday, October 24']);
+    expect(dayNames()).toEqual(['Today', 'Yesterday', 'Saturday, October 24']);
+    click(dayLine('Saturday, October 24'));
     expect(rowTexts().at(-1)).toBe('An idea for an article.');
     expect(earlier.hidden).toBe(true);
   });
@@ -269,11 +279,11 @@ describe('The history', () => {
 
   it('day headings follow the date past midnight', async () => {
     page = await mount();
-    expect($$('.hgrp .hday').map((d) => d.textContent)).toEqual(['Today', 'Yesterday']);
+    expect(dayNames()).toEqual(['Today', 'Yesterday']);
     // The window stays open past midnight: the first entry of the new day redraws every heading.
     vi.setSystemTime(new Date(2026, 10, 1, 0, 5));
     feeds.entry(entry('2026-11-01T00:04:00.000-1', 'Just after midnight.'));
-    expect($$('.hgrp .hday').map((d) => d.textContent)).toEqual(['Today', 'Yesterday', 'Friday, October 30']);
+    expect(dayNames()).toEqual(['Today', 'Yesterday', 'Friday, October 30']);
     const top = rows()[0];
     expect(top.querySelector('.htx')!.textContent).toBe('Just after midnight.');
     expect(top.classList.contains('new')).toBe(true);
@@ -284,18 +294,18 @@ describe('The history', () => {
     page = await mount();
     vi.setSystemTime(new Date(2026, 10, 1, 9, 0));
     window.dispatchEvent(new Event('focus'));
-    expect($$('.hgrp .hday').map((d) => d.textContent)).toEqual(['Yesterday', 'Friday, October 30']);
+    expect(dayNames()).toEqual(['Yesterday', 'Friday, October 30']);
     // The same day again: nothing is drawn anew.
-    const first = rows()[0];
+    const first = $$('.hgrp')[0];
     window.dispatchEvent(new Event('focus'));
-    expect(rows()[0]).toBe(first);
+    expect($$('.hgrp')[0]).toBe(first);
   });
 
   it('a new entry makes Today when there was none', async () => {
     core.historyPage.mockResolvedValue({ days: [{ date: YESTERDAY, entries: [evening] }], more: false });
     page = await mount();
     feeds.entry(entry(`${TODAY}T07:00:00.000-1`, 'First of the day.'));
-    expect($$('.hgrp .hday').map((d) => d.textContent)).toEqual(['Today', 'Yesterday']);
+    expect(dayNames()).toEqual(['Today', 'Yesterday']);
     expect(rowTexts()[0]).toBe('First of the day.');
   });
 
@@ -326,7 +336,7 @@ describe('The history', () => {
     expect(rows()).toHaveLength(1);
     type(input, '');
     expect(rowTexts()[0]).toBe('Typed during a search.');
-    expect(rows()).toHaveLength(4);
+    expect(rows()).toHaveLength(3);
   });
 });
 
@@ -848,5 +858,66 @@ describe('The recording', () => {
     answerAudio(oggFile(1));
     await settle();
     expect(urls.made).toEqual([]);
+  });
+});
+
+describe('A short list', () => {
+  /** Today's entries an hour apart (none stack), newest first, in the app `app`. */
+  const hourly = (n: number, app = 'Notepad') =>
+    Array.from({ length: n }, (_, i) => entry(`${TODAY}T${String(11 - i).padStart(2, '0')}:00:00.000-1`, `Note ${i + 1}.`, { app }));
+
+  it('shows the latest rows of today and folds the rest under one line', async () => {
+    core.historyPage.mockResolvedValue({ days: [{ date: TODAY, entries: hourly(TODAY_SHOWN + 3) }], more: false });
+    page = await mount();
+    const shown = () => rows().filter((r) => !r.closest('.hfold:not(.open)'));
+    expect(shown()).toHaveLength(TODAY_SHOWN);
+    const more = $('.hmt')!;
+    expect(text(more)).toBe('3 more today');
+    click(more);
+    expect($('.hmt')).toBeNull();
+    expect(shown()).toHaveLength(TODAY_SHOWN + 3);
+    // A new entry keeps the rest of today shown.
+    feeds.entry(entry(`${TODAY}T11:30:00.000-1`, 'Newest.'));
+    expect(shown()).toHaveLength(TODAY_SHOWN + 4);
+    expect($('.hmt')).toBeNull();
+  });
+
+  it('a short day has no fold', async () => {
+    core.historyPage.mockResolvedValue({ days: [{ date: TODAY, entries: hourly(TODAY_SHOWN) }], more: false });
+    page = await mount();
+    expect($('.hmt')).toBeNull();
+    expect($('.hgrp .hfold')).toBeNull();
+  });
+
+  it('an earlier day is one line that opens in place and folds back', async () => {
+    const day = [
+      entry(`${YESTERDAY}T18:00:00.000-1`, 'One.', { app: 'Mail' }),
+      entry(`${YESTERDAY}T16:00:00.000-1`, 'Two.', { app: 'Telegram' }),
+      entry(`${YESTERDAY}T14:00:00.000-1`, 'Three.', { app: 'Telegram' }),
+    ];
+    core.historyPage.mockResolvedValue({ days: [{ date: YESTERDAY, entries: day }], more: false });
+    page = await mount();
+    const line = dayLine('Yesterday');
+    expect(line.getAttribute('aria-label')).toBe('Yesterday, 3 entries');
+    expect(line.getAttribute('aria-expanded')).toBe('false');
+    expect(text(line.querySelector('.hdapps'))).toBe('Telegram, Mail');
+    expect(text(line.querySelector('.hcnt'))).toBe('3');
+    expect(rows()).toHaveLength(0);
+    click(line);
+    expect(line.getAttribute('aria-expanded')).toBe('true');
+    expect(rowTexts()).toEqual(['MailOne.', 'TelegramTwo.', 'TelegramThree.']);
+    // Folding it back closes what was opened in it.
+    openRow(day[0].id);
+    expect(rowOf(day[0].id).classList.contains('open')).toBe(true);
+    click(line);
+    expect(line.getAttribute('aria-expanded')).toBe('false');
+    expect(rowOf(day[0].id).classList.contains('open')).toBe(false);
+  });
+
+  it('names the most used apps of a day', () => {
+    const e = (app: string) => entry(`${TODAY}T10:00:00.000-1`, 'x', { app });
+    expect(dayApps([e('A'), e('B'), e('B'), e('C'), e('C'), e('C'), e('')])).toBe('C, B +1');
+    expect(dayApps([e('Mail')])).toBe('Mail');
+    expect(dayApps([e('')])).toBe('');
   });
 });

@@ -16,6 +16,12 @@ export interface WinText {
   today: string;
   yesterday: string;
   earlier: string;
+  /** Over the days before today, each folded into one line. */
+  earlierDays: string;
+  /** Under today's latest entries: the rest of today ({N} entries). */
+  moreToday: string;
+  /** A folded day's line for a screen reader ({DAY}, {N}). */
+  dayEntries: string;
   /** The tray's History page: how long the history is kept (also the History row's value on the tray's first page). */
   keepHistory: string;
   keepHistoryHint: string;
@@ -88,6 +94,9 @@ export const en: WinText = {
   today: 'Today',
   yesterday: 'Yesterday',
   earlier: 'Show earlier',
+  earlierDays: 'Earlier',
+  moreToday: '{N} more today',
+  dayEntries: '{DAY}, {N} entries',
   keepHistory: 'Keep history',
   keepHistoryHint: 'Older entries go by themselves',
   keeps: { forever: 'Forever', year: 'A year', month: 'A month', week: 'A week', off: "Don't keep" },
@@ -154,6 +163,9 @@ export const ru: WinText = {
   today: 'Сегодня',
   yesterday: 'Вчера',
   earlier: 'Показать раньше',
+  earlierDays: 'Раньше',
+  moreToday: 'Ещё за сегодня: {N}',
+  dayEntries: '{DAY}, записей: {N}',
   keepHistory: 'Хранить историю',
   keepHistoryHint: 'Старое удаляется само',
   keeps: { forever: 'Всегда', year: 'Год', month: 'Месяц', week: 'Неделю', off: 'Не хранить' },
