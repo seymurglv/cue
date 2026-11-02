@@ -38,7 +38,7 @@ describe('The dictionary', () => {
     page = await mount();
     expect(text($('[data-scr=dictionary] h3'))).toBe('Dictionary2');
     expect(words()).toEqual(['Soniox', 'GitHub']);
-    expect($('.dch .dx')!.getAttribute('aria-label')).toBe('Remove');
+    expect($('.dch .dx')!.getAttribute('aria-label')).toBe('Delete the word Soniox');
   });
 
   it('adds a word first, with a glint, and keeps the field for the next', async () => {

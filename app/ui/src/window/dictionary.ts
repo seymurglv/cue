@@ -6,6 +6,7 @@
 // A word goes into the page as text.
 import { icon } from './icons';
 import { h, iconButton, type Ctx } from './page';
+import { fill } from './text';
 
 /** The longest word the dictionary takes, as the core counts it (refine::MAX_TERM_CHARS). */
 export const MAX_WORD_CHARS = 60;
@@ -48,6 +49,7 @@ export class DictionaryView {
     this.count = h('em');
     h3.append(this.count);
     this.flow = h('div', 'dflow');
+    this.flow.setAttribute('role', 'list');
     this.flow.addEventListener('click', (e) => {
       const b = (e.target as Element).closest<HTMLElement>('[data-remove]');
       if (b) void this.remove(b.closest<HTMLElement>('.dch')!);
@@ -80,9 +82,11 @@ export class DictionaryView {
     this.flow.textContent = '';
     for (const w of this.words) {
       const chip = h('span', 'dch');
+      chip.setAttribute('role', 'listitem');
       chip.dataset.word = w;
       chip.append(w);
       const x = iconButton('dx', 'x', t.dictRemove);
+      x.setAttribute('aria-label', fill(t.dictRemoveWord, w));
       x.dataset.remove = '';
       chip.append(x);
       if (w === this.fresh) chip.classList.add('new');

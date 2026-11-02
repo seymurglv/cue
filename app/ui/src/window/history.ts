@@ -17,9 +17,9 @@
 import * as api from './api';
 import type { DayView, EntryView } from './api';
 import { icon, type IconName } from './icons';
-import { flash, h, iconButton, logFailed, type Ctx } from './page';
+import { flash, h, iconButton, logFailed, wrap, type Ctx } from './page';
 import { Player, appendDiff, appendHeard, findHit } from './said';
-import { dayLabel, daysBefore } from './text';
+import { dayLabel, daysBefore, excerpt } from './text';
 
 /** Today's rows shown before "N more today" (a stack is one row). */
 export const TODAY_SHOWN = 7;
@@ -164,7 +164,7 @@ export class HistoryView {
     // field grows left out of the magnifier over the line (one eased motion; nothing under it moves), the magnifier
     // rides on its leading edge into it, and a cross that closes it comes up where the magnifier was.
     const h3 = h('h3', '', t.history);
-    this.bsr = h('div', 'hsb');
+    this.bsr = wrap('hsb');
     this.bsr.classList.toggle('open', this.searchOpen);
     const field = h('span', 'hsf');
     this.input = h('input');
@@ -183,6 +183,8 @@ export class HistoryView {
     h3.append(this.bsr);
 
     this.list = h('div', 'bhist');
+    this.list.setAttribute('role', 'group');
+    this.list.setAttribute('aria-label', t.entries);
     this.list.addEventListener('click', (e) => this.onListClick(e));
     this.list.addEventListener('keydown', (e) => this.onListKey(e));
     this.emptyEl = h('p', 'hempty');
@@ -345,7 +347,9 @@ export class HistoryView {
     const g = h('div', 'hgrp');
     g.dataset.day = d.date;
     const label = dayLabel(d.date, this.ctx.today(), t, this.ctx.lang);
-    const hl = h('div', 'hl');
+    g.setAttribute('role', 'group');
+    g.setAttribute('aria-label', label);
+    const hl = wrap('hl');
     const holdsOpened = (entries: readonly EntryView[]) => entries.some((e) => this.opened.has(e.id));
     if (this.results !== null) {
       g.append(h('div', 'hday', label));
@@ -393,9 +397,9 @@ export class HistoryView {
 
   /** A part that grows out of the line above it (its height from 0) and folds back into it. */
   private fold(open: boolean): HTMLElement {
-    const f = h('div', 'hfold');
+    const f = wrap('hfold');
     f.classList.toggle('open', open);
-    const inner = h('div', 'hl');
+    const inner = wrap('hl');
     f.append(inner);
     return f;
   }
@@ -443,7 +447,7 @@ export class HistoryView {
     const rest = run.slice(1);
     if (rest.some((e) => this.opened.has(e.id))) this.openStacks.add(key);
     const open = this.openStacks.has(key);
-    const s = h('div', 'hstk');
+    const s = wrap('hstk');
     s.dataset.stack = key;
     s.classList.toggle('open', open);
     const top = this.row(run[0], '', run.length);
@@ -453,8 +457,8 @@ export class HistoryView {
     const edge = h('span', 'hedge');
     edge.setAttribute('aria-hidden', 'true');
     edge.append(h('i'), h('i'));
-    const hidden = h('div', 'hrest');
-    const inner = h('div');
+    const hidden = wrap('hrest');
+    const inner = wrap();
     for (const e of rest) inner.append(this.row(e, ''));
     hidden.append(inner);
     s.append(top, edge, hidden);
@@ -468,6 +472,11 @@ export class HistoryView {
     const t = this.ctx.t;
     const r = h('div', 'hr');
     r.dataset.id = e.id;
+    // A screen reader names the entry, and each of its buttons, by its time and the start of its words.
+    const start = excerpt(e.text);
+    const name = (template: string) => template.replace('{TIME}', () => e.time).replace('{TEXT}', () => start);
+    r.setAttribute('role', 'group');
+    r.setAttribute('aria-label', name(t.entryName));
     const ha = h('span', 'ha');
     const mi = Object.hasOwn(MODE_ICON, e.mode) ? MODE_ICON[e.mode] : undefined;
     if (mi) {
@@ -500,8 +509,10 @@ export class HistoryView {
     const act = h('span', 'hact');
     const copy = iconButton('ibt sm', 'copy', t.copy);
     copy.dataset.copy = '';
+    copy.setAttribute('aria-label', name(t.copyEntry));
     const paste = iconButton('ibt sm', 'reins', t.pasteAgain);
     paste.dataset.paste = '';
+    paste.setAttribute('aria-label', name(t.pasteEntry));
     act.append(copy, paste);
     r.append(h('span', 'ht', e.time), ha, hx, act);
     // The keyboard and screen readers reach it too: Enter or Space opens it (`onListKey`).

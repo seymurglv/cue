@@ -28,7 +28,7 @@ import { KEY_TITLE, KeyRows } from './keys';
 import { MicRows } from './mic';
 import { bar, modelRow, modelValue, stepModelRow } from './model';
 import { ModelsPage } from './models';
-import { dropDown, h, iconButton, logFailed, relRect, srow, type Ctx } from './page';
+import { dropDown, h, iconButton, logFailed, relRect, srow, wrap, type Ctx } from './page';
 import { languageName } from './text';
 
 export { matchMic } from './mic';
@@ -327,15 +327,15 @@ export class SettingsTray {
   /** The heading line — back, the title, close — and the place for the pages' rows under it, drawn anew. */
   private build(): void {
     const t = this.ctx.t;
-    this.frame = h('div', 'tpg');
-    this.head = h('div', 'tph');
+    this.frame = wrap('tpg');
+    this.head = wrap('tph');
     const back = iconButton('ibt back', 'chev', t.back);
     back.dataset.tback = '';
     this.heading = h('b', 'lbl');
     const x = iconButton('ibt', 'x', t.close);
     x.dataset.tclose = '';
     this.head.append(back, this.heading, x);
-    this.pages = h('div', 'tpb');
+    this.pages = wrap('tpb');
     this.frame.append(this.head, this.pages);
     this.bin.textContent = '';
     this.bin.append(this.frame);
@@ -471,7 +471,10 @@ export class SettingsTray {
     // A page drawn anew (another page, the tray opened again, new settings) never takes a first press of "Clear history"
     // with it: its new button would clear on one press.
     this.disarm();
+    // A screen reader hears the page by its title.
     const pg = h('div');
+    pg.setAttribute('role', 'group');
+    pg.setAttribute('aria-label', sub ? this.title(sub) : t.settings);
     if (!sub) {
       for (const s of SUBS) {
         const row = h('button', 'trw');
@@ -494,7 +497,7 @@ export class SettingsTray {
       pg.append(...this.models.rows());
       return pg;
     }
-    const g = h('div', 'sgrp');
+    const g = wrap('sgrp');
     pg.append(g);
     if (sub === 'model') {
       g.append(this.modelRow());

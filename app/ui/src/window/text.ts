@@ -19,6 +19,12 @@ export interface WinText {
   dictAdd: string;
   dictNew: string;
   dictRemove: string;
+  /** A word's remove button for a screen reader ({NAME} — the word). */
+  dictRemoveWord: string;
+  /** The page's containers for a screen reader: the scrolling page, the header's links, the history's list. */
+  main: string;
+  sections: string;
+  entries: string;
   /** Today: the header's link, and the sentence and the line of the section ({N} is a number, {W} its word). */
   todayNav: string;
   todayWords: string;
@@ -62,6 +68,10 @@ export interface WinText {
   nothing: string;
   copy: string;
   pasteAgain: string;
+  /** An entry and its buttons for a screen reader ({TIME}, {TEXT} — the start of the entry, `excerpt`). */
+  entryName: string;
+  copyEntry: string;
+  pasteEntry: string;
   modes: Record<Mode, string>;
   /** A stack's chip, "Telegram 5": its name for a screen reader and its tooltip ({APP}, {N}). */
   stack: string;
@@ -180,6 +190,10 @@ export const en: WinText = {
   dictAdd: 'Word',
   dictNew: 'New word, Enter',
   dictRemove: 'Remove',
+  dictRemoveWord: 'Delete the word {NAME}',
+  main: 'Main window',
+  sections: 'Sections',
+  entries: 'History entries',
   todayNav: 'Today',
   todayWords: 'Today — {N} {W}.',
   todaySaved: "That's {N} {W} without the keyboard.",
@@ -213,6 +227,9 @@ export const en: WinText = {
   nothing: 'Nothing found',
   copy: 'Copy',
   pasteAgain: 'Paste again',
+  entryName: '{TIME}, {TEXT}',
+  copyEntry: 'Copy: {TEXT}',
+  pasteEntry: 'Paste again: {TEXT}',
   modes: { dictation: 'Dictation', translation: 'Translation', ask: 'Ask' },
   stack: '{APP}, {N} entries',
   saidAs: { dictation: 'How you said it', translation: 'What you said', ask: 'Your question' },
@@ -327,6 +344,10 @@ export const ru: WinText = {
   dictAdd: 'Слово',
   dictNew: 'Новое слово, Enter',
   dictRemove: 'Удалить',
+  dictRemoveWord: 'Удалить слово {NAME}',
+  main: 'Главное окно',
+  sections: 'Разделы',
+  entries: 'Записи истории',
   todayNav: 'Сегодня',
   todayWords: 'Сегодня — {N} {W}.',
   todaySaved: 'Это {N} {W} без клавиатуры.',
@@ -360,6 +381,9 @@ export const ru: WinText = {
   nothing: 'Ничего не найдено',
   copy: 'Копировать',
   pasteAgain: 'Вставить снова',
+  entryName: '{TIME}, {TEXT}',
+  copyEntry: 'Копировать: {TEXT}',
+  pasteEntry: 'Вставить снова: {TEXT}',
   modes: { dictation: 'Диктовка', translation: 'Перевод', ask: 'Спросить' },
   stack: '{APP}, записей: {N}',
   saidAs: { dictation: 'Как вы сказали', translation: 'Что вы сказали', ask: 'Ваш вопрос' },
@@ -477,6 +501,15 @@ export function pickLang(v: unknown): Lang {
 /** `{NAME}` replaced by a function, so a "$&" in a device name stays as it is. */
 export function fill(template: string, name: string): string {
   return template.replace('{NAME}', () => name);
+}
+
+/** The characters of an entry a screen reader names it by. */
+export const EXCERPT_CHARS = 40;
+
+/** The start of `text` on one line: its first EXCERPT_CHARS characters, "…" after them when there is more. */
+export function excerpt(text: string): string {
+  const chars = [...text.replace(/\s+/g, ' ').trim()];
+  return chars.length > EXCERPT_CHARS ? `${chars.slice(0, EXCERPT_CHARS).join('').trimEnd()}…` : chars.join('');
 }
 
 /** The local date `YYYY-MM-DD` of `d`. */

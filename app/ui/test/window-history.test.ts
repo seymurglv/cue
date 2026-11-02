@@ -242,8 +242,8 @@ describe('The history', () => {
     const row = rows()[0];
     const copy = row.querySelector<HTMLElement>('[data-copy]')!;
     const paste = row.querySelector<HTMLElement>('[data-paste]')!;
-    expect(copy.getAttribute('aria-label')).toBe('Copy');
-    expect(paste.getAttribute('aria-label')).toBe('Paste again');
+    expect(copy.getAttribute('aria-label')).toBe('Copy: Morning standup notes.');
+    expect(paste.getAttribute('aria-label')).toBe('Paste again: Morning standup notes.');
     click(copy);
     await settle();
     expect(core.historyCopy).toHaveBeenCalledWith(morning.id);

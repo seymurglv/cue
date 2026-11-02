@@ -92,6 +92,13 @@ export function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', text?
   return e;
 }
 
+/** A box that only lays things out: a screen reader passes over it to what it holds. */
+export function wrap(cls = ''): HTMLDivElement {
+  const d = h('div', cls);
+  d.setAttribute('role', 'none');
+  return d;
+}
+
 /** A small icon button with its tooltip and accessible name. */
 export function iconButton(cls: string, name: Parameters<typeof icon>[0], label: string): HTMLButtonElement {
   const b = h('button', cls);
@@ -254,6 +261,7 @@ export class WindowPage implements Ctx {
     this.reduced = opts.reduced ?? (() => !!window.matchMedia?.(REDUCED_MOTION)?.matches);
     this.now = opts.now ?? (() => new Date());
     app.classList.add('app');
+    app.setAttribute('role', 'none');
     this.menus = new Menus(app);
     this.history = new HistoryView(this);
     this.numbers = new TodayView(this);
@@ -390,23 +398,32 @@ export class WindowPage implements Ctx {
   private build(): void {
     const t = this.t;
     this.app.textContent = '';
+    // The scroller stays in a screen reader's tree however it is marked (it scrolls): it is the page's main part.
     const bsc = h('div', 'bsc');
+    bsc.setAttribute('role', 'main');
+    bsc.setAttribute('aria-label', t.main);
     this.scroller = bsc;
     const bh = h('header', 'bh');
+    bh.setAttribute('role', 'none');
     const logo = h('span', 'logo');
     logo.innerHTML = MARK;
     logo.append('CUE');
     const gear = iconButton('ibt gear', 'gear', t.settings);
     gear.addEventListener('click', () => (this.tray.isOpen ? this.tray.close() : this.tray.open()));
-    const col = h('div', 'bcol');
-    const todaySec = h('section', 'bsec');
-    todaySec.dataset.scr = 'today';
-    const sec = h('section', 'bsec');
-    sec.dataset.scr = 'history';
-    const dictSec = h('section', 'bsec');
-    dictSec.dataset.scr = 'dictionary';
+    const col = wrap('bcol');
+    // Each section is named as its link, so a screen reader can go to it as to a region.
+    const section = (scr: string, label: string) => {
+      const s = h('section', 'bsec');
+      s.dataset.scr = scr;
+      s.setAttribute('aria-label', label);
+      return s;
+    };
+    const todaySec = section('today', t.todayNav);
+    const sec = section('history', t.history);
+    const dictSec = section('dictionary', t.dictionary);
     this.sections = [todaySec, sec, dictSec];
     const nav = h('nav', 'lk');
+    nav.setAttribute('aria-label', t.sections);
     this.links = [
       ['today', t.todayNav],
       ['history', t.history],
@@ -430,7 +447,9 @@ export class WindowPage implements Ctx {
     });
     const tray = h('div', 'btray');
     tray.hidden = true;
-    tray.append(h('div', 'bin'));
+    tray.setAttribute('role', 'region');
+    tray.setAttribute('aria-label', t.settings);
+    tray.append(wrap('bin'));
     this.app.append(bsc, tray);
     this.numbers.mount(todaySec);
     this.history.mount(sec);
