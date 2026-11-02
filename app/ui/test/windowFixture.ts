@@ -22,6 +22,24 @@ export const LANGUAGES: [string, string][] = [
   ['th', 'Thai'], ['tr', 'Turkish'], ['uk', 'Ukrainian'], ['ur', 'Urdu'], ['vi', 'Vietnamese'], ['cy', 'Welsh'],
 ];
 
+const usd = (id: string, name: string, input: number, output: number): api.ModelView => ({ id, name, usd: [input, output], gb: null });
+const disk = (id: string, name: string, gb: number): api.ModelView => ({ id, name, usd: null, gb });
+
+/** The cleanup's connections as the core lists them (`cue_core::connections`), and their default addresses. */
+export const CONNECTIONS: api.ConnectionView[] = [
+  { id: 'anthropic', name: 'Anthropic', local: false, models: [usd('claude-haiku-5-5', 'Claude Haiku 5.5', 0.1, 0.5), usd('claude-sonnet-5-5', 'Claude Sonnet 5.5', 2, 10)] },
+  { id: 'openai', name: 'OpenAI', local: false, models: [usd('gpt-6-luna', 'GPT-6 Luna', 0.1, 0.5), usd('gpt-6.1-terra', 'GPT-6.1 Terra', 1, 5)] },
+  { id: 'gemini', name: 'Google Gemini', local: false, models: [usd('gemini-3.1-flash-lite', 'Gemini 3.1 Flash-Lite', 0.25, 1.5)] },
+  { id: 'openrouter', name: 'OpenRouter', local: false, models: [usd('anthropic/claude-haiku-5.5', 'Claude Haiku 5.5', 0.1, 0.5)] },
+  { id: 'deepseek', name: 'DeepSeek', local: false, models: [usd('deepseek-flash', 'DeepSeek Flash', 0.3, 1.2)] },
+  { id: 'mistral', name: 'Mistral', local: false, models: [usd('mistral-small-2603', 'Mistral Small 4', 0.15, 0.6)] },
+  { id: 'groq', name: 'Groq', local: false, models: [usd('openai/gpt-oss-120b', 'gpt-oss 120B', 0.15, 0.6)] },
+  { id: 'xai', name: 'xAI', local: false, models: [usd('grok-4.3', 'Grok 4.3', 1.25, 2.5)] },
+  { id: 'ollama', name: 'Ollama', local: true, models: [disk('gemma4:12b', 'Gemma 4 12B', 8), disk('gemma4:e4b', 'Gemma 4 E4B', 7)] },
+  { id: 'lmstudio', name: 'LM Studio', local: true, models: [disk('google/gemma-4-12b', 'Gemma 4 12B', 7.4)] },
+];
+const ADDRESSES: Record<string, string> = { ollama: 'http://localhost:11434/v1', lmstudio: 'http://localhost:1234/v1', openai: 'https://api.openai.com/v1' };
+
 export function view(over: Partial<api.SettingsView> = {}): api.SettingsView {
   return {
     historyKeep: 'month',
@@ -33,7 +51,12 @@ export function view(over: Partial<api.SettingsView> = {}): api.SettingsView {
     languages: LANGUAGES,
     saved: true,
     dictionary: [],
-    refineStyle: 'careful',
+    refineStyle: 'default',
+    refineCustom: '',
+    refineConnection: 'anthropic',
+    refineModel: 'claude-haiku-5-5',
+    refineAddress: 'https://api.anthropic.com/v1',
+    connections: CONNECTIONS,
     ...over,
   };
 }
@@ -95,6 +118,11 @@ export function stub(settings: api.SettingsView = view()): void {
     }
     now = { ...now, [c.kind]: c.value };
     if (c.kind === 'uiLanguage') now.lang = c.value === 'ru' ? 'ru' : 'en';
+    // Another connection: its recommended model and its address, as the core answers.
+    if (c.kind === 'refineConnection') {
+      const conn = now.connections.find((x) => x.id === c.value)!;
+      now = { ...now, refineModel: conn.models[0].id, refineAddress: ADDRESSES[c.value] ?? '' };
+    }
     return now;
   });
   core.autostartGet.mockResolvedValue(false);
@@ -112,6 +140,7 @@ export function stub(settings: api.SettingsView = view()): void {
   core.keyState.mockResolvedValue({ saved: false, mask: '' });
   core.keySet.mockImplementation(async (_name, value) => ({ saved: true, mask: `${value.slice(0, 3)}…${value.slice(-3)}` }));
   core.keyCheck.mockResolvedValue('works');
+  core.serverCheck.mockResolvedValue(false);
   core.micList.mockResolvedValue({ names: ['Laptop Microphone'], default: 'Laptop Microphone' });
   core.micPreview.mockResolvedValue(undefined);
   core.onMicLevel.mockImplementation(async (cb) => {

@@ -10,7 +10,7 @@ use cue_core::usage::Summary;
 use cue_engines::EngineError;
 use cue_engines::keys::{self, KeyName};
 
-const USAGE: &str = "cue-cli keys set <anthropic|openrouter>\ncue-cli keys show\ncue-cli keys check\n\
+const USAGE: &str = "cue-cli keys set <anthropic|openrouter|openai|gemini|deepseek|mistral|groq|xai>\ncue-cli keys show\ncue-cli keys check\n\
                      cue-cli usage [YYYY-MM]\ncue-cli leak-scan <file or folder>...";
 
 fn usage() -> ! {
@@ -153,6 +153,11 @@ async fn main() -> Result<()> {
                     Ok(Some(key)) => Ok(Some(match k {
                         KeyName::Anthropic => cue_engines::check::anthropic(&http, &key).await,
                         KeyName::OpenRouter => cue_engines::check::openrouter(&http, &key).await,
+                        // An OpenAI-compatible service: its model list at the connection's address.
+                        other => {
+                            let c = cue_core::connections::find(other.as_str()).context("a key without a connection")?;
+                            cue_engines::chat::check(&http, c.base_url, Some(&key)).await
+                        }
                     })),
                     Ok(None) => Ok(None),
                     Err(e) => Err(e),

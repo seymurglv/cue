@@ -74,6 +74,9 @@ Title «Чистка текста» / "Cleanup". One group of two rows, then a n
 2. **Anthropic.** Today's key row from keys.ts: the `.kin` field and «Проверить» / "Check", the key's state under the
    name («Работает» / "Works" and the others).
 
+Since 2026-11-02-refine-connections.md the group also has «Уровень» / "Level" after the style, the key row's name is
+the selector of the connection («Anthropic ⌄» / «OpenRouter ⌄»), and the key row and the note follow the chosen one.
+
 **The note**, as on Speech recognition: «Текст уходит в Anthropic для чистки; история — только на этом компьютере.» /
 "Text goes to Anthropic for the cleanup; the history stays on this computer only."
 

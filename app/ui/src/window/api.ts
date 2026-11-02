@@ -40,9 +40,23 @@ export const KEEPS: readonly Keep[] = ['forever', 'year', 'month', 'week', 'off'
 export type AudioKeep = 'day' | 'week' | 'month' | 'off';
 export const AUDIO_KEEPS: readonly AudioKeep[] = ['day', 'week', 'month', 'off'];
 export type UiLanguage = 'auto' | 'en' | 'ru';
-/** How freely the cleanup edits: careful keeps the speaker's wording, bold also turns spoken phrasing into written. */
-export type RefineStyle = 'careful' | 'bold';
-export const REFINE_STYLES: readonly RefineStyle[] = ['careful', 'bold'];
+/** CUE's own cleanup, or the user's instructions in its place. */
+export type RefineStyle = 'default' | 'custom';
+export const REFINE_STYLES: readonly RefineStyle[] = ['default', 'custom'];
+/** A model of a connection: its price per million tokens (input, output), or for a local one its size on disk. */
+export interface ModelView {
+  id: string;
+  name: string;
+  usd: [number, number] | null;
+  gb: number | null;
+}
+/** A connection the cleanup can go through; its first model is the recommended one. */
+export interface ConnectionView {
+  id: string;
+  name: string;
+  local: boolean;
+  models: ModelView[];
+}
 /** The settings as the core holds them. `historyKeep` is null while the period is unknown (nothing is written to the
  *  history or deleted from it until the user picks one); `historyAudio` — how long recordings are kept, as the user
  *  chose it, null while unknown (none is recorded until the user picks one); `micDevice` null — the Windows microphone;
@@ -60,6 +74,13 @@ export interface SettingsView {
   /** The dictionary's words, the newest first. */
   dictionary: string[];
   refineStyle: RefineStyle;
+  /** The custom style's instructions. */
+  refineCustom: string;
+  /** The cleanup's connection, its model, and its address (a local server's as the user set it). */
+  refineConnection: string;
+  refineModel: string;
+  refineAddress: string;
+  connections: ConnectionView[];
 }
 export type SettingChange =
   | { kind: 'historyKeep'; value: Keep }
@@ -68,10 +89,15 @@ export type SettingChange =
   | { kind: 'translateTarget'; value: string }
   | { kind: 'uiLanguage'; value: UiLanguage }
   | { kind: 'refineStyle'; value: RefineStyle }
+  | { kind: 'refineCustom'; value: string }
+  | { kind: 'refineConnection'; value: string }
+  | { kind: 'refineModel'; value: string }
+  | { kind: 'refineAddress'; value: string }
   | { kind: 'dictAdd'; value: string }
   | { kind: 'dictRemove'; value: string };
 
-export type KeyName = 'anthropic';
+/** The keys of the cleanup's cloud connections, each under its connection's id. */
+export type KeyName = 'anthropic' | 'openrouter' | 'openai' | 'gemini' | 'deepseek' | 'mistral' | 'groq' | 'xai';
 /** Whether a key is saved and its mask; never the key. */
 export interface KeyView {
   saved: boolean;
@@ -138,6 +164,8 @@ export const keyState = (name: KeyName) => invoke<KeyView>('key_state', { name }
 /** The value goes to Windows Credential Manager; the answer is its mask. */
 export const keySet = (name: KeyName, value: string) => invoke<KeyView>('key_set', { name, value });
 export const keyCheck = (name: KeyName) => invoke<KeyCheck>('key_check', { name });
+/** Whether a local server answers at `address`. */
+export const serverCheck = (address: string) => invoke<boolean>('server_check', { address });
 
 export const micList = () => invoke<MicList>('mic_list');
 /** `device` null — the Windows microphone. The preview is this window's: its level comes here, and only this window's

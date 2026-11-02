@@ -1,13 +1,24 @@
-// The key row of the settings tray's Keys page and of the welcome window's Keys step: Anthropic's key, for the cleanup,
-// a password field, "Check" and the key's state. A key is typed into the field, sent once to be saved and the field
+// The key row of the settings tray's Cleanup page and of the welcome window's Keys step: the key of the cleanup's
+// cloud connection, a password field, "Check" and the key's state. A key is typed into the field, sent once to be saved and the field
 // cleared: its value is not kept here and never logged, and only its mask comes back into the page.
 import * as api from './api';
 import type { KeyName } from './api';
 import { codeOf, h, logFailed, srow, type Ctx } from './page';
 import type { KeyState } from './text';
 
+/** The welcome window's keys; the tray shows the one of the chosen connection, out of `ALL_KEYS`. */
 export const KEYS: readonly KeyName[] = ['anthropic'];
-export const KEY_TITLE: Record<KeyName, string> = { anthropic: 'Anthropic' };
+export const ALL_KEYS: readonly KeyName[] = ['anthropic', 'openrouter', 'openai', 'gemini', 'deepseek', 'mistral', 'groq', 'xai'];
+export const KEY_TITLE: Record<KeyName, string> = {
+  anthropic: 'Anthropic',
+  openrouter: 'OpenRouter',
+  openai: 'OpenAI',
+  gemini: 'Google Gemini',
+  deepseek: 'DeepSeek',
+  mistral: 'Mistral',
+  groq: 'Groq',
+  xai: 'xAI',
+};
 
 /** What the page knows of a key: saved or not, its mask, the result of its last check (null — none yet). */
 export interface KeyInfo {
@@ -17,9 +28,7 @@ export interface KeyInfo {
 }
 
 export class KeyRows {
-  readonly keys: Record<KeyName, KeyInfo> = {
-    anthropic: { saved: false, mask: '', state: null },
-  };
+  readonly keys = Object.fromEntries(ALL_KEYS.map((k) => [k, { saved: false, mask: '', state: null }])) as Record<KeyName, KeyInfo>;
   /** The saved keys were read: until then a row shows no state. */
   read = false;
 
@@ -30,7 +39,8 @@ export class KeyRows {
     private readonly changed: () => void,
   ) {}
 
-  row(name: KeyName): HTMLElement {
+  /** The row of `name`'s key, named `title` (the Cleanup page names it "Key": the card above names the connection). */
+  row(name: KeyName, title: string = KEY_TITLE[name]): HTMLElement {
     const t = this.ctx.t;
     const input = h('input', 'kin');
     input.type = 'password';
@@ -41,7 +51,7 @@ export class KeyRows {
     const btn = h('button', 'btn2 ck', t.check);
     btn.type = 'button';
     btn.dataset.check = name;
-    const { row, small } = srow(KEY_TITLE[name], null, input, btn);
+    const { row, small } = srow(title, null, input, btn);
     small.dataset.state = name;
     row.dataset.key = name;
     this.paint(name, input, btn, small);
@@ -57,15 +67,15 @@ export class KeyRows {
   /** A field shown holds a key typed and not sent yet (its value is only looked at, not kept). */
   typed(): boolean {
     const box = this.box();
-    return KEYS.some((name) => !!box?.querySelector<HTMLInputElement>(`input[data-key="${name}"]`)?.value.trim());
+    return ALL_KEYS.some((name) => !!box?.querySelector<HTMLInputElement>(`input[data-key="${name}"]`)?.value.trim());
   }
 
   /** The rows shown show what is known now. */
   refresh(): void {
     const box = this.box();
-    for (const name of KEYS) {
+    for (const name of ALL_KEYS) {
       const row = box?.querySelector(`.srow[data-key="${name}"]`);
-      if (row) this.paint(name, row.querySelector('input')!, row.querySelector('button')!, row.querySelector('small')!);
+      if (row) this.paint(name, row.querySelector('input')!, row.querySelector<HTMLButtonElement>('button[data-check]')!, row.querySelector('small')!);
     }
     this.changed();
   }
@@ -73,7 +83,7 @@ export class KeyRows {
   /** Whether each key is saved, and its mask. */
   async readAll(): Promise<void> {
     await Promise.all(
-      KEYS.map((name) =>
+      ALL_KEYS.map((name) =>
         api.keyState(name).then(
           (v) => Object.assign(this.keys[name], { saved: v.saved, mask: v.mask }),
           (e) => logFailed(`reading the ${name} key`, e),

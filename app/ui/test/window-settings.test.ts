@@ -142,7 +142,7 @@ describe('The settings tray', () => {
     core.keyCheck.mockResolvedValue('badKey');
     page = await mount();
     await open();
-    expect(text($('.btray em[data-val="cleanup"]'))).toBe('Careful');
+    expect(text($('.btray em[data-val="cleanup"]'))).toBe('Default');
     await sub('cleanup');
     const anthropic = $('small[data-state="anthropic"]')!;
     expect(text(anthropic)).toBe('Saved');
@@ -243,7 +243,7 @@ describe('The settings tray', () => {
     click($('[data-check="anthropic"]'));
     await settle();
     key('Escape');
-    expect(text(em())).toBe('Careful');
+    expect(text(em())).toBe('Default');
     expect(em().classList.contains('warn')).toBe(false);
   });
 
@@ -784,28 +784,150 @@ describe('The settings tray', () => {
     expect(sw.getAttribute('aria-checked')).toBe('false');
   });
 
-  it('the Cleanup page: the careful or bold style, the Anthropic key and the note', async () => {
+  it('the Cleanup page: the style, the connection card, the key, the model and the note', async () => {
     stub(view({ lang: 'ru', uiLanguage: 'ru' }));
-    core.keyState.mockResolvedValue({ saved: true, mask: 'sk-…789' });
+    core.keyState.mockImplementation(async (name) => (name === 'anthropic' ? { saved: true, mask: 'sk-…789' } : { saved: false, mask: '' }));
     page = await mount();
     await open();
     const value = () => text($('.btray em[data-val="cleanup"]'));
-    expect(value()).toBe('Бережная');
+    expect(value()).toBe('По умолчанию');
     await sub('cleanup');
     expect(title()).toBe('Чистка текста');
-    const rows = $$('.btray .sgrp > .srow').map((r) => r.dataset.key ?? text(r.querySelector('.stx b')));
-    expect(rows).toEqual(['Стиль', 'anthropic']);
-    expect(text($('.btray .tft'))).toBe('Текст уходит в Anthropic для чистки; история — только на этом компьютере.');
     const seg = () => $$('[data-seg="refine"] button');
-    expect(seg().map((b) => b.textContent)).toEqual(['Бережная', 'Смелая']);
+    expect(seg().map((b) => b.textContent)).toEqual(['По умолчанию', 'Свой']);
     expect(seg().map((b) => b.getAttribute('aria-pressed'))).toEqual(['true', 'false']);
-    click(seg()[1]);
+    // The card: the lamp on, the name, the key's state.
+    const card = $<HTMLButtonElement>('.btray .pk[data-dd="connection"]')!;
+    expect(card.getAttribute('aria-label')).toBe('Подключение');
+    expect(text(card.querySelector('.pt b'))).toBe('Anthropic');
+    expect(text(card.querySelector('.pt small'))).toBe('Ключ сохранён · sk-…789');
+    expect(card.querySelector('.lamp')!.classList.contains('on')).toBe(true);
+    // The key row under it, then the model.
+    const keyRow = $<HTMLElement>('.btray .srow[data-key="anthropic"]')!;
+    expect(text(keyRow.querySelector('.stx b'))).toBe('Ключ');
+    expect(text($('.btray [data-dd="rmodel"] .ddv'))).toBe('Claude Haiku 5.5');
+    expect(text($('.btray .tft'))).toBe('Текст уходит в Anthropic для чистки; история — только на этом компьютере.');
+  });
+
+  it('the connection card lists ten connections in two groups and switches to the one picked', async () => {
+    core.keyState.mockImplementation(async (name) => (name === 'anthropic' ? { saved: true, mask: 'sk-…789' } : { saved: false, mask: '' }));
+    page = await mount();
+    await open();
+    const em = () => $<HTMLElement>('.btray em[data-val="cleanup"]')!;
+    expect(text(em())).toBe('Default');
+    await sub('cleanup');
+    const card = () => $<HTMLButtonElement>('.btray .pk[data-dd="connection"]')!;
+    click(card());
+    const menu = () => $<HTMLElement>('.menu')!;
+    expect(menu().classList.contains('wide')).toBe(true);
+    expect($$('.menu .mg').map((g) => text(g))).toEqual(['In the cloud', 'On this computer']);
+    const items = () => $$('.menu [data-i]');
+    expect(items().map((b) => text(b.querySelector('.mlb')))).toEqual([
+      'Anthropic', 'OpenAI', 'Google Gemini', 'OpenRouter', 'DeepSeek', 'Mistral', 'Groq', 'xAI', 'Ollama', 'LM Studio',
+    ]);
+    expect(text(items()[0].querySelector('.msub'))).toBe('Key saved · sk-…789');
+    expect(text(items()[1].querySelector('.msub'))).toBe('No key');
+    expect(text(items()[8].querySelector('.msub'))).toBe('Not checked');
+    expect(items().map((b) => b.querySelector('.mlamp')!.classList.contains('on'))).toEqual([true, false, false, false, false, false, false, false, false, false]);
+    expect(items().map((b) => b.getAttribute('aria-checked'))[0]).toBe('true');
+    // A second press on the card closes the list.
+    click(card());
+    expect($('.menu')).toBeNull();
+    click(card());
+    click(items()[1]);
     await settle();
-    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'refineStyle', value: 'bold' });
-    expect(core.settingsSet).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'uiLanguage' }));
-    expect(seg().map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'true']);
+    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'refineConnection', value: 'openai' });
+    expect($('.menu')).toBeNull();
+    expect(text(card().querySelector('.pt b'))).toBe('OpenAI');
+    expect(text(card().querySelector('.pt small'))).toBe('No key');
+    expect($$('.btray .srow[data-key]').map((r) => r.dataset.key)).toEqual(['openai']);
+    expect(text($('.btray [data-dd="rmodel"] .ddv'))).toBe('GPT-6 Luna');
+    expect(text($('.btray .tft'))).toBe('Text goes to OpenAI for the cleanup; the history stays on this computer only.');
+    // The OpenAI key is not saved: the first page says so, in amber.
     key('Escape');
-    expect(value()).toBe('Смелая');
+    expect(text(em())).toBe('No OpenAI key');
+    expect(em().classList.contains('warn')).toBe(true);
+    // Saved and checked on its page: the card and the first page follow.
+    await sub('cleanup');
+    $<HTMLInputElement>('input[data-key="openai"]')!.value = 'sk-proj-new-1234';
+    click($('[data-check="openai"]'));
+    await settle();
+    expect(core.keySet).toHaveBeenCalledWith('openai', 'sk-proj-new-1234');
+    expect(core.keyCheck).toHaveBeenCalledWith('openai');
+    expect(text(card().querySelector('.pt small'))).toBe('Key saved · sk-…234');
+    key('Escape');
+    expect(text(em())).toBe('Default');
+  });
+
+  it('the model list marks the recommended one and gives each its price', async () => {
+    page = await mount();
+    await open();
+    await sub('cleanup');
+    click($('.btray [data-dd="rmodel"]'));
+    const items = () => $$('.menu [data-i]');
+    expect(items().map((b) => text(b.querySelector('.mlb')))).toEqual(['Claude Haiku 5.5', 'Claude Sonnet 5.5']);
+    expect(items().map((b) => text(b.querySelector('.msub')))).toEqual(['$0.10 / $0.50 per 1M tokens', '$2 / $10 per 1M tokens']);
+    expect(items().map((b) => text(b.querySelector('.mbadge')))).toEqual(['Recommended', '']);
+    expect(items().map((b) => b.getAttribute('aria-checked'))).toEqual(['true', 'false']);
+    click(items()[1]);
+    await settle();
+    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'refineModel', value: 'claude-sonnet-5-5' });
+    expect(text($('.btray [data-dd="rmodel"] .ddv'))).toBe('Claude Sonnet 5.5');
+  });
+
+  it('the custom style opens a field for the instructions, saved when it loses focus', async () => {
+    saved();
+    page = await mount();
+    await open();
+    await sub('cleanup');
+    expect($('.btray textarea')).toBeNull();
+    click($$('[data-seg="refine"] button')[1]);
+    await settle();
+    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'refineStyle', value: 'custom' });
+    const field = $<HTMLTextAreaElement>('.btray textarea.cta')!;
+    expect(field.placeholder).toBe('For example: keep it short, no emoji, terms in English.');
+    expect(field.maxLength).toBe(2000);
+    expect(text($('.btray .srow .stx small'))).toBe("Your instructions instead of CUE's cleanup");
+    field.value = 'пиши коротко';
+    field.dispatchEvent(new Event('change', { bubbles: true }));
+    await settle();
+    expect(core.settingsSet).toHaveBeenLastCalledWith({ kind: 'refineCustom', value: 'пиши коротко' });
+    expect($<HTMLTextAreaElement>('.btray textarea.cta')!.value).toBe('пиши коротко');
+    key('Escape');
+    expect(text($('.btray em[data-val="cleanup"]'))).toBe('Custom');
+  });
+
+  it('a local server has an address row instead of a key, and its check lights the card', async () => {
+    stub(view({ refineConnection: 'ollama', refineModel: 'gemma4:12b', refineAddress: 'http://localhost:11434/v1' }));
+    core.serverCheck.mockResolvedValue(true);
+    page = await mount();
+    await open();
+    // A local server needs no key: no amber warning.
+    expect(text($('.btray em[data-val="cleanup"]'))).toBe('Default');
+    await sub('cleanup');
+    expect($$('.btray .srow[data-key]')).toEqual([]);
+    const card = $<HTMLButtonElement>('.btray .pk')!;
+    expect(text(card.querySelector('.pt small'))).toBe('Not checked');
+    const address = $<HTMLInputElement>('.btray input[data-address]')!;
+    expect(address.value).toBe('http://localhost:11434/v1');
+    expect(text($('.btray .srow[data-server] .stx b'))).toBe('Address');
+    expect(text($('.btray [data-dd="rmodel"] .ddv'))).toBe('Gemma 4 12B');
+    expect(text($('.btray .tft'))).toBe('Text never leaves this computer.');
+    click($('[data-server-check]'));
+    await settle();
+    expect(core.serverCheck).toHaveBeenCalledWith('http://localhost:11434/v1');
+    expect(core.settingsSet).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'refineAddress' }));
+    expect(text($('.btray .pk .pt small'))).toBe('Running');
+    expect($('.btray .pk .lamp')!.classList.contains('on')).toBe(true);
+    // Another address: checked, then kept.
+    core.serverCheck.mockResolvedValue(false);
+    $<HTMLInputElement>('.btray input[data-address]')!.value = 'http://10.0.0.5:11434/v1';
+    click($('[data-server-check]'));
+    await settle();
+    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'refineAddress', value: 'http://10.0.0.5:11434/v1' });
+    expect(text($('.btray .pk .pt small'))).toBe('Not running');
+    click($('.btray [data-dd="rmodel"]'));
+    expect($$('.menu [data-i] .msub').map((b) => text(b))).toEqual(['≈ 8 GB on disk', '≈ 7 GB on disk']);
   });
 
   it('reads the settings again when the core did not answer a change in time', async () => {

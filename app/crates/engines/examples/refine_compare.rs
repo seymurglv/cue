@@ -3,7 +3,7 @@
 //!
 //! Run:
 //! cargo run -p cue-engines --example refine_compare -- phrases.json out.json [--models a,b,…] [--runs 3] [--max-usd 1.00]
-//!   [--terms a,b,…] [--style careful|bold] [--dry-run]
+//!   [--terms a,b,…] [--custom TEXT] [--dry-run]
 //!
 //! - `phrases.json` is an array of `{id, app, raw, before_cursor?, to?}`; `out.json` gets all calls and the summary.
 //! - Models are OpenRouter ids (`openai/gpt-6-luna`) and `claude-sonnet-5-5` — the app's current path (Anthropic direct,
@@ -18,8 +18,8 @@
 //!   (cold), reported separately in the summary; medians and p90 are over warm calls.
 //! - The prompt, the context and the response check are the same as in the app: `cue_core::refine`, then `strip_markup`,
 //!   `tidy_list_items` and `sanity_ok` (all via `claude::decide`) with default settings.
-//! - `--style` is the refine style every call uses (`refine.style` in settings.json): `careful` by default, `bold`
-//!   for the bold rewrite.
+//! - `--custom TEXT` cleans up in the custom style with these instructions (`refine.style: "custom"`); without it,
+//!   CUE's own cleanup, as the app's default.
 //! - `--terms` is a dictionary, comma-separated, sent to every model the way the app sends `dictionary.terms`;
 //!   without it, none (as with an empty dictionary).
 //! - Stops as soon as more than `--max-usd` has been spent. `--dry-run` only checks the keys, the phrases and the model list,
@@ -36,7 +36,7 @@ use cue_core::flow::RefineOutcome;
 use cue_core::refine::{timeout_ms, RefineContext};
 use cue_core::settings::{Pricing, RefineSettings, RefineStyle};
 use cue_core::translate;
-use cue_engines::claude::{self, Parsed};
+use cue_engines::claude::{self, Job, Parsed};
 use cue_engines::keys::{self, KeyName};
 use cue_engines::openrouter::{self, Failure, ModelInfo, Profile, Routing};
 use cue_engines::EngineError;
@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// The app's current path: its default model (Claude Sonnet 5.5) through Anthropic directly.
-const DIRECT: &str = "claude-sonnet-5-5";
+const DIRECT: &str = "claude-haiku-5-5";
 
 /// The default set: the direct path, the same Haiku through OpenRouter (the middleman's price) and the candidates.
 const DEFAULT_MODELS: [&str; 10] = [
@@ -63,7 +63,7 @@ const DEFAULT_MODELS: [&str; 10] = [
 /// Request timeout through OpenRouter — well above the app's timeout (3 s), so the whole latency tail is visible.
 const ROUTER_TIMEOUT: Duration = Duration::from_secs(30);
 
-const USAGE: &str = "refine_compare <phrases.json> <out.json> [--models a,b,…] [--runs N] [--max-usd X] [--terms a,b,…] [--style careful|bold] [--dry-run]";
+const USAGE: &str = "refine_compare <phrases.json> <out.json> [--models a,b,…] [--runs N] [--max-usd X] [--terms a,b,…] [--custom TEXT] [--dry-run]";
 
 #[derive(Debug, PartialEq)]
 struct Args {
@@ -74,15 +74,15 @@ struct Args {
     max_usd: f64,
     /// The dictionary, as `dictionary.terms` in settings.json.
     terms: Vec<String>,
-    /// The refine style, as `refine.style` in settings.json.
-    style: RefineStyle,
+    /// The custom style's instructions (`refine.custom` with `refine.style: "custom"`); `None` — CUE's own cleanup.
+    custom: Option<String>,
     dry_run: bool,
 }
 
 fn parse_args(args: &[String]) -> anyhow::Result<Args> {
     let mut positional = Vec::new();
     let (mut models, mut runs, mut max_usd, mut terms, mut dry_run) = (None, 3, 1.0, Vec::new(), false);
-    let mut style = RefineStyle::Careful;
+    let mut custom = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let mut value = || it.next().with_context(|| format!("{arg} needs a value\n{USAGE}"));
@@ -106,12 +106,12 @@ fn parse_args(args: &[String]) -> anyhow::Result<Args> {
                     bail!("--terms: empty list");
                 }
             }
-            "--style" => {
-                style = match value()?.as_str() {
-                    "careful" => RefineStyle::Careful,
-                    "bold" => RefineStyle::Bold,
-                    other => bail!("--style: careful or bold, not {other}"),
+            "--custom" => {
+                let text = value()?.trim().to_owned();
+                if text.is_empty() {
+                    bail!("--custom: empty instructions");
                 }
+                custom = Some(text);
             }
             "--dry-run" => dry_run = true,
             flag if flag.starts_with("--") => bail!("unknown flag {flag}\n{USAGE}"),
@@ -123,7 +123,7 @@ fn parse_args(args: &[String]) -> anyhow::Result<Args> {
     if models.is_empty() {
         bail!("--models: empty list");
     }
-    Ok(Args { phrases, out, models, runs, max_usd, terms, style, dry_run })
+    Ok(Args { phrases, out, models, runs, max_usd, terms, custom, dry_run })
 }
 
 #[derive(Debug, Deserialize)]
@@ -353,7 +353,7 @@ async fn router_call(
     terms: &[String],
     s: &RefineSettings,
 ) -> Call {
-    let body = |r: Routing| openrouter::request_body(id, profile, r, &p.raw, ctx, terms);
+    let body = |r: Routing| openrouter::request_body_styled(id, profile, r, &p.raw, ctx, terms, Job::Rewrite, s.custom_text());
     let routed = openrouter::complete_routed(http, key, *routing, ROUTER_TIMEOUT, body).await;
     let (result, used, elapsed) = (routed.result, routed.routing, ms(routed.elapsed));
     if result.is_ok() {
@@ -688,7 +688,10 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let s = RefineSettings { style: args.style, ..RefineSettings::default() };
+    let s = match &args.custom {
+        Some(text) => RefineSettings { style: RefineStyle::Custom, custom: text.clone(), ..RefineSettings::default() },
+        None => RefineSettings::default(),
+    };
     let (mut calls, mut spent, mut stopped_by_budget) = (Vec::new(), 0.0, false);
     let mut skipped = Vec::new();
     // An empty report right away: the output path is checked before the first paid request.
@@ -755,16 +758,15 @@ mod tests {
         assert_eq!(a.models, DEFAULT_MODELS.map(str::to_owned).to_vec());
         assert_eq!((a.runs, a.max_usd, a.dry_run), (3, 1.0, false));
         assert!(a.terms.is_empty(), "no dictionary by default");
-        assert_eq!(a.style, RefineStyle::Careful);
+        assert_eq!(a.custom, None, "CUE's own cleanup by default");
         assert_eq!(DEFAULT_MODELS.len(), 10);
-        assert_eq!(DIRECT, RefineSettings::default().model, "the direct path is the app's model");
+        assert_eq!(DIRECT, RefineSettings::default().model().id, "the direct path is the app's model");
     }
 
     #[test]
-    fn args_style() {
-        assert_eq!(args(&["p.json", "o.json", "--style", "bold"]).unwrap().style, RefineStyle::Bold);
-        assert_eq!(args(&["p.json", "o.json", "--style", "careful"]).unwrap().style, RefineStyle::Careful);
-        assert!(args(&["p.json", "o.json", "--style", "wild"]).is_err());
+    fn args_custom() {
+        assert_eq!(args(&["p.json", "o.json", "--custom", " кратко "]).unwrap().custom.as_deref(), Some("кратко"));
+        assert!(args(&["p.json", "o.json", "--custom", " "]).is_err());
     }
 
     #[test]

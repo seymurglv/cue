@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use cue_core::history;
+use cue_core::connections::{self, Cost};
 use cue_core::settings::{AudioKeep, DropPosition, Keep, RefineStyle, Settings, UiLanguage};
 use cue_core::translate;
 use cue_core::ui::{TrayKind, UiAction, UiState};
@@ -45,8 +46,58 @@ pub struct SettingsView {
     pub saved: bool,
     /// The dictionary's words as settings.json keeps them, the newest first.
     pub dictionary: Vec<String>,
-    /// How freely refine edits.
+    /// CUE's cleanup or the user's instructions, and those instructions.
     pub refine_style: RefineStyle,
+    pub refine_custom: String,
+    /// The cleanup's connection, its model and its address (a local server's as the user set it).
+    pub refine_connection: &'static str,
+    pub refine_model: &'static str,
+    pub refine_address: String,
+    /// Every connection the cleanup can go through, with its models, the recommended one first.
+    pub connections: Vec<ConnectionView>,
+}
+
+/// A connection as the Cleanup page lists it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionView {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub local: bool,
+    pub models: Vec<ModelView>,
+}
+
+/// A model under its connection: its price per million tokens (input, output), or for a local one its size on disk.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelView {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub usd: Option<(f64, f64)>,
+    pub gb: Option<f32>,
+}
+
+/// The connections of `cue_core::connections` for the window.
+fn connection_views() -> Vec<ConnectionView> {
+    connections::CONNECTIONS
+        .iter()
+        .map(|c| ConnectionView {
+            id: c.id,
+            name: c.name,
+            local: c.local,
+            models: c
+                .models
+                .iter()
+                .map(|m| {
+                    let (usd, gb) = match m.cost {
+                        Cost::Usd { input, output, .. } => (Some((input, output)), None),
+                        Cost::Disk(gb) => (None, Some(gb)),
+                    };
+                    ModelView { id: m.id, name: m.name, usd, gb }
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 impl SettingsView {
@@ -62,6 +113,11 @@ impl SettingsView {
             saved,
             dictionary: s.dictionary.terms.clone(),
             refine_style: s.refine.style,
+            refine_custom: s.refine.custom.clone(),
+            refine_connection: s.refine.connection().id,
+            refine_model: s.refine.model().id,
+            refine_address: s.refine.address().to_owned(),
+            connections: connection_views(),
         }
     }
 }
@@ -79,6 +135,10 @@ impl std::fmt::Debug for SettingsView {
             .field("saved", &self.saved)
             .field("dictionary", &self.dictionary.len())
             .field("refine_style", &self.refine_style)
+            .field("refine_custom_chars", &self.refine_custom.chars().count())
+            .field("refine_connection", &self.refine_connection)
+            .field("refine_model", &self.refine_model)
+            .field("refine_address_chars", &self.refine_address.chars().count())
             .finish()
     }
 }
@@ -434,7 +494,7 @@ mod tests {
         let mut names: Vec<&str> = view.as_object().unwrap().keys().map(String::as_str).collect();
         names.sort_unstable();
         let expected =
-            ["dictionary", "historyAudio", "historyKeep", "lang", "languages", "micDevice", "refineStyle", "saved", "translateTarget", "uiLanguage"];
+            ["connections", "dictionary", "historyAudio", "historyKeep", "lang", "languages", "micDevice", "refineAddress", "refineConnection", "refineCustom", "refineModel", "refineStyle", "saved", "translateTarget", "uiLanguage"];
         assert_eq!(names, expected);
         let defaults = [
             ("historyKeep", json!("month")),
@@ -445,7 +505,11 @@ mod tests {
             ("lang", json!("en")),
             ("saved", json!(true)),
             ("dictionary", json!([])),
-            ("refineStyle", json!("careful")),
+            ("refineStyle", json!("default")),
+            ("refineCustom", json!("")),
+            ("refineConnection", json!("anthropic")),
+            ("refineModel", json!("claude-haiku-5-5")),
+            ("refineAddress", json!("https://api.anthropic.com/v1")),
         ];
         for (name, value) in defaults {
             assert_eq!(view[name], value, "{name}");
@@ -461,7 +525,11 @@ mod tests {
             SettingChange::MicDevice(Some("USB Microphone".into())),
             SettingChange::TranslateTarget("de".into()),
             SettingChange::UiLanguage(UiLanguage::Ru),
-            SettingChange::RefineStyle(RefineStyle::Bold),
+            SettingChange::RefineStyle(RefineStyle::Custom),
+            SettingChange::RefineCustom("пиши коротко".into()),
+            SettingChange::RefineConnection("ollama".into()),
+            SettingChange::RefineModel("gemma4:e4b".into()),
+            SettingChange::RefineAddress("http://10.0.0.5:11434/v1".into()),
         ] {
             assert!(s.apply(change));
         }
@@ -474,7 +542,11 @@ mod tests {
             ("uiLanguage", json!("ru")),
             ("lang", json!("ru")),
             ("saved", json!(false)),
-            ("refineStyle", json!("bold")),
+            ("refineStyle", json!("custom")),
+            ("refineCustom", json!("пиши коротко")),
+            ("refineConnection", json!("ollama")),
+            ("refineModel", json!("gemma4:e4b")),
+            ("refineAddress", json!("http://10.0.0.5:11434/v1")),
         ];
         for (name, value) in set {
             assert_eq!(view[name], value, "{name}");

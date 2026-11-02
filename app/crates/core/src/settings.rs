@@ -2,9 +2,11 @@
 //! sits, the user's dictionary, the translation pair, "Ask", the pinned microphone, how long the history keeps its days
 //! and their recordings, prices for usage accounting. The main window changes a setting one at a time
 //! (`SettingChange`).
+use crate::connections::{self, Connection, Model};
 use crate::refine;
 use crate::translate;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,12 +37,28 @@ impl Default for SttSettings {
     }
 }
 
+/// The longest custom instructions the cleanup takes, in characters.
+pub const MAX_CUSTOM_CHARS: usize = 2_000;
+
+/// The cleanup: its style, the connection it goes through and that connection's model
+/// (docs/specs/2026-11-02-refine-connections.md). `model` and `level` of earlier versions are read past.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RefineSettings {
-    pub model: String,
-    /// How freely refine edits ([`RefineStyle`]).
+    /// The id of a connection in `connections::CONNECTIONS`; one CUE does not know reads as the default.
+    #[serde(deserialize_with = "connection_id")]
+    pub connection: String,
+    /// The model the user picked per connection, only where it is not the recommended one.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, String>,
+    /// A local server's address, only where it is not the default.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub addresses: BTreeMap<String, String>,
+    /// CUE's cleanup or the user's instructions ([`RefineStyle`]).
     pub style: RefineStyle,
+    /// The user's instructions for the custom style.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub custom: String,
     /// How many characters before the caret to give the model.
     pub context_chars: usize,
     /// Sanity check thresholds.
@@ -49,23 +67,65 @@ pub struct RefineSettings {
     pub min_overlap: f32,
 }
 
-/// How freely refine edits. `Careful` fixes the slips and keeps the speaker's wording; `Bold` also turns spoken
-/// phrasing into written (`refine::BOLD_PROMPT`).
+/// `Default` is CUE's own cleanup (`refine::BOLD_PROMPT`); `Custom` puts the user's instructions in its place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RefineStyle {
     #[default]
-    Careful,
-    Bold,
+    Default,
+    Custom,
 }
 
-/// Only `"bold"` is bold (case and surrounding spaces do not matter); any other value reads as `Careful`, so a typo
-/// here never makes the whole file unreadable.
+/// Only `"custom"` is custom (case and surrounding spaces do not matter); anything else reads as `Default`, the bold and
+/// careful styles of earlier versions among them, so a typo here never makes the whole file unreadable.
 impl<'de> Deserialize<'de> for RefineStyle {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
-        let bold = value.as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("bold"));
-        Ok(if bold { Self::Bold } else { Self::Careful })
+        let custom = value.as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("custom"));
+        Ok(if custom { Self::Custom } else { Self::Default })
+    }
+}
+
+/// A connection id CUE lists (case and spaces do not matter), otherwise the default one.
+fn connection_id<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let id = value.as_str().map(|s| s.trim().to_ascii_lowercase());
+    Ok(id.and_then(|id| connections::find(&id)).unwrap_or_else(connections::default).id.to_owned())
+}
+
+impl RefineSettings {
+    /// The connection the cleanup goes through.
+    pub fn connection(&self) -> &'static Connection {
+        connections::find(&self.connection).unwrap_or_else(connections::default)
+    }
+
+    /// The model the cleanup asks for: the one picked for the connection, or its recommended one.
+    pub fn model(&self) -> &'static Model {
+        self.model_for(self.connection().id)
+    }
+
+    /// The model picked for the connection `id` (still listed), or its recommended one; the default connection's for an
+    /// id CUE does not know.
+    pub fn model_for(&self, id: &str) -> &'static Model {
+        let c = connections::find(id).unwrap_or_else(connections::default);
+        self.models.get(c.id).and_then(|m| c.model(m)).unwrap_or_else(|| c.recommended())
+    }
+
+    /// The model's id in usage.csv and the price table.
+    pub fn usage_model(&self) -> String {
+        self.connection().usage_id(self.model())
+    }
+
+    /// The address of the connection's API: a local server's as the user set it, otherwise the listed one.
+    pub fn address(&self) -> &str {
+        let c = self.connection();
+        self.addresses.get(c.id).map(String::as_str).unwrap_or(c.base_url)
+    }
+
+    /// The user's instructions, when the style is custom and they are not blank.
+    pub fn custom_text(&self) -> Option<&str> {
+        let text = self.custom.trim();
+        (self.style == RefineStyle::Custom && !text.is_empty()).then_some(text)
     }
 }
 
@@ -580,8 +640,16 @@ pub enum SettingChange {
     /// A language code CUE knows.
     TranslateTarget(String),
     UiLanguage(UiLanguage),
-    /// How freely refine edits.
+    /// CUE's cleanup or the user's instructions.
     RefineStyle(RefineStyle),
+    /// The user's instructions for the custom style; see [`Settings::apply`] for what is refused.
+    RefineCustom(String),
+    /// A connection id CUE lists.
+    RefineConnection(String),
+    /// A model of the connection chosen now.
+    RefineModel(String),
+    /// The address of the local server chosen now.
+    RefineAddress(String),
     /// A word for the dictionary, put first; see [`Settings::apply`] for what is refused.
     DictAdd(String),
     /// A word out of the dictionary, as it is written there.
@@ -605,6 +673,11 @@ impl std::fmt::Debug for SettingChange {
             Self::TranslateTarget(code) => f.debug_tuple("TranslateTarget").field(&translate::known(code)).finish(),
             Self::UiLanguage(language) => f.debug_tuple("UiLanguage").field(language).finish(),
             Self::RefineStyle(style) => f.debug_tuple("RefineStyle").field(style).finish(),
+            // The instructions and an address may hold what the user wrote: only their length.
+            Self::RefineCustom(text) => f.debug_struct("RefineCustom").field("chars", &text.chars().count()).finish(),
+            Self::RefineConnection(id) => f.debug_tuple("RefineConnection").field(&connections::find(id).map(|c| c.id)).finish(),
+            Self::RefineModel(id) => f.debug_tuple("RefineModel").field(id).finish(),
+            Self::RefineAddress(url) => f.debug_struct("RefineAddress").field("chars", &url.chars().count()).finish(),
             // A word of the dictionary may be a name: only its length.
             Self::DictAdd(word) => f.debug_struct("DictAdd").field("chars", &word.chars().count()).finish(),
             Self::DictRemove(word) => f.debug_struct("DictRemove").field("chars", &word.chars().count()).finish(),
@@ -637,6 +710,32 @@ impl Settings {
             }
             SettingChange::UiLanguage(language) => set_if_changed(&mut self.ui.language, language),
             SettingChange::RefineStyle(style) => set_if_changed(&mut self.refine.style, style),
+            SettingChange::RefineCustom(text) => {
+                let text = text.trim();
+                if text.chars().count() > MAX_CUSTOM_CHARS {
+                    return false;
+                }
+                set_if_changed(&mut self.refine.custom, text.to_owned())
+            }
+            SettingChange::RefineConnection(id) => {
+                let Some(c) = connections::find(&id) else { return false };
+                set_if_changed(&mut self.refine.connection, c.id.to_owned())
+            }
+            SettingChange::RefineModel(id) => {
+                let c = self.refine.connection();
+                let Some(m) = c.model(&id) else { return false };
+                let chosen = (m != c.recommended()).then(|| m.id.to_owned());
+                set_entry(&mut self.refine.models, c.id, chosen)
+            }
+            SettingChange::RefineAddress(url) => {
+                let c = self.refine.connection();
+                let url = url.trim().trim_end_matches('/');
+                if !c.local || !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return false;
+                }
+                let chosen = (url != c.base_url).then(|| url.to_owned());
+                set_entry(&mut self.refine.addresses, c.id, chosen)
+            }
             SettingChange::DictAdd(word) => {
                 let word = word.trim();
                 let terms = &mut self.dictionary.terms;
@@ -663,6 +762,18 @@ fn set_if_changed<T: PartialEq>(slot: &mut T, value: T) -> bool {
     }
     *slot = value;
     true
+}
+
+/// Sets or removes `key` in `map`; `true` if the map changed.
+fn set_entry(map: &mut BTreeMap<String, String>, key: &str, value: Option<String>) -> bool {
+    match value {
+        Some(v) if map.get(key) != Some(&v) => {
+            map.insert(key.to_owned(), v);
+            true
+        }
+        None => map.remove(key).is_some(),
+        _ => false,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -727,8 +838,11 @@ pub enum SettingsError {
 impl Default for RefineSettings {
     fn default() -> Self {
         Self {
-            model: "claude-sonnet-5-5".into(),
-            style: RefineStyle::Careful,
+            connection: connections::DEFAULT_ID.to_owned(),
+            models: BTreeMap::new(),
+            addresses: BTreeMap::new(),
+            style: RefineStyle::Default,
+            custom: String::new(),
             context_chars: 500,
             min_ratio: 0.35,
             max_ratio: 1.25,
@@ -749,7 +863,11 @@ impl Default for Pricing {
                 price("claude-haiku-5-5", 0.10, 0.50, 0.01),
                 price("claude-sonnet-5-5", 2.0, 10.0, 0.10),
                 price("claude-opus-5-5", 4.0, 20.0, 0.20),
-            ],
+            ]
+            .into_iter()
+            // Every model of the cleanup's connections (`connections::prices`); the Messages API's are above.
+            .chain(connections::prices().filter(|(id, ..)| !id.starts_with("claude-")).map(|(id, i, o, c)| price(&id, i, o, c)))
+            .collect(),
             web_search_usd: 0.01,
         }
     }
@@ -861,7 +979,7 @@ mod tests {
     fn defaults_are_as_documented() {
         let s = Settings::default();
         assert_eq!(s.stt.engine, SttEngineKind::Parakeet);
-        assert_eq!(s.refine.model, "claude-sonnet-5-5");
+        assert_eq!(s.refine.model().id, "claude-haiku-5-5");
         assert_eq!(s.refine.context_chars, 500);
         assert_eq!((s.refine.min_ratio, s.refine.max_ratio, s.refine.min_overlap), (0.35, 1.25, 0.7));
         assert_eq!(s.hold_hints_left, 2);
@@ -891,7 +1009,7 @@ mod tests {
         std::fs::write(&p, r#"{"stt":{"soniox_model":"stt-rt-v6","future_stt":true},"refine":{"model":"claude-sonnet-5-5"},"future":1}"#).unwrap();
         let s = load(&p).unwrap();
         assert_eq!(s.stt.engine, SttEngineKind::Parakeet);
-        assert_eq!(s.refine.model, "claude-sonnet-5-5");
+        assert_eq!(s.refine.model().id, "claude-haiku-5-5");
         assert_eq!(s.refine.context_chars, 500);
         std::fs::remove_file(p).unwrap();
     }
@@ -932,7 +1050,6 @@ mod tests {
         let s = load(&p).expect("a file from earlier versions must load");
 
         let mut expected = Settings::default();
-        expected.refine.model = "claude-sonnet-5-5".into();
         expected.refine.context_chars = 300;
         expected.hold_hints_left = 0;
         expected.bench.save_recordings = true;
@@ -1074,7 +1191,7 @@ mod tests {
     #[test]
     fn invalid_utf8_is_a_parse_error() {
         let p = tmp("badutf8.json");
-        std::fs::write(&p, b"{\"refine\":{\"model\":\"\xff\xfe\"}}").unwrap();
+        std::fs::write(&p, b"{\"refine\":{\"style\":\"\xff\xfe\"}}").unwrap();
         assert!(matches!(load(&p), Err(SettingsError::Parse(_))));
         std::fs::remove_file(p).unwrap();
     }
@@ -1099,22 +1216,94 @@ mod tests {
     }
 
     #[test]
-    fn refine_style_is_careful_unless_bold() {
-        assert_eq!(Settings::default().refine.style, RefineStyle::Careful);
+    fn refine_style_is_default_unless_custom() {
+        assert_eq!(Settings::default().refine.style, RefineStyle::Default);
         for (value, expected) in [
-            (r#""bold""#, RefineStyle::Bold),
-            (r#"" Bold ""#, RefineStyle::Bold),
-            (r#""careful""#, RefineStyle::Careful),
-            (r#""wild""#, RefineStyle::Careful),
-            ("1", RefineStyle::Careful),
-            ("null", RefineStyle::Careful),
+            (r#""custom""#, RefineStyle::Custom),
+            (r#"" Custom ""#, RefineStyle::Custom),
+            (r#""default""#, RefineStyle::Default),
+            // The bold and careful styles of earlier versions: CUE's own cleanup is now the bold one.
+            (r#""bold""#, RefineStyle::Default),
+            (r#""careful""#, RefineStyle::Default),
+            (r#""wild""#, RefineStyle::Default),
+            ("1", RefineStyle::Default),
+            ("null", RefineStyle::Default),
         ] {
             let text = format!(r#"{{"refine":{{"style":{value},"context_chars":100}}}}"#);
             let s: Settings = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{value}: {e}"));
             assert_eq!((s.refine.style, s.refine.context_chars), (expected, 100), "{value}");
         }
-        let written = serde_json::to_value(RefineSettings { style: RefineStyle::Bold, ..RefineSettings::default() }).unwrap();
-        assert_eq!(written["style"], "bold");
+        let written = serde_json::to_value(RefineSettings { style: RefineStyle::Custom, ..RefineSettings::default() }).unwrap();
+        assert_eq!(written["style"], "custom");
+        assert_eq!(serde_json::to_value(RefineSettings::default()).unwrap()["style"], "default");
+    }
+
+    #[test]
+    fn refine_connection_is_a_listed_one_or_anthropic() {
+        assert_eq!(Settings::default().refine.connection().id, "anthropic");
+        for (value, expected) in [
+            (r#""openai""#, "openai"),
+            (r#"" OpenRouter ""#, "openrouter"),
+            (r#""lmstudio""#, "lmstudio"),
+            (r#""bard""#, "anthropic"),
+            ("1", "anthropic"),
+            ("null", "anthropic"),
+        ] {
+            let text = format!(r#"{{"refine":{{"connection":{value},"context_chars":100}}}}"#);
+            let s: Settings = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{value}: {e}"));
+            assert_eq!((s.refine.connection().id, s.refine.context_chars), (expected, 100), "{value}");
+            assert_eq!(serde_json::to_value(&s.refine).unwrap()["connection"], expected, "{value}");
+        }
+    }
+
+    /// The chosen model where one was picked and CUE still lists it, otherwise the recommended one; every listed model
+    /// is priced, so usage.csv never has an unpriced cleanup.
+    #[test]
+    fn refine_model_is_the_chosen_one_or_the_recommended() {
+        let read = |json: &str| serde_json::from_str::<Settings>(json).unwrap().refine;
+        let s = RefineSettings::default();
+        assert_eq!((s.model().id, s.usage_model().as_str()), ("claude-haiku-5-5", "claude-haiku-5-5"));
+        let s = read(r#"{"refine":{"models":{"anthropic":"claude-sonnet-5-5"}}}"#);
+        assert_eq!(s.model().id, "claude-sonnet-5-5");
+        let s = read(r#"{"refine":{"models":{"anthropic":"claude-opus-5-5"}}}"#);
+        assert_eq!(s.model().id, "claude-haiku-5-5", "a model CUE does not list for the connection");
+        let s = read(r#"{"refine":{"connection":"openai","models":{"anthropic":"claude-sonnet-5-5"}}}"#);
+        assert_eq!((s.model().id, s.usage_model().as_str()), ("gpt-6-luna", "openai:gpt-6-luna"));
+        assert_eq!(s.model_for("anthropic").id, "claude-sonnet-5-5");
+        let p = Pricing::default();
+        for (id, ..) in crate::connections::prices() {
+            assert!(p.claude_price(&id).is_some(), "{id} is not priced");
+        }
+    }
+
+    #[test]
+    fn refine_custom_text_only_with_the_custom_style() {
+        let custom = |text: &str| RefineSettings { style: RefineStyle::Custom, custom: text.into(), ..RefineSettings::default() };
+        assert_eq!(custom("  пиши коротко  ").custom_text(), Some("пиши коротко"));
+        assert_eq!(custom(" \n ").custom_text(), None, "blank instructions clean up as Default");
+        assert_eq!(RefineSettings { custom: "пиши коротко".into(), ..RefineSettings::default() }.custom_text(), None);
+    }
+
+    #[test]
+    fn refine_address_is_the_local_server_s() {
+        let read = |json: &str| serde_json::from_str::<Settings>(json).unwrap().refine;
+        let s = read(r#"{"refine":{"connection":"ollama"}}"#);
+        assert_eq!(s.address(), "http://localhost:11434/v1");
+        let s = read(r#"{"refine":{"connection":"ollama","addresses":{"ollama":"http://10.0.0.5:11434/v1"}}}"#);
+        assert_eq!(s.address(), "http://10.0.0.5:11434/v1");
+        assert_eq!(read(r#"{"refine":{"connection":"openai"}}"#).address(), "https://api.openai.com/v1");
+    }
+
+    /// `model` and `level` of earlier versions are read past and never written again; empty choices are not written.
+    #[test]
+    fn old_refine_fields_are_read_past() {
+        let s: Settings =
+            serde_json::from_str(r#"{"refine":{"model":"claude-sonnet-5-5","level":"low","style":"bold","context_chars":300}}"#).unwrap();
+        assert_eq!((s.refine.model().id, s.refine.style, s.refine.context_chars), ("claude-haiku-5-5", RefineStyle::Default, 300));
+        let written = serde_json::to_value(&s.refine).unwrap();
+        for absent in ["model", "level", "models", "addresses", "custom"] {
+            assert!(written.get(absent).is_none(), "{absent}: {written}");
+        }
     }
 
     /// Unknown values mean `auto`, and the rest of the file still loads.
@@ -1725,7 +1914,10 @@ mod tests {
             SettingChange::MicDevice(Some(" ".into())),
             SettingChange::TranslateTarget("en".into()),
             SettingChange::UiLanguage(UiLanguage::Auto),
-            SettingChange::RefineStyle(RefineStyle::Careful),
+            SettingChange::RefineStyle(RefineStyle::Default),
+            SettingChange::RefineCustom(" ".into()),
+            SettingChange::RefineConnection("anthropic".into()),
+            SettingChange::RefineModel("claude-haiku-5-5".into()),
         ] {
             assert!(!s.apply(change.clone()), "{change:?}");
         }
@@ -1737,7 +1929,11 @@ mod tests {
             SettingChange::MicDevice(Some("Mic".into())),
             SettingChange::TranslateTarget("fr".into()),
             SettingChange::UiLanguage(UiLanguage::Ru),
-            SettingChange::RefineStyle(RefineStyle::Bold),
+            SettingChange::RefineStyle(RefineStyle::Custom),
+            SettingChange::RefineCustom("пиши коротко".into()),
+            SettingChange::RefineConnection("ollama".into()),
+            SettingChange::RefineModel("gemma4:e4b".into()),
+            SettingChange::RefineAddress("http://10.0.0.5:11434/v1".into()),
         ] {
             assert!(s.apply(change.clone()), "{change:?}");
             assert!(!s.apply(change.clone()), "the same change twice: {change:?}");
@@ -1747,7 +1943,33 @@ mod tests {
         assert_eq!((s.history.keep.known(), s.audio.device.as_deref()), (Some(Keep::Week), Some("Mic")));
         assert_eq!(s.history.audio.known(), Some(AudioKeep::Day));
         assert_eq!((s.translate.target(), s.ui.language), ("fr", UiLanguage::Ru));
-        assert_eq!(s.refine.style, RefineStyle::Bold);
+        assert_eq!((s.refine.style, s.refine.custom_text()), (RefineStyle::Custom, Some("пиши коротко")));
+        assert_eq!((s.refine.connection().id, s.refine.model().id), ("ollama", "gemma4:e4b"));
+        assert_eq!(s.refine.address(), "http://10.0.0.5:11434/v1");
+    }
+
+    #[test]
+    fn apply_refuses_what_the_cleanup_could_not_use() {
+        let mut s = Settings::default();
+        assert!(!s.apply(SettingChange::RefineConnection("bard".into())), "an unknown connection");
+        assert!(!s.apply(SettingChange::RefineModel("claude-opus-5-5".into())), "a model the connection does not list");
+        assert!(!s.apply(SettingChange::RefineCustom("я".repeat(MAX_CUSTOM_CHARS + 1))), "too long");
+        assert!(!s.apply(SettingChange::RefineAddress("http://localhost:1/v1".into())), "a cloud connection has no address");
+        assert_eq!(s, Settings::default());
+        // A model chosen and then the recommended one again: nothing is kept.
+        assert!(s.apply(SettingChange::RefineModel("claude-sonnet-5-5".into())));
+        assert!(s.apply(SettingChange::RefineModel("claude-haiku-5-5".into())));
+        assert!(s.refine.models.is_empty());
+        // The custom text is kept trimmed.
+        assert!(s.apply(SettingChange::RefineCustom("  кратко \n".into())));
+        assert_eq!(s.refine.custom, "кратко");
+        // An address: trimmed, the default one kept as none, and only http(s).
+        assert!(s.apply(SettingChange::RefineConnection("lmstudio".into())));
+        assert!(!s.apply(SettingChange::RefineAddress("localhost:1234".into())));
+        assert!(s.apply(SettingChange::RefineAddress(" http://10.0.0.5:1234/v1 ".into())));
+        assert_eq!(s.refine.address(), "http://10.0.0.5:1234/v1");
+        assert!(s.apply(SettingChange::RefineAddress("http://localhost:1234/v1".into())));
+        assert!(s.refine.addresses.is_empty());
     }
 
     /// The window sends `{"kind": …, "value": …}`. An unknown retention is refused rather than read as a month, and an
@@ -1763,7 +1985,12 @@ mod tests {
         assert_eq!(read(r#"{"kind":"micDevice","value":null}"#).unwrap(), SettingChange::MicDevice(None));
         assert_eq!(read(r#"{"kind":"translateTarget","value":"de"}"#).unwrap(), SettingChange::TranslateTarget("de".into()));
         assert_eq!(read(r#"{"kind":"uiLanguage","value":"ru"}"#).unwrap(), SettingChange::UiLanguage(UiLanguage::Ru));
-        assert_eq!(read(r#"{"kind":"refineStyle","value":"bold"}"#).unwrap(), SettingChange::RefineStyle(RefineStyle::Bold));
+        assert_eq!(read(r#"{"kind":"refineStyle","value":"custom"}"#).unwrap(), SettingChange::RefineStyle(RefineStyle::Custom));
+        assert_eq!(read(r#"{"kind":"refineCustom","value":"кратко"}"#).unwrap(), SettingChange::RefineCustom("кратко".into()));
+        assert_eq!(read(r#"{"kind":"refineConnection","value":"openai"}"#).unwrap(), SettingChange::RefineConnection("openai".into()));
+        assert_eq!(read(r#"{"kind":"refineModel","value":"gpt-6.1-terra"}"#).unwrap(), SettingChange::RefineModel("gpt-6.1-terra".into()));
+        let address = SettingChange::RefineAddress("http://localhost:1/v1".into());
+        assert_eq!(read(r#"{"kind":"refineAddress","value":"http://localhost:1/v1"}"#).unwrap(), address);
         for json in [
             r#"{"kind":"historyKeep","value":"always"}"#,
             r#"{"kind":"historyKeep","value":7}"#,

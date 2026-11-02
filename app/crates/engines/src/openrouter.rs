@@ -1,17 +1,20 @@
-//! OpenRouter: models from different providers through one API (Chat Completions, SSE stream) — refine candidates.
-//! The prompt, the response budget and the result check are the same as for Claude: `cue_core::refine`
-//! and [`crate::claude::decide`].
+//! OpenRouter: models from different providers through one API (Chat Completions, SSE stream) — the cleanup's second
+//! connection ([`refine`], [`translate`]) and refine candidates. The prompt, the response budget and the result check
+//! are the same as for Claude: `cue_core::refine` and [`crate::claude::decide`].
 //!
 //! The key goes only in the `Authorization` header and never appears in error texts. Success bodies (they hold
 //! dictation text) never get into errors; from a refusal only `error.message` is taken, without `metadata`
 //! (a moderation refusal quotes the input there).
 use std::time::{Duration, Instant};
 
-use cue_core::refine::{max_tokens, terms_prompt, user_message, RefineContext, SYSTEM_PROMPT};
+use cue_core::flow::RefineOutcome;
+use cue_core::refine::{max_tokens, timeout_ms, user_message, RefineContext};
+use cue_core::settings::RefineSettings;
+use cue_core::translate;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::claude::Parsed;
+use crate::claude::{self, Job, Parsed, RefineResult};
 use crate::error::{checked, net, read_json, EngineError};
 
 pub const API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -183,15 +186,37 @@ impl Routing {
 /// headroom if reasoning is mandatory), streaming, reasoning per [`Profile::reasoning`], the `{"text": …}` schema (the same
 /// as for Claude), routing per [`Routing`]. Without a cache mark the dictionary block follows the prompt in the same text.
 pub fn request_body(model: &str, p: &Profile, routing: Routing, raw: &str, ctx: &RefineContext, terms: &[String]) -> Value {
-    let budget = max_tokens(raw) + if p.reasoning.mandatory() { REASONING_HEADROOM } else { 0 };
-    let system = match (terms_prompt(terms), p.cache_mark) {
-        (None, true) => json!([{ "type": "text", "text": SYSTEM_PROMPT, "cache_control": { "type": "ephemeral" } }]),
-        (None, false) => json!(SYSTEM_PROMPT),
-        (Some(block), true) => json!([
-            { "type": "text", "text": SYSTEM_PROMPT },
-            { "type": "text", "text": block, "cache_control": { "type": "ephemeral" } }
-        ]),
-        (Some(block), false) => json!(format!("{SYSTEM_PROMPT}\n\n{block}")),
+    request_body_for(model, p, routing, raw, ctx, terms, Job::Clean)
+}
+
+/// [`request_body`] for a job: the system blocks of the Claude request for that job ([`claude::system_blocks`]), as they
+/// are with a cache mark, joined into one text without one; a translation doubles the budget, as for Claude.
+pub fn request_body_for(model: &str, p: &Profile, routing: Routing, raw: &str, ctx: &RefineContext, terms: &[String], job: Job) -> Value {
+    request_body_styled(model, p, routing, raw, ctx, terms, job, None)
+}
+
+/// [`request_body_for`] with the user's instructions (`custom`, the custom style) in place of CUE's own block.
+#[allow(clippy::too_many_arguments)]
+pub fn request_body_styled(
+    model: &str,
+    p: &Profile,
+    routing: Routing,
+    raw: &str,
+    ctx: &RefineContext,
+    terms: &[String],
+    job: Job,
+    custom: Option<&str>,
+) -> Value {
+    let mut budget = max_tokens(raw) + if p.reasoning.mandatory() { REASONING_HEADROOM } else { 0 };
+    if let Job::Translate(_) = job {
+        budget = claude::translation_budget(budget);
+    }
+    let blocks = claude::system_blocks(terms, job, custom);
+    let system = if p.cache_mark {
+        blocks
+    } else {
+        let texts: Vec<&str> = blocks.as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect();
+        json!(texts.join("\n\n"))
     };
     let mut provider = json!({ "sort": "latency" });
     if routing.deny_data_collection {
@@ -229,6 +254,118 @@ pub fn request_body(model: &str, p: &Profile, routing: Routing, raw: &str, ctx: 
         });
     }
     v
+}
+
+/// What the cleanup sends to each of its OpenRouter models (`cue_core::connections`; OpenRouter's list, 2026-11-02): all
+/// take the schema. Haiku 5.5 and GPT-6 Luna turn reasoning off; Sonnet 5.5 cannot, so it gets the lowest effort.
+/// Anthropic's models cache only by marks.
+pub fn model_profile(id: &str) -> Profile {
+    let reasoning = if id == "anthropic/claude-sonnet-5.5" { Reasoning::Lowest(Some("low".into())) } else { Reasoning::EffortNone };
+    Profile { structured: true, reasoning, cache_mark: id.starts_with("anthropic/") }
+}
+
+/// Request timeout: the cleanup's or the translation's by text length, plus headroom when the model must reason first
+/// (Sonnet 5.5 over OpenRouter, as Opus over the Messages API).
+fn request_timeout_ms(p: &Profile, raw: &str, job: Job) -> u64 {
+    let base = match job {
+        Job::Clean | Job::Rewrite => timeout_ms(raw),
+        Job::Translate(_) => translate::timeout_ms(raw),
+    };
+    base + if p.reasoning.mandatory() { claude::THINKING_TIME_HEADROOM_MS } else { 0 }
+}
+
+/// One cleanup over OpenRouter, with the model picked for it and in the style of `s`. Like [`claude::refine`], it never "fails": with no
+/// key, on a failure, a refusal or an unusable answer the raw text comes back, with one log line of the reason.
+pub async fn refine(http: &reqwest::Client, key: Option<&str>, raw: &str, ctx: &RefineContext, terms: &[String], s: &RefineSettings) -> RefineResult {
+    refine_at(API_URL, http, key, raw, ctx, terms, s, Job::Rewrite).await
+}
+
+/// One translation over OpenRouter (see [`claude::translate`]).
+pub async fn translate(
+    http: &reqwest::Client,
+    key: Option<&str>,
+    raw: &str,
+    ctx: &RefineContext,
+    terms: &[String],
+    s: &RefineSettings,
+    to: &'static str,
+) -> RefineResult {
+    refine_at(API_URL, http, key, raw, ctx, terms, s, Job::Translate(to)).await
+}
+
+/// A failure worth a second request: no answer (network, timeout, a stream cut or failed midway) or the service failed
+/// on its side. A refusal of the key, a limit or the balance is not asked again, nor "no provider" (routing already
+/// relaxed its conditions).
+pub(crate) fn worth_asking_again(f: &Failure) -> bool {
+    matches!(f.status, None | Some(500 | 502 | 504 | 529))
+}
+
+/// A failure's reason for the log: the status or the kind, never a message (it may echo the request).
+pub(crate) fn reason(f: &Failure) -> String {
+    match (f.status, &f.error) {
+        (Some(code), _) => format!("HTTP {code}"),
+        (None, EngineError::Timeout) => "timeout".into(),
+        (None, EngineError::Network(_)) => "network".into(),
+        (None, _) => "the stream failed".into(),
+    }
+}
+
+/// [`refine`] or [`translate`] against the URL `url`; tests substitute their own service.
+#[allow(clippy::too_many_arguments)]
+async fn refine_at(
+    url: &str,
+    http: &reqwest::Client,
+    key: Option<&str>,
+    raw: &str,
+    ctx: &RefineContext,
+    terms: &[String],
+    s: &RefineSettings,
+    job: Job,
+) -> RefineResult {
+    let Some(key) = key else {
+        return claude::raw_fallback(raw, RefineOutcome::RawKeyProblem, claude::Usage::default(), "no OpenRouter key");
+    };
+    let model = s.model_for("openrouter").id;
+    let p = model_profile(model);
+    let timeout = request_timeout_ms(&p, raw, job);
+    let body = |routing| request_body_styled(model, &p, routing, raw, ctx, terms, job, s.custom_text());
+    // As for Claude: a failure worth it is asked once more, with twice the time.
+    let mut why = String::new();
+    let mut last = None;
+    for ms in [timeout, timeout * claude::RETRY_TIMEOUT_FACTOR] {
+        if !why.is_empty() {
+            tracing::info!("refine: {why}, asking again");
+        }
+        match complete_routed_at(url, http, key, Routing::STRICT, Duration::from_millis(ms), body).await.result {
+            Err(f) if worth_asking_again(&f) => why = reason(&f),
+            done => {
+                last = Some(done);
+                break;
+            }
+        }
+    }
+    match last {
+        Some(Ok(c)) => {
+            let usage = c.usage.map(claude_usage).unwrap_or_default();
+            claude::settle(raw, parse_content(&c.content, c.finish_reason.as_deref(), p.structured), terms, s, job, usage)
+        }
+        // A refusal before the stream: the key, a limit or the balance is the user's to fix.
+        Some(Err(f)) => {
+            let outcome = f.status.map_or(RefineOutcome::RawFallback, |code| claude::classify_http(code, ""));
+            claude::raw_fallback(raw, outcome, claude::Usage::default(), &reason(&f))
+        }
+        None => claude::raw_fallback(raw, RefineOutcome::RawFallback, claude::Usage::default(), &why),
+    }
+}
+
+/// OpenRouter's usage as usage.csv counts it: the prompt splits into plain input, cache reads and cache writes.
+pub(crate) fn claude_usage(u: Usage) -> claude::Usage {
+    claude::Usage {
+        input_tokens: u.prompt_tokens.saturating_sub(u.cached_tokens).saturating_sub(u.cache_write_tokens),
+        output_tokens: u.completion_tokens,
+        cache_read_input_tokens: u.cached_tokens,
+        cache_creation_input_tokens: u.cache_write_tokens,
+    }
 }
 
 /// Request usage, from the last stream chunk.
@@ -506,9 +643,16 @@ async fn complete_at(
     body: &Value,
     timeout: Duration,
 ) -> Result<Completion, Failure> {
+    stream(http.post(url).bearer_auth(key).header("X-Title", TITLE), key, body, timeout).await
+}
+
+/// One streaming Chat Completions request (`req`: the address and the headers, the key among them) read to its end:
+/// the whole response and the time to first text. Any OpenAI-compatible service answers the same way
+/// (`crate::chat`). `key` is only hidden from the errors (empty — none was sent).
+pub(crate) async fn stream(req: reqwest::RequestBuilder, key: &str, body: &Value, timeout: Duration) -> Result<Completion, Failure> {
     let fail = |error: EngineError, status: Option<u16>| Failure { error: error.redact(key), status };
     let t0 = Instant::now();
-    let send = http.post(url).bearer_auth(key).header("X-Title", TITLE).timeout(timeout).json(body).send().await;
+    let send = req.timeout(timeout).json(body).send().await;
     let mut resp = send.map_err(|e| fail(transport(&e), None))?;
     let status = resp.status();
     if !status.is_success() {
@@ -615,7 +759,9 @@ async fn models_at(url: &str, http: &reqwest::Client) -> Result<Vec<ModelInfo>, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{fake_api, reply, Reply};
+    use crate::testing::{capture_logs, fake_api, reply, Reply};
+    use cue_core::refine::{terms_prompt, BOLD_PROMPT, SYSTEM_PROMPT};
+    use cue_core::settings::RefineStyle;
 
     const KEY: &str = "sk-or-v1-TEST-0123456789";
 
@@ -1157,5 +1303,203 @@ mod tests {
 
         let api = fake_api(|_, _, _| reply(503, "down")).await;
         assert!(matches!(models_at(&api.base, &http()).await, Err(EngineError::Service(_))));
+    }
+
+    // ---- the app's cleanup over OpenRouter ----
+
+    #[test]
+    fn model_profiles() {
+        let marked = |reasoning| Profile { structured: true, reasoning, cache_mark: true };
+        assert_eq!(model_profile("anthropic/claude-haiku-5.5"), marked(Reasoning::EffortNone));
+        assert_eq!(model_profile("anthropic/claude-sonnet-5.5"), marked(Reasoning::Lowest(Some("low".into()))));
+        let luna = Profile { structured: true, reasoning: Reasoning::EffortNone, cache_mark: false };
+        assert_eq!(model_profile("openai/gpt-6-luna"), luna, "OpenAI caches on its own");
+        // Every OpenRouter model the cleanup lists.
+        for m in cue_core::connections::find("openrouter").unwrap().models {
+            assert!(model_profile(m.id).structured, "{}", m.id);
+        }
+    }
+
+    /// Both styles and the translation send the blocks the Claude request sends, in the same order.
+    #[test]
+    fn job_blocks_are_the_claude_ones() {
+        let (raw, terms) = ("ну привет", vec!["Soniox".to_owned()]);
+        let p = profile(true, Reasoning::Absent, true);
+        for job in [Job::Clean, Job::Rewrite, Job::Translate("en")] {
+            for terms in [&[][..], &terms[..]] {
+                let v = request_body_for("x/y", &p, Routing::STRICT, raw, &ctx(), terms, job);
+                let claude = crate::claude::request_body_for("claude-haiku-5-5", raw, &ctx(), terms, job);
+                assert_eq!(v["messages"][0]["content"], claude["system"], "{job:?}, {} terms", terms.len());
+            }
+        }
+        // A careful cleanup is the body `request_body` builds.
+        assert_eq!(
+            request_body_for("x/y", &p, Routing::STRICT, raw, &ctx(), &terms, Job::Clean),
+            request_body("x/y", &p, Routing::STRICT, raw, &ctx(), &terms)
+        );
+    }
+
+    #[test]
+    fn job_blocks_without_a_cache_mark_join_the_prompt() {
+        let raw = "ну привет";
+        let p = profile(true, Reasoning::Absent, false);
+        let bold = request_body_for("x/y", &p, Routing::STRICT, raw, &ctx(), &[], Job::Rewrite);
+        assert_eq!(bold["messages"][0]["content"], json!(format!("{SYSTEM_PROMPT}\n\n{BOLD_PROMPT}")));
+        let to_en = request_body_for("x/y", &p, Routing::STRICT, raw, &ctx(), &[], Job::Translate("en"));
+        assert_eq!(to_en["messages"][0]["content"], json!(format!("{SYSTEM_PROMPT}\n\n{}", translate::instruction("en"))));
+    }
+
+    #[test]
+    fn a_translation_doubles_the_budget() {
+        let raw = "ну привет";
+        let p = profile(true, Reasoning::Lowest(Some("low".into())), true);
+        let clean = request_body_for("x/y", &p, Routing::STRICT, raw, &ctx(), &[], Job::Clean);
+        let to_en = request_body_for("x/y", &p, Routing::STRICT, raw, &ctx(), &[], Job::Translate("en"));
+        assert_eq!(to_en["max_tokens"], clean["max_tokens"].as_u64().unwrap() * 2);
+        let long = "слово ".repeat(9_000);
+        assert_eq!(request_body_for("x/y", &p, Routing::STRICT, &long, &ctx(), &[], Job::Translate("en"))["max_tokens"], 16_000);
+    }
+
+    #[test]
+    fn time_limit_has_headroom_for_mandatory_reasoning() {
+        let raw = "ну привет";
+        assert_eq!(request_timeout_ms(&model_profile("anthropic/claude-haiku-5.5"), raw, Job::Clean), timeout_ms(raw));
+        assert_eq!(request_timeout_ms(&model_profile("anthropic/claude-sonnet-5.5"), raw, Job::Rewrite), timeout_ms(raw) + 5_000);
+        let to = Job::Translate("en");
+        assert_eq!(request_timeout_ms(&model_profile("anthropic/claude-sonnet-5.5"), raw, to), translate::timeout_ms(raw) + 5_000);
+    }
+
+    const RAW: &str = "ну привет как дела";
+
+    /// A stream with this answer text in the schema, and the usage chunk.
+    fn answer(text: &str) -> String {
+        let events = [
+            format!("data: {}", chunk(&json!({ "text": text }).to_string(), None)),
+            format!("data: {}", chunk("", Some("stop"))),
+            format!("data: {}", usage_chunk()),
+            "data: [DONE]".to_owned(),
+        ];
+        events.iter().map(|e| format!("{e}\n\n")).collect()
+    }
+
+    /// The cleanup over OpenRouter with the model `id`.
+    fn picked(id: &str) -> RefineSettings {
+        let mut s = RefineSettings { connection: "openrouter".into(), ..RefineSettings::default() };
+        s.models.insert("openrouter".into(), id.into());
+        s
+    }
+
+    async fn clean_with<F>(key: Option<&str>, s: RefineSettings, job: Job, route: F) -> (RefineResult, Vec<String>, crate::testing::FakeApi)
+    where
+        F: Fn(&str, &str, usize) -> Reply + Send + Sync + 'static,
+    {
+        let api = fake_api(route).await;
+        let (logs, _guard) = capture_logs();
+        let url = format!("{}/api/v1/chat/completions", api.base);
+        let r = refine_at(&url, &http(), key, RAW, &ctx(), &[], &s, job).await;
+        let lines = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::")).cloned().collect();
+        (r, lines, api)
+    }
+
+    /// One warning with the reason `why`, after `asked_again` notes; never the text, the key or a body.
+    fn assert_logged(lines: &[String], asked_again: usize, why: &str) {
+        assert_eq!(lines.len(), asked_again + 1, "{lines:?}");
+        let last = lines.last().unwrap();
+        assert!(last.starts_with("WARN") && last.contains(why), "expected \"{why}\": {last}");
+        for line in lines {
+            for leak in ["привет", "Привет", "TEST-01", "BODY-MARK"] {
+                assert!(!line.contains(leak), "\"{leak}\" in the log: {line}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn refine_returns_the_cleanup_and_its_tokens() {
+        let (r, lines, api) = clean_with(Some(KEY), picked("anthropic/claude-sonnet-5.5"), Job::Clean, |_, _, _| Reply::Send(200, answer("Ну, привет. Как дела?"), "")).await;
+        assert_eq!((r.text.as_str(), r.outcome), ("Ну, привет. Как дела?", RefineOutcome::Refined));
+        // 905 prompt tokens, 768 of them read from the cache.
+        let usage = crate::claude::Usage { input_tokens: 137, output_tokens: 14, cache_read_input_tokens: 768, cache_creation_input_tokens: 0 };
+        assert_eq!(r.usage, usage);
+        assert!(lines.is_empty(), "{lines:?}");
+        let req = &api.seen()[0];
+        assert_eq!(req.header("authorization"), [format!("Bearer {KEY}").as_str()]);
+        let sent: Value = serde_json::from_slice(&req.body).unwrap();
+        let p = model_profile("anthropic/claude-sonnet-5.5");
+        assert_eq!(sent, request_body_for("anthropic/claude-sonnet-5.5", &p, Routing::STRICT, RAW, &ctx(), &[], Job::Clean));
+    }
+
+    #[tokio::test]
+    async fn refine_sends_the_picked_model_and_the_style_s_block() {
+        for model in ["anthropic/claude-haiku-5.5", "anthropic/claude-sonnet-5.5", "openai/gpt-6-luna"] {
+            for custom in [None, Some("пиши коротко")] {
+                let api = fake_api(|_, _, _| Reply::Send(200, answer("Ну, привет. Как дела?"), "")).await;
+                let url = format!("{}/api/v1/chat/completions", api.base);
+                let mut s = picked(model);
+                if let Some(text) = custom {
+                    (s.style, s.custom) = (RefineStyle::Custom, text.into());
+                }
+                let r = refine_at(&url, &http(), Some(KEY), RAW, &ctx(), &[], &s, Job::Rewrite).await;
+                assert_eq!(r.outcome, RefineOutcome::Refined, "{model}");
+                let sent: Value = serde_json::from_slice(&api.body(0)).unwrap();
+                assert_eq!(sent["model"], model);
+                let expected = request_body_styled(model, &model_profile(model), Routing::STRICT, RAW, &ctx(), &[], Job::Rewrite, custom);
+                assert_eq!(sent, expected);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn refine_without_key_sends_nothing() {
+        let (r, lines, api) = clean_with(None, picked("anthropic/claude-sonnet-5.5"), Job::Clean, |_, _, _| Reply::Send(200, answer("Привет"), "")).await;
+        assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawKeyProblem));
+        assert!(api.calls().is_empty());
+        assert_logged(&lines, 0, "no OpenRouter key");
+    }
+
+    #[tokio::test]
+    async fn a_refused_key_or_an_empty_balance_is_a_key_problem() {
+        for code in [401, 402, 403, 429] {
+            let body = json!({ "error": { "code": code, "message": format!("refused {KEY}") } }).to_string();
+            let (r, lines, api) = clean_with(Some(KEY), picked("anthropic/claude-sonnet-5.5"), Job::Clean, move |_, _, _| reply(code, &body)).await;
+            assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawKeyProblem), "HTTP {code}");
+            assert_eq!(api.calls().len(), 1, "HTTP {code} is not asked again");
+            assert_logged(&lines, 0, &format!("HTTP {code}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failing_service_is_asked_once_more() {
+        let (r, lines, api) = clean_with(Some(KEY), picked("anthropic/claude-haiku-5.5"), Job::Clean, |_, _, n| {
+            if n == 0 { reply(502, "BODY-MARK") } else { Reply::Send(200, answer("Ну, привет. Как дела?"), "") }
+        })
+        .await;
+        assert_eq!(r.outcome, RefineOutcome::Refined);
+        assert_eq!(api.calls().len(), 2);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("INFO") && lines[0].contains("HTTP 502") && lines[0].contains("asking again"), "{lines:?}");
+
+        let (r, lines, api) = clean_with(Some(KEY), picked("anthropic/claude-haiku-5.5"), Job::Clean, |_, _, _| Reply::Close).await;
+        assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawFallback));
+        assert_eq!(api.calls().len(), 2);
+        assert_logged(&lines, 1, "network");
+    }
+
+    #[tokio::test]
+    async fn an_unusable_answer_returns_the_raw_text() {
+        let insane = "Конечно! Вот ответ: привет, у меня всё отлично, спасибо, а как дела у тебя сегодня вечером?";
+        let (r, lines, _api) = clean_with(Some(KEY), picked("anthropic/claude-sonnet-5.5"), Job::Clean, move |_, _, _| Reply::Send(200, answer(insane), "")).await;
+        assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawFallback));
+        assert_eq!(r.usage.output_tokens, 14, "tokens were spent, so they are counted");
+        assert_logged(&lines, 0, "sanity check");
+    }
+
+    #[tokio::test]
+    async fn translate_returns_the_translation() {
+        let (r, lines, api) = clean_with(Some(KEY), picked("anthropic/claude-haiku-5.5"), Job::Translate("en"), |_, _, _| Reply::Send(200, answer("Well, hi. How are you?"), "")).await;
+        assert_eq!((r.text.as_str(), r.outcome), ("Well, hi. How are you?", RefineOutcome::Refined));
+        assert!(lines.is_empty(), "{lines:?}");
+        let sent: Value = serde_json::from_slice(&api.body(0)).unwrap();
+        let p = model_profile("anthropic/claude-haiku-5.5");
+        assert_eq!(sent, request_body_for("anthropic/claude-haiku-5.5", &p, Routing::STRICT, RAW, &ctx(), &[], Job::Translate("en")));
     }
 }

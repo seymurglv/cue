@@ -1,4 +1,5 @@
 pub mod ask;
+pub mod chat;
 pub mod check;
 pub mod claude;
 pub mod download;

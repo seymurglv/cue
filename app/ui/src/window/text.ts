@@ -114,7 +114,8 @@ export interface WinText {
     offline: string;
     none: string;
   };
-  /** Cleanup: its title, its value on the first page without the Anthropic key, the note on where text goes. */
+  /** Cleanup: its title, its value on the first page without the connection's key, the note on where text goes
+   *  ({NAME} — Anthropic or OpenRouter). */
   cleanup: string;
   cleanupNoKey: string;
   cleanupNote: string;
@@ -141,10 +142,28 @@ export interface WinText {
   micTestHint: string;
   translateTo: string;
   autostart: string;
-  /** The Cleanup page's style row: how freely the cleanup edits. */
+  /** The Cleanup page's style row (its hint for each style) and the custom instructions' field. */
   refineStyle: string;
   refineStyleHint: string;
+  refineCustomHint: string;
   refineStyles: Record<RefineStyle, string>;
+  refineCustomPlaceholder: string;
+  /** The connection card: its name for a screen reader, the list's groups, a connection's state under its name ({MASK}
+   *  — the key's mask), a local server's states. */
+  refineConnection: string;
+  connectionGroups: { cloud: string; local: string };
+  keySavedMask: string;
+  server: { unknown: string; checking: string; running: string; down: string };
+  /** The key row's and the address row's names. */
+  keyRow: string;
+  addressRow: string;
+  /** The model row, its list's chip, a model's price ({IN}, {OUT} — dollars) or size ({GB}). */
+  refineModel: string;
+  recommended: string;
+  perMtok: string;
+  onDisk: string;
+  /** The note under the Cleanup group for a local server. */
+  cleanupNoteLocal: string;
   uiLanguage: string;
   uiLanguages: Record<UiLanguage, string>;
   /** The tray's History page: how long recordings are kept, never longer than the history. */
@@ -246,8 +265,8 @@ export const en: WinText = {
     none: 'No Parakeet models for this search',
   },
   cleanup: 'Cleanup',
-  cleanupNoKey: 'No Anthropic key',
-  cleanupNote: 'Text goes to Anthropic for the cleanup; the history stays on this computer only.',
+  cleanupNoKey: 'No {NAME} key',
+  cleanupNote: 'Text goes to {NAME} for the cleanup; the history stays on this computer only.',
   languages: 'Languages',
   languagesValue: '{UI} · into {TO}',
   generalOn: 'Starts at sign-in',
@@ -278,8 +297,21 @@ export const en: WinText = {
   translateTo: 'Translate into',
   autostart: 'Start at sign-in',
   refineStyle: 'Style',
-  refineStyleHint: 'Bold also turns spoken phrasing into written',
-  refineStyles: { careful: 'Careful', bold: 'Bold' },
+  refineStyleHint: "CUE's cleanup: drops slips, reads as written",
+  refineCustomHint: "Your instructions instead of CUE's cleanup",
+  refineStyles: { default: 'Default', custom: 'Custom' },
+  refineCustomPlaceholder: 'For example: keep it short, no emoji, terms in English.',
+  refineConnection: 'Connection',
+  connectionGroups: { cloud: 'In the cloud', local: 'On this computer' },
+  keySavedMask: 'Key saved · {MASK}',
+  server: { unknown: 'Not checked', checking: 'Checking…', running: 'Running', down: 'Not running' },
+  keyRow: 'Key',
+  addressRow: 'Address',
+  refineModel: 'Model',
+  recommended: 'Recommended',
+  perMtok: '${IN} / ${OUT} per 1M tokens',
+  onDisk: '≈ {GB} GB on disk',
+  cleanupNoteLocal: 'Text never leaves this computer.',
   uiLanguage: 'Interface language',
   uiLanguages: { auto: 'Auto', en: 'English', ru: 'Русский' },
   keepAudio: 'Keep recordings',
@@ -380,8 +412,8 @@ export const ru: WinText = {
     none: 'Нет моделей Parakeet по запросу',
   },
   cleanup: 'Чистка текста',
-  cleanupNoKey: 'Нет ключа Anthropic',
-  cleanupNote: 'Текст уходит в Anthropic для чистки; история — только на этом компьютере.',
+  cleanupNoKey: 'Нет ключа {NAME}',
+  cleanupNote: 'Текст уходит в {NAME} для чистки; история — только на этом компьютере.',
   languages: 'Языки',
   languagesValue: '{UI} · на {TO}',
   generalOn: 'Запуск при входе',
@@ -412,8 +444,21 @@ export const ru: WinText = {
   translateTo: 'Переводить на',
   autostart: 'Запускать при входе',
   refineStyle: 'Стиль',
-  refineStyleHint: 'Смелая ещё и переписывает разговорные обороты',
-  refineStyles: { careful: 'Бережная', bold: 'Смелая' },
+  refineStyleHint: 'Чистка CUE: убирает оговорки, пишет как текст',
+  refineCustomHint: 'Ваши инструкции вместо чистки CUE',
+  refineStyles: { default: 'По умолчанию', custom: 'Свой' },
+  refineCustomPlaceholder: 'Например: пиши коротко, без смайликов, термины — по-английски.',
+  refineConnection: 'Подключение',
+  connectionGroups: { cloud: 'В облаке', local: 'На этом компьютере' },
+  keySavedMask: 'Ключ сохранён · {MASK}',
+  server: { unknown: 'Не проверен', checking: 'Проверяю…', running: 'Запущен', down: 'Не запущен' },
+  keyRow: 'Ключ',
+  addressRow: 'Адрес',
+  refineModel: 'Модель',
+  recommended: 'Рекомендуем',
+  perMtok: '${IN} / ${OUT} за 1 млн токенов',
+  onDisk: '≈ {GB} ГБ на диске',
+  cleanupNoteLocal: 'Текст не покидает этот компьютер.',
   uiLanguage: 'Язык интерфейса',
   uiLanguages: { auto: 'Авто', en: 'English', ru: 'Русский' },
   keepAudio: 'Хранить записи',

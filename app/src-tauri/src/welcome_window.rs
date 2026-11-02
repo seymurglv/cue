@@ -1,5 +1,6 @@
 //! The welcome window (spec 4a §1): hello, the key, the speech model, the microphone, a first dictation, done. It opens
-//! at a start when the Anthropic key is missing — the first start, or the key removed since — and with `--welcome`, also
+//! at a start when the cleanup's key is missing (Anthropic's, or OpenRouter's when the cleanup goes through OpenRouter) —
+//! the first start, or the key removed since — and with `--welcome`, also
 //! when a second launch brings it to the CUE already running. Like the main window (`main_window`) there is one at a
 //! time, created when opened and destroyed when closed, never built on the main thread. Windows draws its frame, in the
 //! Windows theme, with the close button alone; it takes the focus, so its first dictation is pasted into its own field.
@@ -40,8 +41,8 @@ pub enum KeyPresence {
 
 /// The window opens when it is asked for (`forced`) or a key is missing. A store that could not be read is not a
 /// missing key: no window for that (the main window's keys show the failure).
-pub fn should_welcome(anthropic: KeyPresence, forced: bool) -> bool {
-    forced || anthropic == KeyPresence::Missing
+pub fn should_welcome(key: KeyPresence, forced: bool) -> bool {
+    forced || key == KeyPresence::Missing
 }
 
 /// `--welcome` among a launch's arguments; CUE takes no others.
@@ -49,12 +50,19 @@ pub fn asks_welcome<S: AsRef<OsStr>>(args: impl IntoIterator<Item = S>) -> bool 
     args.into_iter().any(|a| a.as_ref() == WELCOME_ARG)
 }
 
-/// At startup: the window opens if a key is missing, or when `forced` (`--welcome`). The log gets whether each key is
-/// there, never a key.
-pub fn open_at_start(app: &AppHandle, forced: bool) {
-    let anthropic = presence(KeyName::Anthropic);
-    let opens = should_welcome(anthropic, forced);
-    tracing::info!(?anthropic, forced, opens, "welcome window at startup");
+/// The key a start looks at: the one the cleanup's `connection` needs.
+fn start_key(connection: &str) -> Option<KeyName> {
+    KeyName::of_connection(connection)
+}
+
+/// At startup: the window opens if the key of the cleanup's `connection` is missing, or when `forced` (`--welcome`). The
+/// log gets whether the key is there, never a key.
+pub fn open_at_start(app: &AppHandle, connection: &str, forced: bool) {
+    // A local server needs no key: the window opens only when asked for.
+    let name = start_key(connection);
+    let key = name.map_or(KeyPresence::Saved, presence);
+    let opens = should_welcome(key, forced);
+    tracing::info!(key = name.map(KeyName::as_str), presence = ?key, forced, opens, "welcome window at startup");
     if opens {
         open(app);
     }
@@ -198,6 +206,15 @@ mod tests {
     #[test]
     fn store_error_is_not_a_missing_key() {
         assert!(!should_welcome(Unreadable, false));
+    }
+
+    /// Over OpenRouter the OpenRouter key is the one the cleanup needs: no window at every start for a missing Anthropic
+    /// key the user does not use.
+    #[test]
+    fn the_key_looked_at_is_the_connection_s() {
+        assert_eq!(start_key("anthropic"), Some(KeyName::Anthropic));
+        assert_eq!(start_key("openai"), Some(KeyName::OpenAi));
+        assert_eq!(start_key("ollama"), None, "a local server needs no key: no window for it");
     }
 
     #[test]

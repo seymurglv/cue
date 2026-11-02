@@ -17,6 +17,8 @@ machine, so it is tested without windows, a microphone, a model, a network or a 
   - `ui`: `UiState`, `UiPhase`, `Mode`, `ErrorCause`, `TrayKind`, `UiAction`, shared with TypeScript as JSON.
   - `refine`: the system prompt, the dictionary block, the user message, timeout and token budget, the sanity check,
     Markdown stripping, list tidying, and the join space before a paste.
+  - `connections`: the cleanup's ten connections (the Messages API, OpenRouter, eight OpenAI-compatible services, two of
+    them local servers) with their models (the first recommended), prices, and what each service needs in a request.
   - `translate`: the 60 languages a translation can go to, the translation direction, the instruction block, the
     timeout and the translation check.
   - `speech`: the rules of recognition: the alphabet of a dictation, a leak of the other alphabet, the speech language
@@ -37,8 +39,11 @@ machine, so it is tested without windows, a microphone, a model, a network or a 
   (the model's files: resumed, checked, renamed), `claude` (refine and translation requests and responses, the cache
   warm-up), `ask` (the streaming "Ask" request, its event parser and decision, `run` and its cache warm-up `warm`),
   `keys` (Windows Credential Manager, and the deletion of the Soniox key of earlier versions), `check` (free key
-  probes), `error`. `openrouter` holds the server-sent-events reader "Ask" uses too, and otherwise serves only the
-  `refine_compare` example.
+  probes), `error`. `openrouter` is the cleanup's OpenRouter
+  connection (`refine`, `translate`: the same system blocks, checks and fallbacks as `claude`, each model's profile in
+  `model_profile`) and holds the server-sent-events reader that "Ask", `chat` and the `refine_compare` example use too;
+  `chat` is the cleanup over any other OpenAI-compatible service (OpenAI, Gemini, DeepSeek, Mistral, Groq, xAI, Ollama,
+  LM Studio), each service's needs read from `cue_core::connections`.
 - **`cue-platform-win`** (`app/crates/platform-win`): `hook` and `chord` (keyboard, and the mouse while a Shift that
   switched the mode is held), `input` (`SendInput`, modifier state), `clipboard` (paste, and the `Ctrl + C` fallback
   of "Ask"), `focus` (UI Automation: the field, the text before the caret, the selection; and the window under the
@@ -987,7 +992,8 @@ again.
   supported, Not downloaded; also the row's value on the first page), "Speech is recognized on this computer.", and,
   while it downloads or once it failed, a thin bar and "N of M MB" with the numbers in Bebas; Retry (`model_retry`)
   once it failed. There is no choice of engine. The page reads the state with `model_get` when the window opens.
-- **Keys**: a password field and Check for the Anthropic key. Check saves a typed key (`key_set`: Credential Manager,
+- **Keys**: a password field and Check for the key of the cleanup's cloud connection (`refine.connection`, one of
+  `cue_core::connections`; 2026-11-02-refine-connections.md); a local server has an address and `server_check` instead. Check saves a typed key (`key_set`: Credential Manager,
   the service `CUE`, where `cue-cli keys` keeps them; trimmed, an empty one refused) and empties the field, then checks
   the saved key with the free probe of `cue_engines::check` (`key_check`, 10 s): works, key error (key, balance or
   limit), couldn't check, no key. A key never leaves `commands.rs`, in a reply, an error or the log: only its mask
@@ -1014,7 +1020,8 @@ again.
 ## Welcome window
 
 An ordinary window that walks through Hello, Key, Model, Microphone, First dictation and Done (`welcome_window`, label
-`welcome`, the page `welcome.html`). It opens at startup when the Anthropic key is missing from Credential Manager (a
+`welcome`, the page `welcome.html`). It opens at startup when the key of the cleanup's cloud connection is missing from
+Credential Manager (a local server needs none; a
 store that cannot be read is no missing key: a log line says so), and with `--welcome`,
 matched exactly among the program's arguments (`args_os`). The check runs in `setup` right after the tray and before
 the hook starts, so the core holds the hotkey before any chord comes. As with the main window there is one at a time
@@ -1129,7 +1136,8 @@ for, nothing pasted). `mode` is `dictate`, `translate` or `ask` as the dictation
 attempt that ends before that, the mode it was recording in: the attempt follows a `ModeToggle` or `ModeChange` the flow
 accepts), or `warmup`. The Retry of a failed translation re-translates the saved text: a new row with no audio. A cache
 warm-up is a row of its own: its tokens and cost, no audio, latency 0, outcome `discarded`, mode `warmup`, and the model
-it warmed (`refine.model`, or `ask.model` for "Ask"). Rows written before the last three columns existed read as
+it warmed (the cleanup's model, `RefineSettings::usage_model`, or `ask.model` for "Ask"; a cleanup over another
+connection names its model behind it, `openai:gpt-6-luna`, priced from `cue_core::connections`). Rows written before the last three columns existed read as
 dictation, and the header of an existing file is never rewritten (new files get the 18-column header). `words` is how
 many words the attempt wrote (`usage::count_words` of the text of a dictation or translation; 0 for a question, a
 warm-up or one that wrote nothing) and `day` its local date; rows written before them are 13 or 16 columns wide. Latency
@@ -1248,7 +1256,7 @@ loaded once before the run and recognizes every whole recording in turn, on a bl
 (the pieces and the alphabet mask included); its latency is the model's own recognition time, its cost $0, and the
 console line says when the other alphabet was masked out. When recognition starts, the connection to Anthropic is
 warmed up as the app does on the second press. The text of `parakeet-ultra-int8` (or, if it failed or is not
-there, of the first model that succeeded) is refined with `refine.model` and every model in the price list. It uses
+there, of the first model that succeeded) is refined with the Anthropic model picked for the cleanup and every Claude model in the price list. It uses
 the app's own code paths and `dictionary.terms`, so the request, sanity check and timeouts match. One warm-up call per
 model is excluded from the report but counted in spend. A `--max-usd` budget stops new paid calls; `Ctrl+C` finishes
 the step under way (a recognition cannot be interrupted, and a refine request under way is already paid for) and

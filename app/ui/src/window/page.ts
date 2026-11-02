@@ -31,13 +31,22 @@ const MARK =
   '<line x1="9" y1="3" x2="9" y2="17"/><line x1="12.3" y1="5" x2="12.3" y2="15"/><line x1="15.5" y1="7" x2="15.5" y2="13"/></g>' +
   '<circle class="lamp" cx="18.2" cy="3.2" r="1.7"/></svg>';
 
-/** One choice of a menu: its value, its label (text), a muted note after it, whether it is the current one. */
+/** One choice of a menu: its value, its label (text), a muted note after it, whether it is the current one; and for a
+ *  richer list a second line under the label (`sub`), a quiet chip after it (`badge`), a lamp before it (`lamp`: on or
+ *  off), and the group it is listed under (a heading wherever the group changes). */
 export interface MenuItem {
   value: string;
   label: string;
   note?: string;
   on: boolean;
+  sub?: string;
+  badge?: string;
+  lamp?: boolean;
+  group?: string;
 }
+
+/** Which edge of its button a menu lines up with. */
+export type MenuAlign = 'start' | 'end';
 
 /** What the History section and the tray take from the page. */
 export interface Ctx {
@@ -49,8 +58,10 @@ export interface Ctx {
   reduced(): boolean;
   /** The local date now, `YYYY-MM-DD`. */
   today(): string;
-  /** A menu under `button` (a second press on the same button closes it); `pick` gets the value chosen. */
-  menu(button: HTMLElement, items: MenuItem[], pick: (value: string) => void, note?: string): void;
+  /** A menu under `button` (a second press on the same button closes it); `pick` gets the value chosen. `align`: the
+   *  menu's right edge on the button's (`end`, by default) or its left edge (`start`, for a button that starts a row);
+   *  `wide` — the menu as wide as the button. */
+  menu(button: HTMLElement, items: MenuItem[], pick: (value: string) => void, note?: string, align?: MenuAlign, wide?: boolean): void;
   closeMenu(): void;
   /** A setting through the core; the page takes the settings it answers with (null — refused or no answer). */
   change(c: SettingChange): Promise<SettingsView | null>;
@@ -145,7 +156,7 @@ export class Menus {
   }
 
   /** A menu under `button` (a second press on the same button closes it); `pick` gets the value chosen. */
-  show(button: HTMLElement, items: MenuItem[], pick: (value: string) => void, note?: string): void {
+  show(button: HTMLElement, items: MenuItem[], pick: (value: string) => void, note?: string, align: MenuAlign = 'end', wide = false): void {
     if (this.open?.b === button) {
       this.close();
       return;
@@ -155,13 +166,24 @@ export class Menus {
     const m = h('div', 'menu');
     m.setAttribute('role', 'menu');
     let current: HTMLElement | null = null;
+    let group: string | undefined;
     items.forEach((it, i) => {
+      if (it.group !== undefined && it.group !== group) m.append(h('div', 'mg', it.group));
+      group = it.group;
       const b = h('button');
       b.type = 'button';
       b.dataset.i = String(i);
       b.setAttribute('role', 'menuitemradio');
       b.setAttribute('aria-checked', String(it.on));
-      b.append(h('span', 'mlb', it.label));
+      if (it.lamp !== undefined) b.append(h('span', it.lamp ? 'mlamp on' : 'mlamp'));
+      if (it.sub === undefined) b.append(h('span', 'mlb', it.label));
+      else {
+        const two = h('span', 'mt');
+        two.append(h('span', 'mlb', it.label), h('span', 'msub', it.sub));
+        b.append(two);
+        m.classList.add('two');
+      }
+      if (it.badge) b.append(h('span', 'mbadge', it.badge));
       if (it.note) b.append(h('span', 'mnc', it.note));
       if (it.on) {
         b.insertAdjacentHTML('beforeend', icon('ok'));
@@ -177,9 +199,13 @@ export class Menus {
       this.close();
       if (it) pick(it.value);
     });
+    if (wide) {
+      m.classList.add('wide');
+      m.style.width = `${button.offsetWidth}px`;
+    }
     this.app.append(m);
     this.open = { m, b: button };
-    this.place(m, button, current);
+    this.place(m, button, current, align);
   }
 
   close(): void {
@@ -187,9 +213,9 @@ export class Menus {
     this.open = null;
   }
 
-  /** Under the button, its right edge on the button's; above it when there is no room below; scrolled to the current
-   *  choice when it is taller than the room. */
-  private place(m: HTMLElement, b: HTMLElement, current: HTMLElement | null): void {
+  /** Under the button, its right edge on the button's (or, `start`, its left edge, the items' text over the button's);
+   *  above it when there is no room below; scrolled to the current choice when it is taller than the room. */
+  private place(m: HTMLElement, b: HTMLElement, current: HTMLElement | null, align: MenuAlign): void {
     const p = relRect(this.app, b);
     const H = this.app.offsetHeight;
     const below = H - (p.y + p.h + 4) - 8;
@@ -197,7 +223,8 @@ export class Menus {
     const tall = m.offsetHeight;
     const down = tall <= below || below >= above;
     m.style.maxHeight = `${Math.max(120, down ? below : above)}px`;
-    m.style.left = `${Math.max(8, Math.min(p.x + p.w - m.offsetWidth, this.app.offsetWidth - m.offsetWidth - 8))}px`;
+    const x = align === 'start' ? p.x - 4 : p.x + p.w - m.offsetWidth;
+    m.style.left = `${Math.max(8, Math.min(x, this.app.offsetWidth - m.offsetWidth - 8))}px`;
     if (down) {
       m.style.top = `${p.y + p.h + 4}px`;
     } else {
@@ -326,8 +353,8 @@ export class WindowPage implements Ctx {
     }
   }
 
-  menu(button: HTMLElement, items: MenuItem[], pick: (value: string) => void, note?: string): void {
-    this.menus.show(button, items, pick, note);
+  menu(button: HTMLElement, items: MenuItem[], pick: (value: string) => void, note?: string, align?: MenuAlign, wide?: boolean): void {
+    this.menus.show(button, items, pick, note, align, wide);
   }
 
   closeMenu(): void {

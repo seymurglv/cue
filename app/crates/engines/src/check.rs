@@ -1,4 +1,5 @@
-//! API key checks via free probe requests: the Anthropic model list, the OpenRouter key info.
+//! API key checks via free probe requests: the Anthropic model list, the OpenRouter key info, an OpenAI-compatible
+//! service's model list (`chat::check`).
 use crate::error::{checked, net, EngineError};
 
 const ANTHROPIC_MODELS: &str = "https://api.anthropic.com/v1/models";
@@ -34,6 +35,16 @@ pub async fn openrouter(http: &reqwest::Client, key: &str) -> Result<(), EngineE
 
 fn openrouter_request(http: &reqwest::Client, url: &str, key: &str) -> reqwest::RequestBuilder {
     http.get(url).bearer_auth(key)
+}
+
+/// An OpenAI-compatible service's model list at `url`, with the key as a bearer token if there is one (a local server
+/// needs none).
+pub(crate) async fn models_list(http: &reqwest::Client, url: &str, key: Option<&str>) -> Result<(), EngineError> {
+    let req = http.get(url);
+    match key {
+        Some(key) => probe(req.bearer_auth(key), key).await,
+        None => probe(req, "").await,
+    }
 }
 
 #[cfg(test)]

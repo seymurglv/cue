@@ -78,6 +78,26 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .dd{display:inline-flex;align-items:center;gap:6px;height:28px;max-width:190px;padding:0 8px 0 10px;border-radius:5px;background:var(--card);box-shadow:0 0 0 .5px color-mix(in srgb,var(--text) 20%,transparent),0 1px 1.5px rgba(0,0,0,.06);font-size:12px;white-space:nowrap}
 .dd .ddv{overflow:hidden;text-overflow:ellipsis}
 .dd svg{width:12px;height:12px;opacity:.55;transform:rotate(90deg)}
+/* the Cleanup page's connection card: a lamp (green once the connection is ready), the name, its state under it; it opens
+   the list of connections at its own width */
+.srow.wide{display:block}
+.pk{display:flex;align-items:center;gap:10px;width:100%;min-height:44px;padding:6px 10px 6px 12px;border-radius:9px;background:var(--card);box-shadow:0 0 0 .5px color-mix(in srgb,var(--text) 18%,transparent),0 1px 2px rgba(0,0,0,.06);text-align:left;transition:box-shadow .2s}
+.pk:hover{box-shadow:0 0 0 .5px color-mix(in srgb,var(--text) 30%,transparent),0 1px 2px rgba(0,0,0,.08)}
+[data-theme=dark] .pk{background:color-mix(in srgb,var(--text) 7%,transparent)}
+.pk .pt{flex:1;min-width:0}
+.pk .pt b{display:block;font-weight:500;font-size:13px}
+.pk .pt small{display:block;margin-top:1px;overflow:hidden;font-size:11px;line-height:1.35;color:var(--muted);text-overflow:ellipsis;white-space:nowrap}
+.pk>svg{flex:none;width:12px;height:12px;opacity:.55;transform:rotate(90deg)}
+.pk .lamp,.menu .mlamp{flex:none;width:6px;height:6px;border-radius:50%;background:color-mix(in srgb,var(--text) 25%,transparent);transition:background-color .3s}
+.pk .lamp.on,.menu .mlamp.on{background:var(--ok)}
+/* a local server's address is longer than a key's mask: the field takes the line under the row's name */
+.srow[data-server]{flex-wrap:wrap;row-gap:6px}
+.srow[data-server] .stx{flex-basis:100%}
+.srow[data-server] .sc{flex:1 1 100%;max-width:none;flex-wrap:nowrap}
+.srow[data-server] .kin{flex:1;width:auto;min-width:0}
+/* the custom style's instructions */
+.cta{display:block;width:100%;min-height:64px;resize:vertical;padding:8px 10px;border:0;outline:0;border-radius:7px;background:color-mix(in srgb,var(--text) 5%,transparent);font:inherit;font-size:12px;line-height:1.45;color:var(--text)}
+.cta:focus{box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--text) 30%,transparent)}
 [data-theme=dark] .dd{background:color-mix(in srgb,var(--text) 8%,transparent)}
 .menu{position:absolute;z-index:45;min-width:180px;max-width:320px;overflow-x:hidden;overflow-y:auto;scrollbar-width:thin;padding:4px;border-radius:7px;background:var(--card);box-shadow:0 14px 32px -10px rgba(0,0,0,.32),0 0 0 .5px color-mix(in srgb,var(--text) 18%,transparent);transform-origin:50% 0;animation:mnIn .32s var(--e-spring)}
 [data-theme=dark] .menu{background:#222225}
@@ -86,6 +106,15 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .menu button svg{width:14px;height:14px}
 .menu .mlb{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .menu .mnc{font-size:11px;color:var(--muted)}
+/* a richer list: group headings, two lines (a name and its state or price), a quiet chip, a lamp; as wide as its button */
+.menu .mg{padding:8px 10px 3px;font-size:11px;font-weight:600;color:var(--muted)}
+.menu .mg:first-child{padding-top:4px}
+.menu.two button{height:auto;min-height:28px;padding-top:5px;padding-bottom:5px}
+.menu .mt{display:flex;flex:1;flex-direction:column;min-width:0}
+.menu .mt .mlb{font-weight:500}
+.menu .msub{overflow:hidden;font-size:11px;color:var(--muted);text-overflow:ellipsis}
+.menu .mbadge{flex:none;padding:1px 6px;border-radius:9px;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--text) 16%,transparent);font-size:11px;color:var(--muted)}
+.menu.wide{max-width:none}
 .menu .mnote{padding:6px 10px 4px;border-top:1px solid var(--line);margin-top:4px;font-size:11px;line-height:1.35;color:var(--muted);white-space:normal}
 @keyframes mnIn{from{opacity:0;transform:translateY(-4px) scale(.97)}}
 /* microphone level */
@@ -393,10 +422,11 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 /* the keyboard's focus on every other control: the same soft plate as on the icon buttons (one step darker where the
    control has a fill of its own) and dark text, never the system's ring; a plate wider than a bare text button is a
    spread shadow, so nothing moves */
-.app :is(.btn2,.dd,.sw,.segc button,.trw,.menu button,.bmore button,.dnb,.dx):focus-visible{outline:0}
+.app :is(.btn2,.dd,.pk,.sw,.segc button,.trw,.menu button,.bmore button,.dnb,.dx):focus-visible{outline:0}
 .app :is(.mrow[data-sub],.mdl,.mfd):focus-visible{outline:0;box-shadow:0 0 0 4px color-mix(in srgb,var(--text) 8%,transparent);border-radius:6px;background:color-mix(in srgb,var(--text) 8%,transparent)}
 .app .btn2:focus-visible{background:color-mix(in srgb,var(--text) 13%,transparent)}
 .app .dd:focus-visible{background:color-mix(in srgb,var(--text) 8%,var(--card))}
+.app .pk:focus-visible{box-shadow:0 0 0 .5px color-mix(in srgb,var(--text) 30%,transparent),0 0 0 4px color-mix(in srgb,var(--text) 8%,transparent)}
 .app .sw:focus-visible{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--text) 60%,transparent),0 0 0 4px color-mix(in srgb,var(--text) 8%,transparent)}
 .app .sw[aria-checked=true]:focus-visible{box-shadow:0 0 0 4px color-mix(in srgb,var(--text) 8%,transparent)}
 .app .segc button:focus-visible{background:color-mix(in srgb,var(--text) 8%,transparent);color:var(--text)}

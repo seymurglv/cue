@@ -1,26 +1,52 @@
-//! API keys in Windows Credential Manager (service "CUE"). For personal use only:
-//! in the product the keys are held by the CUE server.
+//! API keys in Windows Credential Manager (service "CUE"): the keys of the cleanup's cloud connections.
 //!
 //! A key's value never reaches the output, the log or an error text — only [`mask`].
 use crate::error::EngineError;
 
 pub const SERVICE: &str = "CUE";
 
+/// The keys of the cleanup's cloud connections (`cue_core::connections`), each stored under its connection's id.
+/// Anthropic's is "Ask"'s too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyName {
     Anthropic,
-    /// Comparing refine models through OpenRouter; the app does not read this key yet.
     OpenRouter,
+    OpenAi,
+    Gemini,
+    DeepSeek,
+    Mistral,
+    Groq,
+    Xai,
 }
 
 impl KeyName {
-    pub const ALL: [KeyName; 2] = [KeyName::Anthropic, KeyName::OpenRouter];
+    pub const ALL: [KeyName; 8] = [
+        KeyName::Anthropic,
+        KeyName::OpenRouter,
+        KeyName::OpenAi,
+        KeyName::Gemini,
+        KeyName::DeepSeek,
+        KeyName::Mistral,
+        KeyName::Groq,
+        KeyName::Xai,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             KeyName::Anthropic => "anthropic",
             KeyName::OpenRouter => "openrouter",
+            KeyName::OpenAi => "openai",
+            KeyName::Gemini => "gemini",
+            KeyName::DeepSeek => "deepseek",
+            KeyName::Mistral => "mistral",
+            KeyName::Groq => "groq",
+            KeyName::Xai => "xai",
         }
+    }
+
+    /// The key of the connection `id`; `None` for a local server, which needs none, and an unknown id.
+    pub fn of_connection(id: &str) -> Option<Self> {
+        KeyName::ALL.into_iter().find(|k| k.as_str() == id)
     }
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -115,12 +141,26 @@ mod tests {
         assert_eq!(KeyName::parse("Anthropic"), Some(KeyName::Anthropic));
         assert_eq!(KeyName::parse("openrouter"), Some(KeyName::OpenRouter));
         assert_eq!(KeyName::parse(" OpenRouter "), Some(KeyName::OpenRouter));
-        assert_eq!(KeyName::parse("openai"), None);
+        assert_eq!(KeyName::parse("OpenAI"), Some(KeyName::OpenAi));
+        assert_eq!(KeyName::parse("bard"), None);
         // The keys of dropped engines are gone: their names are like any unknown one.
         assert_eq!(KeyName::parse("elevenlabs"), None);
         assert_eq!(KeyName::parse("soniox"), None);
         // `keys show` prints a line for every key in `ALL`.
-        assert_eq!(KeyName::ALL.map(KeyName::as_str).as_slice(), ["anthropic", "openrouter"]);
+        let all = ["anthropic", "openrouter", "openai", "gemini", "deepseek", "mistral", "groq", "xai"];
+        assert_eq!(KeyName::ALL.map(KeyName::as_str).as_slice(), all);
+    }
+
+    /// Every cloud connection has its key under its id; a local server has none.
+    #[test]
+    fn every_cloud_connection_has_a_key() {
+        for c in &cue_core::connections::CONNECTIONS {
+            assert_eq!(KeyName::of_connection(c.id).is_some(), !c.local, "{}", c.id);
+            if let Some(k) = KeyName::of_connection(c.id) {
+                assert_eq!(k.as_str(), c.id);
+            }
+        }
+        assert_eq!(KeyName::of_connection("bard"), None);
     }
 
     #[test]

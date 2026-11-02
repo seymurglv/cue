@@ -72,6 +72,8 @@ use cue_engines::EngineError;
 use cue_engines::ask as engine_ask;
 use cue_engines::claude::{self, Job, RefineResult};
 use cue_engines::hub;
+use cue_engines::{chat, openrouter};
+use cue_core::connections::Kind;
 use cue_engines::keys::{self, KeyName};
 use cue_engines::stt::{self, Engine, SttOutput, SttSession};
 use cue_platform_win::cardplace::{self, CARD};
@@ -1023,7 +1025,8 @@ impl Runtime {
     /// transcription), at most once every 20 s (right away after sleep) and only if there is a key: refine does not pay
     /// for the TLS handshake inside its 1.5 s budget.
     fn warm_up(&mut self) {
-        if !self.warm.due(self.now()) || !matches!(keys::lookup(KeyName::Anthropic), Ok(Some(_))) {
+        let anthropic = self.settings.refine.connection().kind == Kind::Anthropic;
+        if !anthropic || !self.warm.due(self.now()) || !matches!(keys::lookup(KeyName::Anthropic), Ok(Some(_))) {
             return;
         }
         let http = self.http.clone();
@@ -1036,8 +1039,10 @@ impl Runtime {
     /// after a pause reads the prompt from the cache. Dictation and translation share the prefix; "Ask" has its own
     /// (`warm_ask_cache`).
     fn warm_cache(&mut self) {
-        let model = self.settings.refine.model.clone();
-        if self.flow.mode() == Mode::Ask || !claude::can_warm(&model) || !self.cache_warm.due(self.now()) {
+        // Over another connection there is no warm-up: its first cleanup writes the cache, where it has one.
+        let model = self.settings.refine.model().id.to_owned();
+        let anthropic = self.settings.refine.connection().kind == Kind::Anthropic;
+        if !anthropic || self.flow.mode() == Mode::Ask || !claude::can_warm(&model) || !self.cache_warm.due(self.now()) {
             return;
         }
         let Ok(Some(key)) = keys::lookup(KeyName::Anthropic) else { return };
@@ -1108,10 +1113,14 @@ impl Runtime {
         // The query was late ("unknown"): use the app at the start of recording.
         let app = first_known_app(&[&info.app, &self.attempt.app]).to_owned();
         let ctx = RefineContext::new(app, info.before_cursor.as_deref(), self.settings.refine.context_chars);
-        // No key: `claude::refine` writes the log line itself and returns the raw text.
-        let key = keys::lookup(KeyName::Anthropic).unwrap_or_else(|e| {
-            tracing::warn!("Anthropic key: {e}");
-            None
+        // The connection's key (a local server has none). No key: refine writes the log line itself and returns the raw
+        // text.
+        let kind = self.settings.refine.connection().kind;
+        let key = KeyName::of_connection(self.settings.refine.connection().id).and_then(|name| {
+            keys::lookup(name).unwrap_or_else(|e| {
+                tracing::warn!("{} key: {e}", name.as_str());
+                None
+            })
         });
         let now = self.now();
         // "Ask" has a prefix of its own (`ask_warm`).
@@ -1136,12 +1145,17 @@ impl Runtime {
                 let fallback_raw = raw.clone();
                 // One future for both jobs, so `guarded` covers a translation too.
                 let body = async {
-                    match job {
-                        // The refine style picks a careful cleanup or a bold rewrite (`claude::dictation_job`).
-                        Job::Clean | Job::Rewrite => claude::refine(&http, key.as_deref(), &s.model, &raw, &ctx, &terms, &s).await,
-                        Job::Translate(to) => {
-                            claude::translate(&http, key.as_deref(), &s.model, &raw, &ctx, &terms, &s, to).await
+                    let key = key.as_deref();
+                    // The connection picks the client; the settings give it the model and the style.
+                    match (kind, job) {
+                        (Kind::Anthropic, Job::Clean | Job::Rewrite) => claude::refine(&http, key, s.model().id, &raw, &ctx, &terms, &s).await,
+                        (Kind::Anthropic, Job::Translate(to)) => {
+                            claude::translate(&http, key, s.model().id, &raw, &ctx, &terms, &s, to).await
                         }
+                        (Kind::OpenRouter, Job::Clean | Job::Rewrite) => openrouter::refine(&http, key, &raw, &ctx, &terms, &s).await,
+                        (Kind::OpenRouter, Job::Translate(to)) => openrouter::translate(&http, key, &raw, &ctx, &terms, &s, to).await,
+                        (Kind::Chat, Job::Clean | Job::Rewrite) => chat::refine(&http, key, &raw, &ctx, &terms, &s).await,
+                        (Kind::Chat, Job::Translate(to)) => chat::translate(&http, key, &raw, &ctx, &terms, &s, to).await,
                     }
                 };
                 let result = guarded("refine", body, move || refine_panicked(fallback_raw)).await;

@@ -46,6 +46,8 @@ const EARLIER_DAYS: usize = 7;
 const SEARCH_LIMIT: usize = 200;
 /// A key check gives up after this, as `cue-cli keys check` does.
 const KEY_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+/// A server on this computer answers at once or not at all.
+const SERVER_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long "Paste again" waits for the window under the main one to come in front.
 const BRING_TIMEOUT: Duration = Duration::from_millis(500);
 /// The commands the welcome window's page may call: what its steps need — the language, the key, the speech model, the
@@ -619,6 +621,25 @@ pub async fn open_link(window: WebviewWindow, target: String) -> Result<(), CmdE
     }
 }
 
+/// Whether a local server answers at `address` (the Cleanup page's address row): its model list, no key.
+#[tauri::command]
+pub async fn server_check(window: WebviewWindow, address: String) -> Result<bool, CmdError> {
+    guard(&window, "server_check")?;
+    let address = server_address(&address).ok_or(CmdError::BadValue)?;
+    let http = reqwest::Client::builder().timeout(SERVER_CHECK_TIMEOUT).build().map_err(|_| CmdError::Failed)?;
+    let running = cue_engines::chat::check(&http, &address, None).await.is_ok();
+    // Whether it answered, never the address (it may name a computer on the network).
+    tracing::info!(running, "local server checked");
+    Ok(running)
+}
+
+/// A local server's address as a request takes it: trimmed, http or https with a host, no trailing slash.
+fn server_address(address: &str) -> Option<String> {
+    let address = address.trim().trim_end_matches('/');
+    let rest = address.strip_prefix("http://").or_else(|| address.strip_prefix("https://"))?;
+    (!rest.is_empty()).then(|| address.to_owned())
+}
+
 /// The probe of `name`'s service with `key`; the error never holds the key (`cue_engines::check`).
 async fn probe(name: KeyName, key: &str) -> Result<(), EngineError> {
     let http = reqwest::Client::builder()
@@ -628,6 +649,11 @@ async fn probe(name: KeyName, key: &str) -> Result<(), EngineError> {
     match name {
         KeyName::Anthropic => cue_engines::check::anthropic(&http, key).await,
         KeyName::OpenRouter => cue_engines::check::openrouter(&http, key).await,
+        // Any other is an OpenAI-compatible service: its model list.
+        other => match cue_core::connections::find(other.as_str()) {
+            Some(c) => cue_engines::chat::check(&http, c.base_url, Some(key)).await,
+            None => Err(EngineError::KeyProblem(format!("no connection for the {} key", other.as_str()))),
+        },
     }
 }
 
@@ -642,12 +668,9 @@ fn key_check_of(probed: &Result<Option<Result<(), EngineError>>, EngineError>) -
     }
 }
 
-/// The key the window shows: Anthropic's, for the cleanup.
+/// The keys the window shows: those of the cleanup's cloud connections.
 fn key_name(name: &str) -> Result<KeyName, CmdError> {
-    match KeyName::parse(name) {
-        Some(k @ KeyName::Anthropic) => Ok(k),
-        _ => Err(CmdError::BadName),
-    }
+    KeyName::parse(name).ok_or(CmdError::BadName)
 }
 
 fn send(core: &CoreTx, ev: CoreEvent) -> Result<(), CmdError> {
@@ -666,7 +689,7 @@ mod tests {
     use serde_json::json;
 
     /// Every command a window's page calls (`main`'s handler list, but for the Drop's and the card's own).
-    const COMMANDS: [&str; 27] = [
+    const COMMANDS: [&str; 28] = [
         "settings_get",
         "model_get",
         "model_retry",
@@ -688,6 +711,7 @@ mod tests {
         "key_state",
         "key_set",
         "key_check",
+        "server_check",
         "mic_list",
         "mic_preview",
         "mic_access",
@@ -911,10 +935,22 @@ mod tests {
     }
 
     #[test]
-    fn the_window_shows_only_the_anthropic_key() {
+    fn the_window_shows_the_keys_of_the_cleanup_connections() {
         assert_eq!(key_name("soniox"), Err(CmdError::BadName));
         assert_eq!(key_name("anthropic"), Ok(KeyName::Anthropic));
-        assert_eq!(key_name("openrouter"), Err(CmdError::BadName));
-        assert_eq!(key_name("openai"), Err(CmdError::BadName));
+        assert_eq!(key_name("openrouter"), Ok(KeyName::OpenRouter));
+        assert_eq!(key_name("groq"), Ok(KeyName::Groq));
+        assert_eq!(key_name("ollama"), Err(CmdError::BadName), "a local server has no key");
+        assert_eq!(key_name("openai"), Ok(KeyName::OpenAi));
+    }
+
+    /// A local server's address: http or https only, trimmed, without a trailing slash.
+    #[test]
+    fn server_addresses() {
+        assert_eq!(server_address(" http://localhost:11434/v1/ ").as_deref(), Some("http://localhost:11434/v1"));
+        assert_eq!(server_address("https://10.0.0.5:1234/v1").as_deref(), Some("https://10.0.0.5:1234/v1"));
+        for bad in ["localhost:11434", "file:///c:/x", "", "http://"] {
+            assert_eq!(server_address(bad), None, "{bad:?}");
+        }
     }
 }

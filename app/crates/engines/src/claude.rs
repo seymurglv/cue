@@ -1,9 +1,10 @@
 //! Refine through Claude. Never "fails": on any problem it returns the raw text and the reason.
 use cue_core::flow::RefineOutcome;
 use cue_core::refine::{
-    max_tokens, sanity_ok, strip_markup, terms_prompt, tidy_list_items, timeout_ms, user_message, RefineContext, BOLD_PROMPT, SYSTEM_PROMPT,
+    max_tokens, sanity_ok, strip_markup, terms_prompt, tidy_list_items, timeout_ms, user_message, RefineContext, BOLD_PROMPT,
+    CUSTOM_PREAMBLE, SYSTEM_PROMPT,
 };
-use cue_core::settings::{RefineSettings, RefineStyle};
+use cue_core::settings::RefineSettings;
 use cue_core::translate::{self, translation_ok};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -26,19 +27,29 @@ fn thinking_for(model: &str) -> Option<Value> {
     }
 }
 
+/// The request's effort: Haiku 5.5 at its own default (`medium`, which Anthropic tunes it for), the others at `low`.
+fn effort_for(model: &str) -> &'static str {
+    if model.starts_with("claude-haiku") {
+        "medium"
+    } else {
+        "low"
+    }
+}
+
 /// What the refine request does with the transcript.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Job {
     /// Clean up in the spoken language (dictation).
     Clean,
-    /// Clean up and turn spoken phrasing into written (dictation with bold refine, [`BOLD_PROMPT`]).
+    /// Clean up and turn spoken phrasing into written: CUE's own cleanup of a dictation ([`BOLD_PROMPT`]), or the user's
+    /// instructions in its place (the custom style).
     Rewrite,
     /// Clean up and write in this language (a code of `cue_core::translate::LANGUAGES`).
     Translate(&'static str),
 }
 
 /// Messages API request body: the system prompt with a cache mark, a response strictly in the `{"text": …}` schema,
-/// low effort, thinking per model ([`thinking_for`]).
+/// effort ([`effort_for`]) and thinking ([`thinking_for`]) per model.
 ///
 /// The user's dictionary `terms` go in a second system block after the unchanged prompt ([`terms_prompt`]), and the
 /// cache mark moves to that last block: the cached prefix covers both. With no usable term the body is the same, byte
@@ -51,22 +62,20 @@ pub fn request_body(model: &str, raw: &str, ctx: &RefineContext, terms: &[String
 /// plain dictation uses, so translating never writes a second cache. The answer may be longer in tokens than the speech
 /// (another alphabet), so the budget doubles.
 pub fn request_body_for(model: &str, raw: &str, ctx: &RefineContext, terms: &[String], job: Job) -> Value {
+    request_body_styled(model, raw, ctx, terms, job, None)
+}
+
+/// [`request_body_for`] with the user's instructions (`custom`, the custom style) in place of CUE's own block.
+pub fn request_body_styled(model: &str, raw: &str, ctx: &RefineContext, terms: &[String], job: Job, custom: Option<&str>) -> Value {
     let thinking = thinking_for(model);
     let budget = max_tokens(raw) + if thinking.is_none() { THINKING_HEADROOM } else { 0 };
-    let system = match terms_prompt(terms) {
-        None => json!([{ "type": "text", "text": SYSTEM_PROMPT, "cache_control": { "type": "ephemeral" } }]),
-        Some(block) => json!([
-            { "type": "text", "text": SYSTEM_PROMPT },
-            { "type": "text", "text": block, "cache_control": { "type": "ephemeral" } }
-        ]),
-    };
     let mut v = json!({
         "model": model,
         "max_tokens": budget,
-        "system": system,
+        "system": system_blocks(terms, job, custom),
         "messages": [{ "role": "user", "content": user_message(ctx, raw) }],
         "output_config": {
-            "effort": "low",
+            "effort": effort_for(model),
             "format": {
                 "type": "json_schema",
                 "schema": {
@@ -81,24 +90,38 @@ pub fn request_body_for(model: &str, raw: &str, ctx: &RefineContext, terms: &[St
     if let Some(t) = thinking {
         v["thinking"] = t;
     }
-    match job {
-        Job::Clean => {}
-        // After the cache mark, like a translation: both styles read the same cached prefix.
-        Job::Rewrite => v["system"].as_array_mut().expect("system is an array").push(json!({ "type": "text", "text": BOLD_PROMPT })),
-        Job::Translate(to) => {
-            v["system"].as_array_mut().expect("system is an array").push(json!({ "type": "text", "text": translate::instruction(to) }));
-            v["max_tokens"] = json!(v["max_tokens"].as_u64().unwrap_or(0).saturating_mul(2).min(16_000));
-        }
+    if let Job::Translate(_) = job {
+        v["max_tokens"] = json!(translation_budget(budget));
     }
     v
 }
 
-/// The job of a dictation: a bold refine rewrites, a careful one cleans up.
-pub fn dictation_job(s: &RefineSettings) -> Job {
-    match s.style {
-        RefineStyle::Careful => Job::Clean,
-        RefineStyle::Bold => Job::Rewrite,
+/// The system blocks of a refine request: the prompt, the dictionary block ([`terms_prompt`]) with the cache mark on the
+/// last of them, then the job's own block after the mark: CUE's cleanup ([`BOLD_PROMPT`]) or the user's instructions
+/// (`custom`), or the translation's. Both styles and the translation read the same cached prefix, so switching never
+/// writes a second cache.
+pub(crate) fn system_blocks(terms: &[String], job: Job, custom: Option<&str>) -> Value {
+    let mut system = match terms_prompt(terms) {
+        None => vec![json!({ "type": "text", "text": SYSTEM_PROMPT, "cache_control": { "type": "ephemeral" } })],
+        Some(block) => vec![
+            json!({ "type": "text", "text": SYSTEM_PROMPT }),
+            json!({ "type": "text", "text": block, "cache_control": { "type": "ephemeral" } }),
+        ],
+    };
+    match job {
+        Job::Clean => {}
+        Job::Rewrite => {
+            let block = custom.map_or_else(|| BOLD_PROMPT.to_owned(), |text| format!("{CUSTOM_PREAMBLE}{text}"));
+            system.push(json!({ "type": "text", "text": block }))
+        }
+        Job::Translate(to) => system.push(json!({ "type": "text", "text": translate::instruction(to) })),
     }
+    Value::Array(system)
+}
+
+/// A translation may be longer in tokens than the speech (another alphabet): twice the budget, up to 16 000.
+pub(crate) fn translation_budget(budget: u32) -> u32 {
+    budget.saturating_mul(2).min(16_000)
 }
 
 /// Whether a cache warm-up is possible for the model: a model whose thinking cannot be turned off (Opus 5.5) would need a
@@ -231,7 +254,7 @@ pub async fn refine(
     terms: &[String],
     s: &RefineSettings,
 ) -> RefineResult {
-    refine_at(API_URL, http, key, model, raw, ctx, terms, s, dictation_job(s)).await
+    refine_at(API_URL, http, key, model, raw, ctx, terms, s, Job::Rewrite).await
 }
 
 /// One translation request (spec 2 §5): the refine request with the translation block. Never "fails": on any problem
@@ -253,7 +276,7 @@ pub async fn translate(
 
 /// Timeout headroom for a model whose thinking cannot be turned off (Opus 5.5): thinking runs before the response,
 /// and the usual timeout for a short text (3 s) is not enough for it.
-const THINKING_TIME_HEADROOM_MS: u64 = 5_000;
+pub(crate) const THINKING_TIME_HEADROOM_MS: u64 = 5_000;
 
 /// Request timeout: [`timeout_ms`] by text length ([`translate::timeout_ms`] for a translation), plus headroom for a
 /// model whose thinking cannot be turned off.
@@ -266,7 +289,7 @@ fn request_timeout_ms(model: &str, raw: &str, job: Job) -> u64 {
 }
 
 /// The second request gets this many times the first one's timeout.
-const RETRY_TIMEOUT_FACTOR: u64 = 2;
+pub(crate) const RETRY_TIMEOUT_FACTOR: u64 = 2;
 
 /// A refusal that a second request may not get: the service is overloaded or failed on its side. Key, limit and
 /// balance problems (4xx) are not asked again.
@@ -290,7 +313,7 @@ async fn refine_at(
     let Some(key) = key else {
         return raw_fallback(raw, RefineOutcome::RawKeyProblem, Usage::default(), "no Anthropic key");
     };
-    let body = request_body_for(model, raw, ctx, terms, job);
+    let body = request_body_styled(model, raw, ctx, terms, job, s.custom_text());
     let timeout = request_timeout_ms(model, raw, job);
     // A timeout, a network failure or an overloaded service is asked once more, with twice the time: the raw text is
     // pasted only when the second request fails too.
@@ -321,7 +344,12 @@ async fn refine_at(
     let Ok(m) = resp.json::<MessageResp>().await else {
         return raw_fallback(raw, RefineOutcome::RawFallback, Usage::default(), "HTTP 200 response not parsed");
     };
-    let parsed = parse_response(&m);
+    settle(raw, parse_response(&m), terms, s, job, m.usage)
+}
+
+/// A parsed answer → what to paste: the answer if it passes its job's check, otherwise the raw text and one log line
+/// with the reason. The tokens are counted either way: they were spent.
+pub(crate) fn settle(raw: &str, parsed: Parsed, terms: &[String], s: &RefineSettings, job: Job, usage: Usage) -> RefineResult {
     // The reason, in case the response is rejected.
     let why = match (&parsed, job) {
         (Parsed::Text(_), Job::Clean | Job::Rewrite) => "response failed the sanity check",
@@ -335,13 +363,13 @@ async fn refine_at(
         Job::Translate(to) => decide_translation(raw, parsed, terms, to),
     };
     match decided {
-        (text, RefineOutcome::Refined) => RefineResult { text, outcome: RefineOutcome::Refined, usage: m.usage },
-        (_, outcome) => raw_fallback(raw, outcome, m.usage, why),
+        (text, RefineOutcome::Refined) => RefineResult { text, outcome: RefineOutcome::Refined, usage },
+        (_, outcome) => raw_fallback(raw, outcome, usage, why),
     }
 }
 
 /// The raw text instead of the refined one, plus one log line: the reason and the outcome.
-fn raw_fallback(raw: &str, outcome: RefineOutcome, usage: Usage, why: &str) -> RefineResult {
+pub(crate) fn raw_fallback(raw: &str, outcome: RefineOutcome, usage: Usage, why: &str) -> RefineResult {
     tracing::warn!("refine: {why} → {outcome:?}");
     RefineResult { text: raw.to_string(), outcome, usage }
 }
@@ -404,7 +432,8 @@ mod tests {
         assert_eq!(v["model"], "claude-haiku-5-5");
         assert_eq!(v["max_tokens"], 521);
         assert_eq!(v["thinking"], json!({"type": "disabled"}));
-        assert_eq!(v["output_config"]["effort"], "low");
+        // Haiku 5.5 at its own default effort, with thinking off (accepted at `high` or below).
+        assert_eq!(v["output_config"]["effort"], "medium");
         assert_eq!(v["output_config"]["format"]["type"], "json_schema");
         assert_eq!(v["output_config"]["format"]["schema"]["required"], json!(["text"]));
         assert_eq!(v["system"][0]["cache_control"], json!({"type": "ephemeral"}));
@@ -413,12 +442,12 @@ mod tests {
         assert!(v.get("temperature").is_none() && v.get("top_p").is_none() && v.get("top_k").is_none());
     }
 
-    /// The body as sent before the dictionary existed, byte for byte.
+    /// The body as sent before the dictionary existed, byte for byte (but for Haiku's effort, now its own default).
     fn golden_body() -> String {
         format!(
             concat!(
                 r#"{{"max_tokens":521,"messages":[{{"content":"<app>Telegram Desktop</app>\n<transcript>ну привет</transcript>","role":"user"}}],"#,
-                r#""model":"claude-haiku-5-5","output_config":{{"effort":"low","format":{{"schema":{{"additionalProperties":false,"#,
+                r#""model":"claude-haiku-5-5","output_config":{{"effort":"medium","format":{{"schema":{{"additionalProperties":false,"#,
                 r#""properties":{{"text":{{"type":"string"}}}},"required":["text"],"type":"object"}},"type":"json_schema"}}}},"#,
                 r#""system":[{{"cache_control":{{"type":"ephemeral"}},"text":{prompt},"type":"text"}}],"thinking":{{"type":"disabled"}}}}"#
             ),
@@ -628,12 +657,30 @@ mod tests {
     }
 
     #[test]
-    fn the_dictation_job_follows_the_refine_style() {
-        let mut s = RefineSettings::default();
-        assert_eq!(dictation_job(&s), Job::Clean);
-        s.style = RefineStyle::Bold;
-        assert_eq!(dictation_job(&s), Job::Rewrite);
+    fn sonnet_stays_at_low_effort_with_thinking_between_tools() {
+        let v = request_body("claude-sonnet-5-5", "ну привет", &ctx(), &[]);
+        assert_eq!((v["output_config"]["effort"].as_str(), &v["thinking"]), (Some("low"), &json!({"type": "between_tools"})));
         assert_eq!(request_timeout_ms("claude-sonnet-5-5", "ну привет", Job::Rewrite), timeout_ms("ну привет"));
+    }
+
+    /// The custom style puts the user's instructions where CUE's own block goes, after the cache mark; a translation
+    /// is the same in either style.
+    #[test]
+    fn custom_instructions_take_the_bold_block_s_place() {
+        let terms = ["Soniox".to_owned()];
+        for t in [&[][..], &terms[..]] {
+            let bold = request_body_for("claude-haiku-5-5", "ну привет", &ctx(), t, Job::Rewrite);
+            let custom = request_body_styled("claude-haiku-5-5", "ну привет", &ctx(), t, Job::Rewrite, Some("пиши коротко"));
+            let mut system = bold["system"].as_array().unwrap().clone();
+            *system.last_mut().unwrap() = json!({ "type": "text", "text": format!("{CUSTOM_PREAMBLE}пиши коротко") });
+            assert_eq!(custom["system"], json!(system));
+            let mut rest = custom.clone();
+            rest["system"] = bold["system"].clone();
+            assert_eq!(rest, bold, "nothing else changes");
+            let to_en = Job::Translate("en");
+            let translation = request_body_for("claude-haiku-5-5", "ну привет", &ctx(), t, to_en);
+            assert_eq!(request_body_styled("claude-haiku-5-5", "ну привет", &ctx(), t, to_en, Some("пиши коротко")), translation);
+        }
     }
 
     #[test]

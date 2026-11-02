@@ -1,5 +1,6 @@
 pub mod ask;
 pub mod audio;
+pub mod connections;
 pub mod flow;
 pub mod history;
 pub mod model;

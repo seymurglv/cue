@@ -79,12 +79,14 @@ fn parse_args(args: &[String]) -> Result<Command> {
     }
 }
 
-/// Refine models: the model from settings first (it may have no price), then the priced models — in order, without repeats.
+/// Refine models: the Anthropic model picked in settings first, then the priced Claude models (not the other
+/// connections' ids: the bench calls Anthropic directly) — in order, without repeats.
 fn refine_models(s: &Settings) -> Vec<String> {
     let mut models: Vec<String> = Vec::new();
-    for m in std::iter::once(&s.refine.model).chain(s.pricing.claude.iter().map(|p| &p.model)) {
-        if !m.trim().is_empty() && !models.contains(m) {
-            models.push(m.clone());
+    let priced = s.pricing.claude.iter().map(|p| p.model.as_str()).filter(|m| m.starts_with("claude-"));
+    for m in std::iter::once(s.refine.model_for("anthropic").id).chain(priced) {
+        if !m.trim().is_empty() && !models.iter().any(|x| x == m) {
+            models.push(m.to_owned());
         }
     }
     models
@@ -694,21 +696,22 @@ mod tests {
     #[test]
     fn models_from_settings_refine_model_first_without_duplicates() {
         let s = Settings::default();
-        assert_eq!(refine_models(&s), ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5"]);
+        assert_eq!(refine_models(&s), ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]);
 
         let mut s = Settings::default();
-        s.refine.model = "claude-opus-5-5".into();
-        assert_eq!(refine_models(&s), ["claude-opus-5-5", "claude-haiku-5-5", "claude-sonnet-5-5"], "the refine model comes first");
+        s.refine.models.insert("anthropic".into(), "claude-sonnet-5-5".into());
+        assert_eq!(refine_models(&s), ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5"], "the refine model comes first");
 
-        // A refine model without a price is still listed; a repeat in prices and an empty name are skipped.
+        // The picked model without a price is still listed; a repeat in prices, an empty name and another connection's
+        // id are skipped.
         let mut s = Settings::default();
-        s.refine.model = "claude-new-6".into();
-        s.pricing.claude = vec![price("claude-haiku-5-5"), price(" "), price("claude-haiku-5-5"), price("claude-opus-5-5")];
-        assert_eq!(refine_models(&s), ["claude-new-6", "claude-haiku-5-5", "claude-opus-5-5"]);
+        s.pricing.claude =
+            vec![price("claude-sonnet-5-5"), price(" "), price("claude-sonnet-5-5"), price("openai:gpt-6-luna"), price("claude-opus-5-5")];
+        assert_eq!(refine_models(&s), ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]);
 
         let mut s = Settings::default();
         s.pricing.claude.clear();
-        assert_eq!(refine_models(&s), ["claude-sonnet-5-5"]);
+        assert_eq!(refine_models(&s), ["claude-haiku-5-5"]);
     }
 
     #[test]

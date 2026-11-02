@@ -240,7 +240,7 @@ impl Attempt {
             audio_ms: self.audio_ms(),
             stt_engine: s.stt.engine,
             stt_path: self.stt_path,
-            refine_model: if self.mode == Mode::Ask { s.ask.model().to_owned() } else { s.refine.model.clone() },
+            refine_model: if self.mode == Mode::Ask { s.ask.model().to_owned() } else { s.refine.usage_model() },
             input_tokens: self.refine.input_tokens,
             cache_read_tokens: self.refine.cache_read_input_tokens,
             cache_write_tokens: self.refine.cache_creation_input_tokens,
@@ -393,8 +393,12 @@ mod tests {
         assert_eq!(r.ts, "2026-10-27T10:00:00Z");
         assert_eq!(r.audio_ms, 2_000);
         assert_eq!(r.stt_path, SttPath::Local);
-        assert_eq!(r.refine_model, s.refine.model);
+        assert_eq!(r.refine_model, "claude-haiku-5-5");
         assert_eq!((r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens), (120, 15, 7, 3));
+        // Over another connection the row names the model behind it.
+        let mut openai = s.clone();
+        openai.refine.connection = "openai".into();
+        assert_eq!(a.record(Outcome::Inserted, "t".into(), &openai).refine_model, "openai:gpt-6-luna");
         assert_eq!(r.latency_ms, 1_090);
         assert_eq!(r.outcome, Outcome::Inserted);
     }
@@ -500,11 +504,11 @@ mod tests {
     #[test]
     fn warm_up_row_has_tokens_and_nothing_else() {
         let s = Settings::default();
-        let r = warmup_record(usage(12, 1), "2026-11-01T10:00:00Z".into(), &s, &s.refine.model);
+        let r = warmup_record(usage(12, 1), "2026-11-01T10:00:00Z".into(), &s, s.refine.model().id);
         assert_eq!(r.ts, "2026-11-01T10:00:00Z");
         assert_eq!((r.mode, r.outcome, r.web_searches), (UsageMode::Warmup, Outcome::Discarded, 0));
         assert_eq!((r.audio_ms, r.latency_ms), (0, 0));
-        assert_eq!(r.refine_model, s.refine.model);
+        assert_eq!(r.refine_model, s.refine.model().id);
         assert_eq!((r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens), (12, 1, 7, 3));
     }
 
@@ -553,7 +557,7 @@ mod tests {
         let mut s = Settings::default();
         s.ask.model = Some("claude-opus-5-5".into());
         let r = Attempt::new(DictationId(1)).record(Outcome::Inserted, "t".into(), &s);
-        assert_eq!((r.refine_model.as_str(), r.web_searches), ("claude-sonnet-5-5", 0));
+        assert_eq!((r.refine_model.as_str(), r.web_searches), ("claude-haiku-5-5", 0));
     }
 
     /// Esc before the answer showed, then "restore": the question goes again on the same attempt, and its row counts
