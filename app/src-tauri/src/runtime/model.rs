@@ -10,7 +10,7 @@ use cue_core::model::{Manifest, ModelState, ULTRA};
 use cue_engines::EngineError;
 use cue_engines::download;
 use cue_engines::parakeet::model::{Recognizer, processor_supported};
-use cue_engines::stt::{Recognize, SttOutput};
+use cue_engines::stt::{Partial, Recognize, SttOutput};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::CoreEvent;
@@ -107,6 +107,16 @@ impl ModelSlot {
 impl Recognize for ModelSlot {
     fn recognize(&self, pcm: &[i16]) -> Result<SttOutput, EngineError> {
         self.wait(WAIT_FOR_MODEL)?.recognize(pcm)
+    }
+
+    /// Only a model already loaded recognizes while the speaker talks; one still on its way gets the whole recording at
+    /// the end.
+    fn start(self: Arc<Self>) -> Option<Box<dyn Partial>> {
+        let model = match &*self.slot.lock().unwrap_or_else(PoisonError::into_inner) {
+            Slot::Ready(model) => model.clone(),
+            Slot::Pending | Slot::Failed(_) => return None,
+        };
+        model.start()
     }
 }
 
@@ -272,6 +282,37 @@ mod tests {
         std::thread::sleep(Duration::from_millis(30));
         slot.ready(Arc::new(Echo));
         assert_eq!(waiting.join().unwrap().unwrap().text, "3");
+    }
+
+    /// A stand-in that recognizes while the speaker talks.
+    struct Streaming;
+    impl Recognize for Streaming {
+        fn recognize(&self, _: &[i16]) -> Result<SttOutput, EngineError> {
+            unreachable!()
+        }
+        fn start(self: Arc<Self>) -> Option<Box<dyn Partial>> {
+            Some(Box::new(Tail))
+        }
+    }
+    struct Tail;
+    impl Partial for Tail {
+        fn add(&mut self, _: &[i16]) -> Result<(), EngineError> {
+            Ok(())
+        }
+        fn finish(self: Box<Self>, tail: &[i16]) -> Result<SttOutput, EngineError> {
+            Ok(SttOutput { text: format!("tail {}", tail.len()), audio_ms: 0, language: None })
+        }
+    }
+
+    #[test]
+    fn early_recognition_starts_only_with_a_ready_model() {
+        let slot = ModelSlot::new();
+        assert!(slot.clone().start().is_none(), "a model on its way: the whole recording at the end");
+        slot.failed(EngineError::Model("x".into()));
+        assert!(slot.clone().start().is_none());
+        slot.ready(Arc::new(Streaming));
+        let partial = slot.clone().start().expect("a ready model recognizes while the speaker talks");
+        assert_eq!(partial.finish(&[0; 7]).unwrap().text, "tail 7");
     }
 
     #[test]

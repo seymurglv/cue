@@ -61,12 +61,16 @@ history stays on this computer only."
   normalization), then TDT greedy decoding (token and duration, at most 10 tokens a frame). Owning the decode loop is
   what lets CUE keep one language per dictation (below).
 - **Loaded once.** The model loads in the background at start (≈ 1–2 s) and stays in memory (expected ≈ 1–1.5 GB,
-  measured before release); a recording never waits for a load once CUE has been running a few seconds. 4 threads.
+  measured before release); a recording never waits for a load once CUE has been running a few seconds. Half the
+  processor's threads, 2 to 8.
 - **Long recordings.** A recording is cut into pieces of at most 60 s at the quietest 200 ms between 45 and 60 s;
   pieces are recognized one after another and joined with a space. A dictation is at most 9 minutes.
-- **The same interface as now.** Recognition stays a session: frames go in while recording, `finish` returns the text.
-  Today the session keeps the frames and recognizes them at `finish`; a streaming mode (pieces recognized at pauses
-  while speaking) can be added later behind the same interface without changing the flow or the Drop.
+- **Recognized while speaking.** Recognition stays a session: frames go in while recording, `finish` returns the text.
+  Once 15 s of the recording are not yet recognized, a piece is cut at the quietest 200 ms between 10 and 15 s and
+  recognized in the background while the speaker goes on (the next one waits until it is done), so at `finish` only
+  the tail is left: ≈ 0.2–0.3 s for any length (a 36 s dictation: 0.22 s instead of 0.82 s whole). The leak check and
+  the masked decode run over all the pieces at the end. A model not yet loaded when the dictation starts, or a piece
+  that fails, has the whole recording recognized at `finish` instead. The flow and the Drop do not change.
 - **Retry** recognizes `current.wav` again, the same way.
 
 ## One language per dictation

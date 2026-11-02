@@ -8,7 +8,10 @@ use std::time::Duration;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 
+use cue_core::speech;
+
 use crate::error::EngineError;
+use crate::parakeet::model::{Recognized, Recognizer, Running};
 
 /// Samples per millisecond at 16 kHz.
 pub const SAMPLES_PER_MS: u64 = 16;
@@ -29,22 +32,52 @@ pub struct SttOutput {
     pub language: Option<String>,
 }
 
-/// What recognizes a whole recording on this computer: the speech model, or a stand-in in tests.
+/// What recognizes a recording on this computer: the speech model, or a stand-in in tests.
 pub trait Recognize: Send + Sync + 'static {
+    /// A whole recording.
     fn recognize(&self, pcm: &[i16]) -> Result<SttOutput, EngineError>;
-}
 
-impl Recognize for crate::parakeet::model::Recognizer {
-    fn recognize(&self, pcm: &[i16]) -> Result<SttOutput, EngineError> {
-        let r = crate::parakeet::model::Recognizer::recognize(self, pcm)?;
-        tracing::info!(audio_ms = r.audio_ms, took_ms = r.took_ms, masked = r.masked, "recognized on this computer");
-        // The language is told from the text by the runtime (`speech::speech_language`).
-        Ok(SttOutput { text: r.text, audio_ms: r.audio_ms, language: None })
+    /// A recognition fed while the speaker talks, when this model can take one now; `None` recognizes the whole
+    /// recording at `Finish`.
+    fn start(self: Arc<Self>) -> Option<Box<dyn Partial>> {
+        None
     }
 }
 
-/// The engine of a session: the model on this computer, which keeps the frames and recognizes them at `finish` (a
-/// streaming mode can come behind the same session later).
+/// A recognition fed piece by piece: the pieces in order while the speaker talks, the tail once they stop.
+pub trait Partial: Send + 'static {
+    fn add(&mut self, pcm: &[i16]) -> Result<(), EngineError>;
+    fn finish(self: Box<Self>, tail: &[i16]) -> Result<SttOutput, EngineError>;
+}
+
+fn output(r: Recognized) -> SttOutput {
+    tracing::info!(audio_ms = r.audio_ms, took_ms = r.took_ms, masked = r.masked, "recognized on this computer");
+    // The language is told from the text by the runtime (`speech::speech_language`).
+    SttOutput { text: r.text, audio_ms: r.audio_ms, language: None }
+}
+
+impl Recognize for Recognizer {
+    fn recognize(&self, pcm: &[i16]) -> Result<SttOutput, EngineError> {
+        Recognizer::recognize(self, pcm).map(output)
+    }
+
+    fn start(self: Arc<Self>) -> Option<Box<dyn Partial>> {
+        Some(Box::new(Running::new(self)))
+    }
+}
+
+impl Partial for Running {
+    fn add(&mut self, pcm: &[i16]) -> Result<(), EngineError> {
+        Running::add(self, pcm)
+    }
+
+    fn finish(self: Box<Self>, tail: &[i16]) -> Result<SttOutput, EngineError> {
+        Running::finish(*self, tail).map(output)
+    }
+}
+
+/// The engine of a session: the model on this computer, which recognizes pieces of a long recording while the speaker
+/// talks and the rest at `finish`.
 pub enum Engine {
     Local(Arc<dyn Recognize>),
 }
@@ -62,14 +95,73 @@ pub fn start(engine: Engine) -> SttSession {
     }
 }
 
-/// The local session: frames are kept until `Finish`, then the whole recording is recognized on a blocking thread.
-/// `Abort` or a dropped session is a cancel.
+/// The recognition fed while the speaker talks.
+enum Early {
+    /// Waiting for the next piece.
+    Idle(Box<dyn Partial>),
+    /// A piece is being recognized on a blocking thread.
+    Busy(JoinHandle<(Box<dyn Partial>, Result<(), EngineError>)>),
+    /// None, or a piece failed: the whole recording is recognized at `Finish`.
+    Off,
+}
+
+impl Early {
+    /// Once the piece being recognized is done: `Idle` again, or `Off` if it failed.
+    async fn settle(self) -> Self {
+        let Self::Busy(piece) = self else { return self };
+        match piece.await {
+            Ok((partial, Ok(()))) => Self::Idle(partial),
+            Ok((_, Err(e))) => {
+                tracing::warn!("a piece was not recognized, the whole recording will be: {e}");
+                Self::Off
+            }
+            Err(e) => {
+                tracing::warn!("a piece was not recognized, the whole recording will be: {}", join_failure(&e));
+                Self::Off
+            }
+        }
+    }
+}
+
+/// The local session. Frames are kept; while the speaker talks, a piece cut at a quiet point
+/// ([`speech::early_cut`]) is recognized on a blocking thread whenever the one before is done, so at `Finish` only
+/// the tail is left. A failed piece or tail has the whole recording recognized instead. `Abort` or a dropped session
+/// is a cancel.
 async fn run_local(model: Arc<dyn Recognize>, mut rx: UnboundedReceiver<AudioMsg>) -> Result<SttOutput, EngineError> {
     let mut pcm = Vec::new();
+    // Samples already handed to the early recognition.
+    let mut fed = 0;
+    let mut early = model.clone().start().map_or(Early::Off, Early::Idle);
     while let Some(msg) = rx.recv().await {
         match msg {
-            AudioMsg::Pcm(frame) => pcm.extend_from_slice(&frame),
-            AudioMsg::Finish => return recognize(model, pcm).await,
+            AudioMsg::Pcm(frame) => {
+                pcm.extend_from_slice(&frame);
+                if matches!(&early, Early::Busy(piece) if piece.is_finished()) {
+                    early = early.settle().await;
+                }
+                if let Early::Idle(_) = early
+                    && let Some(cut) = speech::early_cut(&pcm[fed..])
+                {
+                    let Early::Idle(mut partial) = std::mem::replace(&mut early, Early::Off) else { unreachable!() };
+                    let piece = pcm[fed..fed + cut].to_vec();
+                    fed += cut;
+                    early = Early::Busy(tokio::task::spawn_blocking(move || {
+                        let added = partial.add(&piece);
+                        (partial, added)
+                    }));
+                }
+            }
+            AudioMsg::Finish => {
+                if let Early::Idle(partial) = early.settle().await {
+                    let tail = pcm[fed..].to_vec();
+                    match tokio::task::spawn_blocking(move || partial.finish(&tail)).await {
+                        Ok(Ok(out)) => return Ok(out),
+                        Ok(Err(e)) => tracing::warn!("the tail was not recognized, the whole recording will be: {e}"),
+                        Err(e) => tracing::warn!("the tail was not recognized, the whole recording will be: {}", join_failure(&e)),
+                    }
+                }
+                return recognize(model, pcm).await;
+            }
             AudioMsg::Abort => break,
         }
     }
@@ -180,6 +272,79 @@ mod tests {
         s.push(vec![0; 320]);
         let out = s.finish(Duration::from_secs(5)).await.unwrap();
         assert_eq!((out.text.as_str(), out.audio_ms), ("1920 samples", 120));
+    }
+
+    /// A stand-in model that recognizes while the speaker talks: the text lists the pieces it got and the tail; a whole
+    /// recording says so.
+    struct Streaming {
+        fail_add: bool,
+        fail_finish: bool,
+    }
+    impl Recognize for Streaming {
+        fn recognize(&self, pcm: &[i16]) -> Result<SttOutput, EngineError> {
+            Ok(SttOutput { text: format!("whole {}", pcm.len()), audio_ms: pcm.len() as u64 / SAMPLES_PER_MS, language: None })
+        }
+        fn start(self: Arc<Self>) -> Option<Box<dyn Partial>> {
+            Some(Box::new(StreamingRun { model: self, pieces: Vec::new() }))
+        }
+    }
+    struct StreamingRun {
+        model: Arc<Streaming>,
+        pieces: Vec<usize>,
+    }
+    impl Partial for StreamingRun {
+        fn add(&mut self, pcm: &[i16]) -> Result<(), EngineError> {
+            if self.model.fail_add {
+                return Err(EngineError::Model("piece".into()));
+            }
+            self.pieces.push(pcm.len());
+            Ok(())
+        }
+        fn finish(self: Box<Self>, tail: &[i16]) -> Result<SttOutput, EngineError> {
+            if self.model.fail_finish {
+                return Err(EngineError::Model("tail".into()));
+            }
+            let samples = self.pieces.iter().sum::<usize>() + tail.len();
+            Ok(SttOutput {
+                text: format!("pieces {:?} tail {}", self.pieces, tail.len()),
+                audio_ms: samples as u64 / SAMPLES_PER_MS,
+                language: None,
+            })
+        }
+    }
+
+    /// `seconds` of audio in 20 ms frames, then the result.
+    async fn dictate(model: Streaming, seconds: usize) -> SttOutput {
+        let s = start(Engine::Local(Arc::new(model)));
+        for _ in 0..seconds * 50 {
+            s.push(vec![1_000; 320]);
+        }
+        s.finish(Duration::from_secs(5)).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_long_dictation_is_recognized_in_pieces_while_it_is_spoken() {
+        let out = dictate(Streaming { fail_add: false, fail_finish: false }, 40).await;
+        assert_eq!(out.audio_ms, 40_000, "every sample once: {}", out.text);
+        let (pieces, tail) = out.text.strip_prefix("pieces [").and_then(|t| t.split_once("] tail ")).expect(&out.text);
+        let pieces: Vec<usize> = pieces.split(", ").map(|n| n.parse().unwrap()).collect();
+        assert!(!pieces.is_empty(), "{}", out.text);
+        assert!(pieces.iter().all(|&n| (160_000..=240_000).contains(&n)), "10 to 15 s each: {pieces:?}");
+        assert_eq!(pieces.iter().sum::<usize>() + tail.parse::<usize>().unwrap(), 640_000);
+    }
+
+    #[tokio::test]
+    async fn a_short_dictation_is_all_tail() {
+        let out = dictate(Streaming { fail_add: false, fail_finish: false }, 5).await;
+        assert_eq!(out.text, "pieces [] tail 80000");
+    }
+
+    #[tokio::test]
+    async fn a_failed_piece_or_tail_falls_back_to_the_whole_recording() {
+        let out = dictate(Streaming { fail_add: true, fail_finish: false }, 40).await;
+        assert_eq!(out.text, "whole 640000");
+        let out = dictate(Streaming { fail_add: false, fail_finish: true }, 40).await;
+        assert_eq!(out.text, "whole 640000");
     }
 
     #[tokio::test]

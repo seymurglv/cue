@@ -1,7 +1,7 @@
 //! The ONNX model: the encoder over a recording's features, then the decoder/joint step by step ([`tdt::decode`]).
 //! Files as the onnx-asr exports name them (`encoder-model.int8.onnx`, `decoder_joint-model.int8.onnx`, `vocab.txt`).
 use std::path::Path;
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use cue_core::speech;
@@ -18,8 +18,11 @@ use crate::EngineError;
 pub const ENCODER: &str = "encoder-model.int8.onnx";
 pub const DECODER: &str = "decoder_joint-model.int8.onnx";
 pub const VOCAB: &str = "vocab.txt";
-/// Threads of one model run: enough for a fast recognition, few enough to leave the rest of the computer alone.
-const THREADS: usize = 4;
+/// Threads of one model run: half the processor's, 2 to 8 — enough for a fast recognition, few enough to leave the
+/// rest of the computer alone.
+fn threads() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get() / 2).clamp(2, 8)
+}
 /// The prediction network's LSTM: 2 layers of 640.
 const LSTM_LAYERS: usize = 2;
 const LSTM_SIZE: usize = 640;
@@ -90,7 +93,7 @@ fn session(path: &Path) -> Result<Session, EngineError> {
         .map_err(model_error)?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(model_error)?
-        .with_intra_threads(THREADS)
+        .with_intra_threads(threads())
         .map_err(model_error)?
         .commit_from_file(path)
         .map_err(model_error)
@@ -116,37 +119,88 @@ impl Recognizer {
     pub fn recognize(&self, pcm: &[i16]) -> Result<Recognized, EngineError> {
         let started = Instant::now();
         let mut sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut encoded = Vec::new();
-        for piece in speech::pieces(pcm) {
-            let audio: Vec<f32> = pcm[piece].iter().map(|&s| f32::from(s) / 32_768.0).collect();
+        let pieces = self.pieces(&mut sessions, pcm)?;
+        let (text, masked) = self.text(&mut sessions, &pieces)?;
+        Ok(Recognized { text, masked, audio_ms: audio_ms(pcm.len()), took_ms: started.elapsed().as_millis() as u64 })
+    }
+
+    /// `pcm` cut into pieces ([`speech::pieces`]), each encoded and decoded without a mask.
+    fn pieces(&self, sessions: &mut Sessions, pcm: &[i16]) -> Result<Vec<Piece>, EngineError> {
+        let mut out = Vec::new();
+        for range in speech::pieces(pcm) {
+            let audio: Vec<f32> = pcm[range].iter().map(|&s| f32::from(s) / 32_768.0).collect();
             let mel = self.features.log_mel(&audio);
             if mel.frames > 0 {
-                encoded.push(sessions.encode(&mel)?);
+                let encoded = sessions.encode(&mel)?;
+                let ids = self.decode(sessions, &encoded, None)?;
+                out.push(Piece { encoded, ids });
             }
         }
-        let decode_all = |sessions: &mut Sessions, mask: Option<&[bool]>| -> Result<String, EngineError> {
-            let mut texts = Vec::new();
-            for e in &encoded {
-                let mut joint = OrtJoint { session: &mut sessions.joint, encoded: e };
-                let ids = tdt::decode(&mut joint, e.frames, self.vocab.len(), self.vocab.blank, mask)?;
-                let text = self.vocab.text(&ids);
-                if !text.is_empty() {
-                    texts.push(text);
-                }
-            }
-            Ok(texts.join(" "))
+        Ok(out)
+    }
+
+    fn decode(&self, sessions: &mut Sessions, encoded: &Encoded, mask: Option<&[bool]>) -> Result<Vec<usize>, EngineError> {
+        let mut joint = OrtJoint { session: &mut sessions.joint, encoded };
+        tdt::decode(&mut joint, encoded.frames, self.vocab.len(), self.vocab.blank, mask)
+    }
+
+    /// The pieces' texts joined with a space, and whether the other alphabet was masked out: when it leaked
+    /// ([`speech::leak`]), every piece is decoded again without it.
+    fn text(&self, sessions: &mut Sessions, pieces: &[Piece]) -> Result<(String, bool), EngineError> {
+        let join = |ids: &mut dyn Iterator<Item = Vec<usize>>| {
+            ids.map(|ids| self.vocab.text(&ids)).filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" ")
         };
-        let mut text = decode_all(&mut sessions, None)?;
-        let mut masked = false;
-        if let Some(alphabet) = speech::leak(&text) {
-            let mask = self.vocab.mask_of(alphabet);
-            text = decode_all(&mut sessions, Some(&mask))?;
-            masked = true;
-        }
+        let text = join(&mut pieces.iter().map(|p| p.ids.clone()));
+        let Some(alphabet) = speech::leak(&text) else { return Ok((text, false)) };
+        let mask = self.vocab.mask_of(alphabet);
+        let ids = pieces.iter().map(|p| self.decode(sessions, &p.encoded, Some(&mask))).collect::<Result<Vec<_>, _>>()?;
+        Ok((join(&mut ids.into_iter()), true))
+    }
+}
+
+fn audio_ms(samples: usize) -> u64 {
+    samples as u64 * 1_000 / speech::SAMPLE_RATE as u64
+}
+
+/// One piece recognized: the encoder's output, kept for a decode with a mask, and its tokens without one.
+struct Piece {
+    encoded: Encoded,
+    ids: Vec<usize>,
+}
+
+/// A recognition fed while the speaker talks: each piece is recognized as it comes, so at the end only the tail is
+/// left. The same text as [`Recognizer::recognize`] would give with the same cuts.
+pub struct Running {
+    model: Arc<Recognizer>,
+    pieces: Vec<Piece>,
+    samples: usize,
+}
+
+impl Running {
+    pub fn new(model: Arc<Recognizer>) -> Self {
+        Self { model, pieces: Vec::new(), samples: 0 }
+    }
+
+    /// The next piece of the recording, recognized now.
+    pub fn add(&mut self, pcm: &[i16]) -> Result<(), EngineError> {
+        let mut sessions = self.model.sessions.lock().unwrap_or_else(PoisonError::into_inner);
+        let pieces = self.model.pieces(&mut sessions, pcm)?;
+        self.pieces.extend(pieces);
+        self.samples += pcm.len();
+        Ok(())
+    }
+
+    /// The tail recognized, and the text of the whole recording; `took_ms` is this last step's time.
+    pub fn finish(mut self, tail: &[i16]) -> Result<Recognized, EngineError> {
+        let started = Instant::now();
+        let model = self.model.clone();
+        let mut sessions = model.sessions.lock().unwrap_or_else(PoisonError::into_inner);
+        self.pieces.extend(model.pieces(&mut sessions, tail)?);
+        let (text, masked) = model.text(&mut sessions, &self.pieces)?;
         Ok(Recognized {
             text,
             masked,
-            audio_ms: pcm.len() as u64 * 1_000 / speech::SAMPLE_RATE as u64,
+            audio_ms: audio_ms(self.samples + tail.len()),
             took_ms: started.elapsed().as_millis() as u64,
         })
     }
@@ -248,6 +302,30 @@ mod tests {
         println!("loaded in {} ms", t.elapsed().as_millis());
         let out = r.recognize(&pcm).unwrap();
         println!("{out:?}\n{}", out.text);
+        assert!(!out.text.is_empty());
+    }
+
+    /// The same WAV fed in pieces as a dictation feeds them ([`speech::early_cut`]): prints the time left after the
+    /// last frame and both texts, the whole recording's and the pieces', never asserted.
+    #[test]
+    #[ignore = "needs the model files (CUE_MODEL_DIR) and a recording (CUE_TEST_WAV)"]
+    fn a_recording_fed_in_pieces_is_recognized() {
+        let dir = model_dir().expect("CUE_MODEL_DIR");
+        let wav = std::env::var("CUE_TEST_WAV").expect("CUE_TEST_WAV");
+        let pcm: Vec<i16> = hound::WavReader::open(wav).unwrap().samples::<i16>().map(Result::unwrap).collect();
+        let model = Arc::new(Recognizer::load(&dir).unwrap());
+        println!("threads {}", threads());
+        let whole = model.recognize(&pcm).unwrap();
+        let mut running = Running::new(model.clone());
+        let mut fed = 0;
+        while let Some(cut) = speech::early_cut(&pcm[fed..]) {
+            let t = Instant::now();
+            running.add(&pcm[fed..fed + cut]).unwrap();
+            println!("piece of {} ms in {} ms", audio_ms(cut), t.elapsed().as_millis());
+            fed += cut;
+        }
+        let out = running.finish(&pcm[fed..]).unwrap();
+        println!("whole {whole:?}\n{}\npieces {out:?}\n{}", whole.text, out.text);
         assert!(!out.text.is_empty());
     }
 

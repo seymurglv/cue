@@ -128,6 +128,19 @@ const QUIET_WINDOW: usize = SAMPLE_RATE / 5;
 /// The step the quiet window moves by: 50 ms.
 const QUIET_STEP: usize = SAMPLE_RATE / 20;
 
+/// While the speaker talks, a piece is recognized once the recording not yet recognized is this long.
+pub const EARLY_PIECE_S: usize = 15;
+/// An early piece is cut no earlier than this into it.
+pub const EARLY_MIN_S: usize = 10;
+
+/// The cut in the middle of the quietest 200 ms of `pcm` that starts between `from` and `to - 200 ms`.
+fn quiet_cut(pcm: &[i16], from: usize, to: usize) -> usize {
+    let loudness = |at: usize| pcm[at..at + QUIET_WINDOW].iter().map(|s| u64::from(s.unsigned_abs())).sum::<u64>();
+    let quietest =
+        (from..=to - QUIET_WINDOW).step_by(QUIET_STEP).min_by_key(|&at| loudness(at)).unwrap_or(to - QUIET_WINDOW);
+    quietest + QUIET_WINDOW / 2
+}
+
 /// Sample ranges of at most [`MAX_PIECE_S`] seconds covering all of `pcm` in order, each cut in the middle of the
 /// quietest 200 ms between [`MIN_PIECE_S`] and [`MAX_PIECE_S`] seconds of its piece, so a word is rarely split.
 pub fn pieces(pcm: &[i16]) -> Vec<Range<usize>> {
@@ -135,12 +148,7 @@ pub fn pieces(pcm: &[i16]) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     let mut start = 0;
     while pcm.len() - start > max {
-        let loudness = |at: usize| pcm[at..at + QUIET_WINDOW].iter().map(|s| u64::from(s.unsigned_abs())).sum::<u64>();
-        let quietest = (start + min..=start + max - QUIET_WINDOW)
-            .step_by(QUIET_STEP)
-            .min_by_key(|&at| loudness(at))
-            .unwrap_or(start + max - QUIET_WINDOW);
-        let cut = quietest + QUIET_WINDOW / 2;
+        let cut = quiet_cut(pcm, start + min, start + max);
         out.push(start..cut);
         start = cut;
     }
@@ -148,6 +156,14 @@ pub fn pieces(pcm: &[i16]) -> Vec<Range<usize>> {
         out.push(start..pcm.len());
     }
     out
+}
+
+/// Where to cut a piece off the start of `uncut`, the recording not yet recognized, while the speaker still talks:
+/// once it is [`EARLY_PIECE_S`] seconds long, in the middle of the quietest 200 ms between [`EARLY_MIN_S`] and
+/// [`EARLY_PIECE_S`] seconds; `None` before that.
+pub fn early_cut(uncut: &[i16]) -> Option<usize> {
+    let (max, min) = (EARLY_PIECE_S * SAMPLE_RATE, EARLY_MIN_S * SAMPLE_RATE);
+    (uncut.len() >= max).then(|| quiet_cut(uncut, min, max))
 }
 
 #[cfg(test)]
@@ -212,6 +228,21 @@ mod tests {
         assert_eq!(p.last().unwrap().end, pcm.len());
         assert!(p.windows(2).all(|w| w[0].end == w[1].start), "no gaps, no overlaps");
         assert!(pieces(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_recording_is_cut_early_at_a_quiet_point_once_long_enough() {
+        let sr = SAMPLE_RATE;
+        assert_eq!(early_cut(&vec![1000; 15 * sr - 1]), None, "shorter than the early piece waits");
+        assert_eq!(early_cut(&[]), None);
+        let mut pcm = vec![1000i16; 15 * sr];
+        pcm[12 * sr..12 * sr + sr / 5].fill(0);
+        assert_eq!(early_cut(&pcm), Some(12 * sr + sr / 10), "in the middle of the quiet window");
+        // Quiet before 10 s does not count: the piece is never shorter.
+        let mut pcm = vec![1000i16; 20 * sr];
+        pcm[3 * sr..3 * sr + sr / 5].fill(0);
+        let cut = early_cut(&pcm).unwrap();
+        assert!((10 * sr..=15 * sr).contains(&cut), "{cut}");
     }
 
     #[test]
