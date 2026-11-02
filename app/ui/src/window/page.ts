@@ -1,4 +1,4 @@
-// The main window's page (spec 3 §1–3): the header — the live mark and CUE on the left, links to the sections and the
+// The main window's page (spec 3 §1–3): the header — the dictation mark and CUE on the left, links to the sections and the
 // gear on the right — the Today and History sections, and the settings tray that grows out of the gear. A link scrolls
 // to its section; the link of the section under the header is the darker one. Ported from the approved design (stage 5).
 // The page draws nothing until the core has told it the settings: the language is SettingsView.lang (the window has
@@ -12,7 +12,6 @@ import '../design/cue.js';
 import '../design/drop.js';
 import * as api from './api';
 import type { SettingChange, SettingsView } from './api';
-import { CUE } from '../designParts';
 import { HistoryView } from './history';
 import { icon } from './icons';
 import { SettingsTray } from './settings';
@@ -24,6 +23,13 @@ const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
 const DARK = '(prefers-color-scheme: dark)';
 /** How long a button shows its "done" check (as in the design). */
 const FLASH_MS = 1400;
+/** The dictation mark before the word CUE: five bars of a voice that roll as a slow wave, and the red lamp pulsing
+ *  beside them (window.css moves both, and stills them with reduced motion). The window's 20 grid, stroke 1.8. */
+const MARK =
+  '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">' +
+  '<g class="wv"><line x1="2.5" y1="7" x2="2.5" y2="13"/><line x1="5.7" y1="4.5" x2="5.7" y2="15.5"/>' +
+  '<line x1="9" y1="3" x2="9" y2="17"/><line x1="12.3" y1="5" x2="12.3" y2="15"/><line x1="15.5" y1="7" x2="15.5" y2="13"/></g>' +
+  '<circle class="lamp" cx="18.2" cy="3.2" r="1.7"/></svg>';
 
 /** One choice of a menu: its value, its label (text), a muted note after it, whether it is the current one. */
 export interface MenuItem {
@@ -215,8 +221,6 @@ export class WindowPage implements Ctx {
   readonly reduced: () => boolean;
   private readonly now: () => Date;
   private readonly menus: Menus;
-  private logo: any = null;
-  private looping = false;
   private readonly off = new AbortController();
 
   constructor(readonly app: HTMLElement, opts: PageOptions = {}) {
@@ -233,7 +237,6 @@ export class WindowPage implements Ctx {
     const theme = () => (document.documentElement.dataset.theme = dark?.matches ? 'dark' : 'light');
     theme();
     dark?.addEventListener?.('change', theme, { signal });
-    window.matchMedia?.(REDUCED_MOTION)?.addEventListener?.('change', () => this.animate(), { signal });
     document.addEventListener('keydown', (e) => this.onKey(e), { signal });
     // Outside a menu or the tray: by the event's path as it was dispatched — a click inside may already have replaced
     // the element it hit (a tray page, a menu that closed).
@@ -303,7 +306,6 @@ export class WindowPage implements Ctx {
     this.numbers.dispose();
     this.tray.stopPreview();
     this.history.release();
-    this.looping = false;
   }
 
   async change(c: SettingChange): Promise<SettingsView | null> {
@@ -362,7 +364,7 @@ export class WindowPage implements Ctx {
     this.scroller = bsc;
     const bh = h('header', 'bh');
     const logo = h('span', 'logo');
-    logo.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><g></g></svg>';
+    logo.innerHTML = MARK;
     logo.append('CUE');
     const gear = iconButton('ibt gear', 'gear', t.settings);
     gear.addEventListener('click', () => (this.tray.isOpen ? this.tray.close() : this.tray.open()));
@@ -400,14 +402,12 @@ export class WindowPage implements Ctx {
     tray.hidden = true;
     tray.append(h('div', 'bin'));
     this.app.append(bsc, tray);
-    this.logo = new (CUE().Morph)(logo.querySelector('g'), { state: 'idle' });
     this.numbers.mount(todaySec);
     this.history.mount(sec);
     this.dict.mount(dictSec);
     this.markCurrent(bh);
     this.tray.mount(tray, gear);
     document.fonts?.ready?.then(() => this.tray.refit());
-    this.animate();
   }
 
   /** A link's section comes up under the header: smoothly, at once with reduced motion. */
@@ -429,21 +429,6 @@ export class WindowPage implements Ctx {
       current = this.sections[this.sections.length - 1]?.dataset.scr;
     }
     for (const l of this.links) l.setAttribute('aria-current', String(l.dataset.go === current));
-  }
-
-  /** The mark breathes in its idle pose, frame by frame; with reduced motion it stands still. */
-  private animate(): void {
-    if (this.looping || this.reduced() || this.off.signal.aborted) return;
-    this.looping = true;
-    const frame = (now: number) => {
-      if (!this.looping || this.reduced()) {
-        this.looping = false;
-        return;
-      }
-      this.logo?.tick(now);
-      requestAnimationFrame(frame);
-    };
-    requestAnimationFrame(frame);
   }
 
   /** Esc: an open menu closes; in the tray, back to its first page, then closed; then the field of a new dictionary word
