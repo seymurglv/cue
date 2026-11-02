@@ -2,14 +2,15 @@
    The mark is built from 5 lines and a lamp dot. Each state is a position of these primitives;
    unused lines shrink into an invisible point. Every frame the values are pulled toward the target by a spring.
    The "thinking" dots sit 1 to the right (center 12, like the circle); their jump is unchanged.
-   In start and listen the bars are centered in the circle: start's five short bars on 6.4 … 17.6, the three voice bars on
-   7.5 / 12 / 16.5 growing from y = 12, so they stay centered at every level. The lamp is an accent at their top right,
-   not part of the centering: start (21.2, 4.2), listen (+9 from the middle bar, 7.5 above the bars' center line). The Drop clips the mark to the 24 grid. Every still pose lies 0.5 or more inside it (the listen
-   lamp at its largest, r 2.5, reaches 23.5). Between poses the spring overshoots: the hidden lamp of ask and translate
-   is parked at the start lamp's spot, so their way into listen stays inside, and wherever the lamp flies from (the
+   In start and listen the bars are centered in the circle: the three voice bars on 7.5 / 12 / 16.5 growing from y = 12,
+   so they stay centered at every level. The lamp is an accent at their top right, not part of the centering: +9 from
+   the middle bar, 7.5 above the bars' center line (21, 4.5). The Drop clips the mark to the 24 grid. Every still pose
+   lies 0.5 or more inside it (the listen lamp at its largest, r 2.5, reaches 23.5). Between poses the spring
+   overshoots: the hidden lamp of ask and translate is parked at the listen lamp's spot, so their way into listen stays
+   inside, and wherever the lamp flies from (the
    error lamp, or the hidden one of think and cancel, both near the middle, into listen through a short start) it is
    drawn no closer than 0.5 to the grid's edge, a line no still pose crosses. A test runs every way into listen.
-   idle is not centered: the hover capsule's margins in drop.css are measured from where its bars and lamp are painted. */
+   idle has the same bars and lamp; the hover capsule's margins in drop.css are measured from where they are painted. */
 (function(){
 const TAU=Math.PI*2;
 const L=(x1,y1,x2,y2,o=1)=>({x1,y1,x2,y2,o});
@@ -20,27 +21,29 @@ const ROT=(cx,cy,len,a)=>{const dx=Math.sin(a)*len/2,dy=-Math.cos(a)*len/2;retur
 function pack(lines,extra){const o={};lines.forEach((l,i)=>{o['a'+i]=l.x1;o['b'+i]=l.y1;o['c'+i]=l.x2;o['d'+i]=l.y2;o['o'+i]=l.o});return Object.assign(o,extra)}
 const shake=t=>t<460?Math.sin(t/26)*1.3*(1-t/460):0;
 
-/* The idle mark is the dictation wave: five voice bars on y = 12 and the lamp at their top right (21.6, 4.2), r 1.9.
-   Live, the bars roll as a slow wave (2.4 s, each 0.5 s after the one before) and the lamp fades in and out (1.8 s);
-   its place and size stay, so the hover capsule's margins (drop.css) hold. */
-const IDLE_X=[4.5,8,11.5,15,18.5],IDLE_H=[7,13,16,12,7];
-/* start gathers the wave to the middle: five short bars on x 6.4 … 17.6 that flicker while the lamp grows red at their
-   top right (21.2, 4.2); listen keeps the outer and middle bars (lines 0, 2, 4) and the other two fade between them. */
-const START_X=[6.4,9.2,12,14.8,17.6],START_H=[3.5,5,6.5,5,3.5];
+/* One mark from rest to the end of a dictation: three voice bars on x 7.5 / 12 / 16.5 (lines 0, 2, 4; the other two
+   are parked between them) and the lamp at their top right (21, 4.5). Only the bars' heights change.
+   idle is the dictation wave: the bars as tall as a loud voice, 16 at the middle in the voice's proportions, roll as a
+   slow wave (2.4 s, each 0.5 s after the one before) and the lamp, r 1.9, fades in and out (1.8 s); its place and size
+   stay, so the hover capsule's margins (drop.css) hold.
+   start is listen before the microphone has sent anything: the bars at rest while the lamp grows red. Listening then
+   changes nothing: the bars move only with the voice. */
+const VOICE_X=[7.5,12,16.5],VOICE_K=[.72,1,.8],IDLE_H=VOICE_K.map(k=>16*k);
+const voiceBars=h=>[BAR(VOICE_X[0],12,h(0)),PT(9.75,12),BAR(VOICE_X[1],12,h(1)),PT(14.25,12),BAR(VOICE_X[2],12,h(2))];
 /* Mark states on a 24×24 grid. */
 const STATES=['idle','start','listen','think','done','cancel','error','ask','translate'];
 function pose(s,c){
  const {t,lvl,jit,now}=c;
  switch(s){
-  case 'idle':{const s=i=>c.static?1:.725+.275*Math.sin(TAU*(t+i*500)/2400);return pack(IDLE_X.map((x,i)=>BAR(x,12,IDLE_H[i]*s(i))),{dx:21.6,dy:4.2,dr:1.9,do:c.static?1:.775+.225*Math.sin(TAU*t/1800)})}
-  case 'start':{const s=i=>c.static?1:.75+.25*Math.sin(t/90-i*.9);return pack(START_X.map((x,i)=>BAR(x,12,START_H[i]*s(i))),{dx:21.2,dy:4.2,dr:c.static?1.9:Math.min(2.3,.4+t/180),do:1})}
-  case 'listen':{const h=i=>3+11.5*lvl*[.72,1,.8][i]*(.5+.5*jit[i]);return pack([BAR(7.5,12,h(0)),PT(9.75,12),BAR(12,12,h(1)),PT(14.25,12),BAR(16.5,12,h(2))],{dx:21,dy:4.5,dr:1.5+lvl,do:1})}
+  case 'idle':{const s=i=>c.static?1:.725+.275*Math.sin(TAU*(t+i*500)/2400);return pack(voiceBars(i=>IDLE_H[i]*s(i)),{dx:21,dy:4.5,dr:1.9,do:c.static?1:.775+.225*Math.sin(TAU*t/1800)})}
+  case 'start':return pack(voiceBars(()=>3),{dx:21,dy:4.5,dr:c.static?1.5:Math.min(1.5,.4+t/180),do:1});
+  case 'listen':{const h=i=>3+11.5*lvl*VOICE_K[i]*(.5+.5*jit[i]);return pack(voiceBars(h),{dx:21,dy:4.5,dr:1.5+lvl,do:1})}
   case 'think':{const y=i=>12.5-2.4*Math.max(0,Math.sin(now/150-i*.9));return pack([DOT(7.5,y(0)),DOT(12,y(1)),DOT(16.5,y(2)),PT(12,12),PT(12,12)],{dx:12,dy:12.5,dr:0,do:0})}
   case 'done':return pack([L(6,12.5,10,16.5),L(10,16.5,18,8.5),PT(10,16.5),PT(12,12),PT(12,12)],{dx:18,dy:8.5,dr:0,do:0});
   case 'error':{const sh=shake(t),l=L(12+sh,5,12+sh,14);return pack([l,{...l},{...l},PT(12,12),PT(12,12)],{dx:12+sh,dy:19.2,dr:1.6,do:1})}
   case 'cancel':return pack([L(7,7,17,17),L(17,7,7,17),PT(12,12),PT(12,12),PT(12,12)],{dx:12,dy:12,dr:0,do:0});
-  case 'ask':{const a=c.static?0:now/1600;return pack([ROT(12,12,14,a),ROT(12,12,14,a+Math.PI/3),ROT(12,12,14,a+2*Math.PI/3),PT(12,12),PT(12,12)],{dx:21.2,dy:4.2,dr:0,do:0})}
-  case 'translate':return pack([L(5,9,19,9),L(19,9,15.5,5.5),L(19,15,5,15),L(5,15,8.5,18.5),PT(12,12)],{dx:21.2,dy:4.2,dr:0,do:0});
+  case 'ask':{const a=c.static?0:now/1600;return pack([ROT(12,12,14,a),ROT(12,12,14,a+Math.PI/3),ROT(12,12,14,a+2*Math.PI/3),PT(12,12),PT(12,12)],{dx:21,dy:4.5,dr:0,do:0})}
+  case 'translate':return pack([L(5,9,19,9),L(19,9,15.5,5.5),L(19,15,5,15),L(5,15,8.5,18.5),PT(12,12)],{dx:21,dy:4.5,dr:0,do:0});
  }
 }
 const toneOf=s=>s==='error'?'warn':s==='ask'?'ask':'';
@@ -72,13 +75,14 @@ class Morph{
  }
 }
 
-/* App icon: a graphite plate (macOS squircle / soft Windows square) + the idle mark. */
+/* App icon: a graphite plate (macOS squircle / soft Windows square) + the idle mark, what it paints centered on the
+   plate. */
 const SQ=(()=>{const n=5,c=50,r=41,N=120;let d='';for(let i=0;i<N;i++){const t=i/N*TAU,ct=Math.cos(t),st=Math.sin(t);d+=(i?'L':'M')+(c+r*Math.sign(ct)*Math.abs(ct)**(2/n)).toFixed(2)+' '+(c+r*Math.sign(st)*Math.abs(st)**(2/n)).toFixed(2)}return d+'Z'})();
 let UID=0;
 function plate(os,size,state='idle'){
  const u='cue'+(UID++),mac=os==='mac',shape=mac?`<path d="${SQ}"/>`:'<rect x="8" y="8" width="84" height="84" rx="17"/>';
  const w=document.createElement('div');
- w.innerHTML=`<svg viewBox="0 0 100 100" width="${size}" height="${size}" aria-hidden="true" style="display:block"><defs><filter id="${u}s" x="-25%" y="-20%" width="150%" height="160%"><feDropShadow dx="0" dy="${mac?2.6:1.8}" stdDeviation="${mac?2.6:2}" flood-color="#000" flood-opacity="${mac?.3:.24}"/></filter><linearGradient id="${u}p" x1="0" y1="0" x2="${mac?0:.5}" y2="1"><stop offset="0" stop-color="#3C3C42"/><stop offset="1" stop-color="#0E0E10"/></linearGradient><linearGradient id="${u}h" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".1"/><stop offset=".5" stop-color="#fff" stop-opacity="0"/></linearGradient><clipPath id="${u}c">${shape}</clipPath></defs><g filter="url(#${u}s)" fill="url(#${u}p)">${shape}</g><g clip-path="url(#${u}c)"><g class="art" transform="translate(18.8 18.8) scale(2.6)" style="color:#F4F4F6;--rec:#FF4A1C"></g><rect width="100" height="100" fill="url(#${u}h)"/></g><g fill="none" stroke="rgba(255,255,255,.14)" stroke-width=".9">${shape}</g></svg>`;
+ w.innerHTML=`<svg viewBox="0 0 100 100" width="${size}" height="${size}" aria-hidden="true" style="display:block"><defs><filter id="${u}s" x="-25%" y="-20%" width="150%" height="160%"><feDropShadow dx="0" dy="${mac?2.6:1.8}" stdDeviation="${mac?2.6:2}" flood-color="#000" flood-opacity="${mac?.3:.24}"/></filter><linearGradient id="${u}p" x1="0" y1="0" x2="${mac?0:.5}" y2="1"><stop offset="0" stop-color="#3C3C42"/><stop offset="1" stop-color="#0E0E10"/></linearGradient><linearGradient id="${u}h" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".1"/><stop offset=".5" stop-color="#fff" stop-opacity="0"/></linearGradient><clipPath id="${u}c">${shape}</clipPath></defs><g filter="url(#${u}s)" fill="url(#${u}p)">${shape}</g><g clip-path="url(#${u}c)"><g class="art" transform="translate(11.9 19.2) scale(2.6)" style="color:#F4F4F6;--rec:#FF4A1C"></g><rect width="100" height="100" fill="url(#${u}h)"/></g><g fill="none" stroke="rgba(255,255,255,.14)" stroke-width=".9">${shape}</g></svg>`;
  new Morph(w.querySelector('.art'),{state,static:true,tone:''});
  return w.firstElementChild;
 }

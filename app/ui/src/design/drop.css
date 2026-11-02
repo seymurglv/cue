@@ -24,9 +24,9 @@
 @media (prefers-reduced-motion:reduce){.drop[data-s=idle]:not(.hov){animation:none}}
 /* Idle on hover: even margins to what is painted. 0.3 h from each end of the capsule to the bar's left stroke edge and
    to the last key's right edge, 0.2 h from the lamp dot to the first key, 4u between the keys. Where the bar and the dot
-   are painted in the mark's box comes from the idle mark in cue.js (on its 24 grid: the first bar at x 4.5 with a 2.2
-   stroke, the dot at x 21.6 with r 1.9; a test keeps them equal); the padding and the two parts' margins take the rest. */
-.drop{--bar-l:calc((4.5 - 2.2 / 2) / 24 * var(--mk));--dot-r:calc((21.6 + 1.9) / 24 * var(--mk))}
+   are painted in the mark's box comes from the idle mark in cue.js (on its 24 grid: the first bar at x 7.5 with a 2.2
+   stroke, the dot at x 21 with r 1.9; a test keeps them equal); the padding and the two parts' margins take the rest. */
+.drop{--bar-l:calc((7.5 - 2.2 / 2) / 24 * var(--mk));--dot-r:calc((21 + 1.9) / 24 * var(--mk))}
 .drop[data-s=idle].hov{height:var(--h);opacity:1;padding-left:0;padding-right:calc(.3 * var(--h) - 4 * var(--u))}
 .drop[data-s=idle].hov>.mkw.on{margin-left:calc(.3 * var(--h) - var(--bar-l));margin-right:0}
 .drop[data-s=idle].hov>.kc.on{margin-left:calc(.2 * var(--h) - (var(--mk) - var(--dot-r)));margin-right:calc(4 * var(--u))}

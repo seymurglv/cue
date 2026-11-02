@@ -115,7 +115,8 @@ describe('The "Ask" answer', () => {
     view.update(answer({ turns: [done('x')] }));
     // From 10 000 the mark rests; 10 600 to 11 100 is where a blinking cursor would be dim.
     for (let t = 10_000; t <= 11_100; t += 16) view.frame(t);
-    const lines = [...root.querySelectorAll('.am .m-l')].slice(0, 3);
+    // The voice bars are lines 0, 2 and 4.
+    const lines = [...root.querySelectorAll('.am .m-l')].filter((_, i) => i % 2 === 0);
     expect(lines.map((l) => Number(l.getAttribute('opacity')))).toEqual([1, 1, 1]);
   });
 
@@ -392,13 +393,13 @@ describe('The "Ask" answer', () => {
     const cursorX = () => Number(root.querySelector('.am .m-l')!.getAttribute('x1'));
     view.update(answer({ turns: [done('x')] }));
     view.frame(0);
-    // The idle mark's first voice bar stands at x 4.5.
-    expect(cursorX(), 'the soft spring is still on its way from the asterisk').not.toBe(4.5);
+    // The idle mark's first voice bar stands at x 7.5.
+    expect(cursorX(), 'the soft spring is still on its way from the asterisk').not.toBe(7.5);
     view.update(null);
     reduced = true;
     view.update(answer({ turns: [done('x')] }));
     view.frame(0);
-    expect(cursorX()).toBe(4.5);
+    expect(cursorX()).toBe(7.5);
     view.update(answer({ listening: true, turns: [done('x')] }));
     view.level(1);
     view.frame(16);

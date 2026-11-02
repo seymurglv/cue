@@ -23,12 +23,13 @@ const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
 const DARK = '(prefers-color-scheme: dark)';
 /** How long a button shows its "done" check (as in the design). */
 const FLASH_MS = 1400;
-/** The dictation mark before the word CUE: five bars of a voice that roll as a slow wave, and the red lamp pulsing
- *  beside them (window.css moves both, and stills them with reduced motion). The window's 20 grid, stroke 1.8. */
+/** The dictation mark before the word CUE: the Drop's three voice bars, in its proportions, that roll as a slow wave,
+ *  and the red lamp pulsing at their top right (window.css moves both, and stills them with reduced motion). The
+ *  window's 20 grid, stroke 1.8. */
 const MARK =
   '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">' +
-  '<g class="wv"><line x1="2.5" y1="7" x2="2.5" y2="13"/><line x1="5.7" y1="4.5" x2="5.7" y2="15.5"/>' +
-  '<line x1="9" y1="3" x2="9" y2="17"/><line x1="12.3" y1="5" x2="12.3" y2="15"/><line x1="15.5" y1="7" x2="15.5" y2="13"/></g>' +
+  '<g class="wv"><line x1="3.2" y1="5" x2="3.2" y2="15"/><line x1="8.2" y1="3" x2="8.2" y2="17"/>' +
+  '<line x1="13.2" y1="4.4" x2="13.2" y2="15.6"/></g>' +
   '<circle class="lamp" cx="18.2" cy="3.2" r="1.7"/></svg>';
 
 /** One choice of a menu: its value, its label (text), a muted note after it, whether it is the current one; and for a

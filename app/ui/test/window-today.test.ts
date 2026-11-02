@@ -37,13 +37,13 @@ afterEach(() => {
 });
 
 describe('The header', () => {
-  it('opens with the dictation mark: a wave of five bars and the red lamp, before the word CUE', async () => {
+  it('opens with the dictation mark: a wave of three bars and the red lamp, before the word CUE', async () => {
     page = await mount();
     const logo = $('.bh .logo')!;
     expect(text(logo)).toBe('CUE');
     const svg = logo.querySelector('svg')!;
     expect(svg.getAttribute('aria-hidden')).toBe('true');
-    expect(svg.querySelectorAll('.wv line')).toHaveLength(5);
+    expect(svg.querySelectorAll('.wv line')).toHaveLength(3);
     expect(svg.querySelectorAll('circle.lamp')).toHaveLength(1);
     expect(svg.querySelector('.m-l, .m-dot')).toBeNull();
     expect(logo.firstChild).toBe(svg);

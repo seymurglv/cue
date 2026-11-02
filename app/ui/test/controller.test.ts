@@ -464,11 +464,11 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
   it('idle on hover: 0.3 h at both ends to what is painted, 0.2 h from the lamp to the keys, at every place and size', () => {
     ctl.apply(base);
     hover(true);
-    // The idle mark the margins are measured from: the first bar at x 4.5 with a 2.2 stroke, the lamp at 21.6 with r 1.9.
+    // The idle mark the margins are measured from: the first bar at x 7.5 with a 2.2 stroke, the lamp at 21 with r 1.9.
     const line = part('.mkw svg line');
-    expect([line.getAttribute('x1'), line.getAttribute('stroke-width')]).toEqual(['4.500', '2.2']);
+    expect([line.getAttribute('x1'), line.getAttribute('stroke-width')]).toEqual(['7.500', '2.2']);
     const dot = part('.mkw svg circle');
-    expect([dot.getAttribute('cx'), dot.getAttribute('r')]).toEqual(['21.600', '1.900']);
+    expect([dot.getAttribute('cx'), dot.getAttribute('r')]).toEqual(['21.000', '1.900']);
     const check = (h: number, at: string) => {
       const g = idleGaps();
       expect(g.left, `${at} left`).toBeCloseTo(0.3 * h, 6);
@@ -480,12 +480,12 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
       ctl.place(place);
       check(H, place);
     }
-    // 36 px: no padding on the left, 7.2 on the right; the mark's margins 7.74 and 0, the keys' 6.75 and 3.6.
+    // 36 px: no padding on the left, 7.2 on the right; the mark's margins 5.04 and 0, the keys' 6.21 and 3.6.
     ctl.place('bottom');
     expect(size(drop(), 'padding-left')).toBe(0);
     expect(size(drop(), 'padding-right')).toBeCloseTo(7.2, 6);
-    expect([size(part('.mkw'), 'margin-left'), size(part('.mkw'), 'margin-right')].map((v) => +v.toFixed(4))).toEqual([7.74, 0]);
-    expect([size(part('.kc'), 'margin-left'), size(part('.kc'), 'margin-right')].map((v) => +v.toFixed(4))).toEqual([6.75, 3.6]);
+    expect([size(part('.mkw'), 'margin-left'), size(part('.mkw'), 'margin-right')].map((v) => +v.toFixed(4))).toEqual([5.04, 0]);
+    expect([size(part('.kc'), 'margin-left'), size(part('.kc'), 'margin-right')].map((v) => +v.toFixed(4))).toEqual([6.21, 3.6]);
     const big = document.createElement('style');
     big.textContent = ':root{--h:48px}';
     document.head.append(big);

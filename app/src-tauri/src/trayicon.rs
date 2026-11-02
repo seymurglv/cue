@@ -1,4 +1,4 @@
-//! Tray icon: the CUE dictation mark as the Drop shows it at rest, five voice bars with round ends and a lamp at their
+//! Tray icon: the CUE dictation mark as the Drop shows it at rest, three voice bars with round ends and a lamp at their
 //! top right (the mark's own proportions, still). The mark is drawn to its own frame: most of the icon height, centered.
 //! Idle is monochrome; recording has a red, larger lamp; pause is faded.
 use cue_core::ui::{UiPhase, UiState};
@@ -6,29 +6,29 @@ use cue_core::ui::{UiPhase, UiState};
 /// Share of the icon height the mark's frame may take, and of its width.
 const MARK_HEIGHT: f32 = 0.90;
 const MARK_WIDTH: f32 = 0.92;
-// The mark on the Drop's 24 grid (cue.js, the idle pose): bars at x 4.5 … 18.5, 7 / 13 / 16 / 12 / 7 high, centered
-// on y 12, a 2.2 stroke; the lamp at (21.6, 4.2), r 1.9, 2.4 while recording.
-const GRID_BARS_X: [f32; 5] = [4.5, 8.0, 11.5, 15.0, 18.5];
-const GRID_BARS_H: [f32; 5] = [7.0, 13.0, 16.0, 12.0, 7.0];
+// The mark on the Drop's 24 grid (cue.js, the idle pose): bars at x 7.5 / 12 / 16.5, 11.52 / 16 / 12.8 high (the
+// voice's proportions), centered on y 12, a 2.2 stroke; the lamp at (21, 4.5), r 1.9, 2.4 while recording.
+const GRID_BARS_X: [f32; 3] = [7.5, 12.0, 16.5];
+const GRID_BARS_H: [f32; 3] = [11.52, 16.0, 12.8];
 const GRID_BAR_CY: f32 = 12.0;
 const GRID_HALF_STROKE: f32 = 1.1;
-const GRID_LAMP: (f32, f32) = (21.6, 4.2);
+const GRID_LAMP: (f32, f32) = (21.0, 4.5);
 const GRID_LAMP_IDLE: f32 = 1.9;
 const GRID_LAMP_REC: f32 = 2.4;
 // The frame on the grid, sized by the large lamp so the mark does not shift while recording: from the first bar's
 // left edge to the large lamp's right edge, from the large lamp's top to the tallest bar's bottom.
-const GRID_LEFT: f32 = 4.5 - GRID_HALF_STROKE;
-const GRID_RIGHT: f32 = 21.6 + GRID_LAMP_REC;
-const GRID_TOP: f32 = 4.2 - GRID_LAMP_REC;
+const GRID_LEFT: f32 = GRID_BARS_X[0] - GRID_HALF_STROKE;
+const GRID_RIGHT: f32 = GRID_LAMP.0 + GRID_LAMP_REC;
+const GRID_TOP: f32 = GRID_LAMP.1 - GRID_LAMP_REC;
 const GRID_BOTTOM: f32 = GRID_BAR_CY + 8.0 + GRID_HALF_STROKE;
 
 /// The mark in px of an icon of `size`.
 #[derive(Clone, Copy, Debug)]
 struct Mark {
     /// Horizontal centers of the bars, and the ends of their axes (without the round caps).
-    bars_x: [f32; 5],
-    bars_top: [f32; 5],
-    bars_bottom: [f32; 5],
+    bars_x: [f32; 3],
+    bars_top: [f32; 3],
+    bars_bottom: [f32; 3],
     half_stroke: f32,
     lamp_x: f32,
     lamp_y: f32,
@@ -93,7 +93,7 @@ pub fn rgba(look: TrayLook, light_taskbar: bool, size: u32) -> Vec<u8> {
         for x in 0..size {
             let (cx, cy) = (x as f32 + 0.5, y as f32 + 0.5);
             // Each bar is a vertical line with round ends; the lamp is a circle.
-            let bars = (0..5)
+            let bars = (0..GRID_BARS_X.len())
                 .map(|i| {
                     let dy = (m.bars_top[i] - cy).max(cy - m.bars_bottom[i]).max(0.0);
                     cover((cx - m.bars_x[i]).hypot(dy) - m.half_stroke)
@@ -218,7 +218,7 @@ mod tests {
                 let idle = rgba(TrayLook::Idle, light, size);
                 assert_eq!(idle.len(), (size * size * 4) as usize, "{size} px");
                 let m = Mark::new(size);
-                let mid = px(&idle, size, m.bars_x[2] as u32, size / 2);
+                let mid = px(&idle, size, m.bars_x[1] as u32, size / 2);
                 assert_eq!(mid, [ink[0], ink[1], ink[2], 255], "{size} px: the middle bar is opaque, taskbar color");
                 let (lamp_px, _) = lamp(&idle, size);
                 assert_eq!(lamp_px, [ink[0], ink[1], ink[2], 255], "{size} px: idle lamp in the bars' color");
@@ -226,7 +226,7 @@ mod tests {
                 assert_eq!(lamp(&rec, size).0, [RED[0], RED[1], RED[2], 255], "{size} px: recording lamp is red");
                 let paused = rgba(TrayLook::Paused, light, size);
                 assert!(paused.chunks(4).all(|p| p[3] <= 115), "{size} px: pause is faded");
-                assert_eq!(px(&paused, size, m.bars_x[2] as u32, size / 2)[3], 115, "{size} px");
+                assert_eq!(px(&paused, size, m.bars_x[1] as u32, size / 2)[3], 115, "{size} px");
                 for img in [&idle, &rec, &paused] {
                     for (x, y) in [(0, 0), (size - 1, 0), (0, size - 1), (size - 1, size - 1)] {
                         assert_eq!(px(img, size, x, y)[3], 0, "{size} px: corner ({x}, {y}) is transparent");
@@ -237,10 +237,10 @@ mod tests {
     }
 
     #[test]
-    fn mark_is_five_voice_bars() {
-        for size in [24, 32, 48, 64] {
+    fn mark_is_three_voice_bars() {
+        for size in [16, 24, 32, 48, 64] {
             let img = rgba(TrayLook::Idle, false, size);
-            assert_eq!(bar_peaks(&img, size), 5, "{size} px: five bars across the middle row");
+            assert_eq!(bar_peaks(&img, size), 3, "{size} px: three bars across the middle row");
         }
     }
 
@@ -271,7 +271,7 @@ mod tests {
             let img = rgba(TrayLook::Idle, false, size);
             let m = Mark::new(size);
             let y = size / 2;
-            let x = m.bars_x[2];
+            let x = m.bars_x[1];
             let width: f32 = ((x - 2.0) as u32..=(x + 2.0) as u32).map(|x| f32::from(px(&img, size, x, y)[3]) / 255.0).sum();
             assert!(width >= 1.4 * size as f32 / 16.0, "{size} px: bar thickness {width:.2} px");
         }
