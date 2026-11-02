@@ -99,16 +99,34 @@ describe('The idle mark', () => {
 });
 
 describe('The mark in the circle', () => {
-  it('start: the bar is centered on x = 12 and y = 12, the lamp at its right side', () => {
+  it('start: five short bars of the wave centered on x = 12 and y = 12, the lamp at their right side', () => {
     for (const g of [still('start'), live('start')]) {
-      const bar = linesBox(g);
-      expect(Math.abs(bar.cx - 12)).toBeLessThanOrEqual(0.05);
-      expect(Math.abs(bar.cy - 12)).toBeLessThanOrEqual(0.05);
-      expect(dotBox(g)!.left).toBeGreaterThan(bar.right);
+      const bars = linesBox(g);
+      expect(Math.abs(bars.cx - 12)).toBeLessThanOrEqual(0.05);
+      expect(Math.abs(bars.cy - 12)).toBeLessThanOrEqual(0.05);
+      expect(dotBox(g)!.left).toBeGreaterThan(bars.right);
+      const lines = [...g.querySelectorAll('line')];
+      expect(lines.map((l) => num(l, 'x1'))).toEqual([6.4, 9.2, 12, 14.8, 17.6]);
     }
-    // The lamp keeps its original offset from the bar: 6.4 to the right, at y = 6.2.
     const dot = still('start').querySelector('circle')!;
-    expect([num(dot, 'cx'), num(dot, 'cy')]).toEqual([18.4, 6.2]);
+    expect([num(dot, 'cx'), num(dot, 'cy')]).toEqual([21.2, 4.2]);
+  });
+
+  it('from idle into start no tall bar shows up: the wave only gathers to the middle', () => {
+    const g = group();
+    const m = new (CUE().Morph)(g, { state: 'idle' });
+    let t = 0;
+    for (; t < 1000; t += 16) m.tick(t);
+    m.set('start', t);
+    for (const end = t + 1200; t < end; t += 16) {
+      m.tick(t);
+      for (const l of g.querySelectorAll('line')) {
+        if (num(l, 'opacity') <= 0) continue;
+        expect(num(l, 'y2') - num(l, 'y1'), `${t} ms`).toBeLessThanOrEqual(16.5);
+      }
+    }
+    // Settled, every bar is short.
+    for (const l of g.querySelectorAll('line')) expect(num(l, 'y2') - num(l, 'y1')).toBeLessThanOrEqual(7);
   });
 
   it.each([0, 0.5, 1])('listen at level %s: the bars are centered on x = 12, the lamp at their right side', (lvl) => {
@@ -122,8 +140,11 @@ describe('The mark in the circle', () => {
   it('listen: the bars grow from y = 12 at every level, the lamp keeps its offset at their top right', () => {
     for (const lvl of [0, 0.3, 0.5, 1]) {
       const g = live('listen', lvl);
-      const lines = [...g.querySelectorAll('line')].slice(0, 3);
+      // The voice bars are lines 0, 2 and 4: start's outer and middle bars become them, its other two fade between.
+      const all = [...g.querySelectorAll('line')];
+      const lines = [all[0], all[2], all[4]];
       for (const l of lines) expect((num(l, 'y1') + num(l, 'y2')) / 2, `level ${lvl}`).toBeCloseTo(12, 2);
+      expect([all[1], all[3]].map((l) => num(l, 'opacity'))).toEqual([0, 0]);
       expect(lines.map((l) => num(l, 'x1'))).toEqual([7.5, 12, 16.5]);
       const dot = g.querySelector('circle')!;
       // 9 to the right of the middle bar, 7.5 above the bars' center line.
@@ -192,7 +213,7 @@ describe('The mark in the circle', () => {
   it('ask and translate park their hidden lamp at the start lamp\'s spot, so no clamp is needed on their way in', () => {
     for (const state of ['ask', 'translate']) {
       const dot = still(state).querySelector('circle')!;
-      expect([num(dot, 'cx'), num(dot, 'cy'), num(dot, 'opacity')], state).toEqual([18.4, 6.2, 0]);
+      expect([num(dot, 'cx'), num(dot, 'cy'), num(dot, 'opacity')], state).toEqual([21.2, 4.2, 0]);
     }
   });
 

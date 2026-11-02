@@ -402,7 +402,8 @@ describe('The "Ask" answer', () => {
     view.update(answer({ listening: true, turns: [done('x')] }));
     view.level(1);
     view.frame(16);
-    const middleBar = root.querySelectorAll('.lsn .m-l')[1];
+    // The voice bars are lines 0, 2 and 4 of the mark.
+    const middleBar = root.querySelectorAll('.lsn .m-l')[2];
     expect(Number(middleBar.getAttribute('y1'))).toBeCloseTo(6.1875, 2);
   });
 

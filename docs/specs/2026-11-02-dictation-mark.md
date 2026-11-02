@@ -28,6 +28,10 @@ The owner asked for the mark wherever the blinking bar stood:
   r 1.9. Live, the bars roll as the same wave and the lamp fades between 55 % and 100 % opacity; its place and size
   stay, so the hover capsule's even margins (`drop.css`, `--bar-l`, `--dot-r`) hold. The mark has five lines now; the
   other poses park the fifth.
+- **The start of a dictation** (`start`): the wave gathers to the middle as five short bars on x 6.4 … 17.6 (3.5 / 5 /
+  6.5 / 5 / 3.5 high) that flicker while the lamp grows red at their top right (21.2, 4.2), the spot ask and translate
+  park their hidden lamp at. Listening keeps the outer and middle bars as its three voice bars (lines 0, 2, 4); the
+  other two fade where they stand. No tall bar shows up on the way, from rest through start into listening.
 - **The Drop at rest**: the strip breathes, its opacity between 40 % and 72 % over 3.2 s; hovered or with reduced
   motion it holds still. Chosen from four variants (as is, breathing, a shine, a row of bars).
 - **The key hint** on hover: soft plates, a 12 % white fill with no outline, the system type at 11 (in the 40 px

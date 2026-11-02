@@ -2,15 +2,14 @@
    The mark is built from 5 lines and a lamp dot. Each state is a position of these primitives;
    unused lines shrink into an invisible point. Every frame the values are pulled toward the target by a spring.
    The "thinking" dots sit 1 to the right (center 12, like the circle); their jump is unchanged.
-   In start and listen the bars are centered in the circle: the start bar on x = 12, the three voice bars on 7.5 / 12 /
-   16.5 growing from y = 12, so they stay centered at every level. The lamp is an accent at their side, not part of the
-   centering, at its original offset from the bars: start (+6.4, 6.2), listen (+9 from the middle bar, 7.5 above the
-   bars' center line). The Drop clips the mark to the 24 grid. Every still pose lies 0.5 or more inside it (the listen
+   In start and listen the bars are centered in the circle: start's five short bars on 6.4 … 17.6, the three voice bars on
+   7.5 / 12 / 16.5 growing from y = 12, so they stay centered at every level. The lamp is an accent at their top right,
+   not part of the centering: start (21.2, 4.2), listen (+9 from the middle bar, 7.5 above the bars' center line). The Drop clips the mark to the 24 grid. Every still pose lies 0.5 or more inside it (the listen
    lamp at its largest, r 2.5, reaches 23.5). Between poses the spring overshoots: the hidden lamp of ask and translate
    is parked at the start lamp's spot, so their way into listen stays inside, and wherever the lamp flies from (the
    error lamp, or the hidden one of think and cancel, both near the middle, into listen through a short start) it is
    drawn no closer than 0.5 to the grid's edge, a line no still pose crosses. A test runs every way into listen.
-   idle is not centered: the hover capsule's margins in drop.css are measured from where its bar and lamp are painted. */
+   idle is not centered: the hover capsule's margins in drop.css are measured from where its bars and lamp are painted. */
 (function(){
 const TAU=Math.PI*2;
 const L=(x1,y1,x2,y2,o=1)=>({x1,y1,x2,y2,o});
@@ -25,20 +24,23 @@ const shake=t=>t<460?Math.sin(t/26)*1.3*(1-t/460):0;
    Live, the bars roll as a slow wave (2.4 s, each 0.5 s after the one before) and the lamp fades in and out (1.8 s);
    its place and size stay, so the hover capsule's margins (drop.css) hold. */
 const IDLE_X=[4.5,8,11.5,15,18.5],IDLE_H=[7,13,16,12,7];
+/* start gathers the wave to the middle: five short bars on x 6.4 … 17.6 that flicker while the lamp grows red at their
+   top right (21.2, 4.2); listen keeps the outer and middle bars (lines 0, 2, 4) and the other two fade between them. */
+const START_X=[6.4,9.2,12,14.8,17.6],START_H=[3.5,5,6.5,5,3.5];
 /* Mark states on a 24×24 grid. */
 const STATES=['idle','start','listen','think','done','cancel','error','ask','translate'];
 function pose(s,c){
  const {t,lvl,jit,now}=c;
  switch(s){
   case 'idle':{const s=i=>c.static?1:.725+.275*Math.sin(TAU*(t+i*500)/2400);return pack(IDLE_X.map((x,i)=>BAR(x,12,IDLE_H[i]*s(i))),{dx:21.6,dy:4.2,dr:1.9,do:c.static?1:.775+.225*Math.sin(TAU*t/1800)})}
-  case 'start':{const b=c.static?1:(Math.floor(t/140)%2?.4:1),l=L(12,5,12,19,b);return pack([l,{...l},{...l},PT(12,12),PT(12,12)],{dx:18.4,dy:6.2,dr:c.static?1.9:Math.min(2.3,.4+t/180),do:1})}
-  case 'listen':{const h=i=>3+11.5*lvl*[.72,1,.8][i]*(.5+.5*jit[i]);return pack([BAR(7.5,12,h(0)),BAR(12,12,h(1)),BAR(16.5,12,h(2)),PT(12,12),PT(12,12)],{dx:21,dy:4.5,dr:1.5+lvl,do:1})}
+  case 'start':{const s=i=>c.static?1:.75+.25*Math.sin(t/90-i*.9);return pack(START_X.map((x,i)=>BAR(x,12,START_H[i]*s(i))),{dx:21.2,dy:4.2,dr:c.static?1.9:Math.min(2.3,.4+t/180),do:1})}
+  case 'listen':{const h=i=>3+11.5*lvl*[.72,1,.8][i]*(.5+.5*jit[i]);return pack([BAR(7.5,12,h(0)),PT(9.75,12),BAR(12,12,h(1)),PT(14.25,12),BAR(16.5,12,h(2))],{dx:21,dy:4.5,dr:1.5+lvl,do:1})}
   case 'think':{const y=i=>12.5-2.4*Math.max(0,Math.sin(now/150-i*.9));return pack([DOT(7.5,y(0)),DOT(12,y(1)),DOT(16.5,y(2)),PT(12,12),PT(12,12)],{dx:12,dy:12.5,dr:0,do:0})}
   case 'done':return pack([L(6,12.5,10,16.5),L(10,16.5,18,8.5),PT(10,16.5),PT(12,12),PT(12,12)],{dx:18,dy:8.5,dr:0,do:0});
   case 'error':{const sh=shake(t),l=L(12+sh,5,12+sh,14);return pack([l,{...l},{...l},PT(12,12),PT(12,12)],{dx:12+sh,dy:19.2,dr:1.6,do:1})}
   case 'cancel':return pack([L(7,7,17,17),L(17,7,7,17),PT(12,12),PT(12,12),PT(12,12)],{dx:12,dy:12,dr:0,do:0});
-  case 'ask':{const a=c.static?0:now/1600;return pack([ROT(12,12,14,a),ROT(12,12,14,a+Math.PI/3),ROT(12,12,14,a+2*Math.PI/3),PT(12,12),PT(12,12)],{dx:18.4,dy:6.2,dr:0,do:0})}
-  case 'translate':return pack([L(5,9,19,9),L(19,9,15.5,5.5),L(19,15,5,15),L(5,15,8.5,18.5),PT(12,12)],{dx:18.4,dy:6.2,dr:0,do:0});
+  case 'ask':{const a=c.static?0:now/1600;return pack([ROT(12,12,14,a),ROT(12,12,14,a+Math.PI/3),ROT(12,12,14,a+2*Math.PI/3),PT(12,12),PT(12,12)],{dx:21.2,dy:4.2,dr:0,do:0})}
+  case 'translate':return pack([L(5,9,19,9),L(19,9,15.5,5.5),L(19,15,5,15),L(5,15,8.5,18.5),PT(12,12)],{dx:21.2,dy:4.2,dr:0,do:0});
  }
 }
 const toneOf=s=>s==='error'?'warn':s==='ask'?'ask':'';
