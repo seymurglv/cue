@@ -163,17 +163,27 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-The speech model is not part of this software or its installer: CUE downloads it on its first start, from a fixed
-commit of the Hugging Face repository below, and uses its files unchanged. It is licensed under the Creative Commons
-Attribution 4.0 International License (CC-BY-4.0, https://creativecommons.org/licenses/by/4.0/), and is credited as
+The speech models are not part of this software or its installer. CUE downloads its default model, Parakeet Ultra, on
+its first start, and the others listed below only when chosen on its Model page, each from a fixed commit of the
+Hugging Face repository named, and uses their files unchanged. They are licensed under the Creative Commons
+Attribution 4.0 International License (CC-BY-4.0, https://creativecommons.org/licenses/by/4.0/), and are credited as
 follows.
 
 - Parakeet TDT 0.6B v3, by NVIDIA (https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), CC-BY-4.0: the original
-  model.
+  model of Parakeet Ultra and Parakeet v3.
 - Parakeet Ultra, by Moondream (https://huggingface.co/moondream/parakeet-ultra), CC-BY-4.0: Parakeet TDT 0.6B v3
   post-trained by Moondream.
 - parakeet-tdt-0.6b-v3-ultra-onnx, by Olicorne (https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx),
   CC-BY-4.0: Parakeet Ultra converted to ONNX and quantized to int8. CUE uses its files encoder-model.int8.onnx,
   decoder_joint-model.int8.onnx and vocab.txt.
+- parakeet-tdt-0.6b-v3-onnx, by istupakov (https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx), CC-BY-4.0:
+  Parakeet TDT 0.6B v3 converted to ONNX, CUE's Parakeet v3.
+- Parakeet TDT 0.6B v2, by NVIDIA (https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2), CC-BY-4.0: the original model
+  of Parakeet v2.
+- parakeet-tdt-0.6b-v2-onnx, by istupakov (https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx), CC-BY-4.0:
+  Parakeet TDT 0.6B v2 converted to ONNX, CUE's Parakeet v2.
+
+A model found by the Model page's search of Hugging Face is the user's choice, downloaded from its own repository and
+used under that repository's own license.
 
 The models are provided as is, without warranties of any kind; see the license for its full terms.

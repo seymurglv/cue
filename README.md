@@ -3,7 +3,8 @@
 CUE is a voice-dictation app for Windows 11. Press `Ctrl + Win`, speak, press the keys again (or hold them while you
 speak), and the text appears at the caret in whatever app you are typing in: fillers and false starts removed,
 punctuation added, your own words kept, in Russian or English. Speech is recognized on your computer by a speech model
-CUE downloads once (Parakeet Ultra), and the text is tidied up by Claude, from Anthropic, with your own key. Add
+CUE downloads once (Parakeet Ultra), and the text is tidied up by a language model: by default Claude, from Anthropic,
+with your own key, or one of nine other connections, two of them (Ollama and LM Studio) on your computer. Add
 `Shift` and the text comes out translated; add `Alt` instead and ask a question out loud, and the answer appears next
 to your work. CUE runs quietly in the background: a small indicator at the bottom of the screen (the Drop) shows what
 it is doing, and an icon next to the clock opens the main window, with the history of everything CUE wrote and the
@@ -27,67 +28,85 @@ Download the installer, `CUE_<version>_x64-setup.exe`, from the latest release:
    upgrade runs first, makes the next install a first one. You can turn Start at sign-in off in the menu of the icon
    next to the clock, or in the main window's General settings.
 
-On its first start, and on every start while the Anthropic key is missing, CUE opens a welcome window: Hello, Key,
-Model, Microphone, First dictation and Done. While it is open, `Ctrl + Win` works only at the First dictation step; at
-the others it brings the window forward. If you close it before the key is saved, it comes back at the next start. To
-open it again at any time, even while CUE is running, press `Win + R` and run
-`"%LOCALAPPDATA%\Programs\CUE\cue.exe" --welcome`.
+On its first start, and on every start while the key of the cleanup's connection is missing (Anthropic's, unless you
+chose another in the settings), CUE opens a welcome window: Hello, Key, Model, Microphone, First dictation and Done.
+Its Key step asks for the Anthropic key, which "Ask" always uses; the key of another connection goes into the main
+window's **Cleanup** settings, and Ollama or LM Studio on this computer need no key, so with one of them chosen the
+window does not open by itself. While it is open, `Ctrl + Win` works only at the First dictation step; at the others
+it brings the window forward. If you close it before the key is saved, it comes back at the next start. To open it
+again at any time, even while CUE is running, press `Win + R` and run `"%LOCALAPPDATA%\Programs\CUE\cue.exe" --welcome`.
 
 At the same first start CUE downloads its speech model, Parakeet Ultra, about 670 MB, from Hugging Face into
 `%LOCALAPPDATA%\CUE\models`, in the background. The Model step shows its progress and moves on by itself when it is
 ready; you can go on to the other steps meanwhile. A download that stops (no network, the computer asleep) goes on
 from where it stopped when you press **Retry** (in the welcome window, the main window's **Speech recognition**
-settings, or the Drop). After that, recognition needs no network. The model needs a processor with AVX2 (2013 and
-later); on one without it, the Drop says "Processor not supported".
+settings, or the Drop). After that, recognition needs no network. Another speech model can be chosen later in the
+**Speech recognition** settings (see Features). The model needs a processor with AVX2 (2013 and later); on one without
+it, the Drop says "Processor not supported".
 
 ## Keys
 
-CUE uses your own account at one service, which bills you directly for what you use:
+CUE uses your own account at the services it talks to, which bill you directly for what you use:
 
-- **Anthropic** cleans the text up, translates it and answers your questions, with Claude. Sign in at the
-  [Anthropic Console](https://console.anthropic.com), set up billing and create an API key.
+- **Anthropic** cleans the text up and translates it, by default with Claude Haiku 5.5, and answers your questions
+  with Claude whatever the cleanup goes through. Sign in at the [Anthropic Console](https://console.anthropic.com),
+  set up billing and create an API key.
+- Instead of Anthropic, the main window's **Cleanup** settings can send the cleanup and translation through another
+  connection, each with a recommended model, chosen until you pick another. In the cloud, each with a key of its own:
+  OpenRouter, OpenAI, Google Gemini, DeepSeek, Mistral, Groq and xAI (their models are listed in
+  [API keys](#api-keys)). On this computer, with no key: Ollama and LM Studio, with Gemma 4 12B or Gemma 4 E4B, which
+  has to be in that app already; the text then stays on this computer.
 
 Speech recognition runs on your computer and costs nothing. Earlier versions of CUE also used Soniox, with a key of
 its own: this version does not, and deletes that key from Windows Credential Manager at its first start.
 
-Paste the key into the welcome window, or later into the main window's settings (**Keys**), and press **Check**: it
-saves the key and sends a free test request. The key is kept in Windows Credential Manager; CUE's windows show only a
-mask of it.
+Paste the Anthropic key into the welcome window, or any cloud connection's key into the main window's **Cleanup**
+settings, and press **Check**: it saves the key and sends a free test request. Keys are kept in Windows Credential
+Manager, each under its connection's id; CUE's windows show only a mask of them. For Ollama or LM Studio, the Cleanup
+settings show the server's address instead (`http://localhost:11434/v1` and `http://localhost:1234/v1` by default):
+**Check** asks the server for its models, and a new address is kept once it has been checked.
 
-Dictation and translation cost roughly $8.50–9.50 a month for an hour of speech a day with the default cleanup model,
-Claude Sonnet 5.5 (under $1.50 with Claude Haiku 5.5, see `refine.model`): all of it is the cleanup. Questions asked
-with `Ctrl + Win + Alt` cost more, and each web search one of them runs adds $0.01. CUE writes down what every
-dictation and question cost, on your computer only (`usage.csv`, see [Costs](#costs)).
+Dictation and translation cost about $0.0001 a dictation with the default cleanup model, Claude Haiku 5.5: under $1 a
+month for an hour of speech a day in dictations of about 13 seconds, cache warm-ups included. Claude Sonnet 5.5 costs
+about 15 to 20 times as much. All of it is the cleanup. Other services bill at their own prices, which the Cleanup
+settings' list of models shows per million tokens; Ollama and LM Studio cost nothing. Questions asked with
+`Ctrl + Win + Alt` cost more, and each web search one of them runs adds $0.01. CUE writes down what every dictation and
+question cost, on your computer only (`usage.csv`, see [Costs](#costs)).
 
 ## Privacy
 
 - **Sound stays on this computer.** Each dictation, translation and question is recognized here, by the speech model;
   no recording is sent anywhere, **Retry** included.
-- **Anthropic** receives the text: what the model recognized, the app name and up to 500 characters before the caret,
-  and for a question also the text you selected. Nothing is read from password fields.
+- **The cleanup's connection** receives the text: what the model recognized, the app name and up to 500 characters
+  before the caret. That is Anthropic by default, or the service you chose in the Cleanup settings; with Ollama or
+  LM Studio on this computer the text stays here.
+- **Anthropic** receives your questions to "Ask", with the text you selected, whatever the cleanup goes through.
+  Nothing is read from password fields.
 - The microphone is open only while CUE records, and while a window shows its level for you to check it.
 - Your history, with the recordings of what you said for the period you choose, settings, logs and the copy of your
-  last dictation stay on this computer. CUE has no telemetry: it connects only to Anthropic, and to Hugging Face to
-  download the speech model (a plain download of fixed files: nothing of yours goes with it). The installer sends
-  nothing.
+  last dictation stay on this computer. CUE has no telemetry: it connects only to the cleanup's connection, to
+  Anthropic for "Ask", and to Hugging Face to download speech models (a plain download of fixed files: nothing of
+  yours goes with it) and to search them when you type in the Model settings' search. The installer sends nothing.
 
-Anthropic has its own policy on how long it keeps what it receives. Every detail is in
+Each service has its own policy on how long it keeps what it receives. Every detail is in
 [Privacy in detail](#privacy-in-detail).
 
 ## Uninstall
 
 Quit CUE from the menu of its icon next to the clock, then open Windows **Settings → Apps → Installed apps**, find
 **CUE** and choose **Uninstall**. This removes the program, its Start menu entry, its desktop shortcut and Start at
-sign-in. Your history, settings, speech model and key stay, so installing CUE again picks up where you left off. The
+sign-in. Your history, settings, speech models and keys stay, so installing CUE again picks up where you left off. The
 uninstaller's **Delete the application data** box removes only the cache of CUE's windows (the last folder below) and
 the installer's registry key (the last line). To remove everything:
 
 - the folder `%LOCALAPPDATA%\CUE`: the history and its recordings, the last dictation, the logs, the cost records and
-  the speech model (`models`, about 670 MB);
+  the speech models (`models`, about 670 MB each);
 - the folder `%APPDATA%\CUE`: the settings;
 - the folder `%LOCALAPPDATA%\app.cue.dictation`: the cache of CUE's windows;
-- the key: in **Control Panel → Credential Manager → Windows Credentials**, remove `anthropic.CUE` under Generic
-  Credentials (the `soniox.CUE` of earlier versions is already gone: CUE deletes it at its first start);
+- the keys: in **Control Panel → Credential Manager → Windows Credentials**, remove under Generic Credentials each
+  one named after a connection: `anthropic.CUE`, and those of the others you saved a key for, `openrouter.CUE`,
+  `openai.CUE`, `gemini.CUE`, `deepseek.CUE`, `mistral.CUE`, `groq.CUE` and `xai.CUE` (the `soniox.CUE` of earlier
+  versions is already gone: CUE deletes it at its first start);
 - the registry key `HKEY_CURRENT_USER\Software\seymurglv`, named after CUE's publisher, where the installer remembers
   the folder CUE was installed in and whether Start at sign-in was on: in Registry Editor.
 
@@ -148,17 +167,31 @@ from source.
 - **Text at the caret in any app**, pasted through the clipboard. Your previous clipboard content comes back about
   half a second later, and dictated text is kept out of Windows clipboard history and the cloud clipboard.
 - **Speech recognized on this computer** by Parakeet Ultra, Moondream's post-trained version of NVIDIA's Parakeet TDT
-  0.6B v3, which writes punctuation and capital letters itself. The text comes once you finish: recognition of a
-  30-second dictation takes well under a second on a current processor, and the cleanup follows. While recording, the
-  Drop shows your voice level, never text. A dictation made before the model has finished downloading or loading is
-  kept: the Drop thinks until the model is ready, and the text is pasted then. When the model becomes ready after a
-  download, a quiet card says so: "Model is ready".
+  0.6B v3, which writes punctuation and capital letters itself. The model runs on half the processor's threads (2 to
+  8). The text comes once you finish, but a long dictation is recognized in pieces while you speak: once 15 s are
+  waiting, a piece is cut at the quietest moment between 10 and 15 s and recognized in the background, so only the
+  last seconds are left when you finish, and the cleanup follows. While recording, the Drop shows your voice level,
+  never text. A dictation made before the model has finished downloading or loading is kept: the Drop thinks until the
+  model is ready, and the text is pasted then. When the model becomes ready after a download, a quiet card says so:
+  "Model is ready".
+- **A choice of speech models** on the Model page (Settings → Speech recognition, the model's row): Parakeet Ultra
+  (the default), NVIDIA's own Parakeet TDT 0.6B v3 (25 languages, as Ultra) and v2 (English only), or a Parakeet TDT
+  model found on Hugging Face from the page's search, when it is exported to int8 ONNX the way CUE runs it (a model
+  that is not is shown pale, with the reason). A found model is pinned at the repository's current commit when you
+  choose it, and every model's files are checked by SHA-256. A model not yet here is downloaded first, if the drive
+  has room for it and 10 % more; the model in use keeps recognizing until the new one has loaded, then CUE switches to
+  it without a restart. Downloaded models stay, so going back is instant, and one not in use can be deleted.
 - **Russian or English, one language a dictation.** Names and terms in the other alphabet stay as you said them
   ("запусти cargo test в Visual Studio Code", "call Марисоль"); when the model writes part of a Russian sentence in
   English (or the other way round), CUE recognizes it again in the dictation's own alphabet.
-- **Light-touch cleanup:** fillers, stutters and abandoned starts are removed, "Wednesday, no, Thursday" becomes
-  "Thursday", punctuation and paragraphs are added, lists go on separate lines, numbers are written as digits.
-  The tone adapts to the target app; in terminals the result always stays on one line, so nothing runs by itself.
+- **Cleanup:** fillers, stutters and abandoned starts are removed, "Wednesday, no, Thursday" becomes "Thursday",
+  punctuation and paragraphs are added, lists go on separate lines, numbers are written as digits. The Default style,
+  CUE's own, also makes the text read as written rather than spoken: colloquial forms take their standard spelling
+  ("нету" → "нет"), words that only fill the speech go ("в принципе", "basically"), and a clumsy or repeated phrase is
+  reworded, while the meaning, every fact and request, your person and tone stay, names and terms stay as said, and
+  nothing is added. The Custom style puts your own instructions (up to 2,000 characters) in place of CUE's: they win
+  where they differ from its rules, and blank ones clean up as Default. The style does not change a translation. The
+  tone adapts to the target app; in terminals the result always stays on one line, so nothing runs by itself.
 - **Safe fallbacks:** if cleanup is slow, refused or looks wrong, or there is no network, the raw transcript is pasted
   instead. If recognition fails, the recording is kept and **Retry** recognizes it again; if the model did not
   download, **Retry** downloads the rest of it first.
@@ -200,21 +233,27 @@ from source.
     again**: the text goes into the window right under the main window (usually the one you were in before opening
     it), or into the clipboard when there is none. `Ctrl + Win + V`, a paste with an answer's button, a refusal and a
     failure add no entry, and **Paste again** does not change the last result.
-  - **Settings** (the gear): **Speech recognition** (Parakeet Ultra and its state: Ready, Downloading with its percent,
-    its megabytes and a bar, or Didn't download with **Retry**, which goes on from where the download stopped; there is
-    no choice of engine), **Keys** (Anthropic: paste the key and press **Check**, which saves it and sends a free test
-    request; the window shows only its mask), **Microphone** (As in Windows, or a device of your own, with
-    a live level), **Translation** (the target language of `Ctrl + Win + Shift`, any of the 60), **History** (**Keep
-    history**: Forever, A year, A month (the default), A week or Don't keep, older days deleted on their own; **Keep
-    recordings**: A day, A week (the default), A month or Don't keep, never longer than the history itself; a shorter
-    period deletes the older ones at once; **Clear history** needs a second press), **General** (Start at sign-in, the
-    interface language). A change takes effect at once, without a restart, and is written to `settings.json`.
+  - **Settings** (the gear): a tray whose first page lists six pages, each with its value. **Speech recognition**
+    (the model in use and its state: Ready, Downloading with its percent, its megabytes and a bar, or Did not download
+    with **Retry**, which goes on from where the download stopped; the model's row opens the Model page, see "A choice
+    of speech models"), **Cleanup** (the style, Default or Custom with a field for your instructions; the connection,
+    a card that opens the list of ten, In the cloud and On this computer, each with a lamp that is green once its key
+    is saved or its server has answered; the connection's key with **Check**, which saves it and sends a free test
+    request, the window showing only its mask, or a local server's address with **Check**; and the model, each with
+    its price per million tokens or its size on disk, the recommended one marked; its value on the first page is the
+    style, or "No *name* key" when the chosen cloud connection has none), **Microphone** (As in Windows, or a device of
+    your own, with a live level), **Languages** (the interface language, and the target language of
+    `Ctrl + Win + Shift`, any of the 60), **History** (**Keep history**: Forever, A year, A month (the default), A week
+    or Don't keep, older days deleted on their own; **Keep recordings**: A day, A week (the default), A month or Don't
+    keep, never longer than the history itself; a shorter period deletes the older ones at once; **Clear history**
+    needs a second press), **General** (Start at sign-in). A change takes effect at once, without a restart, and is
+    written to `settings.json`.
 - **A pinned microphone.** A microphone chosen in the settings stays CUE's even when Windows changes its default (a
   headset plugged in, say). When it is not connected, CUE records from the Windows microphone, and a card says so once:
   "*name* not found — recording from *name*".
 - **Tray icon:** a double click opens the main window, and the right button opens the menu: Open CUE, Pause for an
   hour, Start at sign-in, Open log, Quit. A single left click does nothing.
-- **Interface language:** English, or Russian when the Windows display language is Russian; the main window's General
+- **Interface language:** English, or Russian when the Windows display language is Russian; the main window's Languages
   settings (or `ui.language` in `settings.json`) can fix it to either, and the tray menu, the Drop and the main window
   switch at once.
 - **Usage accounting:** every dictation's cost is recorded locally, with its mode; `cue-cli usage` shows a monthly
@@ -223,9 +262,9 @@ from source.
   folder and through several Claude models, and builds a blind A/B report. A second one (`ask_compare`) asks a set of
   questions the way "Ask" does and measures its decisions, speed and cost.
 
-Not in this version: changing the hotkeys, text appearing while you speak, a choice of speech models, recognition on
-the graphics card, a vocabulary for speech recognition itself (the dictionary guides only the cleanup, see Settings),
-macOS.
+Not in this version: changing the hotkeys, text appearing while you speak, speech models other than Parakeet TDT in
+int8 ONNX, recognition on the graphics card, a vocabulary for speech recognition itself (the dictionary guides only
+the cleanup, see Settings), "Ask" through a service other than Anthropic, macOS.
 
 ## Requirements for building
 
@@ -236,24 +275,50 @@ macOS.
 - Microsoft Edge WebView2 Runtime (included with Windows 11).
 - Node.js 24 or newer, with npm (`"node": ">=24"` in `app/package.json`).
 - A processor with AVX2, for the speech model.
-- An Anthropic API key.
+- An Anthropic API key (for "Ask" and the benches, and for the cleanup by default), or another connection's key or a
+  local server for the cleanup alone. The tests need none.
 
 The first build downloads ONNX Runtime's prebuilt library, which the `ort` crate links into the program, into
 `%LOCALAPPDATA%\ort.pyke.io`, once.
 
 ## API keys
 
-Keys live in Windows Credential Manager under the service name `CUE`. They are never written to files, never
-printed in full and never logged. Enter the Anthropic key once in the welcome window or the main window (Settings →
-Keys: paste the key and press **Check**), or with the command-line tool (input is hidden):
+Keys live in Windows Credential Manager under the service name `CUE`, each under its connection's id (`anthropic`,
+`openrouter`, `openai`, `gemini`, `deepseek`, `mistral`, `groq`, `xai`; Credential Manager shows them as
+`anthropic.CUE` and so on). They are never written to files, never printed in full and never logged. Enter a key once
+in the main window (Settings → Cleanup: choose the connection, paste the key and press **Check**), the Anthropic key
+also in the welcome window, or with the command-line tool (input is hidden):
 
 ```powershell
-cargo run -p cue-cli -- keys set anthropic
-cargo run -p cue-cli -- keys show     # masked values, e.g. sk-ant…f3a9
-cargo run -p cue-cli -- keys check    # a free test request per key
+cargo run -p cue-cli -- keys set anthropic   # or openrouter, openai, gemini, deepseek, mistral, groq, xai
+cargo run -p cue-cli -- keys show            # masked values, e.g. sk-ant…f3a9
+cargo run -p cue-cli -- keys check           # a free test request per key
 ```
 
-`keys set openrouter` is also accepted; that key is used only by the `refine_compare` developer example, not by the app.
+The test request is Anthropic's and OpenRouter's own check, and for the other services a request for their list of
+models (10 s): it works, the key is refused, or it could not be checked. A local server is checked the same way without
+a key, within 3 s. The cleanup's connections and their models (the first of each is the recommended one, the default
+until another is picked; prices in USD per million input / output tokens, as CUE counts them):
+
+| Id | Connection | Models |
+|---|---|---|
+| `anthropic` | Anthropic (the default) | Claude Haiku 5.5 `claude-haiku-5-5` $0.10 / $0.50; Claude Sonnet 5.5 `claude-sonnet-5-5` $2 / $10 |
+| `openrouter` | OpenRouter | Claude Haiku 5.5 `anthropic/claude-haiku-5.5` $0.10 / $0.50; Claude Sonnet 5.5 `anthropic/claude-sonnet-5.5` $2 / $10; GPT-6 Luna `openai/gpt-6-luna` $0.10 / $0.50 |
+| `openai` | OpenAI | GPT-6 Luna `gpt-6-luna` $0.10 / $0.50; GPT-6.1 Terra `gpt-6.1-terra` $1 / $5 |
+| `gemini` | Google Gemini | Gemini 3.1 Flash-Lite `gemini-3.1-flash-lite` $0.25 / $1.50; Gemini 3.5 Flash-Lite `gemini-3.5-flash-lite` $0.30 / $2.50 |
+| `deepseek` | DeepSeek | DeepSeek Flash `deepseek-flash` $0.30 / $1.20 |
+| `mistral` | Mistral | Mistral Small 4 `mistral-small-2603` $0.15 / $0.60; Ministral 8B `ministral-8b-2512` $0.15 / $0.15 |
+| `groq` | Groq | gpt-oss 120B `openai/gpt-oss-120b` $0.15 / $0.60; gpt-oss 20B `openai/gpt-oss-20b` $0.075 / $0.30 |
+| `xai` | xAI | Grok 4.3 `grok-4.3` $1.25 / $2.50 |
+| `ollama` | Ollama, on this computer (`http://localhost:11434/v1`) | Gemma 4 12B `gemma4:12b`, about 8 GB; Gemma 4 E4B `gemma4:e4b`, about 7 GB |
+| `lmstudio` | LM Studio, on this computer (`http://localhost:1234/v1`) | Gemma 4 12B `google/gemma-4-12b`, 7.4 GB; Gemma 4 E4B `google/gemma-4-e4b`, 5.9 GB |
+
+Anthropic gets the Messages API request it always had: Claude Haiku 5.5 at effort `medium` with thinking off, Claude
+Sonnet 5.5 at effort `low`. Every other connection gets one OpenAI-compatible Chat Completions request, with the key as
+a bearer token (none for a local server), reasoning turned down as far as the service allows, and an answer held to
+the same `{"text": …}` form. A missing, refused or unfunded key, a limit, no network, a timeout or an unusable answer
+pastes the raw text, as before. `refine_compare` (see Repository layout) still compares cleanup models through
+OpenRouter's key, and the direct path through Anthropic's.
 
 ## Build and run
 
@@ -279,6 +344,10 @@ one running and exits. This build and an installed CUE are one app to Windows (o
 single instance, the data folders and keys, the cache of the windows and the Start at sign-in value. While this build
 runs, the installer's **Run CUE** and an installed `cue.exe --welcome` reach it instead, without a word: to try an
 installed CUE, quit this one first, and check which program runs with `(Get-Process cue).Path`.
+
+`DirectML.dll` goes beside the program: ONNX Runtime, linked into it, is built with DirectML and loads the DLL at
+start, though CUE runs the model on the processor. Cargo copies it next to `cue.exe` with the build, and the installer
+carries it there too.
 
 The installer is built into `target\dist`, so `target\release` is left alone. Before an installer leaves this
 computer, build it twice, the uncompressed one for the scan first, and look through both and the program for anything
@@ -341,9 +410,10 @@ history is neither written nor cleaned up until a period is chosen in the window
 
 ```json
 {
-  "stt": { "engine": "parakeet" },
+  "stt": { "engine": "parakeet", "model": "parakeet-ultra-int8" },
   "refine": {
-    "model": "claude-sonnet-5-5",
+    "connection": "anthropic",
+    "style": "default",
     "context_chars": 500,
     "min_ratio": 0.35,
     "max_ratio": 1.25,
@@ -357,16 +427,33 @@ history is neither written nor cleaned up until a period is chosen in the window
 - `stt.engine` has a single value, `parakeet`, the speech model on this computer; any other name reads as it. The
   fields of earlier versions (`soniox_model`, `soniox_async_model`, `language_hints`, and the Soniox prices under
   `pricing`) are ignored and dropped the next time CUE writes the file.
-- `refine.model`: the Claude model for cleanup and translation, `claude-sonnet-5-5` by default; `claude-haiku-5-5`
-  is faster and cheaper and fixes fewer misheard words. `context_chars`: how much text before the caret is sent as context,
-  for cleanup and for "Ask" alike (0 turns it off). `min_ratio`, `max_ratio`, `min_overlap`: the sanity check (see
-  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
+- `stt.model`: the speech model's id, the name of its folder under `models`: `parakeet-ultra-int8` (the default),
+  `parakeet-v3-int8`, `parakeet-v2-int8`, or `hf--<owner>--<repository>` (lower case) for a model found on Hugging
+  Face, whose folder keeps its `manifest.json`. The Model page writes it once the new model has loaded. An id CUE
+  cannot find reads as Parakeet Ultra.
+- `refine`: the cleanup and translation.
+  - `connection` (default `anthropic`): one of the ids in [API keys](#api-keys); case and surrounding spaces do not
+    matter, and any other value reads as `anthropic`.
+  - `models`: the model picked for a connection, by connection id, kept only where it is not the recommended one.
+    Example: `"models": { "anthropic": "claude-sonnet-5-5" }`. A model CUE does not list for that connection reads as
+    the recommended one.
+  - `addresses`: the address of Ollama's or LM Studio's server (`ollama`, `lmstudio`), kept only where it is not the
+    default. Example: `"addresses": { "ollama": "http://127.0.0.1:11500/v1" }`.
+  - `style`: `"default"`, CUE's own cleanup, or `"custom"`, your instructions in `custom`. Case and surrounding spaces
+    do not matter; any other value, the `"careful"` and `"bold"` of earlier versions included, reads as `"default"`.
+  - `custom`: the instructions of the Custom style, kept only when not empty; the main window takes up to 2,000
+    characters and trims them. Blank instructions clean up as Default.
+  - `context_chars`: how much text before the caret is sent as context, for cleanup and for "Ask" alike (0 turns it
+    off). `min_ratio`, `max_ratio`, `min_overlap`: the sanity check (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
+
+  The `model` and `level` of earlier versions are ignored and dropped the next time CUE writes the file, so a file that
+  named Sonnet cleans up with the default, Claude Haiku 5.5, until another model is picked.
 - `hold_hints_left`: how many more times the "Press and release" card appears after a held chord.
 - `bench.save_recordings`: copy each successful dictation's audio and app name for the bench.
 - `ui.language`: the language of the tray menu, the Drop, the "Ask" card and the main window. `"auto"` (the default)
   follows the Windows display language, `"en"` and `"ru"` fix it (case and surrounding spaces do not matter), any
-  other value means `"auto"`. The value is kept in the file only when it is `"en"` or `"ru"`. The main window's General
-  settings set it too. Example: `"ui": { "language": "ru" }`.
+  other value means `"auto"`. The value is kept in the file only when it is `"en"` or `"ru"`. The main window's
+  Languages settings set it too. Example: `"ui": { "language": "ru" }`.
 - `audio.device`: the microphone CUE records from, by the name Windows shows for it, chosen in the main window's
   settings. Without it (the default) CUE records from the microphone Windows uses by default; with it, CUE keeps that
   device when Windows changes its default, and when the device is not connected records from the Windows microphone
@@ -391,14 +478,15 @@ history is neither written nor cleaned up until a period is chosen in the window
   the same list. Example:
   `"dictionary": { "terms": ["Parakeet", "Claude Haiku", "GitHub"] }`. When the transcript clearly means one of them
   but spells it differently, splits it or mixes alphabets (`Пара kit`, `гитхаб`, `git hub`), the cleanup writes it as
-  listed. The list affects only the Claude cleanup, where it rides along with the cached system prompt and costs
-  almost nothing; the speech model takes no vocabulary. Entries are trimmed; empty ones, ones with a line break, ones
-  longer than 60 characters and exact repeats (case-sensitive) are skipped, and only the first 200 are used. A value
-  that is not a list reads as an empty list. The block is kept in the file only when the list is not empty.
+  listed. The list affects only the cleanup, whichever connection it goes through, where it rides along with the
+  system prompt (cached, with Anthropic) and costs almost nothing; the speech model takes no vocabulary. Entries are
+  trimmed; empty ones, ones with a line break, ones longer than 60 characters and exact repeats (case-sensitive) are
+  skipped, and only the first 200 are used. A value that is not a list reads as an empty list. The block is kept in
+  the file only when the list is not empty.
 - `translate`: the language pair of `Ctrl + Win + Shift`, as the ISO 639-1 codes of the 60 languages CUE knows
   (`en`, `ru`, `de`, `zh`, …). Case and surrounding spaces do not matter, and a locale name reads as its language
   (`"ru-RU"` is `ru`).
-  - `target` (default `en`): speech in any other language is translated into it. The main window's Translation
+  - `target` (default `en`): speech in any other language is translated into it. The main window's Languages
     settings set it too.
   - `home`: speech in the target language is translated into it. By default the Windows display language, else
     Russian (English when the target is Russian); one equal to the target is skipped. With no home language, speech in
@@ -424,8 +512,11 @@ history is neither written nor cleaned up until a period is chosen in the window
   `"ask": { "model": "claude-sonnet-5-5", "max_searches": 3 }`.
 - `pricing` (not written unless you change it): a `claude` list of
   `{model, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok}` in USD. Defaults: Haiku 5.5
-  $0.10 / $0.50, Sonnet 5.5 $2 / $10, Opus 5.5 $4 / $20 per million input / output tokens. `web_search_usd` ($0.01)
-  prices one web search of "Ask". Recognition on this computer has no price.
+  $0.10 / $0.50, Sonnet 5.5 $2 / $10, Opus 5.5 $4 / $20 per million input / output tokens, and every model of the
+  cleanup's connections at the price in [API keys](#api-keys), under the id `usage.csv` gives it (OpenRouter's as it
+  is, `anthropic/claude-haiku-5.5`; another service's after its connection, `openai:gpt-6-luna`), its cache reads at a
+  tenth of its input price; Ollama's and LM Studio's at 0. A cache write costs 1.25 × the input price.
+  `web_search_usd` ($0.01) prices one web search of "Ask". Recognition on this computer has no price.
 
 Start at sign-in is not a setting: it is the Windows `Run` registry entry, toggled from the tray menu or the main
 window's General settings.
@@ -442,7 +533,8 @@ Everything else lives in `%LOCALAPPDATA%\CUE`:
 | `history\audio\` | The recordings of the history's entries, one Ogg Opus file per entry (speech at 16 kbit/s, about 6 MB an hour), named by the entry's id. Older than `history.audio` (and never older than the history) they are deleted on their own; **Clear history**, Don't keep and the history turned off delete them all. A clear first renames the folder `audio.cleared-<n>`, then deletes it. |
 | `logs\cue.log.YYYY-MM-DD` | Daily log: events, per-stage timings, error kinds. No dictation text, no questions, answers or selected text, no history, no microphone names, no audio, no keys. Kept 7 days and 10 MB at most. **Open log** in the tray menu opens this folder. |
 | `usage.csv` | One row per attempt: time (UTC), audio length, recognition engine and path, cost, model, tokens, latency, outcome, mode, web searches, how many words it wrote and its local date. A cache warm-up gets a row of its own. No text. |
-| `models\parakeet-ultra-int8\` | The speech model, about 670 MB: `encoder-model.int8.onnx`, `decoder_joint-model.int8.onnx` and `vocab.txt`, downloaded once from a fixed commit of the Hugging Face repository `Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx`. Each file comes as `<name>.part`, resumes from where it stopped, and is renamed only once its SHA-256 matches the one in CUE's code; a file that does not match is deleted and downloaded again. |
+| `models\parakeet-ultra-int8\` | The default speech model, about 670 MB: `encoder-model.int8.onnx`, `decoder_joint-model.int8.onnx` and `vocab.txt`, downloaded once from a fixed commit of the Hugging Face repository `Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx`. Each file comes as `<name>.part`, resumes from where it stopped, and is renamed only once its SHA-256 matches the one in CUE's code; a file that does not match is deleted and downloaded again. |
+| `models\<id>\` | Every other model chosen on the Model page, the same three files downloaded the same way: `parakeet-v3-int8` and `parakeet-v2-int8` (`istupakov/parakeet-tdt-0.6b-v3-onnx` and `…-v2-onnx`, pinned in CUE's code like Ultra), and `hf--<owner>--<repository>` for a model found on Hugging Face, with its `manifest.json`: the repository, the commit it was pinned at and each file's size and SHA-256. A folder without a readable manifest is not CUE's: it is never shown or deleted. **Delete** on the Model page removes a model's folder. |
 | `bench\recordings\` | Recordings for the bench, only when `bench.save_recordings` is `true`. |
 | `bench\runs\<timestamp>\` | Bench runs: `results.json` and `report.html`. |
 
@@ -463,7 +555,10 @@ and per hour of audio, the average latency from the second key press to the past
 `settings.json`. A Retry is a second attempt, whose cleanup is paid again, and gets its own row; the Retry of a
 failed translation translates the saved text again, so its row has no audio.
 
-New rows have `stt_engine` `parakeet`, `stt_path` `local` and `stt_usd` 0; the columns stay as they were. The
+New rows have `stt_engine` `parakeet`, `stt_path` `local` and `stt_usd` 0; the columns stay as they were.
+`refine_model` names the cleanup's model as the price list does: Anthropic's and OpenRouter's ids as they are
+(`claude-haiku-5-5`, `anthropic/claude-haiku-5.5`), another service's after its connection (`openai:gpt-6-luna`,
+`ollama:gemma4:12b`, at $0). The
 columns `mode`, `web_searches` and `search_usd` came with the modes, and `words` and `day` with Today. `mode` is
 `dictate`, `translate`, `ask` or `warmup`; `words` is how many words a dictation or translation wrote (0 for anything
 else) and `day` the local date.
@@ -473,8 +568,8 @@ else) and `day` the local date.
   the Retry of a failed question (without audio). Pasting an answer with its button adds no row: the answer was counted
   when it was complete. A shown answer has the outcome `answered`, and its latency runs from the second key press to
   the first words; a text written into the field is `inserted` (or `no_field`), with the latency to the paste.
-- A `warmup` row is a cache warm-up (see Privacy in detail), of the cleanup or of "Ask" (then with `ask.model`): paid
-  tokens, no audio, outcome `discarded`; it counts in the cost, not as a dictation.
+- A `warmup` row is a cache warm-up (see Privacy in detail), of the cleanup (only when it goes through Anthropic) or of
+  "Ask" (then with `ask.model`): paid tokens, no audio, outcome `discarded`; it counts in the cost, not as a dictation.
 
 Rows written before these columns existed read as dictation, and the header of an existing file is not rewritten: it
 keeps the 13 old names while new rows have 16 fields.
@@ -488,10 +583,10 @@ The bench compares speech models and cleanup models on your own speech and shows
 it. It does not tune the thresholds.
 
 1. Set `"bench": { "save_recordings": true }` in `settings.json`, restart CUE and dictate as usual.
-2. Put the speech models to compare in `%LOCALAPPDATA%\CUE\models\`, one folder each: `parakeet-ultra-int8`, the app's
-   model, is there once CUE has downloaded it, and another export with the same file names (`encoder-model.int8.onnx`,
-   `decoder_joint-model.int8.onnx`, `vocab.txt`), such as NVIDIA's own v3 from `istupakov/parakeet-tdt-0.6b-v3-onnx`,
-   can go next to it in a folder of its own.
+2. Put the speech models to compare in `%LOCALAPPDATA%\CUE\models\`, one folder each: `parakeet-ultra-int8`, the
+   default model, is there once CUE has downloaded it, and so is every model downloaded on the Model page (NVIDIA's own
+   v3 and v2, models found on Hugging Face); another export with the same file names (`encoder-model.int8.onnx`,
+   `decoder_joint-model.int8.onnx`, `vocab.txt`) can go next to them in a folder of its own.
 3. Run it (needs the Anthropic key):
 
    ```powershell
@@ -502,9 +597,10 @@ it. It does not tune the thresholds.
    another export) is skipped with a console line. Each model is loaded once and recognizes every recording in turn,
    as the app does; its time is the model's own recognition time, its cost is $0, and its console line says when the
    other alphabet was masked out (see One language a dictation in docs/ARCHITECTURE.md). The text of
-   `parakeet-ultra-int8` (or of the first model that succeeded, without it) is then cleaned by `refine.model` and
-   every model in the `pricing.claude` list, with the same request (including `dictionary.terms`), sanity check and
-   timeout as the app. `--max-usd` (default $1) stops new paid calls once reached. The first `Ctrl+C` finishes the step
+   `parakeet-ultra-int8` (or of the first model that succeeded, without it) is then cleaned through Anthropic by the
+   Claude model picked for the Anthropic connection (`refine.models`, Claude Haiku 5.5 by default) and every Claude
+   model in the `pricing.claude` list, with the same request (including `dictionary.terms`), sanity check and timeout
+   as the app. `--max-usd` (default $1) stops new paid calls once reached. The first `Ctrl+C` finishes the step
    under way and stops; a second one exits at once. Results are saved after every recording.
 4. Open `report.html` from the run folder. It shows blind A/B pairs for recognition and for refine, then the scores,
    latency and cost per dictation. **Save choices** downloads your answers as `choices.json`.
@@ -548,22 +644,29 @@ whether the model wrote such words (`text_before_search`) and the error codes of
 ## Privacy in detail
 
 - **Speech recognition** runs on this computer: no sound leaves it, while you record, on Retry or ever. The network
-  is needed only to download the model once, from Hugging Face (`huggingface.co`, files of a fixed commit; the
-  request carries no key and nothing of yours), and for Anthropic.
-- **Anthropic** receives the transcript, the app name, up to `refine.context_chars` (500) characters of text
-  before the caret, and your `dictionary.terms`. Nothing is read from password fields, and the window title is never
-  sent. A translation goes in the same cleanup request, with the target language added. While you record, CUE also
-  sends an empty `HEAD` request without a key to open the connection early, so cleanup starts faster. When a
-  dictation starts four minutes or more after the last cleanup, CUE sends a cache warm-up: the cleanup request with
-  your `dictionary.terms` and a one-character placeholder instead of a transcript, without the app name or any text
-  before the caret, so the first cleanup after a pause reads the prompt from Anthropic's cache.
-- **"Ask"** sends Anthropic the question (as it was recognized), the selected text (up to 8,000 characters: a
-  longer selection goes as its start and its end), up to `refine.context_chars` (500) characters before the caret, the
-  app name and today's local date; a follow-up sends only its question, with the conversation so far. With web search
-  on, Anthropic searches the web for what the model asks it to. Nothing is read from password fields. When the "Ask"
-  chord starts, and on a follow-up, four minutes or more after the last "Ask" request or warm-up, CUE sends a cache
-  warm-up of the "Ask" instruction with a one-character placeholder, nothing of yours. The conversation lives only while
-  the answer is open.
+  is needed only to download a model once, from Hugging Face (`huggingface.co`, files of a fixed commit; the request
+  carries no key and nothing of yours), and for the cleanup and "Ask". The Model page's search sends Hugging Face the
+  words typed into it (from two letters on), and choosing a model it found asks Hugging Face for that repository's
+  list of files; nothing else of yours goes with either.
+- **The cleanup's connection** (Anthropic by default, or the one chosen in the Cleanup settings) receives the
+  transcript, the app name, up to `refine.context_chars` (500) characters of text before the caret, your
+  `dictionary.terms` and, with the Custom style, your instructions. Nothing is read from password fields, and the
+  window title is never sent. A translation goes in the same kind of request to the same connection, with the target
+  language added. Through OpenRouter, CUE first asks for providers that do not store requests for training, and only
+  when none of them can take the request, for any provider. Ollama and LM Studio get the request at the address in
+  the Cleanup settings, on this computer unless you change it, so the text then stays here.
+- **Anthropic, when the cleanup goes through it**: while you record, CUE also sends an empty `HEAD` request without a
+  key to open the connection early, so cleanup starts faster. When a dictation starts four minutes or more after the
+  last cleanup, CUE sends a cache warm-up: the cleanup request with your `dictionary.terms` and a one-character
+  placeholder instead of a transcript, without the app name or any text before the caret, so the first cleanup after
+  a pause reads the prompt from Anthropic's cache. Over the other connections there is neither.
+- **"Ask"** always goes to Anthropic, whatever the cleanup's connection. It sends the question (as it was
+  recognized), the selected text (up to 8,000 characters: a longer selection goes as its start and its end), up to
+  `refine.context_chars` (500) characters before the caret, the app name and today's local date; a follow-up sends
+  only its question, with the conversation so far. With web search on, Anthropic searches the web for what the model
+  asks it to. Nothing is read from password fields. When the "Ask" chord starts, and on a follow-up, four minutes or
+  more after the last "Ask" request or warm-up, CUE sends a cache warm-up of the "Ask" instruction with a
+  one-character placeholder, nothing of yours. The conversation lives only while the answer is open.
 - **The `Ctrl + C` fallback of "Ask".** When the app does not tell CUE what is selected, CUE presses `Ctrl + C` in that
   window once the recording ends (never in a terminal CUE knows, nor in another window than the one you asked in), reads
   the selection from the clipboard and puts your clipboard back as it was. It never does while Windows syncs copied
@@ -586,11 +689,12 @@ whether the model wrote such words (`text_before_search`) and the error codes of
 - The microphone is open only while CUE is recording, and while the main window's Microphone settings or the welcome
   window's Microphone step show its level (only the level reaches that window; that audio is never kept).
 - **Stays on this computer:** every sound CUE records, the history with its recordings, the last dictation's audio and
-  text, recordings saved for the bench, the speech model, settings, logs and usage rows. Logs and `usage.csv` never
-  contain dictation text, questions, answers, selected text, sources, the history or microphone names, nor any sound:
+  text, recordings saved for the bench, the speech models, settings, logs and usage rows. Logs and `usage.csv` never
+  contain dictation text, questions, answers, selected text, sources, the history, microphone names, your Custom
+  instructions or a local server's address (only their length, or whether the server answered), nor any sound:
   a recording's line has its length and size alone; a crash records only the thread and code location, not the panic
   message. A recording reaches the main window alone, as the bytes of its file, and plays there from memory.
-- Check Anthropic's own data-retention policy for the text it receives.
+- Check the data-retention policy of each service you use for the text it receives.
 
 ## Known limitations
 
@@ -610,7 +714,13 @@ whether the model wrote such words (`text_before_search`) and the error codes of
 - The speech language of a translation is told by its alphabet alone, so speech in a language outside the pair counts
   as the pair's language written in the same letters: with the default pair (English and Russian), German speech
   counts as English and is translated into Russian. `translate.speech` fixes the speech language.
-- Text appears only after you finish: the model recognizes the whole recording then, not while you speak.
+- Text appears only after you finish. A long dictation is recognized in pieces while you speak, but nothing of it is
+  shown until it is pasted.
+- Parakeet v2 recognizes no Russian: with it, every dictation comes out in Latin letters and reads as English.
+- The recommended models of the connections were chosen from the services' documentation, not by comparing their
+  cleanup on real dictations.
+- "Ask" goes through Anthropic alone, so it needs the Anthropic key even when the cleanup goes through another
+  connection, and the welcome window's Key step asks for that key whichever connection is chosen.
 - A dictation is Russian or English. When both alphabets hold whole sentences (at least two of each language's little
   words: "the", "to", «и», «что»…), the one with fewer letters is taken for a slip of the model, and the dictation is
   recognized again without it, so a sentence said in the other language on purpose comes out spelled in the main
@@ -662,11 +772,12 @@ LICENSE, NOTICE           Apache License 2.0, and the copyright notice
 app/
   package.json            front-end tooling: Vite, TypeScript, Vitest, Tauri CLI
   crates/core/            cue-core: dictation state machine, settings, refine, translation and "Ask" rules, the
-                          speech rules (one language a dictation, long recordings cut), the speech model's files,
-                          audio helpers, usage, the history files
+                          cleanup's connections and their models, the speech rules (one language a dictation, long
+                          recordings cut), the speech models (the short list, a found model's manifest, whether a
+                          repository runs), audio helpers, usage, the history files
   crates/engines/         cue-engines: speech recognition on this computer (Parakeet: log-mel, TDT decoding, ONNX
-                          Runtime) and the model's download, Claude refine, translation and "Ask", API keys and
-                          checks
+                          Runtime), the models' download and Hugging Face's search, refine and translation through
+                          Anthropic, OpenRouter and the OpenAI-compatible services, "Ask", API keys and checks
   crates/platform-win/    cue-platform-win: keyboard hook (and a mouse hook while a Shift that switched the mode is
                           held), clipboard paste and copy, focus and selection via UI Automation, microphone (a
                           pinned one by its name), Drop window styles and placement, card placement, sleep and lock
@@ -700,13 +811,19 @@ The program includes the Opus audio codec, libopus 1.3.1 in its Rust translation
 `arrayref` (BSD-2-Clause), which it uses, and ONNX Runtime (MIT, by Microsoft), linked in through the `ort` crate
 (MIT or Apache-2.0, by pyke.io). Its log-mel features and TDT decoding are ported from
 [parakeet-rs](https://github.com/altunenes/parakeet-rs) (MIT or Apache-2.0, by Enes Altun). Their licenses are in
-[NOTICE](NOTICE).
+[NOTICE](NOTICE). The installer also carries `DirectML.dll`, Microsoft DirectX Machine Learning 1.15.4, unchanged, as
+it comes with ONNX Runtime; it is not covered by CUE's license but by Microsoft's own license terms for DirectML, named
+in [NOTICE](NOTICE).
 
-The speech model CUE downloads is not part of the program or the installer. It is
+The speech models CUE downloads are not part of the program or the installer. The default is
 [Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra) by Moondream, a post-trained version of
 [NVIDIA Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), in the int8 ONNX export
 [Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx); all
-three are licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). See [NOTICE](NOTICE).
+three are licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). See [NOTICE](NOTICE). The other
+two models of the Model page's list, downloaded only when chosen, are NVIDIA's Parakeet TDT 0.6B v3 and v2 in the
+int8 ONNX exports [istupakov/parakeet-tdt-0.6b-v3-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx)
+and [istupakov/parakeet-tdt-0.6b-v2-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx), also under
+CC-BY-4.0; a model found on Hugging Face comes under its repository's own license.
 
 `app/src-tauri/nsis/installer.nsi` is the installer template of the Tauri CLI (Apache-2.0 OR MIT, by the Tauri
 contributors) with the default install folder changed, as its comment on that line says.
