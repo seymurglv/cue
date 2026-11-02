@@ -58,7 +58,7 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .btn2:hover{background:color-mix(in srgb,var(--text) 11%,transparent)}
 .btn2.ck{padding:0 10px}
 /* "Clear history" */
-.btn2.warn{color:var(--warn)}
+.btn2.warn{color:var(--warn-ink)}
 .btn2 .lbl{display:inline-flex}
 .btn2:disabled{opacity:.5}
 /* a key field: a capsule with a hairline ring, as the history's search and the Dictionary's "+ Word"; the ring darkens

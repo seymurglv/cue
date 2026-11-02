@@ -21,7 +21,8 @@ soft fill at radius 8, C the Windows look at radius 5.
   or the system's ring. Buttons and rows keep the soft plate.
 - **Chevrons:** one tone, `--muted`, on drop-downs, the card, the first page's rows and the model row.
 
-## Not changed
+## "Clear history"
 
-Colors and type stay as they are. "Clear history" keeps `--warn` as its text color (2.27:1 on its fill in the light
-theme); whether to darken it is still open.
+Type stays as it is. "Clear history" had `--warn` as its text color, 2.27:1 on its fill in the light theme; the owner
+asked to darken it. Its words take `--warn-ink` (`cue.css`): #945500 in the light theme, 5.1:1 on the button's fill and
+4.7:1 under the pointer, and `--warn` itself in the dark theme, where it already reads.

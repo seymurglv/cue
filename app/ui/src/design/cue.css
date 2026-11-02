@@ -3,6 +3,8 @@
 :root{
   --bg:#FBFBFA;--card:#FFFFFF;--surface2:#F3F3F1;--text:#111111;--muted:#6B6B67;--faint:#C4C4C0;--line:#ECECE9;
   --rec:#FF4A1C;--warn:#EE9A00;--ask:#2F6BFF;--ok:#1E9E5A;--graphite:#1C1C1F;
+  /* amber as the words of a button: --warn darkened to 4.5:1 on a button's fill in the light theme */
+  --warn-ink:#945500;
   --mac-font:-apple-system,BlinkMacSystemFont,"SF Pro Text","Inter",system-ui,sans-serif;
   --win-font:"Segoe UI Variable Text","Segoe UI Variable","Segoe UI","Inter",system-ui,sans-serif;
   --num-font:"Bebas Neue","Montserrat",sans-serif;
@@ -13,6 +15,7 @@
 [data-theme=dark]{
   --bg:#0E0E0F;--card:#151517;--surface2:#1C1C1F;--text:#ECECEA;--muted:#85858A;--faint:#4A4A4E;--line:#232326;
   --rec:#FF5A2E;--warn:#F5B82E;--ask:#5C8DFF;--ok:#33C27A;--graphite:#242428;
+  --warn-ink:#F5B82E;
 }
 /* live mark: the lines take currentColor, the lamp takes the signal color */
 .mk .m-l{stroke:currentColor;stroke-linecap:round;transition:stroke .3s}
