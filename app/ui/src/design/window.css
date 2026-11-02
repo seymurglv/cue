@@ -9,7 +9,9 @@
    connected" mark in menus; long menus scroll; a key field; quiet lines for an empty history and for nothing found.
    Since: runs from one app stacked, the search grown out of the magnifier on the heading's line, an opened row's
    recording as a thin progress line in place of the design's waveform, the history's period and Clear history on the
-   tray's History page instead of under the list. */
+   tray's History page instead of under the list; every control one capsule 28 px high (docs/specs/2026-11-02-selectors.md):
+   fields, drop-downs and the connection card with a hairline ring that darkens with the focus, buttons and segments
+   filled, menus rounded to match. */
 @font-face{font-family:"Bebas Neue";src:url("./fonts/BebasNeue-Regular.ttf") format("truetype");font-display:block}
 @font-face{font-family:"Montserrat";font-weight:800;src:url("./fonts/Montserrat-ExtraBold-cyrillic-ext.woff2") format("woff2");font-display:block;unicode-range:U+0460-052F,U+1C80-1C8A,U+20B4,U+2DE0-2DFF,U+A640-A69F,U+FE2E-FE2F}
 @font-face{font-family:"Montserrat";font-weight:800;src:url("./fonts/Montserrat-ExtraBold-cyrillic.woff2") format("woff2");font-display:block;unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
@@ -51,7 +53,7 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .gear:hover,.tph .ibt:hover,.hsb .hsbt:hover{background:none;color:var(--text)}
 .gear svg,.tph .ibt svg,.hsb .hsbt svg{transition:scale .2s var(--e-out)}
 .gear:active svg,.tph .ibt:active svg,.hsb .hsbt:active svg{scale:.88}
-.btn2{display:inline-flex;align-items:center;gap:4px;height:26px;padding:0 10px 0 6px;border-radius:999px;background:color-mix(in srgb,var(--text) 7%,transparent);font-size:12px;font-weight:500;white-space:nowrap}
+.btn2{display:inline-flex;align-items:center;gap:4px;height:28px;padding:0 10px 0 6px;border-radius:999px;background:color-mix(in srgb,var(--text) 7%,transparent);font-size:12px;font-weight:500;white-space:nowrap}
 .btn2 svg{width:14px;height:14px}
 .btn2:hover{background:color-mix(in srgb,var(--text) 11%,transparent)}
 .btn2.ck{padding:0 10px}
@@ -59,35 +61,36 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .btn2.warn{color:var(--warn)}
 .btn2 .lbl{display:inline-flex}
 .btn2:disabled{opacity:.5}
-/* a key field: the Windows text field's look */
-.kin{width:100px;height:26px;padding:0 8px;border:0;outline:0;border-radius:5px;background:color-mix(in srgb,var(--card) 60%,transparent);box-shadow:inset 0 -1px 0 color-mix(in srgb,var(--text) 35%,transparent),0 0 0 1px color-mix(in srgb,var(--text) 8%,transparent);font-size:12px;color:var(--text)}
-.kin:focus{box-shadow:inset 0 -2px 0 var(--text),0 0 0 1px color-mix(in srgb,var(--text) 8%,transparent)}
+/* a key field: a capsule with a hairline ring, as the history's search and the Dictionary's "+ Word"; the ring darkens
+   with the focus */
+.kin{width:100px;height:28px;padding:0 12px;border:0;outline:0;border-radius:14px;background:transparent;box-shadow:inset 0 0 0 1px var(--faint);font-size:12px;color:var(--text);transition:box-shadow .2s}
+.kin:focus{box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--text) 45%,transparent)}
 .kin::placeholder{color:var(--muted)}
 /* switch */
 .sw{position:relative;flex:none;width:40px;height:20px;border-radius:999px;background:transparent;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--text) 60%,transparent);transition:background .25s,box-shadow .25s}
 .sw::after{content:"";position:absolute;left:4px;top:4px;width:12px;height:12px;border-radius:50%;background:color-mix(in srgb,var(--text) 78%,transparent);transition:transform .4s var(--e-spring),background .25s}
 .sw[aria-checked=true]{background:var(--text);box-shadow:none}
 .sw[aria-checked=true]::after{transform:translateX(20px);background:var(--card)}
-/* segments */
-.segc{position:relative;display:inline-flex;padding:2px;border-radius:5px;background:color-mix(in srgb,var(--text) 6%,transparent);isolation:isolate}
-.segc button{position:relative;z-index:1;display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 10px;border-radius:6px;font-size:12px;font-weight:500;color:var(--muted);white-space:nowrap;transition:color .2s}
+/* segments: a capsule; the thumb and the buttons inside it are 2 px in, so their radius is 2 less */
+.segc{position:relative;display:inline-flex;padding:2px;border-radius:14px;background:color-mix(in srgb,var(--text) 6%,transparent);isolation:isolate}
+.segc button{position:relative;z-index:1;display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 10px;border-radius:12px;font-size:12px;font-weight:500;color:var(--muted);white-space:nowrap;transition:color .2s}
 .segc button[aria-pressed=true]{color:var(--text)}
-.segc .thb{position:absolute;z-index:0;top:2px;bottom:2px;left:0;width:0;border-radius:5px;background:var(--card);box-shadow:0 1px 2px rgba(0,0,0,.1),0 0 0 .5px rgba(0,0,0,.06);transition:transform .45s var(--e-spring),width .45s var(--e-spring)}
+.segc .thb{position:absolute;z-index:0;top:2px;bottom:2px;left:0;width:0;border-radius:12px;background:var(--card);box-shadow:0 1px 2px rgba(0,0,0,.1),0 0 0 .5px rgba(0,0,0,.06);transition:transform .45s var(--e-spring),width .45s var(--e-spring)}
 [data-theme=dark] .segc .thb{background:color-mix(in srgb,var(--text) 15%,transparent)}
-/* drop-down */
-.dd{display:inline-flex;align-items:center;gap:6px;height:28px;max-width:190px;padding:0 8px 0 10px;border-radius:5px;background:var(--card);box-shadow:0 0 0 .5px color-mix(in srgb,var(--text) 20%,transparent),0 1px 1.5px rgba(0,0,0,.06);font-size:12px;white-space:nowrap}
+/* drop-down: the field's capsule and ring; under the pointer the ring darkens */
+.dd{display:inline-flex;align-items:center;gap:6px;height:28px;max-width:190px;padding:0 10px 0 12px;border-radius:14px;background:transparent;box-shadow:inset 0 0 0 1px var(--faint);font-size:12px;white-space:nowrap;transition:box-shadow .2s}
+.dd:hover{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--text) 30%,transparent)}
 .dd .ddv{overflow:hidden;text-overflow:ellipsis}
-.dd svg{width:12px;height:12px;opacity:.55;transform:rotate(90deg)}
+.dd svg{width:12px;height:12px;color:var(--muted);transform:rotate(90deg)}
 /* the Cleanup page's connection card: a lamp (green once the connection is ready), the name, its state under it; it opens
-   the list of connections at its own width */
+   the list of connections at its own width. The drop-down's ring at the card's size. */
 .srow.wide{display:block}
-.pk{display:flex;align-items:center;gap:10px;width:100%;min-height:44px;padding:6px 10px 6px 12px;border-radius:9px;background:var(--card);box-shadow:0 0 0 .5px color-mix(in srgb,var(--text) 18%,transparent),0 1px 2px rgba(0,0,0,.06);text-align:left;transition:box-shadow .2s}
-.pk:hover{box-shadow:0 0 0 .5px color-mix(in srgb,var(--text) 30%,transparent),0 1px 2px rgba(0,0,0,.08)}
-[data-theme=dark] .pk{background:color-mix(in srgb,var(--text) 7%,transparent)}
+.pk{display:flex;align-items:center;gap:10px;width:100%;min-height:44px;padding:6px 12px 6px 14px;border-radius:14px;background:transparent;box-shadow:inset 0 0 0 1px var(--faint);text-align:left;transition:box-shadow .2s}
+.pk:hover{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--text) 30%,transparent)}
 .pk .pt{flex:1;min-width:0}
 .pk .pt b{display:block;font-weight:500;font-size:13px}
 .pk .pt small{display:block;margin-top:1px;overflow:hidden;font-size:11px;line-height:1.35;color:var(--muted);text-overflow:ellipsis;white-space:nowrap}
-.pk>svg{flex:none;width:12px;height:12px;opacity:.55;transform:rotate(90deg)}
+.pk>svg{flex:none;width:12px;height:12px;color:var(--muted);transform:rotate(90deg)}
 .pk .lamp,.menu .mlamp{flex:none;width:6px;height:6px;border-radius:50%;background:color-mix(in srgb,var(--text) 25%,transparent);transition:background-color .3s}
 .pk .lamp.on,.menu .mlamp.on{background:var(--ok)}
 /* a local server's address is longer than a key's mask: the field takes the line under the row's name */
@@ -95,13 +98,13 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .srow[data-server] .stx{flex-basis:100%}
 .srow[data-server] .sc{flex:1 1 100%;max-width:none;flex-wrap:nowrap}
 .srow[data-server] .kin{flex:1;width:auto;min-width:0}
-/* the custom style's instructions */
-.cta{display:block;width:100%;min-height:64px;resize:vertical;padding:8px 10px;border:0;outline:0;border-radius:7px;background:color-mix(in srgb,var(--text) 5%,transparent);font:inherit;font-size:12px;line-height:1.45;color:var(--text)}
-.cta:focus{box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--text) 30%,transparent)}
-[data-theme=dark] .dd{background:color-mix(in srgb,var(--text) 8%,transparent)}
-.menu{position:absolute;z-index:45;min-width:180px;max-width:320px;overflow-x:hidden;overflow-y:auto;scrollbar-width:thin;padding:4px;border-radius:7px;background:var(--card);box-shadow:0 14px 32px -10px rgba(0,0,0,.32),0 0 0 .5px color-mix(in srgb,var(--text) 18%,transparent);transform-origin:50% 0;animation:mnIn .32s var(--e-spring)}
+/* the custom style's instructions: the fields' ring */
+.cta{display:block;width:100%;min-height:64px;resize:vertical;padding:8px 12px;border:0;outline:0;border-radius:14px;background:transparent;box-shadow:inset 0 0 0 1px var(--faint);font:inherit;font-size:12px;line-height:1.45;color:var(--text);transition:box-shadow .2s}
+.cta:focus{box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--text) 45%,transparent)}
+/* menus: 4 px in from the edge, so an item's radius is 4 less than the menu's */
+.menu{position:absolute;z-index:45;min-width:180px;max-width:320px;overflow-x:hidden;overflow-y:auto;scrollbar-width:thin;padding:4px;border-radius:14px;background:var(--card);box-shadow:0 14px 32px -10px rgba(0,0,0,.32),0 0 0 .5px color-mix(in srgb,var(--text) 18%,transparent);transform-origin:50% 0;animation:mnIn .32s var(--e-spring)}
 [data-theme=dark] .menu{background:#222225}
-.menu button{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;height:28px;padding:0 8px 0 10px;border-radius:6px;font-size:12px;text-align:left;white-space:nowrap}
+.menu button{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;height:28px;padding:0 8px 0 10px;border-radius:10px;font-size:12px;text-align:left;white-space:nowrap}
 .menu button:hover{background:color-mix(in srgb,var(--text) 6%,transparent)}
 .menu button svg{width:14px;height:14px}
 .menu .mlb{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
@@ -363,7 +366,7 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .trw .si{display:grid;color:var(--muted)}
 .trw .si svg{width:16px;height:16px}
 .trw em{flex:1;min-width:0;text-align:right;font-style:normal;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.trw>svg{width:12px;height:12px;color:var(--faint)}
+.trw>svg{width:12px;height:12px;color:var(--muted)}
 .tft{margin-top:6px;padding:9px 4px 0;border-top:1px solid var(--line);font-size:11px;line-height:1.4;color:var(--muted)}
 /* Speech recognition (docs/specs/2026-11-02-settings-tray.md): the first page's value in amber or Bebas, a 2 px line
    under the row while the model downloads; on its page the model's row wraps to take its bar and its bytes. */
@@ -383,7 +386,7 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .mprog small .num{color:var(--text)}
 /* Speech recognition's model row opens the Model page: the chevron at its end */
 .mrow[data-sub]{cursor:pointer}
-.mrow .sc>svg{width:12px;height:12px;color:var(--faint)}
+.mrow .sc>svg{width:12px;height:12px;color:var(--muted)}
 /* the Model page. The search is the list's last row, quiet until pressed: the magnifier and "Search Hugging Face" in
    the muted color. Pressed, the row becomes the field where it stands: the words stay in place as its hint, a line
    grows under it out of the magnifier (450 ms, no overshoot), the glyph darkens, and once something is typed a cross
@@ -421,12 +424,12 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .mfnote{padding:8px 0 4px;font-size:12px;color:var(--muted)}
 /* the keyboard's focus on every other control: the same soft plate as on the icon buttons (one step darker where the
    control has a fill of its own) and dark text, never the system's ring; a plate wider than a bare text button is a
-   spread shadow, so nothing moves */
+   spread shadow, so nothing moves. The ringed capsules (drop-downs, the connection card) darken their ring, as the
+   fields do. */
 .app :is(.btn2,.dd,.pk,.sw,.segc button,.trw,.menu button,.bmore button,.dnb,.dx):focus-visible{outline:0}
 .app :is(.mrow[data-sub],.mdl,.mfd):focus-visible{outline:0;box-shadow:0 0 0 4px color-mix(in srgb,var(--text) 8%,transparent);border-radius:6px;background:color-mix(in srgb,var(--text) 8%,transparent)}
 .app .btn2:focus-visible{background:color-mix(in srgb,var(--text) 13%,transparent)}
-.app .dd:focus-visible{background:color-mix(in srgb,var(--text) 8%,var(--card))}
-.app .pk:focus-visible{box-shadow:0 0 0 .5px color-mix(in srgb,var(--text) 30%,transparent),0 0 0 4px color-mix(in srgb,var(--text) 8%,transparent)}
+.app :is(.dd,.pk):focus-visible{box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--text) 45%,transparent)}
 .app .sw:focus-visible{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--text) 60%,transparent),0 0 0 4px color-mix(in srgb,var(--text) 8%,transparent)}
 .app .sw[aria-checked=true]:focus-visible{box-shadow:0 0 0 4px color-mix(in srgb,var(--text) 8%,transparent)}
 .app .segc button:focus-visible{background:color-mix(in srgb,var(--text) 8%,transparent);color:var(--text)}
