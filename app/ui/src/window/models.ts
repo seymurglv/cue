@@ -11,7 +11,7 @@ import * as api from './api';
 import type { EntryState, Found, ModelEntry, ModelsView } from './api';
 import { icon } from './icons';
 import { bar, bytesLine, percent } from './model';
-import { h, logFailed, type Ctx } from './page';
+import { h, logFailed, wrap, type Ctx } from './page';
 import { formatNumber, plural } from './text';
 
 /** The search runs this long after the last key, once the field holds this many letters. */
@@ -57,8 +57,11 @@ export class ModelsPage {
 
   /** The page's content: the list, the search's row under it, what the search found. */
   rows(): HTMLElement[] {
+    const t = this.ctx.t.models;
     this.list = h('div', 'sgrp mlist');
+    this.list.setAttribute('aria-label', t.list);
     this.found = h('div', 'sgrp mfound');
+    this.found.setAttribute('aria-label', t.found);
     for (const box of [this.list, this.found]) {
       box.addEventListener('click', (e) => this.pressed(e.target as Element));
       box.addEventListener('keydown', (e) => {
@@ -76,7 +79,7 @@ export class ModelsPage {
   /** The search as the list's last row, opening into the field where it stands. */
   private searchRow(): HTMLElement {
     const t = this.ctx.t.models;
-    const row = h('div', 'msr');
+    const row = wrap('msr');
     const glyph = h('span', 'msg');
     glyph.innerHTML = icon('search');
     const input = h('input');

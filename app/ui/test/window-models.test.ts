@@ -277,3 +277,13 @@ describe('The Model page', () => {
     expect(small(found()[1])).toBe('Другая архитектура');
   });
 });
+
+describe('The Model page for a screen reader', () => {
+  it('names its list and what the search found; the search row only lays things out', async () => {
+    page = await mount();
+    await models();
+    expect($('.btray .mlist')!.getAttribute('aria-label')).toBe('Models');
+    expect($('.btray .mfound')!.getAttribute('aria-label')).toBe('On Hugging Face');
+    expect($('.btray .msr')!.getAttribute('role')).toBe('none');
+  });
+});
