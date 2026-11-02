@@ -6,7 +6,8 @@
    Sizes come from drop.css (--h, the Drop's height in every state); nothing here assumes a size.
    Also: the mark, buttons and icons open to their own size measured once (this.nat), not to their scrollWidth;
    with prefers-reduced-motion the mark's spring has almost no inertia (k=20, d=.05) and the tray card folds at once.
-   The idle key hint is two thin keys, "Ctrl" and the Windows logo ("fn" on mac), with the screen-reader name in aria-label. */
+   The idle key hint is two soft key plates, "Ctrl" and the Windows logo ("fn" on mac), with the screen-reader name in
+   aria-label. */
 (function(){
 const el=h=>{const t=document.createElement('template');t.innerHTML=h.trim();return t.content.firstElementChild};
 const SV=d=>`<svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;

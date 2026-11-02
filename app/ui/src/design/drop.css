@@ -18,11 +18,15 @@
 .pv{z-index:6;display:flex;justify-content:center;align-items:flex-end;pointer-events:none}
 .drop{--u:calc(var(--h) / 40);--mk:calc(var(--h) * .6);pointer-events:auto;display:flex;align-items:center;flex:none;white-space:nowrap;height:var(--h);min-width:var(--h);padding-left:calc(4 * var(--u));padding-right:calc(4 * var(--u));border-radius:999px;background:rgba(18,18,20,.9);color:#fff;--rec:#FF4A1C;--warn:#F5B82E;--ask:#5C8DFF;box-shadow:0 10px 26px -8px rgba(0,0,0,.45),inset 0 0 0 .5px rgba(255,255,255,.14);backdrop-filter:blur(20px) saturate(1.6);-webkit-backdrop-filter:blur(20px) saturate(1.6);overflow:hidden;transition:height .45s var(--e-spring),min-width .45s var(--e-spring),opacity .3s,padding .45s var(--e-spring)}
 .drop[data-s=idle]{height:calc(var(--h) / 5);opacity:.55}
+/* at rest the strip breathes: its opacity rises and falls slowly; hovered or with reduced motion it holds still */
+.drop[data-s=idle]:not(.hov){animation:idle-breathe 3.2s ease-in-out infinite}
+@keyframes idle-breathe{0%,100%{opacity:.4}50%{opacity:.72}}
+@media (prefers-reduced-motion:reduce){.drop[data-s=idle]:not(.hov){animation:none}}
 /* Idle on hover: even margins to what is painted. 0.3 h from each end of the capsule to the bar's left stroke edge and
    to the last key's right edge, 0.2 h from the lamp dot to the first key, 4u between the keys. Where the bar and the dot
-   are painted in the mark's box comes from the idle mark in cue.js (on its 24 grid: the bar at x 11 with a 2.2 stroke,
-   the dot at x 17.4 with r 1.9; a test keeps them equal); the padding and the two parts' margins take the rest. */
-.drop{--bar-l:calc((11 - 2.2 / 2) / 24 * var(--mk));--dot-r:calc((17.4 + 1.9) / 24 * var(--mk))}
+   are painted in the mark's box comes from the idle mark in cue.js (on its 24 grid: the first bar at x 4.5 with a 2.2
+   stroke, the dot at x 21.6 with r 1.9; a test keeps them equal); the padding and the two parts' margins take the rest. */
+.drop{--bar-l:calc((4.5 - 2.2 / 2) / 24 * var(--mk));--dot-r:calc((21.6 + 1.9) / 24 * var(--mk))}
 .drop[data-s=idle].hov{height:var(--h);opacity:1;padding-left:0;padding-right:calc(.3 * var(--h) - 4 * var(--u))}
 .drop[data-s=idle].hov>.mkw.on{margin-left:calc(.3 * var(--h) - var(--bar-l));margin-right:0}
 .drop[data-s=idle].hov>.kc.on{margin-left:calc(.2 * var(--h) - (var(--mk) - var(--dot-r)));margin-right:calc(4 * var(--u))}
@@ -63,8 +67,8 @@
 .kc{line-height:calc(18 * var(--u))}
 .kc>span{display:flex;gap:calc(4 * var(--u))}
 /* flex:none — the keys do not shrink while the part is folded: otherwise scrollWidth in layout() is less than the real width and the hint gets clipped */
-.key{flex:none;display:grid;place-items:center;min-width:calc(18 * var(--u));height:calc(18 * var(--u));padding-left:calc(5 * var(--u));padding-right:calc(5 * var(--u));border-radius:calc(5 * var(--u));box-shadow:inset 0 0 0 1px rgba(255,255,255,.32);font-family:"Bebas Neue",sans-serif;font-size:calc(13 * var(--u));letter-spacing:.05em;line-height:calc(18 * var(--u));color:rgba(255,255,255,.88)}
-.key:not(.w){padding-top:calc(2 * var(--u))} /* Bebas Neue capitals sit above the middle of the line */
+/* the keys are soft plates: a quiet fill, no outline, the system type */
+.key{flex:none;display:grid;place-items:center;min-width:calc(18 * var(--u));height:calc(18 * var(--u));padding-left:calc(5 * var(--u));padding-right:calc(5 * var(--u));border-radius:calc(6 * var(--u));background:rgba(255,255,255,.12);font-family:var(--win-font,"Segoe UI Variable","Segoe UI",system-ui,sans-serif);font-size:calc(11 * var(--u));font-weight:600;line-height:calc(18 * var(--u));color:rgba(255,255,255,.82)}
 .key.w{padding-left:calc(4 * var(--u));padding-right:calc(4 * var(--u))}
 .key.w svg{width:calc(10 * var(--u));height:calc(10 * var(--u))}
 

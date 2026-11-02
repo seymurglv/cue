@@ -392,12 +392,13 @@ describe('The "Ask" answer', () => {
     const cursorX = () => Number(root.querySelector('.am .m-l')!.getAttribute('x1'));
     view.update(answer({ turns: [done('x')] }));
     view.frame(0);
-    expect(cursorX(), 'the soft spring is still on its way from the asterisk').not.toBe(11);
+    // The idle mark's first voice bar stands at x 4.5.
+    expect(cursorX(), 'the soft spring is still on its way from the asterisk').not.toBe(4.5);
     view.update(null);
     reduced = true;
     view.update(answer({ turns: [done('x')] }));
     view.frame(0);
-    expect(cursorX()).toBe(11);
+    expect(cursorX()).toBe(4.5);
     view.update(answer({ listening: true, turns: [done('x')] }));
     view.level(1);
     view.frame(16);

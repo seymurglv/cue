@@ -64,6 +64,40 @@ function live(state: string, lvl = 0, ms = 3000) {
   return g;
 }
 
+describe('The idle mark', () => {
+  it('is the dictation wave: five bars on y = 12 and the lamp at their top right, inside the grid', () => {
+    for (const g of [still('idle'), live('idle')]) {
+      const lines = [...g.querySelectorAll('line')];
+      expect(lines).toHaveLength(5);
+      expect(lines.map((l) => num(l, 'x1'))).toEqual([4.5, 8, 11.5, 15, 18.5]);
+      for (const l of lines) expect((num(l, 'y1') + num(l, 'y2')) / 2).toBeCloseTo(12, 2);
+      const b = paintedBox(g);
+      expect(b.left).toBeGreaterThanOrEqual(0.5);
+      expect(b.right).toBeLessThanOrEqual(23.5);
+      expect(dotBox(g)!.left).toBeGreaterThan(linesBox(g).right - 1);
+    }
+    const dot = still('idle').querySelector('circle')!;
+    expect([num(dot, 'cx'), num(dot, 'cy'), num(dot, 'r'), num(dot, 'opacity')]).toEqual([21.6, 4.2, 1.9, 1]);
+  });
+
+  it('breathes: the bars roll as a wave and the lamp fades in and out, while its place and size stay', () => {
+    const g = group();
+    const m = new (CUE().Morph)(g, { state: 'idle' });
+    const heights = new Set<string>();
+    const lamp = new Set<string>();
+    for (let t = 0; t <= 2400; t += 16) {
+      m.tick(t);
+      const l = g.querySelectorAll('line');
+      heights.add([...l].map((x) => (num(x, 'y2') - num(x, 'y1')).toFixed(1)).join());
+      const dot = g.querySelector('circle')!;
+      lamp.add(num(dot, 'opacity').toFixed(2));
+      expect([num(dot, 'cx'), num(dot, 'r')]).toEqual([21.6, 1.9]);
+    }
+    expect(heights.size).toBeGreaterThan(20);
+    expect(lamp.size).toBeGreaterThan(10);
+  });
+});
+
 describe('The mark in the circle', () => {
   it('start: the bar is centered on x = 12 and y = 12, the lamp at its right side', () => {
     for (const g of [still('start'), live('start')]) {

@@ -436,7 +436,8 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
     hover(true);
     const key = part('.kc .key');
     expect(size(key, 'height')).toBeCloseTo(18 * 0.9, 6);
-    expect(size(key, 'font-size')).toBeCloseTo(13 * 0.9, 6);
+    // The keys' system type is 11 in the 40 px drawing.
+    expect(size(key, 'font-size')).toBeCloseTo(11 * 0.9, 6);
   });
 
   /** The four visible gaps of the idle capsule on hover, CSS px: capsule edge to the bar's left stroke edge, the lamp
@@ -463,11 +464,11 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
   it('idle on hover: 0.3 h at both ends to what is painted, 0.2 h from the lamp to the keys, at every place and size', () => {
     ctl.apply(base);
     hover(true);
-    // The idle mark the margins are measured from: the bar at x 11 with a 2.2 stroke, the lamp at 17.4 with r 1.9.
+    // The idle mark the margins are measured from: the first bar at x 4.5 with a 2.2 stroke, the lamp at 21.6 with r 1.9.
     const line = part('.mkw svg line');
-    expect([line.getAttribute('x1'), line.getAttribute('stroke-width')]).toEqual(['11.000', '2.2']);
+    expect([line.getAttribute('x1'), line.getAttribute('stroke-width')]).toEqual(['4.500', '2.2']);
     const dot = part('.mkw svg circle');
-    expect([dot.getAttribute('cx'), dot.getAttribute('r')]).toEqual(['17.400', '1.900']);
+    expect([dot.getAttribute('cx'), dot.getAttribute('r')]).toEqual(['21.600', '1.900']);
     const check = (h: number, at: string) => {
       const g = idleGaps();
       expect(g.left, `${at} left`).toBeCloseTo(0.3 * h, 6);
@@ -479,12 +480,12 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
       ctl.place(place);
       check(H, place);
     }
-    // 36 px: no padding on the left, 7.2 on the right; the mark's margins 1.89 and 0, the keys' 2.97 and 3.6.
+    // 36 px: no padding on the left, 7.2 on the right; the mark's margins 7.74 and 0, the keys' 6.75 and 3.6.
     ctl.place('bottom');
     expect(size(drop(), 'padding-left')).toBe(0);
     expect(size(drop(), 'padding-right')).toBeCloseTo(7.2, 6);
-    expect([size(part('.mkw'), 'margin-left'), size(part('.mkw'), 'margin-right')].map((v) => +v.toFixed(4))).toEqual([1.89, 0]);
-    expect([size(part('.kc'), 'margin-left'), size(part('.kc'), 'margin-right')].map((v) => +v.toFixed(4))).toEqual([2.97, 3.6]);
+    expect([size(part('.mkw'), 'margin-left'), size(part('.mkw'), 'margin-right')].map((v) => +v.toFixed(4))).toEqual([7.74, 0]);
+    expect([size(part('.kc'), 'margin-left'), size(part('.kc'), 'margin-right')].map((v) => +v.toFixed(4))).toEqual([6.75, 3.6]);
     const big = document.createElement('style');
     big.textContent = ':root{--h:48px}';
     document.head.append(big);
@@ -536,6 +537,20 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
     }
     const pv = getComputedStyle(document.querySelector('.pv')!).transition;
     for (const prop of ['left', 'top', 'transform']) expect(pv).toContain(`${prop} .3s`);
+  });
+
+  it('at rest the strip breathes; on hover it stops and the keys are soft plates in the system type', () => {
+    ctl.apply(base);
+    const anim = () => getComputedStyle(drop()).getPropertyValue('animation');
+    expect(anim()).toContain('idle-breathe 3.2s');
+    hover(true);
+    expect(anim()).not.toContain('idle-breathe');
+    for (const key of document.querySelectorAll('.drop .kc .key')) {
+      const k = getComputedStyle(key);
+      expect(k.boxShadow).toBe('none');
+      expect(k.backgroundColor).toBe('rgba(255, 255, 255, 0.12)');
+      expect(k.fontFamily).not.toContain('Bebas');
+    }
   });
 });
 
