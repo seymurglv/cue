@@ -1,5 +1,5 @@
 //! Refine: the request text for the model and the rules around its answer.
-use crate::settings::RefineSettings;
+use crate::settings::{RefineSettings, RefineStyle};
 
 /// The constant part of the request; it is cached. The result is what the user meant to type: every slip of speech
 /// and of the recognizer is fixed, while their words, tone and meaning stay theirs.
@@ -52,6 +52,22 @@ The text before the cursor is context only: never repeat or change it.
 
 Return only the cleaned text, in the language it was spoken in \
 (English speech stays English, even though most examples here are Russian), in the `text` field.";
+
+/// Bold refine (`RefineStyle::Bold`): a system block after the cached prompt, so both styles share one cache. The
+/// speaker's wording may change; their meaning, facts, person and tone may not.
+pub const BOLD_PROMPT: &str = "\
+Bold editing: the user wants the text to read as written, not spoken. Besides the fixes above, edit more freely; \
+here the speaker's wording may change:
+- turn spoken constructions into written ones: drop a pronoun that repeats the subject \
+(\"текст, который я отправил, он был отправлен\" → \"текст, который я отправил, был отправлен\"), \
+and write colloquial forms in their standard spelling (\"нету\" → \"нет\", \"щас\" → \"сейчас\", \"чё\" → \"что\");
+- drop words that only fill the speech, even real words (\"в принципе\", \"собственно\", \"как бы\", \"то есть\", \
+\"получается\", \"в целом\", \"basically\", \"actually\", \"kind of\"), when the sentence means the same without them;
+- reword a clumsy phrase, a repeated word or a wandering sentence so it reads smoothly, merging or splitting sentences \
+where that helps; a plain word may replace the speaker's when it says the same.
+Still keep the meaning, every fact and request, the speaker's person (я, мы) and tone: casual stays casual. \
+Names, terms and the English words a Russian speaker uses stay as said, never translated (\"background padding\" stays). \
+Nothing is added: no \"пожалуйста\", \"please\" or other words the speaker didn't say.";
 
 /// The start of the dictionary block ([`terms_prompt`]); the terms follow, one per line. Conservative: a term
 /// replaces only what clearly means it, and nothing else changes because of the list.
@@ -262,8 +278,21 @@ pub fn sanity_ok(raw: &str, refined: &str, terms: &[String], s: &RefineSettings)
     }
     let term_words: Vec<String> = usable_terms(terms).into_iter().flat_map(words).collect();
     let known: std::collections::HashSet<&str> = raw_words.iter().chain(&term_words).map(String::as_str).collect();
-    let hits = new_words.iter().filter(|w| known.contains(w.as_str())).count();
+    // Bold refine changes endings ("отправлен" → "отправлено"): there a word of a said stem counts as said too.
+    let stems: std::collections::HashSet<&str> = match s.style {
+        RefineStyle::Careful => Default::default(),
+        RefineStyle::Bold => known.iter().filter_map(|w| stem(w)).collect(),
+    };
+    let said = |w: &str| known.contains(w) || stem(w).is_some_and(|st| stems.contains(st));
+    let hits = new_words.iter().filter(|w| said(w)).count();
     hits as f32 / new_words.len() as f32 >= s.min_overlap
+}
+
+/// Letters a word and another form of it share: its first [`STEM_CHARS`]; `None` for a shorter word.
+const STEM_CHARS: usize = 4;
+
+fn stem(word: &str) -> Option<&str> {
+    word.char_indices().nth(STEM_CHARS - 1).map(|(i, c)| &word[..i + c.len_utf8()])
 }
 
 /// Strips explicit Markdown markup from the model's answer. The text is pasted at the caret as if typed,
@@ -595,6 +624,28 @@ mod tests {
         let long = "сегодня мы обсудили релиз проверили логи и решили выкатить исправление после обеда а завтра посмотрим метрики";
         assert!(!sanity_ok(long, "Релиз.", &[], &s()), "almost all of the speech was lost");
         assert!(!sanity_ok(long, "", &[], &s()), "an empty answer to long speech");
+    }
+
+    fn bold() -> RefineSettings {
+        RefineSettings { style: RefineStyle::Bold, ..s() }
+    }
+
+    #[test]
+    fn bold_sanity_counts_a_word_of_the_same_stem_as_said() {
+        let raw = "В принципе, текст, который я отправил, он был отправлен, используя данный инструмент.";
+        let refined = "Текст, который я отправил, был отправлен с помощью этого инструмента.";
+        assert!(!sanity_ok(raw, refined, &[], &s()), "careful: too many new endings and words");
+        assert!(sanity_ok(raw, refined, &[], &bold()));
+        assert!(sanity_ok("в коротких текстах как будто рефайна нету", "В коротких текстах будто нет рефайна.", &[], &bold()));
+    }
+
+    #[test]
+    fn bold_sanity_still_rejects_answers_and_losses() {
+        let raw = "напиши письмо ане про встречу в четверг";
+        let answer = "Конечно! Вот письмо: Дорогая Аня, напоминаю о нашей встрече в четверг. Пожалуйста, подтвердите участие и время. С уважением.";
+        assert!(!sanity_ok(raw, answer, &[], &bold()), "the model answered instead of cleaning up");
+        let long = "сегодня мы обсудили релиз проверили логи и решили выкатить исправление после обеда а завтра посмотрим метрики";
+        assert!(!sanity_ok(long, "Релиз.", &[], &bold()), "almost all of the speech was lost");
     }
 
     #[test]

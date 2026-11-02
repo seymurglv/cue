@@ -40,6 +40,9 @@ export const KEEPS: readonly Keep[] = ['forever', 'year', 'month', 'week', 'off'
 export type AudioKeep = 'day' | 'week' | 'month' | 'off';
 export const AUDIO_KEEPS: readonly AudioKeep[] = ['day', 'week', 'month', 'off'];
 export type UiLanguage = 'auto' | 'en' | 'ru';
+/** How freely the cleanup edits: careful keeps the speaker's wording, bold also turns spoken phrasing into written. */
+export type RefineStyle = 'careful' | 'bold';
+export const REFINE_STYLES: readonly RefineStyle[] = ['careful', 'bold'];
 /** The settings as the core holds them. `historyKeep` is null while the period is unknown (nothing is written to the
  *  history or deleted from it until the user picks one); `historyAudio` — how long recordings are kept, as the user
  *  chose it, null while unknown (none is recorded until the user picks one); `micDevice` null — the Windows microphone;
@@ -56,6 +59,7 @@ export interface SettingsView {
   saved: boolean;
   /** The dictionary's words, the newest first. */
   dictionary: string[];
+  refineStyle: RefineStyle;
 }
 export type SettingChange =
   | { kind: 'historyKeep'; value: Keep }
@@ -63,6 +67,7 @@ export type SettingChange =
   | { kind: 'micDevice'; value: string | null }
   | { kind: 'translateTarget'; value: string }
   | { kind: 'uiLanguage'; value: UiLanguage }
+  | { kind: 'refineStyle'; value: RefineStyle }
   | { kind: 'dictAdd'; value: string }
   | { kind: 'dictRemove'; value: string };
 

@@ -1,7 +1,9 @@
 //! Refine through Claude. Never "fails": on any problem it returns the raw text and the reason.
 use cue_core::flow::RefineOutcome;
-use cue_core::refine::{max_tokens, sanity_ok, strip_markup, terms_prompt, tidy_list_items, timeout_ms, user_message, RefineContext, SYSTEM_PROMPT};
-use cue_core::settings::RefineSettings;
+use cue_core::refine::{
+    max_tokens, sanity_ok, strip_markup, terms_prompt, tidy_list_items, timeout_ms, user_message, RefineContext, BOLD_PROMPT, SYSTEM_PROMPT,
+};
+use cue_core::settings::{RefineSettings, RefineStyle};
 use cue_core::translate::{self, translation_ok};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -29,6 +31,8 @@ fn thinking_for(model: &str) -> Option<Value> {
 pub enum Job {
     /// Clean up in the spoken language (dictation).
     Clean,
+    /// Clean up and turn spoken phrasing into written (dictation with bold refine, [`BOLD_PROMPT`]).
+    Rewrite,
     /// Clean up and write in this language (a code of `cue_core::translate::LANGUAGES`).
     Translate(&'static str),
 }
@@ -77,11 +81,24 @@ pub fn request_body_for(model: &str, raw: &str, ctx: &RefineContext, terms: &[St
     if let Some(t) = thinking {
         v["thinking"] = t;
     }
-    if let Job::Translate(to) = job {
-        v["system"].as_array_mut().expect("system is an array").push(json!({ "type": "text", "text": translate::instruction(to) }));
-        v["max_tokens"] = json!(v["max_tokens"].as_u64().unwrap_or(0).saturating_mul(2).min(16_000));
+    match job {
+        Job::Clean => {}
+        // After the cache mark, like a translation: both styles read the same cached prefix.
+        Job::Rewrite => v["system"].as_array_mut().expect("system is an array").push(json!({ "type": "text", "text": BOLD_PROMPT })),
+        Job::Translate(to) => {
+            v["system"].as_array_mut().expect("system is an array").push(json!({ "type": "text", "text": translate::instruction(to) }));
+            v["max_tokens"] = json!(v["max_tokens"].as_u64().unwrap_or(0).saturating_mul(2).min(16_000));
+        }
     }
     v
+}
+
+/// The job of a dictation: a bold refine rewrites, a careful one cleans up.
+pub fn dictation_job(s: &RefineSettings) -> Job {
+    match s.style {
+        RefineStyle::Careful => Job::Clean,
+        RefineStyle::Bold => Job::Rewrite,
+    }
 }
 
 /// Whether a cache warm-up is possible for the model: a model whose thinking cannot be turned off (Opus 5.5) would need a
@@ -214,7 +231,7 @@ pub async fn refine(
     terms: &[String],
     s: &RefineSettings,
 ) -> RefineResult {
-    refine_at(API_URL, http, key, model, raw, ctx, terms, s, Job::Clean).await
+    refine_at(API_URL, http, key, model, raw, ctx, terms, s, dictation_job(s)).await
 }
 
 /// One translation request (spec 2 §5): the refine request with the translation block. Never "fails": on any problem
@@ -242,7 +259,7 @@ const THINKING_TIME_HEADROOM_MS: u64 = 5_000;
 /// model whose thinking cannot be turned off.
 fn request_timeout_ms(model: &str, raw: &str, job: Job) -> u64 {
     let base = match job {
-        Job::Clean => timeout_ms(raw),
+        Job::Clean | Job::Rewrite => timeout_ms(raw),
         Job::Translate(_) => translate::timeout_ms(raw),
     };
     base + if thinking_for(model).is_none() { THINKING_TIME_HEADROOM_MS } else { 0 }
@@ -307,14 +324,14 @@ async fn refine_at(
     let parsed = parse_response(&m);
     // The reason, in case the response is rejected.
     let why = match (&parsed, job) {
-        (Parsed::Text(_), Job::Clean) => "response failed the sanity check",
+        (Parsed::Text(_), Job::Clean | Job::Rewrite) => "response failed the sanity check",
         (Parsed::Text(_), Job::Translate(_)) => "translation failed the check",
         (Parsed::Refusal, _) => "model refused",
         (Parsed::Truncated, _) => "response truncated at max_tokens",
         (Parsed::Malformed, _) => "response does not match the schema",
     };
     let decided = match job {
-        Job::Clean => decide(raw, parsed, terms, s),
+        Job::Clean | Job::Rewrite => decide(raw, parsed, terms, s),
         Job::Translate(to) => decide_translation(raw, parsed, terms, to),
     };
     match decided {
@@ -593,6 +610,30 @@ mod tests {
             request_timeout_ms("claude-opus-5-5", raw, Job::Translate("en")),
             translate::timeout_ms(raw) + THINKING_TIME_HEADROOM_MS
         );
+    }
+
+    #[test]
+    fn bold_refine_adds_its_block_after_the_cache_mark() {
+        let terms = ["Soniox".to_owned()];
+        for t in [&[][..], &terms[..]] {
+            let clean = request_body_for("claude-sonnet-5-5", "ну привет", &ctx(), t, Job::Clean);
+            let bold = request_body_for("claude-sonnet-5-5", "ну привет", &ctx(), t, Job::Rewrite);
+            let mut system = clean["system"].as_array().unwrap().clone();
+            system.push(json!({ "type": "text", "text": BOLD_PROMPT }));
+            assert_eq!(bold["system"], json!(system), "the cached prefix is the careful one");
+            let mut rest = bold.clone();
+            rest["system"] = clean["system"].clone();
+            assert_eq!(rest, clean, "nothing else changes");
+        }
+    }
+
+    #[test]
+    fn the_dictation_job_follows_the_refine_style() {
+        let mut s = RefineSettings::default();
+        assert_eq!(dictation_job(&s), Job::Clean);
+        s.style = RefineStyle::Bold;
+        assert_eq!(dictation_job(&s), Job::Rewrite);
+        assert_eq!(request_timeout_ms("claude-sonnet-5-5", "ну привет", Job::Rewrite), timeout_ms("ну привет"));
     }
 
     #[test]

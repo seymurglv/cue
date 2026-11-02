@@ -10,7 +10,7 @@
 // Speech recognition holds the key row of keys.ts, the Microphone page the microphone rows of mic.ts (the welcome window
 // shows them too); the microphone's level is listened to only while that page is shown.
 import * as api from './api';
-import { AUDIO_KEEPS, KEEPS, type AudioKeep, type Keep, type KeyName, type UiLanguage } from './api';
+import { AUDIO_KEEPS, KEEPS, REFINE_STYLES, type AudioKeep, type Keep, type KeyName, type RefineStyle, type UiLanguage } from './api';
 import { CUE } from '../designParts';
 import { icon, type IconName } from './icons';
 import { KeyRows } from './keys';
@@ -54,6 +54,21 @@ function syncSeg(sg: HTMLElement): void {
     th.style.transition = '';
     sg.dataset.ready = '1';
   }
+}
+
+/** A segmented control of `values` named by `labels`, `cur` pressed; `name` tells the click which setting it is. */
+function segment<V extends string>(name: string, values: readonly V[], labels: Record<V, string>, cur: V | undefined): HTMLElement {
+  const seg = h('span', 'segc');
+  seg.dataset.seg = name;
+  seg.append(h('span', 'thb'));
+  for (const v of values) {
+    const b = h('button', '', labels[v]);
+    b.type = 'button';
+    b.dataset.v = v;
+    b.setAttribute('aria-pressed', String(v === cur));
+    seg.append(b);
+  }
+  return seg;
 }
 
 export class SettingsTray {
@@ -369,7 +384,9 @@ export class SettingsTray {
     else if ((b = t.closest<HTMLElement>('[data-hclear]'))) this.clearPressed(b);
     else if (t.closest('[data-sw="autostart"]')) void this.toggleAutostart();
     else if ((b = t.closest<HTMLElement>('.segc button')) && b.getAttribute('aria-pressed') !== 'true') {
-      void this.ctx.change({ kind: 'uiLanguage', value: b.dataset.v as UiLanguage });
+      const v = b.dataset.v!;
+      if (b.closest<HTMLElement>('.segc')!.dataset.seg === 'refine') void this.ctx.change({ kind: 'refineStyle', value: v as RefineStyle });
+      else void this.ctx.change({ kind: 'uiLanguage', value: v as UiLanguage });
     }
   }
 
@@ -451,16 +468,7 @@ export class SettingsTray {
   /** The interface's language, then the one a translation goes into. */
   private languageRows(): HTMLElement[] {
     const t = this.ctx.t;
-    const seg = h('span', 'segc');
-    seg.append(h('span', 'thb'));
-    const cur = this.ctx.settings?.uiLanguage;
-    for (const l of UI_LANGUAGES) {
-      const b = h('button', '', t.uiLanguages[l]);
-      b.type = 'button';
-      b.dataset.v = l;
-      b.setAttribute('aria-pressed', String(l === cur));
-      seg.append(b);
-    }
+    const seg = segment('ui', UI_LANGUAGES, t.uiLanguages, this.ctx.settings?.uiLanguage);
     return [srow(t.uiLanguage, null, seg).row, srow(t.translateTo, null, dropDown('target', this.targetName())).row];
   }
 
@@ -559,7 +567,8 @@ export class SettingsTray {
     sw.setAttribute('aria-checked', String(!!this.autostart));
     sw.setAttribute('aria-label', t.autostart);
     sw.disabled = this.autostart === null;
-    return [srow(t.autostart, null, sw).row];
+    const style = segment('refine', REFINE_STYLES, t.refineStyles, this.ctx.settings?.refineStyle);
+    return [srow(t.autostart, null, sw).row, srow(t.refineStyle, t.refineStyleHint, style).row];
   }
 
   private async readAutostart(): Promise<void> {

@@ -1095,7 +1095,8 @@ impl Runtime {
                 // One future for both jobs, so `guarded` covers a translation too.
                 let body = async {
                     match job {
-                        Job::Clean => claude::refine(&http, key.as_deref(), &s.model, &raw, &ctx, &terms, &s).await,
+                        // The refine style picks a careful cleanup or a bold rewrite (`claude::dictation_job`).
+                        Job::Clean | Job::Rewrite => claude::refine(&http, key.as_deref(), &s.model, &raw, &ctx, &terms, &s).await,
                         Job::Translate(to) => {
                             claude::translate(&http, key.as_deref(), &s.model, &raw, &ctx, &terms, &s, to).await
                         }

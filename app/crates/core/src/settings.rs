@@ -31,12 +31,34 @@ pub struct SttSettings {
 #[serde(default)]
 pub struct RefineSettings {
     pub model: String,
+    /// How freely refine edits ([`RefineStyle`]).
+    pub style: RefineStyle,
     /// How many characters before the caret to give the model.
     pub context_chars: usize,
     /// Sanity check thresholds.
     pub min_ratio: f32,
     pub max_ratio: f32,
     pub min_overlap: f32,
+}
+
+/// How freely refine edits. `Careful` fixes the slips and keeps the speaker's wording; `Bold` also turns spoken
+/// phrasing into written (`refine::BOLD_PROMPT`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RefineStyle {
+    #[default]
+    Careful,
+    Bold,
+}
+
+/// Only `"bold"` is bold (case and surrounding spaces do not matter); any other value reads as `Careful`, so a typo
+/// here never makes the whole file unreadable.
+impl<'de> Deserialize<'de> for RefineStyle {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let bold = value.as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("bold"));
+        Ok(if bold { Self::Bold } else { Self::Careful })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
@@ -550,6 +572,8 @@ pub enum SettingChange {
     /// A language code CUE knows.
     TranslateTarget(String),
     UiLanguage(UiLanguage),
+    /// How freely refine edits.
+    RefineStyle(RefineStyle),
     /// A word for the dictionary, put first; see [`Settings::apply`] for what is refused.
     DictAdd(String),
     /// A word out of the dictionary, as it is written there.
@@ -572,6 +596,7 @@ impl std::fmt::Debug for SettingChange {
             }
             Self::TranslateTarget(code) => f.debug_tuple("TranslateTarget").field(&translate::known(code)).finish(),
             Self::UiLanguage(language) => f.debug_tuple("UiLanguage").field(language).finish(),
+            Self::RefineStyle(style) => f.debug_tuple("RefineStyle").field(style).finish(),
             // A word of the dictionary may be a name: only its length.
             Self::DictAdd(word) => f.debug_struct("DictAdd").field("chars", &word.chars().count()).finish(),
             Self::DictRemove(word) => f.debug_struct("DictRemove").field("chars", &word.chars().count()).finish(),
@@ -603,6 +628,7 @@ impl Settings {
                 set_if_changed(&mut self.translate.target, (code != DEFAULT_TARGET).then(|| code.to_owned()))
             }
             SettingChange::UiLanguage(language) => set_if_changed(&mut self.ui.language, language),
+            SettingChange::RefineStyle(style) => set_if_changed(&mut self.refine.style, style),
             SettingChange::DictAdd(word) => {
                 let word = word.trim();
                 let terms = &mut self.dictionary.terms;
@@ -692,7 +718,14 @@ pub enum SettingsError {
 
 impl Default for RefineSettings {
     fn default() -> Self {
-        Self { model: "claude-sonnet-5-5".into(), context_chars: 500, min_ratio: 0.35, max_ratio: 1.25, min_overlap: 0.7 }
+        Self {
+            model: "claude-sonnet-5-5".into(),
+            style: RefineStyle::Careful,
+            context_chars: 500,
+            min_ratio: 0.35,
+            max_ratio: 1.25,
+            min_overlap: 0.7,
+        }
     }
 }
 
@@ -1040,6 +1073,25 @@ mod tests {
             let s: Settings = serde_json::from_str(&json).unwrap();
             assert_eq!(s.ui.language, expected, "{text:?}");
         }
+    }
+
+    #[test]
+    fn refine_style_is_careful_unless_bold() {
+        assert_eq!(Settings::default().refine.style, RefineStyle::Careful);
+        for (value, expected) in [
+            (r#""bold""#, RefineStyle::Bold),
+            (r#"" Bold ""#, RefineStyle::Bold),
+            (r#""careful""#, RefineStyle::Careful),
+            (r#""wild""#, RefineStyle::Careful),
+            ("1", RefineStyle::Careful),
+            ("null", RefineStyle::Careful),
+        ] {
+            let text = format!(r#"{{"refine":{{"style":{value},"context_chars":100}}}}"#);
+            let s: Settings = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{value}: {e}"));
+            assert_eq!((s.refine.style, s.refine.context_chars), (expected, 100), "{value}");
+        }
+        let written = serde_json::to_value(RefineSettings { style: RefineStyle::Bold, ..RefineSettings::default() }).unwrap();
+        assert_eq!(written["style"], "bold");
     }
 
     /// Unknown values mean `auto`, and the rest of the file still loads.
@@ -1650,6 +1702,7 @@ mod tests {
             SettingChange::MicDevice(Some(" ".into())),
             SettingChange::TranslateTarget("en".into()),
             SettingChange::UiLanguage(UiLanguage::Auto),
+            SettingChange::RefineStyle(RefineStyle::Careful),
         ] {
             assert!(!s.apply(change.clone()), "{change:?}");
         }
@@ -1661,6 +1714,7 @@ mod tests {
             SettingChange::MicDevice(Some("Mic".into())),
             SettingChange::TranslateTarget("fr".into()),
             SettingChange::UiLanguage(UiLanguage::Ru),
+            SettingChange::RefineStyle(RefineStyle::Bold),
         ] {
             assert!(s.apply(change.clone()), "{change:?}");
             assert!(!s.apply(change.clone()), "the same change twice: {change:?}");
@@ -1670,6 +1724,7 @@ mod tests {
         assert_eq!((s.history.keep.known(), s.audio.device.as_deref()), (Some(Keep::Week), Some("Mic")));
         assert_eq!(s.history.audio.known(), Some(AudioKeep::Day));
         assert_eq!((s.translate.target(), s.ui.language), ("fr", UiLanguage::Ru));
+        assert_eq!(s.refine.style, RefineStyle::Bold);
     }
 
     /// The window sends `{"kind": …, "value": …}`. An unknown retention is refused rather than read as a month, and an
@@ -1685,6 +1740,7 @@ mod tests {
         assert_eq!(read(r#"{"kind":"micDevice","value":null}"#).unwrap(), SettingChange::MicDevice(None));
         assert_eq!(read(r#"{"kind":"translateTarget","value":"de"}"#).unwrap(), SettingChange::TranslateTarget("de".into()));
         assert_eq!(read(r#"{"kind":"uiLanguage","value":"ru"}"#).unwrap(), SettingChange::UiLanguage(UiLanguage::Ru));
+        assert_eq!(read(r#"{"kind":"refineStyle","value":"bold"}"#).unwrap(), SettingChange::RefineStyle(RefineStyle::Bold));
         for json in [
             r#"{"kind":"historyKeep","value":"always"}"#,
             r#"{"kind":"historyKeep","value":7}"#,

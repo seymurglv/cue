@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use cue_core::history;
-use cue_core::settings::{AudioKeep, DropPosition, Keep, Settings, UiLanguage};
+use cue_core::settings::{AudioKeep, DropPosition, Keep, RefineStyle, Settings, UiLanguage};
 use cue_core::translate;
 use cue_core::ui::{TrayKind, UiAction, UiState};
 use tauri::ipc::Channel;
@@ -45,6 +45,8 @@ pub struct SettingsView {
     pub saved: bool,
     /// The dictionary's words as settings.json keeps them, the newest first.
     pub dictionary: Vec<String>,
+    /// How freely refine edits.
+    pub refine_style: RefineStyle,
 }
 
 impl SettingsView {
@@ -59,6 +61,7 @@ impl SettingsView {
             languages: translate::LANGUAGES,
             saved,
             dictionary: s.dictionary.terms.clone(),
+            refine_style: s.refine.style,
         }
     }
 }
@@ -75,6 +78,7 @@ impl std::fmt::Debug for SettingsView {
             .field("languages", &self.languages.len())
             .field("saved", &self.saved)
             .field("dictionary", &self.dictionary.len())
+            .field("refine_style", &self.refine_style)
             .finish()
     }
 }
@@ -418,7 +422,7 @@ mod tests {
         let mut names: Vec<&str> = view.as_object().unwrap().keys().map(String::as_str).collect();
         names.sort_unstable();
         let expected =
-            ["dictionary", "historyAudio", "historyKeep", "lang", "languages", "micDevice", "saved", "translateTarget", "uiLanguage"];
+            ["dictionary", "historyAudio", "historyKeep", "lang", "languages", "micDevice", "refineStyle", "saved", "translateTarget", "uiLanguage"];
         assert_eq!(names, expected);
         let defaults = [
             ("historyKeep", json!("month")),
@@ -429,6 +433,7 @@ mod tests {
             ("lang", json!("en")),
             ("saved", json!(true)),
             ("dictionary", json!([])),
+            ("refineStyle", json!("careful")),
         ];
         for (name, value) in defaults {
             assert_eq!(view[name], value, "{name}");
@@ -444,6 +449,7 @@ mod tests {
             SettingChange::MicDevice(Some("USB Microphone".into())),
             SettingChange::TranslateTarget("de".into()),
             SettingChange::UiLanguage(UiLanguage::Ru),
+            SettingChange::RefineStyle(RefineStyle::Bold),
         ] {
             assert!(s.apply(change));
         }
@@ -456,6 +462,7 @@ mod tests {
             ("uiLanguage", json!("ru")),
             ("lang", json!("ru")),
             ("saved", json!(false)),
+            ("refineStyle", json!("bold")),
         ];
         for (name, value) in set {
             assert_eq!(view[name], value, "{name}");

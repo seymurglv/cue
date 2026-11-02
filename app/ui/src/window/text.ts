@@ -1,6 +1,6 @@
 // The main window's texts in English and Russian. The language is the core's (SettingsView.lang): the window has no
 // language set before its script runs, so the page asks for the settings before it draws anything.
-import type { AudioKeep, Keep, KeyCheck, Mode, UiLanguage } from './api';
+import type { AudioKeep, Keep, KeyCheck, Mode, RefineStyle, UiLanguage } from './api';
 
 export type Lang = 'en' | 'ru';
 
@@ -115,6 +115,10 @@ export interface WinText {
   micTestHint: string;
   translateTo: string;
   autostart: string;
+  /** The tray's General page: how freely the cleanup edits. */
+  refineStyle: string;
+  refineStyleHint: string;
+  refineStyles: Record<RefineStyle, string>;
   uiLanguage: string;
   uiLanguages: Record<UiLanguage, string>;
   /** The tray's History page: how long recordings are kept, never longer than the history. */
@@ -226,6 +230,9 @@ export const en: WinText = {
   micTestHint: 'Say something',
   translateTo: 'Translate into',
   autostart: 'Start at sign-in',
+  refineStyle: 'Cleanup',
+  refineStyleHint: 'Bold also turns spoken phrasing into written',
+  refineStyles: { careful: 'Careful', bold: 'Bold' },
   uiLanguage: 'Interface language',
   uiLanguages: { auto: 'Auto', en: 'English', ru: 'Русский' },
   keepAudio: 'Keep recordings',
@@ -336,6 +343,9 @@ export const ru: WinText = {
   micTestHint: 'Скажите что-нибудь',
   translateTo: 'Переводить на',
   autostart: 'Запускать при входе',
+  refineStyle: 'Чистка текста',
+  refineStyleHint: 'Смелая ещё и переписывает разговорные обороты',
+  refineStyles: { careful: 'Бережная', bold: 'Смелая' },
   uiLanguage: 'Язык интерфейса',
   uiLanguages: { auto: 'Авто', en: 'English', ru: 'Русский' },
   keepAudio: 'Хранить записи',

@@ -76,8 +76,13 @@ Title «Языки» / "Languages". Two rows:
 
 ## General
 
-Title «Общие» / "General". One row, «Запускать при входе» / "Start at sign-in" with its switch. «Учиться у меня» /
-"Learn from me" (2026-11-02-corrections.md) comes in later as the second row.
+Title «Общие» / "General". Rows:
+
+1. «Запускать при входе» / "Start at sign-in" with its switch.
+2. «Чистка текста» / "Cleanup": the segmented control «Бережная | Смелая» / "Careful | Bold", hint «Смелая ещё и
+   переписывает разговорные обороты» / "Bold also turns spoken phrasing into written" (2026-11-02-bold-refine.md).
+
+«Учиться у меня» / "Learn from me" (2026-11-02-corrections.md) comes in later as the next row.
 
 ## Not changed
 

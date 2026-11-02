@@ -331,15 +331,15 @@ describe('The settings tray', () => {
     expect($$('.btray .srow .stx b').map(text)).toEqual(['Язык интерфейса', 'Переводить на']);
   });
 
-  it('General holds only start at sign-in, and its value follows the switch', async () => {
+  it('General holds start at sign-in and the cleanup, and its value follows the switch', async () => {
     page = await mount();
     await open();
     const value = () => text($('.btray em[data-val="general"]'));
     expect(value()).toBe('Manually');
     await sub('general');
     expect(title()).toBe('General');
-    expect($$('.btray .srow').map((r) => text(r.querySelector('.stx b')))).toEqual(['Start at sign-in']);
-    expect($('.btray .segc')).toBeNull();
+    expect($$('.btray .srow').map((r) => text(r.querySelector('.stx b')))).toEqual(['Start at sign-in', 'Cleanup']);
+    expect($$('.btray .segc').map((s) => s.dataset.seg)).toEqual(['refine']);
     click($('[data-sw="autostart"]'));
     await settle();
     expect(core.autostartSet).toHaveBeenCalledWith(true);
@@ -787,6 +787,22 @@ describe('The settings tray', () => {
     await settle();
     expect(core.autostartSet).toHaveBeenLastCalledWith(false);
     expect(sw.getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('refine style is a careful or bold segment under General', async () => {
+    stub(view({ lang: 'ru', uiLanguage: 'ru' }));
+    page = await mount();
+    await open();
+    await sub('general');
+    const seg = () => $$('[data-seg="refine"] button');
+    expect(seg().map((b) => b.textContent)).toEqual(['Бережная', 'Смелая']);
+    expect(text($('.btray .sgrp'))).toContain('Чистка текста');
+    expect(seg().map((b) => b.getAttribute('aria-pressed'))).toEqual(['true', 'false']);
+    click(seg()[1]);
+    await settle();
+    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'refineStyle', value: 'bold' });
+    expect(core.settingsSet).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'uiLanguage' }));
+    expect(seg().map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'true']);
   });
 
   it('reads the settings again when the core did not answer a change in time', async () => {

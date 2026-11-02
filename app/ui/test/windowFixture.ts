@@ -33,6 +33,7 @@ export function view(over: Partial<api.SettingsView> = {}): api.SettingsView {
     languages: LANGUAGES,
     saved: true,
     dictionary: [],
+    refineStyle: 'careful',
     ...over,
   };
 }
