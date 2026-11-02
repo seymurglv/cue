@@ -18,11 +18,7 @@ export function percent(done: number, total: number): number {
 const mb = (bytes: number) => String(Math.round(bytes / MB));
 
 /** The value on the first page and its look: `warn` — amber; `progress` — the share for the line under the row. */
-export function modelValue(
-  t: Ctx['t'],
-  s: ModelState | null,
-  keyMissing: boolean,
-): { text: string; warn: boolean; progress: number | null } {
+export function modelValue(t: Ctx['t'], s: ModelState | null): { text: string; warn: boolean; progress: number | null } {
   const v = t.modelValue;
   if (!s) return { text: '', warn: false, progress: null };
   switch (s.state) {
@@ -32,8 +28,6 @@ export function modelValue(
       return { text: v.failed, warn: true, progress: null };
     case 'unsupported':
       return { text: v.unsupported, warn: true, progress: null };
-    case 'ready':
-      return keyMissing ? { text: v.noKey, warn: true, progress: null } : { text: v.ready, warn: false, progress: null };
     default:
       return { text: v[s.state], warn: false, progress: null };
   }

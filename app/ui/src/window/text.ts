@@ -84,14 +84,18 @@ export interface WinText {
   translate: string;
   general: string;
   /** Speech recognition (docs/specs/2026-11-02-settings-tray.md): its title; on the first page its value by the model's
-   *  state ({N} — percent; ready without the Anthropic key); on its page the model's line by state ({DONE}, {TOTAL} —
-   *  MB), Retry, and the note on where sound and text go. */
+   *  state ({N} — percent); on its page the model's line by state ({DONE}, {TOTAL} —
+   *  MB), Retry, and the note on where sound goes. */
   model: string;
   modelName: string;
-  modelValue: { ready: string; noKey: string; loading: string; downloading: string; failed: string; unsupported: string; missing: string };
+  modelValue: { ready: string; loading: string; downloading: string; failed: string; unsupported: string; missing: string };
   modelLine: { ready: string; downloading: string; failed: string; loading: string; unsupported: string; missing: string };
   modelRetry: string;
   modelNote: string;
+  /** Cleanup: its title, its value on the first page without the Anthropic key, the note on where text goes. */
+  cleanup: string;
+  cleanupNoKey: string;
+  cleanupNote: string;
   /** Languages: its title and its value ({UI} — the interface language, {TO} — the translation's). */
   languages: string;
   languagesValue: string;
@@ -115,7 +119,7 @@ export interface WinText {
   micTestHint: string;
   translateTo: string;
   autostart: string;
-  /** The tray's General page: how freely the cleanup edits. */
+  /** The Cleanup page's style row: how freely the cleanup edits. */
   refineStyle: string;
   refineStyleHint: string;
   refineStyles: Record<RefineStyle, string>;
@@ -184,7 +188,6 @@ export const en: WinText = {
   modelName: 'Parakeet Ultra',
   modelValue: {
     ready: 'Ready',
-    noKey: 'No Anthropic key',
     loading: 'Loading',
     downloading: '{N} %',
     failed: 'Did not download',
@@ -200,7 +203,10 @@ export const en: WinText = {
     missing: 'Not downloaded',
   },
   modelRetry: 'Retry',
-  modelNote: 'Sound stays on this computer; text goes to Anthropic for the cleanup; the history stays on this computer only.',
+  modelNote: 'Sound stays on this computer.',
+  cleanup: 'Cleanup',
+  cleanupNoKey: 'No Anthropic key',
+  cleanupNote: 'Text goes to Anthropic for the cleanup; the history stays on this computer only.',
   languages: 'Languages',
   languagesValue: '{UI} · into {TO}',
   generalOn: 'Starts at sign-in',
@@ -230,7 +236,7 @@ export const en: WinText = {
   micTestHint: 'Say something',
   translateTo: 'Translate into',
   autostart: 'Start at sign-in',
-  refineStyle: 'Cleanup',
+  refineStyle: 'Style',
   refineStyleHint: 'Bold also turns spoken phrasing into written',
   refineStyles: { careful: 'Careful', bold: 'Bold' },
   uiLanguage: 'Interface language',
@@ -297,7 +303,6 @@ export const ru: WinText = {
   modelName: 'Parakeet Ultra',
   modelValue: {
     ready: 'Готово',
-    noKey: 'Нет ключа Anthropic',
     loading: 'Загружается',
     downloading: '{N} %',
     failed: 'Не скачалась',
@@ -313,7 +318,10 @@ export const ru: WinText = {
     missing: 'Не скачана',
   },
   modelRetry: 'Повторить',
-  modelNote: 'Звук остаётся на этом компьютере; текст уходит в Anthropic для чистки; история — только на этом компьютере.',
+  modelNote: 'Звук остаётся на этом компьютере.',
+  cleanup: 'Чистка текста',
+  cleanupNoKey: 'Нет ключа Anthropic',
+  cleanupNote: 'Текст уходит в Anthropic для чистки; история — только на этом компьютере.',
   languages: 'Языки',
   languagesValue: '{UI} · на {TO}',
   generalOn: 'Запуск при входе',
@@ -343,7 +351,7 @@ export const ru: WinText = {
   micTestHint: 'Скажите что-нибудь',
   translateTo: 'Переводить на',
   autostart: 'Запускать при входе',
-  refineStyle: 'Чистка текста',
+  refineStyle: 'Стиль',
   refineStyleHint: 'Смелая ещё и переписывает разговорные обороты',
   refineStyles: { careful: 'Бережная', bold: 'Смелая' },
   uiLanguage: 'Язык интерфейса',

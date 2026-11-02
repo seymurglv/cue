@@ -2,7 +2,7 @@
 
 Parakeet already writes punctuation and capitals, so the careful cleanup often has nothing left to fix in a short
 phrase, and it returns the text as heard. The owner wanted a cleanup that also reads like written text. CUE now has
-two styles, chosen on the settings tray's General page («Чистка текста» / "Cleanup").
+two styles, chosen on the settings tray's own Cleanup page («Чистка текста» / "Cleanup"), beside the Anthropic key.
 
 ## Styles
 

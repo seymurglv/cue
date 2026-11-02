@@ -1,13 +1,14 @@
 // The settings tray (spec 3 §3, regrouped in docs/specs/2026-11-02-settings-tray.md): it grows out of the gear (the gear
 // turns into its close button) and folds back into it. Its first page lists Speech recognition (the model on this
-// computer, window/model.ts, and the Anthropic key), Microphone, Languages (the interface's and the translation's),
-// History (how long the history and its recordings are kept, and clearing it) and General with their values; one of them at a time slides in, the chevron goes back; Esc goes
-// back, then closes. Every change goes to the core at once.
+// computer, window/model.ts), Cleanup (careful or bold, and the Anthropic key it needs), Microphone, Languages (the
+// interface's and the translation's), History (how long the history and its recordings are kept, and clearing it) and
+// General with their values; one of them at a time slides in, the chevron goes back; Esc goes back, then closes. Every
+// change goes to the core at once.
 // Going from page to page, the heading line stays: its title changes letter by letter and the chevron grows in front
 // of it; only the rows below slide. The height eases to the new page without overshooting, and nothing scrolls while
 // the pages pass (a scroll bar showing for a moment would narrow the rows). A page whose values come later (the
 // microphones, new settings) is filled in where it is, even while it is still sliding in.
-// Speech recognition holds the key row of keys.ts, the Microphone page the microphone rows of mic.ts (the welcome window
+// Cleanup holds the key row of keys.ts, the Microphone page the microphone rows of mic.ts (the welcome window
 // shows them too); the microphone's level is listened to only while that page is shown.
 import * as api from './api';
 import { AUDIO_KEEPS, KEEPS, REFINE_STYLES, type AudioKeep, type Keep, type KeyName, type RefineStyle, type UiLanguage } from './api';
@@ -21,10 +22,11 @@ import { languageName } from './text';
 
 export { matchMic } from './mic';
 
-type Sub = 'model' | 'mic' | 'languages' | 'history' | 'general';
-const SUBS: readonly Sub[] = ['model', 'mic', 'languages', 'history', 'general'];
+type Sub = 'model' | 'cleanup' | 'mic' | 'languages' | 'history' | 'general';
+const SUBS: readonly Sub[] = ['model', 'cleanup', 'mic', 'languages', 'history', 'general'];
 const SUB_ICON: Record<Sub, IconName> = {
   model: 'wave',
+  cleanup: 'sparkle',
   mic: 'micOn',
   languages: 'globe',
   history: 'clock',
@@ -99,9 +101,9 @@ export class SettingsTray {
     private readonly ctx: Ctx,
     private readonly clearHistory: () => Promise<void>,
   ) {
-    // The key's state shows in Speech recognition's value ("No Anthropic key") and on its page.
+    // The key's state shows in Cleanup's value ("No Anthropic key") and on its page.
     this.keys = new KeyRows(ctx, () => this.current, () => {
-      this.paintModelValue();
+      this.paintCleanupValue();
       this.fit();
     });
     this.mic = new MicRows(ctx, () => this.current, () => {
@@ -125,7 +127,7 @@ export class SettingsTray {
   private paintModelValue(page: ParentNode | null = this.current): void {
     const row = page?.querySelector<HTMLElement>('[data-sub="model"]');
     if (!row) return;
-    const v = modelValue(this.ctx.t, this.model, this.keys.read && !this.keys.keys.anthropic.saved);
+    const v = modelValue(this.ctx.t, this.model);
     const em = row.querySelector('em')!;
     em.textContent = v.text;
     em.classList.toggle('warn', v.warn);
@@ -134,6 +136,15 @@ export class SettingsTray {
     if (v.progress === null) old?.remove();
     else if (old) old.querySelector<HTMLElement>('i')!.style.transform = `scaleX(${Math.min(1, v.progress)})`;
     else row.append(bar('tline', v.progress));
+  }
+
+  /** The first page's Cleanup value: the style, or amber "No Anthropic key" once the keys are read and it is not saved. */
+  private paintCleanupValue(page: ParentNode | null = this.current): void {
+    const em = page?.querySelector<HTMLElement>('em[data-val="cleanup"]');
+    if (!em) return;
+    const noKey = this.keys.read && !this.keys.keys.anthropic.saved;
+    em.textContent = noKey ? this.ctx.t.cleanupNoKey : this.value('cleanup');
+    em.classList.toggle('warn', noKey);
   }
 
   /** Takes the page's tray box and gear; an open tray stays open on its page (the page was built again). */
@@ -412,14 +423,18 @@ export class SettingsTray {
         pg.append(row);
       }
       this.paintModelValue(pg);
+      this.paintCleanupValue(pg);
       if (this.ctx.settings && !this.ctx.settings.saved) pg.append(h('div', 'tft', t.unsaved));
       return pg;
     }
     const g = h('div', 'sgrp');
     pg.append(g);
     if (sub === 'model') {
-      g.append(modelRow(t, this.model), this.keys.row('anthropic'));
+      g.append(modelRow(t, this.model));
       pg.append(h('div', 'tft', t.modelNote));
+    } else if (sub === 'cleanup') {
+      g.append(...this.cleanupRows());
+      pg.append(h('div', 'tft', t.cleanupNote));
     } else if (sub === 'mic') g.append(...this.mic.rows());
     else if (sub === 'languages') g.append(...this.languageRows());
     else if (sub === 'history') g.append(...this.historyRows());
@@ -429,7 +444,7 @@ export class SettingsTray {
 
   private title(sub: Sub): string {
     const t = this.ctx.t;
-    return { model: t.model, mic: t.mic, languages: t.languages, history: t.history, general: t.general }[sub];
+    return { model: t.model, cleanup: t.cleanup, mic: t.mic, languages: t.languages, history: t.history, general: t.general }[sub];
   }
 
   /** A section's value on the first page. */
@@ -440,6 +455,9 @@ export class SettingsTray {
       case 'model':
         // Drawn with its look by `paintModelValue`.
         return '';
+      case 'cleanup':
+        // The key's warning over it is `paintCleanupValue`'s.
+        return s ? t.refineStyles[s.refineStyle] ?? '' : '';
       case 'mic':
         return this.mic.label();
       case 'languages':
@@ -556,6 +574,15 @@ export class SettingsTray {
     this.ctx.menu(b, items, (v) => void this.ctx.change({ kind: 'translateTarget', value: v }));
   }
 
+  /* ---------- cleanup ---------- */
+
+  /** How freely the cleanup edits, then the Anthropic key it needs. */
+  private cleanupRows(): HTMLElement[] {
+    const t = this.ctx.t;
+    const style = segment('refine', REFINE_STYLES, t.refineStyles, this.ctx.settings?.refineStyle);
+    return [srow(t.refineStyle, t.refineStyleHint, style).row, this.keys.row('anthropic')];
+  }
+
   /* ---------- general ---------- */
 
   private generalRows(): HTMLElement[] {
@@ -567,8 +594,7 @@ export class SettingsTray {
     sw.setAttribute('aria-checked', String(!!this.autostart));
     sw.setAttribute('aria-label', t.autostart);
     sw.disabled = this.autostart === null;
-    const style = segment('refine', REFINE_STYLES, t.refineStyles, this.ctx.settings?.refineStyle);
-    return [srow(t.autostart, null, sw).row, srow(t.refineStyle, t.refineStyleHint, style).row];
+    return [srow(t.autostart, null, sw).row];
   }
 
   private async readAutostart(): Promise<void> {

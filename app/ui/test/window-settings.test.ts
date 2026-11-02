@@ -50,14 +50,16 @@ describe('The settings tray', () => {
     expect(title()).toBe('Settings');
     expect($$('.btray .trw').map((r) => r.querySelector('span:not(.si)')!.textContent)).toEqual([
       'Speech recognition',
+      'Cleanup',
       'Microphone',
       'Languages',
       'History',
       'General',
     ]);
-    expect($$('.btray .trw').map((r) => r.dataset.sub)).toEqual(['model', 'mic', 'languages', 'history', 'general']);
-    // Each row with its value (no key saved: Speech recognition says so).
+    expect($$('.btray .trw').map((r) => r.dataset.sub)).toEqual(['model', 'cleanup', 'mic', 'languages', 'history', 'general']);
+    // Each row with its value (no key saved: Cleanup says so).
     expect($$('.btray .trw em').map((e) => e.textContent)).toEqual([
+      'Ready',
       'No Anthropic key',
       'As in Windows',
       'Auto · into English',
@@ -99,7 +101,7 @@ describe('The settings tray', () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     page = await mount();
     await open();
-    await sub('model');
+    await sub('cleanup');
     expect($$('input[data-key]').map((i) => i.dataset.key)).toEqual(['anthropic']);
     const input = $<HTMLInputElement>('input[data-key="anthropic"]')!;
     expect(input.type).toBe('password');
@@ -140,8 +142,8 @@ describe('The settings tray', () => {
     core.keyCheck.mockResolvedValue('badKey');
     page = await mount();
     await open();
-    expect(text($('.btray em[data-val="model"]'))).toBe('Ready');
-    await sub('model');
+    expect(text($('.btray em[data-val="cleanup"]'))).toBe('Careful');
+    await sub('cleanup');
     const anthropic = $('small[data-state="anthropic"]')!;
     expect(text(anthropic)).toBe('Saved');
     expect($<HTMLInputElement>('input[data-key="anthropic"]')!.placeholder).toBe('sk-…789');
@@ -228,28 +230,24 @@ describe('The settings tray', () => {
     expect(text(em)).toBe('Ready');
   });
 
-  it('the model ready without the Anthropic key says the key is missing, until it is saved', async () => {
+  it('Cleanup says the Anthropic key is missing until it is saved; Speech recognition never does', async () => {
     page = await mount();
     await open();
-    const em = () => $<HTMLElement>('.btray em[data-val="model"]')!;
+    const em = () => $<HTMLElement>('.btray em[data-val="cleanup"]')!;
     expect(text(em())).toBe('No Anthropic key');
     expect(em().classList.contains('warn')).toBe(true);
-    // A failed download comes first.
-    feeds.model({ state: 'failed', done: 1 * MB, total: TOTAL });
-    expect(text(em())).toBe('Did not download');
-    feeds.model({ state: 'ready', total: TOTAL });
-    expect(text(em())).toBe('No Anthropic key');
-    // The key saved on its page: the first page says Ready.
-    await sub('model');
+    expect(text($('.btray em[data-val="model"]'))).toBe('Ready');
+    // The key saved on its page: the first page names the style.
+    await sub('cleanup');
     $<HTMLInputElement>('input[data-key="anthropic"]')!.value = 'sk-ant-new-1234';
     click($('[data-check="anthropic"]'));
     await settle();
     key('Escape');
-    expect(text(em())).toBe('Ready');
+    expect(text(em())).toBe('Careful');
     expect(em().classList.contains('warn')).toBe(false);
   });
 
-  it('the Speech recognition page: the model row, the Anthropic key and the note', async () => {
+  it('the Speech recognition page: the model row and the note', async () => {
     saved();
     core.modelGet.mockResolvedValue({ state: 'downloading', done: 412 * MB, total: TOTAL });
     page = await mount();
@@ -257,10 +255,8 @@ describe('The settings tray', () => {
     await sub('model');
     expect(title()).toBe('Speech recognition');
     const rows = $$('.btray .sgrp > .srow');
-    expect(rows.map((r) => (r.classList.contains('mrow') ? 'model' : r.dataset.key))).toEqual(['model', 'anthropic']);
-    expect(text($('.btray .tft'))).toBe(
-      'Sound stays on this computer; text goes to Anthropic for the cleanup; the history stays on this computer only.',
-    );
+    expect(rows.map((r) => (r.classList.contains('mrow') ? 'model' : r.dataset.key))).toEqual(['model']);
+    expect(text($('.btray .tft'))).toBe('Sound stays on this computer.');
     const mrow = () => $<HTMLElement>('.btray .mrow')!;
     const row = mrow();
     expect(row.dataset.model).toBe('downloading');
@@ -275,14 +271,13 @@ describe('The settings tray', () => {
     expect(text(row.querySelector('.mpct'))).toBe('70 %');
     expect(text(row.querySelector('.mdone'))).toBe('470');
     expect(text(row.querySelector('.mprog small'))).toBe('Downloading: 470 of 668 MB');
-    // Failed: the row is drawn again, with Retry; the key row stays.
+    // Failed: the row is drawn again, with Retry.
     feeds.model({ state: 'failed', done: 500 * MB, total: TOTAL });
     expect(title()).toBe('Speech recognition');
     expect(mrow()).not.toBe(row);
     expect(mrow().dataset.model).toBe('failed');
     expect(text(mrow().querySelector('.stx small.warn'))).toBe('Did not download · 500 of 668 MB');
     expect(mrow().querySelector('.mpct')).toBeNull();
-    expect($('.btray .srow[data-key="anthropic"]')).not.toBeNull();
     const retry = mrow().querySelector<HTMLButtonElement>('[data-model-retry]')!;
     expect(text(retry.querySelector('.lbl'))).toBe('Retry');
     click(retry);
@@ -331,15 +326,15 @@ describe('The settings tray', () => {
     expect($$('.btray .srow .stx b').map(text)).toEqual(['Язык интерфейса', 'Переводить на']);
   });
 
-  it('General holds start at sign-in and the cleanup, and its value follows the switch', async () => {
+  it('General holds only start at sign-in, and its value follows the switch', async () => {
     page = await mount();
     await open();
     const value = () => text($('.btray em[data-val="general"]'));
     expect(value()).toBe('Manually');
     await sub('general');
     expect(title()).toBe('General');
-    expect($$('.btray .srow').map((r) => text(r.querySelector('.stx b')))).toEqual(['Start at sign-in', 'Cleanup']);
-    expect($$('.btray .segc').map((s) => s.dataset.seg)).toEqual(['refine']);
+    expect($$('.btray .srow').map((r) => text(r.querySelector('.stx b')))).toEqual(['Start at sign-in']);
+    expect($('.btray .segc')).toBeNull();
     click($('[data-sw="autostart"]'));
     await settle();
     expect(core.autostartSet).toHaveBeenCalledWith(true);
@@ -789,20 +784,28 @@ describe('The settings tray', () => {
     expect(sw.getAttribute('aria-checked')).toBe('false');
   });
 
-  it('refine style is a careful or bold segment under General', async () => {
+  it('the Cleanup page: the careful or bold style, the Anthropic key and the note', async () => {
     stub(view({ lang: 'ru', uiLanguage: 'ru' }));
+    core.keyState.mockResolvedValue({ saved: true, mask: 'sk-…789' });
     page = await mount();
     await open();
-    await sub('general');
+    const value = () => text($('.btray em[data-val="cleanup"]'));
+    expect(value()).toBe('Бережная');
+    await sub('cleanup');
+    expect(title()).toBe('Чистка текста');
+    const rows = $$('.btray .sgrp > .srow').map((r) => r.dataset.key ?? text(r.querySelector('.stx b')));
+    expect(rows).toEqual(['Стиль', 'anthropic']);
+    expect(text($('.btray .tft'))).toBe('Текст уходит в Anthropic для чистки; история — только на этом компьютере.');
     const seg = () => $$('[data-seg="refine"] button');
     expect(seg().map((b) => b.textContent)).toEqual(['Бережная', 'Смелая']);
-    expect(text($('.btray .sgrp'))).toContain('Чистка текста');
     expect(seg().map((b) => b.getAttribute('aria-pressed'))).toEqual(['true', 'false']);
     click(seg()[1]);
     await settle();
     expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'refineStyle', value: 'bold' });
     expect(core.settingsSet).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'uiLanguage' }));
     expect(seg().map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'true']);
+    key('Escape');
+    expect(value()).toBe('Смелая');
   });
 
   it('reads the settings again when the core did not answer a change in time', async () => {
