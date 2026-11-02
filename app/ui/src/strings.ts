@@ -1,7 +1,7 @@
 // Interface texts in English (default) and Russian. The core picks the language once from the Windows UI language
 // and sets it in the Drop window before any script runs (window.__CUE_LANG__); the tray menu uses the same value.
 export type Lang = 'en' | 'ru';
-export type TrayKind = 'noField' | 'micSilent' | 'holdHint' | 'lastMinute' | 'micMissing' | 'modelReady';
+export type TrayKind = 'noField' | 'micSilent' | 'holdHint' | 'lastMinute' | 'micMissing' | 'modelReady' | 'modelSwitched';
 export type ErrorCause = 'model' | 'cpu' | 'stt' | 'claudeKey' | 'translate';
 
 export const KEY_NAME = 'Ctrl + Win';
@@ -23,18 +23,19 @@ export const TRAYS: Record<TrayKind, TrayLook> = {
   lastMinute: { icon: 'timer', tone: 'warn', act: null, ttl: 5000 },
   micMissing: { icon: 'mic', tone: 'warn', act: null, ttl: 6000 },
   modelReady: { icon: 'model', tone: 'ok', act: null, ttl: 5000 },
+  modelSwitched: { icon: 'model', tone: 'ok', act: null, ttl: 5000 },
 };
 
 export interface TrayText {
   title: string;
   /** Trusted HTML: may contain <b>; {KEY} becomes <kbd>KEY_NAME</kbd>; {WANTED} and {USED} become the device names,
-   *  escaped. */
+   *  {NAME} the speech model's, escaped. */
   body: string;
   /** Button label: present exactly when TRAYS[kind].act is not null. */
   act?: string;
   /** Label after the press, then the card closes; without it the card closes at once. */
   done?: string;
-  /** In place of {USED} when Windows gave the microphone no name. */
+  /** In place of {USED} when Windows gave the microphone no name, of {NAME} when the model's name did not come. */
   unnamed?: string;
 }
 
@@ -109,6 +110,11 @@ export const en: Dict = {
       title: 'Model is ready',
       body: 'Speech is recognized on this computer.',
     },
+    modelSwitched: {
+      title: 'Model is ready',
+      body: '<b>{NAME}</b>',
+      unnamed: 'The model you chose',
+    },
   },
   error: {
     model: 'Model did not download',
@@ -175,6 +181,11 @@ export const ru: Dict = {
     modelReady: {
       title: 'Модель готова',
       body: 'Речь распознаётся на этом компьютере.',
+    },
+    modelSwitched: {
+      title: 'Модель готова',
+      body: '<b>{NAME}</b>',
+      unnamed: 'Выбранная модель',
     },
   },
   error: {

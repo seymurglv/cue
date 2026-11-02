@@ -34,7 +34,7 @@ export function modelValue(t: Ctx['t'], s: ModelState | null): { text: string; w
 }
 
 /** A line with {DONE} and {TOTAL} as megabytes in Bebas (`.num`); the rest as text. */
-function bytesLine(template: string, done: number, total: number): DocumentFragment {
+export function bytesLine(template: string, done: number, total: number): DocumentFragment {
   const out = document.createDocumentFragment();
   for (const part of template.split(/(\{DONE\}|\{TOTAL\})/)) {
     if (part === '{DONE}') out.append(h('b', 'num mdone', mb(done)));
@@ -53,13 +53,13 @@ export function bar(cls: string, share: number): HTMLElement {
   return b;
 }
 
-/** The model's row on its page, by state. */
-export function modelRow(t: Ctx['t'], s: ModelState | null): HTMLElement {
+/** The model's row on its page, by state; `name` — the model in use's (Parakeet Ultra until the core says). */
+export function modelRow(t: Ctx['t'], s: ModelState | null, name: string = t.modelName): HTMLElement {
   const row = h('div', 'srow mrow');
   row.dataset.model = s?.state ?? 'unknown';
   const stx = h('div', 'stx');
   const small = h('small');
-  stx.append(h('b', '', t.modelName), small);
+  stx.append(h('b', '', name), small);
   const sc = h('div', 'sc');
   row.append(stx, sc);
   const line = t.modelLine;

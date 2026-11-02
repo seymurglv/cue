@@ -3,6 +3,7 @@ pub mod check;
 pub mod claude;
 pub mod download;
 pub mod error;
+pub mod hub;
 pub mod keys;
 pub mod openrouter;
 pub mod parakeet;

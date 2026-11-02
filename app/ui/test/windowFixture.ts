@@ -43,6 +43,21 @@ export function entry(id: string, text: string, over: Partial<api.EntryView> = {
   return { id, time, mode: 'dictation', app: '', text, question: null, raw: null, hasAudio: false, ...over };
 }
 
+/** The 25 languages of Parakeet v3 and Ultra. */
+const EUROPEAN = ['en', 'es', 'fr', 'de', 'bg', 'hr', 'cs', 'da', 'nl', 'et', 'fi', 'el', 'hu', 'it', 'lv', 'lt', 'mt', 'pl', 'pt', 'ro', 'sk', 'sl', 'sv', 'ru', 'uk'];
+
+/** The Model page's list as the core sends it: the short list, Ultra in use, the others not downloaded. */
+export function modelsView(over: Partial<Record<string, Partial<api.ModelEntry>>> = {}, current = 'parakeet-ultra-int8'): api.ModelsView {
+  const entries: api.ModelEntry[] = [
+    { id: 'parakeet-ultra-int8', name: 'Parakeet Ultra', repo: 'Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx', languages: EUROPEAN, size: 667_729_022, state: 'inUse' },
+    { id: 'parakeet-v3-int8', name: 'Parakeet v3', repo: 'istupakov/parakeet-tdt-0.6b-v3-onnx', languages: EUROPEAN, size: 670_479_942, state: 'missing' },
+    { id: 'parakeet-v2-int8', name: 'Parakeet v2', repo: 'istupakov/parakeet-tdt-0.6b-v2-onnx', languages: ['en'], size: 661_191_684, state: 'missing' },
+  ];
+  const changed = entries.map((e) => ({ ...e, ...over[e.id] }) as api.ModelEntry);
+  for (const [id, e] of Object.entries(over)) if (!entries.some((x) => x.id === id)) changed.push(e as api.ModelEntry);
+  return { current, entries: changed };
+}
+
 export const core = vi.mocked(api);
 
 /** What the page subscribed with: new history entries, the microphone's level, a failed microphone, the core's state. */
@@ -52,12 +67,14 @@ export const feeds: {
   failed: () => void;
   state: (s: api.CoreState) => void;
   model: (m: api.ModelState) => void;
+  models: (m: api.ModelsView) => void;
 } = {
   entry: () => {},
   level: () => {},
   failed: () => {},
   state: () => {},
   model: () => {},
+  models: () => {},
 };
 
 /** Answers of a core that holds `settings` and changes them as asked. */
@@ -112,6 +129,13 @@ export function stub(settings: api.SettingsView = view()): void {
   core.onModel.mockImplementation(async (cb) => {
     feeds.model = cb;
   });
+  core.modelsGet.mockResolvedValue(modelsView());
+  core.onModels.mockImplementation(async (cb) => {
+    feeds.models = cb;
+  });
+  core.modelsSearch.mockResolvedValue([]);
+  core.modelChoose.mockResolvedValue(undefined);
+  core.modelDelete.mockResolvedValue(true);
   core.welcomeStep.mockResolvedValue(undefined);
   core.welcomeClose.mockResolvedValue(undefined);
   core.openLink.mockResolvedValue(undefined);

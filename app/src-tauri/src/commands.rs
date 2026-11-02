@@ -17,10 +17,11 @@ use std::time::Duration;
 
 use cue_core::flow::Input;
 use cue_core::history;
-use cue_core::model::ModelState;
+use cue_core::model::{ModelState, ModelsView};
 use cue_core::settings::SettingChange;
 use cue_core::stats::{self, Stats};
 use cue_engines::EngineError;
+use cue_engines::hub;
 use cue_engines::keys::{self, KeyName};
 use cue_platform_win::{focus, mic};
 use tauri::ipc::Channel;
@@ -31,10 +32,14 @@ use crate::ipc::{CoreTx, DayView, EntryView, HistoryFeed, MAIN_LABEL, PageView, 
 use crate::micpreview;
 use crate::paths::Paths;
 use crate::runtime::recordings::{self, AudioLimit, Playable};
-use crate::runtime::{CoreEvent, MIC_SETTINGS, SettingsCmd, local_today, open_url, utc_offset_minutes};
+use crate::runtime::{Choice, CoreEvent, MIC_SETTINGS, SettingsCmd, local_today, open_url, utc_offset_minutes};
 
 /// How long a command waits for the core's answer about the settings.
 const CORE_WAIT: Duration = Duration::from_secs(3);
+/// How long a search of Hugging Face may take, its repositories' files asked for included.
+const MODELS_SEARCH_WAIT: Duration = Duration::from_secs(30);
+/// The longest search text sent.
+const MODELS_QUERY_CHARS: usize = 100;
 /// "Show earlier": this many more days with entries.
 const EARLIER_DAYS: usize = 7;
 /// The most entries a search finds.
@@ -182,6 +187,69 @@ pub async fn model_get(window: WebviewWindow, core: State<'_, CoreTx>) -> Result
 pub fn model_retry(window: WebviewWindow, core: State<'_, CoreTx>) -> Result<(), CmdError> {
     guard(&window, "model_retry")?;
     send(&core, CoreEvent::ModelRetry)
+}
+
+/// The Model page's list (spec "Choosing the speech model"): the short list and the found models here, each with its
+/// state. Changes come as `cue://models`.
+#[tauri::command]
+pub async fn models_get(window: WebviewWindow, core: State<'_, CoreTx>) -> Result<ModelsView, CmdError> {
+    guard(&window, "models_get")?;
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    send(&core, CoreEvent::ModelsGet(reply))?;
+    match tokio::time::timeout(CORE_WAIT, answer).await {
+        Ok(Ok(view)) => Ok(view),
+        _ => Err(CmdError::Core),
+    }
+}
+
+/// Hugging Face searched: ONNX repositories by downloads, each with whether CUE can run it. `Failed` — no answer (no
+/// connection, an error of the service).
+#[tauri::command]
+pub async fn models_search(window: WebviewWindow, core: State<'_, CoreTx>, query: String) -> Result<Vec<hub::Found>, CmdError> {
+    guard(&window, "models_search")?;
+    let query: String = query.chars().take(MODELS_QUERY_CHARS).collect();
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    send(&core, CoreEvent::ModelsSearch { query, reply })?;
+    match tokio::time::timeout(MODELS_SEARCH_WAIT, answer).await {
+        Ok(Ok(Ok(found))) => Ok(found),
+        Ok(Ok(Err(e))) => {
+            tracing::info!("models: the search failed: {e}");
+            Err(CmdError::Failed)
+        }
+        _ => Err(CmdError::Core),
+    }
+}
+
+/// `owner/name` of a Hugging Face repository: letters, digits, `-`, `_` and `.`, neither part starting with a dot.
+fn repository(repo: &str) -> bool {
+    let part = |p: &str| !p.is_empty() && !p.starts_with('.') && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
+    repo.split_once('/').is_some_and(|(owner, name)| part(owner) && part(name))
+}
+
+/// A model chosen on the Model page: `id` from its list, or `repo` from the search. The switch's states come as
+/// `cue://models`.
+#[tauri::command]
+pub fn model_choose(window: WebviewWindow, core: State<'_, CoreTx>, id: Option<String>, repo: Option<String>) -> Result<(), CmdError> {
+    guard(&window, "model_choose")?;
+    let choice = match (id, repo) {
+        (Some(id), None) => Choice::Id(id),
+        (None, Some(repo)) if repository(&repo) => Choice::Repo(repo),
+        _ => return Err(CmdError::BadValue),
+    };
+    send(&core, CoreEvent::ModelChoose(choice))
+}
+
+/// A model's files deleted from the Model page: `false` — the model in use, one being switched to, or one CUE does not
+/// know.
+#[tauri::command]
+pub async fn model_delete(window: WebviewWindow, core: State<'_, CoreTx>, id: String) -> Result<bool, CmdError> {
+    guard(&window, "model_delete")?;
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    send(&core, CoreEvent::ModelDelete { id, reply })?;
+    match tokio::time::timeout(CORE_WAIT, answer).await {
+        Ok(Ok(deleted)) => Ok(deleted),
+        _ => Err(CmdError::Core),
+    }
 }
 
 /// The settings as the core holds them (spec 3 §3).
@@ -598,10 +666,14 @@ mod tests {
     use serde_json::json;
 
     /// Every command a window's page calls (`main`'s handler list, but for the Drop's and the card's own).
-    const COMMANDS: [&str; 23] = [
+    const COMMANDS: [&str; 27] = [
         "settings_get",
         "model_get",
         "model_retry",
+        "models_get",
+        "models_search",
+        "model_choose",
+        "model_delete",
         "stats_get",
         "settings_set",
         "autostart_get",
@@ -656,6 +728,17 @@ mod tests {
         }
         for command in ["history_page", "history_subscribe", "history_paste", "autostart_set", "drop_action", ""] {
             assert_eq!(guard_label(WELCOME_LABEL, command), Err(CmdError::NotMain), "{command:?}");
+        }
+    }
+
+    /// A repository from the search names an owner and a repository, nothing else: never a path.
+    #[test]
+    fn a_chosen_repository_is_owner_and_name() {
+        for repo in ["istupakov/parakeet-tdt-0.6b-v3-onnx", "myned-ai/Parakeet_TDT.v3"] {
+            assert!(repository(repo), "{repo}");
+        }
+        for repo in ["", "parakeet", "a/b/c", "../x", "a/..", "a/b c", "a/b?x=1", "/b", "a/", r"a", "a/.git"] {
+            assert!(!repository(repo), "{repo:?}");
         }
     }
 

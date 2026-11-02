@@ -23,9 +23,27 @@ pub const VOCAB: &str = "vocab.txt";
 fn threads() -> usize {
     std::thread::available_parallelism().map_or(4, |n| n.get() / 2).clamp(2, 8)
 }
-/// The prediction network's LSTM: 2 layers of 640.
-const LSTM_LAYERS: usize = 2;
-const LSTM_SIZE: usize = 640;
+/// The prediction network's LSTM: `layers × 1 × size` states, read from the decoder's inputs ([`lstm_of`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Lstm {
+    layers: usize,
+    size: usize,
+}
+
+/// Parakeet 0.6B's: 2 layers of 640, for an export that leaves the sizes open.
+const PARAKEET_LSTM: Lstm = Lstm { layers: 2, size: 640 };
+
+/// The LSTM of a decoder whose `input_states_1` has `shape`.
+fn lstm_of(shape: Option<&[i64]>) -> Result<Lstm, EngineError> {
+    match shape {
+        Some(&[layers, _, size]) => Ok(if layers > 0 && size > 0 {
+            Lstm { layers: layers as usize, size: size as usize }
+        } else {
+            PARAKEET_LSTM
+        }),
+        _ => Err(model_error(format!("{DECODER}: no LSTM state input"))),
+    }
+}
 
 /// A recognized recording: its text, whether the other alphabet was masked out, and how long it took.
 #[derive(Clone, PartialEq)]
@@ -59,6 +77,7 @@ pub struct Recognizer {
 struct Sessions {
     encoder: Session,
     joint: Session,
+    lstm: Lstm,
 }
 
 /// ONNX Runtime allows one environment a process.
@@ -110,7 +129,9 @@ impl Recognizer {
         let vocab = Vocab::parse(&vocab)?;
         let encoder = session(&dir.join(ENCODER))?;
         let joint = session(&dir.join(DECODER))?;
-        Ok(Self { sessions: Mutex::new(Sessions { encoder, joint }), vocab, features: Features::new() })
+        let state = joint.inputs().iter().find(|i| i.name() == "input_states_1").and_then(|i| i.dtype().tensor_shape());
+        let lstm = lstm_of(state.map(|s| &s[..]))?;
+        Ok(Self { sessions: Mutex::new(Sessions { encoder, joint, lstm }), vocab, features: Features::new() })
     }
 
     /// A whole recording, 16 kHz mono: cut into pieces ([`speech::pieces`]), each recognized, joined with a space. When
@@ -140,7 +161,7 @@ impl Recognizer {
     }
 
     fn decode(&self, sessions: &mut Sessions, encoded: &Encoded, mask: Option<&[bool]>) -> Result<Vec<usize>, EngineError> {
-        let mut joint = OrtJoint { session: &mut sessions.joint, encoded };
+        let mut joint = OrtJoint { session: &mut sessions.joint, lstm: sessions.lstm, encoded };
         tdt::decode(&mut joint, encoded.frames, self.vocab.len(), self.vocab.blank, mask)
     }
 
@@ -230,10 +251,11 @@ impl Sessions {
 /// The decoder/joint session over one piece's encoder output.
 struct OrtJoint<'a> {
     session: &'a mut Session,
+    lstm: Lstm,
     encoded: &'a Encoded,
 }
 
-/// The LSTM's hidden and cell states, `LSTM_LAYERS × 1 × LSTM_SIZE` each.
+/// The LSTM's hidden and cell states, `layers × 1 × size` each.
 #[derive(Clone)]
 struct LstmState {
     h: Vec<f32>,
@@ -244,13 +266,15 @@ impl Joint for OrtJoint<'_> {
     type State = LstmState;
 
     fn initial(&self) -> LstmState {
-        LstmState { h: vec![0.0; LSTM_LAYERS * LSTM_SIZE], c: vec![0.0; LSTM_LAYERS * LSTM_SIZE] }
+        let n = self.lstm.layers * self.lstm.size;
+        LstmState { h: vec![0.0; n], c: vec![0.0; n] }
     }
 
     fn step(&mut self, frame: usize, last: usize, state: &LstmState) -> Result<(Vec<f32>, LstmState), EngineError> {
         let e = self.encoded;
         let column: Vec<f32> = (0..e.dim).map(|d| e.data[d * (e.data.len() / e.dim) + frame]).collect();
-        let states = |v: &Vec<f32>| Tensor::from_array(([LSTM_LAYERS, 1usize, LSTM_SIZE], v.clone())).map_err(model_error);
+        let Lstm { layers, size } = self.lstm;
+        let states = |v: &Vec<f32>| Tensor::from_array(([layers, 1usize, size], v.clone())).map_err(model_error);
         let outputs = self
             .session
             .run(ort::inputs![
@@ -358,6 +382,15 @@ mod tests {
         }
         println!("largest difference {worst}");
         assert!(worst < 1e-3, "features differ from the reference by {worst}");
+    }
+
+    #[test]
+    fn the_lstm_is_read_from_the_decoders_state_input() {
+        assert_eq!(lstm_of(Some(&[2, -1, 640])).unwrap(), Lstm { layers: 2, size: 640 });
+        assert_eq!(lstm_of(Some(&[1, 1, 320])).unwrap(), Lstm { layers: 1, size: 320 });
+        assert_eq!(lstm_of(Some(&[-1, -1, -1])).unwrap(), Lstm { layers: 2, size: 640 }, "unknown sizes: Parakeet's");
+        assert!(matches!(lstm_of(Some(&[640])), Err(EngineError::Model(_))));
+        assert!(matches!(lstm_of(None), Err(EngineError::Model(_))));
     }
 
     #[test]

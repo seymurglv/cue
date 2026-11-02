@@ -53,6 +53,9 @@ pub enum TrayKind {
     MicMissing,
     /// The speech model finished downloading in the background: recognition works now.
     ModelReady,
+    /// Another speech model, chosen on the Model page, has loaded and recognizes now: its name comes to the Drop just
+    /// before the card.
+    ModelSwitched,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -137,6 +140,7 @@ mod tests {
             (TrayKind::LastMinute, "lastMinute"),
             (TrayKind::MicMissing, "micMissing"),
             (TrayKind::ModelReady, "modelReady"),
+            (TrayKind::ModelSwitched, "modelSwitched"),
         ];
         for (v, name) in trays {
             assert_eq!(json(v), format!("\"{name}\""));

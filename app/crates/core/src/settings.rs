@@ -21,10 +21,18 @@ pub enum SttEngineKind {
 }
 
 /// The fields of earlier engines (`soniox_model`, `language_hints` and the rest) are read past and never written again.
-#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+/// `model` — the speech model's id (`crate::model`), written once a newly chosen one has loaded.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SttSettings {
     pub engine: SttEngineKind,
+    pub model: String,
+}
+
+impl Default for SttSettings {
+    fn default() -> Self {
+        Self { engine: SttEngineKind::default(), model: crate::model::DEFAULT_ID.to_owned() }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -939,6 +947,21 @@ mod tests {
         assert_eq!(json["stt"]["engine"], "parakeet");
         assert_eq!(load(&p).unwrap(), expected);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The chosen speech model: Ultra when the file names none; whichever id it names is kept as written (the runtime
+    /// reads an id it cannot find as Ultra).
+    #[test]
+    fn the_speech_model_is_ultra_until_another_is_written() {
+        assert_eq!(Settings::default().stt.model, crate::model::DEFAULT_ID);
+        let p = tmp("stt-model.json");
+        std::fs::write(&p, r#"{"stt":{"engine":"parakeet"}}"#).unwrap();
+        let mut s = load(&p).unwrap();
+        assert_eq!(s.stt.model, crate::model::DEFAULT_ID);
+        s.stt.model = "hf--someone--parakeet-tdt".into();
+        save(&s, &p).unwrap();
+        assert_eq!(load(&p).unwrap().stt.model, "hf--someone--parakeet-tdt");
+        std::fs::remove_file(p).unwrap();
     }
 
     #[test]

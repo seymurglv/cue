@@ -21,7 +21,7 @@ const shown = () =>
     .sort();
 const hover = (inside: boolean) => document.querySelector('.drop')!.dispatchEvent(new MouseEvent(inside ? 'mouseenter' : 'mouseleave'));
 const CUE = () => (window as any).CUE;
-const KINDS: TrayKind[] = ['noField', 'micSilent', 'holdHint', 'lastMinute', 'micMissing', 'modelReady'];
+const KINDS: TrayKind[] = ['noField', 'micSilent', 'holdHint', 'lastMinute', 'micMissing', 'modelReady', 'modelSwitched'];
 
 beforeEach(() => {
   document.body.innerHTML = '<div id="stage"></div>';
@@ -998,6 +998,21 @@ describe('Tray card', () => {
     expect(document.querySelector('.tray [data-act]')).toBeNull();
   });
 
+  it('modelSwitched card: "Model is ready" with the name of the model chosen, escaped; green, 5 s, no button', () => {
+    expect(TRAYS.modelSwitched).toEqual({ icon: 'model', tone: 'ok', act: null, ttl: 5000 });
+    ctl.modelName('Parakeet <v3> & Co');
+    ctl.tray('modelSwitched');
+    expect(document.querySelector('.tray .nhd b')!.textContent).toBe('Model is ready');
+    const body = document.querySelector('.tray .nbd')!;
+    expect(body.querySelector('b')!.textContent).toBe('Parakeet <v3> & Co');
+    expect(document.querySelector('.tray [data-act]')).toBeNull();
+    // In Russian, and no name heard (the Drop was reloaded meanwhile).
+    const box = document.createElement('div');
+    box.innerHTML = trayHtml('modelSwitched', ru, null, null);
+    expect(box.querySelector('.nhd b')!.textContent).toBe('Модель готова');
+    expect(box.querySelector('.nbd')!.textContent).toBe(ru.tray.modelSwitched.unnamed);
+  });
+
   it('micMissing card: microphone icon, amber, closes by itself in 6 s, no button', () => {
     expect(TRAYS.micMissing).toEqual({ icon: 'mic', tone: 'warn', act: null, ttl: 6000 });
     expect(en.tray.micMissing.body).toBe('<b>{WANTED}</b> not found — recording from <b>{USED}</b>');
@@ -1023,11 +1038,12 @@ describe('Tray card', () => {
       const t = DICTS[lang];
       for (const kind of KINDS) {
         const box = document.createElement('div');
-        box.innerHTML = trayHtml(kind, t, { wanted: 'Headset', used: 'Microphone' });
+        box.innerHTML = trayHtml(kind, t, { wanted: 'Headset', used: 'Microphone' }, 'Parakeet v3');
         const body = t.tray[kind].body
           .replace('{KEY}', `<kbd>${KEY_NAME}</kbd>`)
           .replace('{WANTED}', 'Headset')
-          .replace('{USED}', 'Microphone');
+          .replace('{USED}', 'Microphone')
+          .replace('{NAME}', 'Parakeet v3');
         expect(box.querySelector('.nhd b')!.textContent, `${lang}.${kind}`).toBe(t.tray[kind].title);
         expect(box.querySelector('.xb')!.getAttribute('aria-label'), `${lang}.${kind}`).toBe(t.close);
         expect(box.querySelector('.nbd')!.innerHTML, `${lang}.${kind}`).toBe(body);

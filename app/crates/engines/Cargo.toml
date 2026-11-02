@@ -18,6 +18,7 @@ tracing.workspace = true
 realfft.workspace = true
 ort.workspace = true
 hound.workspace = true
+sha1.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]

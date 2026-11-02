@@ -171,6 +171,47 @@ export async function onModel(cb: (s: ModelState) => void): Promise<void> {
   await getCurrentWebviewWindow().listen<ModelState>('cue://model', (e) => cb(e.payload));
 }
 
+/** A model on the Model page (docs/specs/2026-11-02-model-picker.md): in use (the check), downloaded, not here, being
+ *  pinned on Hugging Face, downloading, loading, stopped (`done` bytes kept for Retry), downloaded and still not
+ *  running, or too big for the drive's free room. */
+export type EntryState =
+  | { state: 'inUse' }
+  | { state: 'downloaded' }
+  | { state: 'missing' }
+  | { state: 'preparing' }
+  | { state: 'downloading'; done: number; total: number }
+  | { state: 'loading' }
+  | { state: 'failed'; done: number; total: number }
+  | { state: 'notRunnable' }
+  | { state: 'noSpace'; needed: number; free: number };
+/** `languages` — ISO codes; `size` — bytes of its files. */
+export type ModelEntry = { id: string; name: string; repo: string; languages: string[]; size: number } & EntryState;
+/** The list and the model in use (`cue://models`). */
+export interface ModelsView {
+  current: string;
+  entries: ModelEntry[];
+}
+/** Why CUE cannot run a repository's model. */
+export type NotRunnable = 'architecture' | 'noInt8' | 'layout';
+/** A repository the search found; `size` — of a runnable one, when its files were listed. */
+export interface Found {
+  repo: string;
+  downloads: number;
+  size: number | null;
+  reason: NotRunnable | null;
+  languages: string[];
+}
+export const modelsGet = () => invoke<ModelsView>('models_get');
+/** ONNX repositories on Hugging Face matching `query`, by downloads; fails without a connection. */
+export const modelsSearch = (query: string) => invoke<Found[]>('models_search', { query });
+/** Switch to a model of the list or a repository the search found; the switch's states come as `cue://models`. */
+export const modelChoose = (choice: { id: string } | { repo: string }) => invoke<void>('model_choose', choice);
+/** A model's files deleted; false — the model in use or one being switched to. */
+export const modelDelete = (id: string) => invoke<boolean>('model_delete', { id });
+export async function onModels(cb: (v: ModelsView) => void): Promise<void> {
+  await getCurrentWebviewWindow().listen<ModelsView>('cue://models', (e) => cb(e.payload));
+}
+
 /** What the core is doing, as every window hears it: `start` and `listen` — a recording is on. */
 export type CorePhase = 'idle' | 'start' | 'listen' | 'think' | 'done' | 'empty' | 'cancel' | 'error' | 'answer';
 /** The core's state (`cue://state`, the one the Drop draws): its phase, and whether CUE is paused. No text in it. */

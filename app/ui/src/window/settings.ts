@@ -8,7 +8,8 @@
 // of it; only the rows below slide. The height eases to the new page without overshooting, and nothing scrolls while
 // the pages pass (a scroll bar showing for a moment would narrow the rows). A page whose values come later (the
 // microphones, new settings) is filled in where it is, even while it is still sliding in.
-// Cleanup holds the key row of keys.ts, the Microphone page the microphone rows of mic.ts (the welcome window
+// Speech recognition's model row opens the Model page (window/models.ts), one level deeper: back goes to Speech
+// recognition. Cleanup holds the key row of keys.ts, the Microphone page the microphone rows of mic.ts (the welcome window
 // shows them too); the microphone's level is listened to only while that page is shown.
 import * as api from './api';
 import { AUDIO_KEEPS, KEEPS, REFINE_STYLES, type AudioKeep, type Keep, type KeyName, type RefineStyle, type UiLanguage } from './api';
@@ -17,14 +18,17 @@ import { icon, type IconName } from './icons';
 import { KeyRows } from './keys';
 import { MicRows } from './mic';
 import { bar, modelRow, modelValue, stepModelRow } from './model';
+import { ModelsPage } from './models';
 import { dropDown, h, iconButton, logFailed, relRect, srow, type Ctx } from './page';
 import { languageName } from './text';
 
 export { matchMic } from './mic';
 
-type Sub = 'model' | 'cleanup' | 'mic' | 'languages' | 'history' | 'general';
-const SUBS: readonly Sub[] = ['model', 'cleanup', 'mic', 'languages', 'history', 'general'];
-const SUB_ICON: Record<Sub, IconName> = {
+type Sub = 'model' | 'models' | 'cleanup' | 'mic' | 'languages' | 'history' | 'general';
+const SUBS: readonly Exclude<Sub, 'models'>[] = ['model', 'cleanup', 'mic', 'languages', 'history', 'general'];
+/** The page a page goes back to: the Model page is Speech recognition's; the rest are the first page's. */
+const PARENT: Partial<Record<Sub, Sub>> = { models: 'model' };
+const SUB_ICON: Record<Exclude<Sub, 'models'>, IconName> = {
   model: 'wave',
   cleanup: 'sparkle',
   mic: 'micOn',
@@ -90,6 +94,7 @@ export class SettingsTray {
   private swapTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly keys: KeyRows;
   private readonly mic: MicRows;
+  private readonly models: ModelsPage;
   private autostart: boolean | null = null;
   /** The speech model's state, as `cue://model` last said (null — not heard yet). */
   private model: api.ModelState | null = null;
@@ -109,6 +114,26 @@ export class SettingsTray {
     this.mic = new MicRows(ctx, () => this.current, () => {
       if (this.sub === 'mic') this.redraw();
     });
+    this.models = new ModelsPage(ctx, () => this.fit());
+  }
+
+  /** The Model page's list and the model in use: the page shown follows it, and Speech recognition names the model. */
+  setModels(view: api.ModelsView): void {
+    this.models.set(view);
+    if (this.sub !== 'model') return;
+    const row = this.current?.querySelector('.mrow');
+    if (row && !stepModelRow(row, this.model ?? { state: 'missing' })) row.replaceWith(this.modelRow());
+    else row?.querySelector('.stx b')?.replaceChildren(this.models.currentName() ?? this.ctx.t.modelName);
+  }
+
+  /** Speech recognition's row: the model in use with its state, opening the Model page. */
+  private modelRow(): HTMLElement {
+    const row = modelRow(this.ctx.t, this.model, this.models.currentName() ?? undefined);
+    row.dataset.sub = 'models';
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
+    row.querySelector('.sc')!.insertAdjacentHTML('beforeend', icon('chev'));
+    return row;
   }
 
   /** The speech model's new state: its value on the first page; on its page a download goes on in place, any other
@@ -118,7 +143,7 @@ export class SettingsTray {
     this.paintModelValue();
     if (this.sub !== 'model') return;
     const row = this.current?.querySelector('.mrow');
-    if (row && !stepModelRow(row, state)) row.replaceWith(modelRow(this.ctx.t, state));
+    if (row && !stepModelRow(row, state)) row.replaceWith(this.modelRow());
     this.fit();
   }
 
@@ -161,6 +186,11 @@ export class SettingsTray {
         e.preventDefault();
         void this.keys.check(input.dataset.key as KeyName);
       }
+      // The model row is a button of its own: Enter or Space opens the Model page.
+      if ((e.key === 'Enter' || e.key === ' ') && (e.target as Element).matches('.mrow[data-sub]')) {
+        e.preventDefault();
+        this.go('models');
+      }
     });
     if (!this.isOpen) return;
     el.hidden = false;
@@ -200,6 +230,7 @@ export class SettingsTray {
     if (!this.isOpen || !el) return;
     this.isOpen = false;
     if (this.sub === 'mic') this.stopPreview();
+    if (this.sub === 'models') this.models.stop();
     this.sub = null;
     this.ctx.closeMenu();
     this.swapped();
@@ -364,6 +395,7 @@ export class SettingsTray {
   }
 
   private go(sub: Sub): void {
+    if (this.sub === 'models') this.models.stop();
     this.sub = sub;
     this.show(sub, 1);
     if (sub === 'mic') {
@@ -376,15 +408,18 @@ export class SettingsTray {
 
   private back(): void {
     if (this.sub === 'mic') this.stopPreview();
+    if (this.sub === 'models') this.models.stop();
     this.ctx.closeMenu();
-    this.sub = null;
-    this.show(null, -1);
+    const parent = this.sub ? PARENT[this.sub] ?? null : null;
+    this.sub = parent;
+    this.show(parent, -1);
   }
 
   private onClick(e: Event): void {
     const t = e.target as Element;
     let b: HTMLElement | null;
-    if ((b = t.closest<HTMLElement>('[data-sub]'))) this.go(b.dataset.sub as Sub);
+    // Retry on the model row is the row's own: it does not open the Model page.
+    if ((b = t.closest<HTMLElement>('[data-sub]')) && !t.closest('[data-model-retry]')) this.go(b.dataset.sub as Sub);
     else if (t.closest('[data-tback]')) this.back();
     else if (t.closest('[data-tclose]')) this.close();
     else if ((b = t.closest<HTMLElement>('[data-check]'))) void this.keys.check(b.dataset.check as KeyName);
@@ -427,10 +462,14 @@ export class SettingsTray {
       if (this.ctx.settings && !this.ctx.settings.saved) pg.append(h('div', 'tft', t.unsaved));
       return pg;
     }
+    if (sub === 'models') {
+      pg.append(...this.models.rows());
+      return pg;
+    }
     const g = h('div', 'sgrp');
     pg.append(g);
     if (sub === 'model') {
-      g.append(modelRow(t, this.model));
+      g.append(this.modelRow());
       pg.append(h('div', 'tft', t.modelNote));
     } else if (sub === 'cleanup') {
       g.append(...this.cleanupRows());
@@ -444,11 +483,11 @@ export class SettingsTray {
 
   private title(sub: Sub): string {
     const t = this.ctx.t;
-    return { model: t.model, cleanup: t.cleanup, mic: t.mic, languages: t.languages, history: t.history, general: t.general }[sub];
+    return { model: t.model, models: t.models.title, cleanup: t.cleanup, mic: t.mic, languages: t.languages, history: t.history, general: t.general }[sub];
   }
 
   /** A section's value on the first page. */
-  private value(sub: Sub): string {
+  private value(sub: Exclude<Sub, 'models'>): string {
     const t = this.ctx.t;
     const s = this.ctx.settings;
     switch (sub) {

@@ -23,7 +23,7 @@
 mod report;
 
 use anyhow::{Context, Result, anyhow, bail};
-use cue_core::model::ULTRA;
+use cue_core::model::{DEFAULT_ID, ultra};
 use cue_core::refine::RefineContext;
 use cue_core::settings::Settings;
 use cue_core::usage::{refine_cost, utc_timestamp};
@@ -164,7 +164,7 @@ fn no_models(root: &Path) -> String {
         "no speech model loads from {}: start CUE once so it downloads {}, or put a model folder there \
          ({}, {}, {})",
         root.display(),
-        ULTRA.name,
+        ultra().name,
         parakeet::ENCODER,
         parakeet::DECODER,
         parakeet::VOCAB
@@ -180,7 +180,7 @@ fn model_dirs(root: &Path) -> Result<Vec<PathBuf>> {
         Err(e) => return Err(e).with_context(|| format!("models folder {}", root.display())),
     };
     let mut dirs: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_dir()).collect();
-    dirs.sort_by_key(|d| (file_name(d) != ULTRA.id, file_name(d)));
+    dirs.sort_by_key(|d| (file_name(d) != DEFAULT_ID, file_name(d)));
     Ok(dirs)
 }
 
@@ -301,7 +301,7 @@ async fn stt_phase<Fut: Future<Output = Heard>>(names: &[String], stop: &Stop, m
 /// succeeded. The app does not refine empty text (outcome "empty") — neither does the bench.
 fn refine_input(runs: &[SttRun]) -> Option<String> {
     let ok = |r: &&SttRun| r.error.is_none();
-    let source = runs.iter().filter(ok).find(|r| r.engine == ULTRA.id).or_else(|| runs.iter().find(ok))?;
+    let source = runs.iter().filter(ok).find(|r| r.engine == DEFAULT_ID).or_else(|| runs.iter().find(ok))?;
     (!source.text.trim().is_empty()).then(|| source.text.clone())
 }
 
@@ -804,16 +804,16 @@ mod tests {
     #[test]
     fn model_folders_are_found_app_model_first_and_files_are_not_models() {
         let root = temp_dir("models");
-        for d in [V3, "aaa-export", ULTRA.id, "zz-partial"] {
+        for d in [V3, "aaa-export", DEFAULT_ID, "zz-partial"] {
             std::fs::create_dir(root.join(d)).unwrap();
         }
         std::fs::write(root.join("notes.txt"), b"").unwrap();
         let names = |v: &[PathBuf]| v.iter().map(|p| file_name(p)).collect::<Vec<_>>();
         let dirs = model_dirs(&root).unwrap();
-        assert_eq!(names(&dirs), [ULTRA.id, "aaa-export", V3, "zz-partial"], "the app's model first, then by name");
+        assert_eq!(names(&dirs), [DEFAULT_ID, "aaa-export", V3, "zz-partial"], "the app's model first, then by name");
 
         // A folder the loader refuses (here: no vocabulary) is skipped; the rest keep their order and folder names.
-        for d in [V3, "aaa-export", ULTRA.id] {
+        for d in [V3, "aaa-export", DEFAULT_ID] {
             std::fs::write(root.join(d).join(parakeet::VOCAB), d).unwrap();
         }
         let mut tried = Vec::new();
@@ -821,9 +821,9 @@ mod tests {
             tried.push(file_name(d));
             std::fs::read_to_string(d.join(parakeet::VOCAB)).map_err(|e| EngineError::Model(e.to_string()))
         });
-        assert_eq!(tried, [ULTRA.id, "aaa-export", V3, "zz-partial"], "each folder is loaded once");
+        assert_eq!(tried, [DEFAULT_ID, "aaa-export", V3, "zz-partial"], "each folder is loaded once");
         let loaded: Vec<(&str, &str)> = models.iter().map(|m| (m.name.as_str(), m.recognizer.as_str())).collect();
-        assert_eq!(loaded, [(ULTRA.id, ULTRA.id), ("aaa-export", "aaa-export"), (V3, V3)]);
+        assert_eq!(loaded, [(DEFAULT_ID, DEFAULT_ID), ("aaa-export", "aaa-export"), (V3, V3)]);
 
         // An empty folder is no error here — `prepare` says "no model loads"; a missing folder already says what to do.
         let empty = temp_dir("no-models");
@@ -836,7 +836,7 @@ mod tests {
 
     #[test]
     fn load_lines_have_the_time_or_the_reason() {
-        assert_eq!(load_line(ULTRA.id, Ok(1_234)), "speech model parakeet-ultra-int8: loaded in 1234 ms");
+        assert_eq!(load_line(DEFAULT_ID, Ok(1_234)), "speech model parakeet-ultra-int8: loaded in 1234 ms");
         let line = load_line(V3, Err(&EngineError::Unsupported("no AVX2".into())));
         assert!(line.contains(V3) && line.contains("skipped") && line.contains("no AVX2"), "{line}");
     }
@@ -847,8 +847,8 @@ mod tests {
 
     #[test]
     fn stt_run_keeps_text_or_error() {
-        let (ok, masked) = stt_run(ULTRA.id, (Ok(recognized("привет", true)), 330));
-        assert_eq!(ok, SttRun { engine: ULTRA.id.into(), text: "привет".into(), latency_ms: 310, cost_usd: 0.0, error: None }, "latency is the model's own time");
+        let (ok, masked) = stt_run(DEFAULT_ID, (Ok(recognized("привет", true)), 330));
+        assert_eq!(ok, SttRun { engine: DEFAULT_ID.into(), text: "привет".into(), latency_ms: 310, cost_usd: 0.0, error: None }, "latency is the model's own time");
         assert!(masked);
         let (failed, masked) = stt_run(V3, (Err(EngineError::Model("encoder: broken".into())), 45));
         assert_eq!(failed, SttRun { engine: V3.into(), text: String::new(), latency_ms: 45, cost_usd: 0.0, error: Some("speech model: encoder: broken".into()) });
@@ -857,7 +857,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_model_hears_the_recording_until_a_stop() {
-        let names = vec![ULTRA.id.to_owned(), V3.to_owned()];
+        let names = vec![DEFAULT_ID.to_owned(), V3.to_owned()];
         let stop = Stop::default();
         let mut asked = Vec::new();
         let runs = stt_phase(&names, &stop, |i| {
@@ -867,7 +867,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(asked, [0, 1]);
-        assert_eq!(runs.iter().map(|r| (r.engine.as_str(), r.text.as_str())).collect::<Vec<_>>(), [(ULTRA.id, "text 0"), (V3, "text 1")]);
+        assert_eq!(runs.iter().map(|r| (r.engine.as_str(), r.text.as_str())).collect::<Vec<_>>(), [(DEFAULT_ID, "text 0"), (V3, "text 1")]);
 
         // A stop during the first model: it finishes, the next one does not start, the recording is incomplete.
         let mut asked = 0;
@@ -960,20 +960,20 @@ mod tests {
 
     #[test]
     fn refine_takes_the_app_model_text_then_the_first_that_succeeded() {
-        let ultra = |t: &str| stt(ULTRA.id, t, None);
+        let ultra = |t: &str| stt(DEFAULT_ID, t, None);
         let v3 = |t: &str| stt(V3, t, None);
         let other = |t: &str| stt("aaa-export", t, None);
         let failed = |engine: &str| stt(engine, "", Some("speech model: broken"));
         assert_eq!(refine_input(&[ultra("ultra"), v3("v3")]).as_deref(), Some("ultra"));
         // The app's model is not first in the list — it is still the one refined.
         assert_eq!(refine_input(&[other("other"), ultra("ultra")]).as_deref(), Some("ultra"));
-        assert_eq!(refine_input(&[failed(ULTRA.id), other("other"), v3("v3")]).as_deref(), Some("other"), "the app's model failed — the first that succeeded");
+        assert_eq!(refine_input(&[failed(DEFAULT_ID), other("other"), v3("v3")]).as_deref(), Some("other"), "the app's model failed — the first that succeeded");
         assert_eq!(refine_input(&[failed("aaa-export"), v3("v3")]).as_deref(), Some("v3"), "the app's model is not installed");
-        assert_eq!(refine_input(&[failed(ULTRA.id), failed(V3)]), None);
+        assert_eq!(refine_input(&[failed(DEFAULT_ID), failed(V3)]), None);
         assert_eq!(refine_input(&[]), None);
         // The app's model gave empty text — for the app that is "empty", refine does not run.
         assert_eq!(refine_input(&[ultra("  "), v3("v3")]), None);
-        assert_eq!(refine_input(&[failed(ULTRA.id), v3(" "), other("other")]), None);
+        assert_eq!(refine_input(&[failed(DEFAULT_ID), v3(" "), other("other")]), None);
     }
 
     const SECRET: &str = "секретная диктовка";
@@ -994,7 +994,7 @@ mod tests {
 
     #[test]
     fn console_lines_have_numbers_but_no_dictation_text() {
-        let line = stt_line(&stt(ULTRA.id, SECRET, None), false);
+        let line = stt_line(&stt(DEFAULT_ID, SECRET, None), false);
         assert_eq!(line, "  parakeet-ultra-int8: 10 ms, other alphabet masked: no");
         let line = stt_line(&stt(V3, SECRET, None), true);
         assert!(!line.contains(SECRET) && line.contains(V3) && line.ends_with("masked: yes"), "{line}");

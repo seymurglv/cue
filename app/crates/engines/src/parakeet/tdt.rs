@@ -31,6 +31,9 @@ pub fn decode<J: Joint>(
     let (mut t, mut on_frame) = (0, 0);
     while t < frames {
         let (logits, next) = joint.step(t, last, &state)?;
+        if logits.len() <= vocab {
+            return Err(EngineError::Model(format!("the joint gives {} logits for {vocab} tokens: no durations", logits.len())));
+        }
         let (token, duration) = pick(&logits, vocab, blank, mask);
         if token != blank {
             tokens.push(token);
@@ -134,6 +137,15 @@ mod tests {
         j.runner_up = Some(2);
         let mask = [false, true, false, false, false];
         assert_eq!(decode(&mut j, 1, 5, BLANK, Some(&mask)).unwrap(), [2]);
+    }
+
+    /// A joint with no duration logits after the tokens is not a TDT model: an error, never a loop over the frames.
+    #[test]
+    fn a_joint_without_durations_is_refused() {
+        let mut j = Scripted::new(5, vec![vec![(1, 0)]]);
+        let err = decode(&mut j, 1, 5 + 5, BLANK, None).unwrap_err();
+        assert!(matches!(err, EngineError::Model(_)), "{err:?}");
+        assert_eq!(j.calls, 1);
     }
 
     #[test]

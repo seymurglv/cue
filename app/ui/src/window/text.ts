@@ -92,6 +92,28 @@ export interface WinText {
   modelLine: { ready: string; downloading: string; failed: string; loading: string; unsupported: string; missing: string };
   modelRetry: string;
   modelNote: string;
+  /** The Model page (docs/specs/2026-11-02-model-picker.md): its title, the search's hint and its clearing cross, the two groups, a row's line
+   *  ({N} languages, {SIZE} in MB), its states ({DONE}, {TOTAL} — MB; {NEED}, {FREE} — GB), Delete, a found
+   *  repository's line ({N} {W} downloads) and why one cannot run, and what the search says instead of rows. */
+  models: {
+    title: string;
+    hint: string;
+    clear: string;
+    list: string;
+    found: string;
+    languages: Forms;
+    englishOnly: string;
+    mb: string;
+    preparing: string;
+    loading: string;
+    notRunnable: string;
+    noSpace: string;
+    remove: string;
+    downloads: Forms;
+    reasons: { architecture: string; noInt8: string; layout: string };
+    offline: string;
+    none: string;
+  };
   /** Cleanup: its title, its value on the first page without the Anthropic key, the note on where text goes. */
   cleanup: string;
   cleanupNoKey: string;
@@ -204,6 +226,25 @@ export const en: WinText = {
   },
   modelRetry: 'Retry',
   modelNote: 'Sound stays on this computer.',
+  models: {
+    title: 'Model',
+    hint: 'Search Hugging Face',
+    clear: 'Clear',
+    list: 'Models',
+    found: 'On Hugging Face',
+    languages: ['language', 'languages'],
+    englishOnly: 'English only',
+    mb: '{SIZE} MB',
+    preparing: 'Getting ready',
+    loading: 'Loading',
+    notRunnable: "Doesn't run in CUE",
+    noSpace: 'Needs {NEED} GB, {FREE} free',
+    remove: 'Delete',
+    downloads: ['download', 'downloads'],
+    reasons: { architecture: 'Another architecture', noInt8: 'No int8', layout: 'Another file layout' },
+    offline: 'No connection to Hugging Face',
+    none: 'No Parakeet models for this search',
+  },
   cleanup: 'Cleanup',
   cleanupNoKey: 'No Anthropic key',
   cleanupNote: 'Text goes to Anthropic for the cleanup; the history stays on this computer only.',
@@ -319,6 +360,25 @@ export const ru: WinText = {
   },
   modelRetry: 'Повторить',
   modelNote: 'Звук остаётся на этом компьютере.',
+  models: {
+    title: 'Модель',
+    hint: 'Найти на Hugging Face',
+    clear: 'Очистить',
+    list: 'Модели',
+    found: 'На Hugging Face',
+    languages: ['язык', 'языка', 'языков'],
+    englishOnly: 'Только английский',
+    mb: '{SIZE} МБ',
+    preparing: 'Готовится',
+    loading: 'Загружается',
+    notRunnable: 'Не запускается в CUE',
+    noSpace: 'Нужно {NEED} ГБ, свободно {FREE}',
+    remove: 'Удалить',
+    downloads: ['скачивание', 'скачивания', 'скачиваний'],
+    reasons: { architecture: 'Другая архитектура', noInt8: 'Нет int8', layout: 'Другая раскладка файлов' },
+    offline: 'Нет связи с Hugging Face',
+    none: 'Нет моделей Parakeet по запросу',
+  },
   cleanup: 'Чистка текста',
   cleanupNoKey: 'Нет ключа Anthropic',
   cleanupNote: 'Текст уходит в Anthropic для чистки; история — только на этом компьютере.',

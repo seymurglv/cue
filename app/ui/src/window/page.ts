@@ -293,6 +293,9 @@ export class WindowPage implements Ctx {
     // The speech model's state: asked once, then followed.
     api.onModel((m) => this.tray.setModel(m)).catch((e) => logFailed('following the speech model', e));
     api.modelGet().then((m) => this.tray.setModel(m), (e) => logFailed('reading the speech model', e));
+    // The Model page's list and the model in use, the same way.
+    api.onModels((v) => this.tray.setModels(v)).catch((e) => logFailed('following the speech models', e));
+    api.modelsGet().then((v) => this.tray.setModels(v), (e) => logFailed('reading the speech models', e));
     // A recording CUE starts must not take in a recording of the history playing aloud.
     api.onCoreState((s) => {
       if (s.phase === 'start' || s.phase === 'listen') this.history.recordingStarts();

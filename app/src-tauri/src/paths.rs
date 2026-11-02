@@ -14,8 +14,8 @@ pub struct Paths {
     /// The recordings of the history's entries, inside `history`: only the core writes and deletes them.
     pub history_audio: PathBuf,
     pub bench_recordings: PathBuf,
-    /// The speech model's folder (`runtime::model::MANIFEST`).
-    pub model: PathBuf,
+    /// The speech models' folder: one folder each, named by the model's id (`cue_core::model`).
+    pub models: PathBuf,
 }
 
 impl Paths {
@@ -29,7 +29,7 @@ impl Paths {
             history: cue_core::paths::history_dir(local),
             history_audio: cue_core::paths::history_audio_dir(local),
             bench_recordings: cue_core::paths::bench_dir(local).join("recordings"),
-            model: cue_core::paths::model_dir(local, cue_core::model::ULTRA.id),
+            models: cue_core::paths::models_dir(local),
         }
     }
 

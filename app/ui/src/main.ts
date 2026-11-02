@@ -62,6 +62,7 @@ async function start() {
     listen<UiState>('cue://state', (e) => ctl.apply(e.payload)),
     listen<number>('cue://level', (e) => ctl.level(e.payload)),
     listen<MicNames>('cue://mic-names', (e) => ctl.micNames(e.payload)),
+    listen<string>('cue://model-name', (e) => ctl.modelName(e.payload)),
     listen<TrayKind | null>('cue://tray', (e) => ctl.tray(e.payload)),
     listen('cue://shake', () => ctl.shake()),
     listen<boolean>('cue://idle-hidden', (e) => ctl.idleHidden(e.payload)),

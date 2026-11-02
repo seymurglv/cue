@@ -352,10 +352,49 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .mprog .mbar{margin-top:6px}
 .mprog small{display:block;margin-top:5px;font-size:11px;color:var(--muted)}
 .mprog small .num{color:var(--text)}
+/* Speech recognition's model row opens the Model page: the chevron at its end */
+.mrow[data-sub]{cursor:pointer}
+.mrow .sc>svg{width:12px;height:12px;color:var(--faint)}
+/* the Model page. The search is the list's last row, quiet until pressed: the magnifier and "Search Hugging Face" in
+   the muted color. Pressed, the row becomes the field where it stands: the words stay in place as its hint, a line
+   grows under it out of the magnifier (450 ms, no overshoot), the glyph darkens, and once something is typed a cross
+   comes up at its end. No ring and no plate: the line is the field. */
+.msr{position:relative;display:flex;align-items:center;gap:8px;height:40px;border-top:1px solid var(--line);color:var(--muted);cursor:text;transition:color .2s}
+.msr:hover,.msr.open{color:var(--text)}
+.msg{display:grid;flex:none}
+.msg svg{width:14px;height:14px}
+.msl{font-size:12px;color:var(--muted);transition:opacity .16s}
+.msr input{position:absolute;left:22px;right:26px;top:0;bottom:0;width:auto;min-width:0;padding:0;border:0;outline:0;background:none;font:inherit;font-size:12px;font-weight:400;color:var(--text);opacity:0;transition:opacity .16s}
+.msr input::placeholder{color:var(--muted);opacity:1}
+.msr.open .msl{opacity:0}
+.msr.open input{opacity:1}
+.msu{position:absolute;left:0;right:0;bottom:-1px;height:1px;background:var(--text);transform:scaleX(0);transform-origin:left;transition:transform .45s var(--e-sm)}
+.msr.open .msu{transform:none}
+.msx{position:absolute;right:0;top:9px;width:22px;height:22px;display:grid;place-items:center;color:var(--muted);opacity:0;pointer-events:none;transform:scale(.6);transition:opacity .18s,transform .3s var(--e-out),color .2s}
+.msx svg{width:12px;height:12px}
+.msr.typed .msx{opacity:1;pointer-events:auto;transform:none}
+.msx:hover{color:var(--text)}
+.mgh{padding:8px 0 0;font-size:11px;font-weight:600;color:var(--muted)}
+.mfound{margin-top:4px}
+.mdl,.mfd:not(.off){cursor:pointer}
+.mdl{flex-wrap:wrap}
+.mdl .num{font-family:"Bebas Neue",sans-serif;font-weight:400;letter-spacing:.03em;font-variant-numeric:tabular-nums}
+.mdl small .num{display:inline;font-size:13px}
+.mdl .mpct{font-size:15px;color:var(--text)}
+.mok{display:grid;color:var(--ok)}
+.mok svg{width:16px;height:16px}
+.msz{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.mdel{font-size:12px;color:var(--muted);opacity:0;transition:opacity .15s,color .15s}
+.mdl:is(:hover,:focus-within) .mdel{opacity:1}
+.mdel:hover{color:var(--warn)}
+.mfd .stx b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mfd.off{opacity:.45}
+.mfnote{padding:8px 0 4px;font-size:12px;color:var(--muted)}
 /* the keyboard's focus on every other control: the same soft plate as on the icon buttons (one step darker where the
    control has a fill of its own) and dark text, never the system's ring; a plate wider than a bare text button is a
    spread shadow, so nothing moves */
 .app :is(.btn2,.dd,.sw,.segc button,.trw,.menu button,.bmore button,.dnb,.dx):focus-visible{outline:0}
+.app :is(.mrow[data-sub],.mdl,.mfd):focus-visible{outline:0;box-shadow:0 0 0 4px color-mix(in srgb,var(--text) 8%,transparent);border-radius:6px;background:color-mix(in srgb,var(--text) 8%,transparent)}
 .app .btn2:focus-visible{background:color-mix(in srgb,var(--text) 13%,transparent)}
 .app .dd:focus-visible{background:color-mix(in srgb,var(--text) 8%,var(--card))}
 .app .sw:focus-visible{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--text) 60%,transparent),0 0 0 4px color-mix(in srgb,var(--text) 8%,transparent)}

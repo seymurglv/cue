@@ -60,7 +60,7 @@ use cue_core::ask::{AnswerPlace, AskContext, MAX_SELECTION_CHARS, SelectionKind,
 use cue_core::audio::{Silence, SilenceDetector};
 use cue_core::flow::{DictationId, Effect, Flow, InsertOutcome, Input, Outcome, PasteHow, SttError, TimerKind};
 use cue_core::history;
-use cue_core::model::ModelState;
+use cue_core::model::{ModelState, ModelsView};
 use cue_core::refine::RefineContext;
 use cue_core::stats;
 use cue_core::settings::{self, AudioKeep, DropPosition, HistorySettings, Keep, Period, SettingChange, Settings};
@@ -71,6 +71,7 @@ use cue_core::usage::{self, SttPath, UsageRecord};
 use cue_engines::EngineError;
 use cue_engines::ask as engine_ask;
 use cue_engines::claude::{self, Job, RefineResult};
+use cue_engines::hub;
 use cue_engines::keys::{self, KeyName};
 use cue_engines::stt::{self, Engine, SttOutput, SttSession};
 use cue_platform_win::cardplace::{self, CARD};
@@ -98,7 +99,8 @@ use recordings::{AudioLimit, Recordings, Snapshot};
 use state::{
     CacheWarm, InsertWatch, LevelGate, MicGate, MicTold, ShownOnce, TaskSlot, Timers, ViewGate, ViewSend, WarmUp,
 };
-use model::{ModelEvent, ModelKeeper};
+pub(crate) use model::Choice;
+use model::{ModelKeeper, ModelNews, Told};
 use tasks::{ask_panicked, guarded, refine_panicked, stt_panicked};
 
 /// Timeout for each UI Automation query.
@@ -158,12 +160,20 @@ pub enum CoreEvent {
     Settings { cmd: SettingsCmd, reply: tokio::sync::oneshot::Sender<SettingsView> },
     /// "Clear history" in the main window: every day of the history goes, with every recording.
     HistoryClear,
-    /// A step of the speech model's download or load.
-    Model(ModelEvent),
+    /// A step of a speech model's download or load, or of pinning a found one.
+    Model(ModelNews),
     /// A window asks for the speech model's state.
     ModelGet(tokio::sync::oneshot::Sender<ModelState>),
     /// "Retry" on the speech model in the main or the welcome window.
     ModelRetry,
+    /// The Model page asks for its list (`cue://models` carries every change after).
+    ModelsGet(tokio::sync::oneshot::Sender<ModelsView>),
+    /// The Model page searches Hugging Face; the answer comes from a task of its own.
+    ModelsSearch { query: String, reply: tokio::sync::oneshot::Sender<Result<Vec<hub::Found>, EngineError>> },
+    /// The Model page chose a model: it is switched to.
+    ModelChoose(Choice),
+    /// The Model page deletes a model's files; the answer — whether they went.
+    ModelDelete { id: String, reply: tokio::sync::oneshot::Sender<bool> },
     /// A history entry's text from the main window (decision 3): "Paste again" into `target`, the window that was under
     /// the main one and is now in front, or "Copy" (`None`) — the clipboard. Neither is a new result: the last result
     /// (Ctrl+Win+V) and the history stay as they are.
@@ -306,7 +316,7 @@ impl Runtime {
             }
         };
         let translate_home = pair_now(&settings);
-        let model = ModelKeeper::new(paths.model.clone());
+        let model = ModelKeeper::new(paths.models.clone(), &settings.stt.model);
         let history = HistoryLog::new(paths.history.clone(), Recordings::new(paths.history_audio.clone()));
         // Alt picks "Ask" only when it is on (spec 2 §9); the hook reads the switch on every key.
         hook::ASK_ENABLED.store(settings.ask.enabled(), Ordering::Relaxed);
@@ -388,6 +398,7 @@ impl Runtime {
         self.history.start(&self.settings.history, &local_today());
         self.model.start(&self.tx, &self.http);
         self.ui.model(self.model.state());
+        self.ui.models(&self.model.view());
         forget_soniox_key();
         while let Some(ev) = rx.recv().await {
             // A crash in one event does not stop the core; the panic hook logs where it happened.
@@ -562,12 +573,25 @@ impl Runtime {
                 self.settings.drop.position = place;
                 self.save_settings();
             }
-            CoreEvent::Model(event) => {
-                let told = self.model.on_event(event, &self.tx);
+            CoreEvent::Model(news) => {
+                let told = self.model.on_event(news, &self.tx, &self.http);
                 self.ui.model(self.model.state());
-                // "Model is ready" after a download, only on a Drop at rest: a dictation that waited shows its text instead.
-                if told && self.tray.is_none() && self.flow.ui_state().phase == UiPhase::Idle {
-                    self.tray = Some(TrayKind::ModelReady);
+                self.ui.models(&self.model.view());
+                let tray = match told {
+                    Told::Nothing => None,
+                    Told::Ready => Some(TrayKind::ModelReady),
+                    // The new model is written only now that it has loaded.
+                    Told::Switched { id, name } => {
+                        self.settings.stt.model = id;
+                        self.save_settings();
+                        self.ui.model_name(&name);
+                        Some(TrayKind::ModelSwitched)
+                    }
+                };
+                // "Model is ready" after a download or a switch, only on a Drop at rest: a dictation that waited shows
+                // its text instead.
+                if tray.is_some() && self.tray.is_none() && self.flow.ui_state().phase == UiPhase::Idle {
+                    self.tray = tray;
                     self.ui.tray(self.tray);
                 }
             }
@@ -577,6 +601,24 @@ impl Runtime {
             CoreEvent::ModelRetry => {
                 self.model.retry(&self.tx, &self.http);
                 self.ui.model(self.model.state());
+                self.ui.models(&self.model.view());
+            }
+            CoreEvent::ModelsGet(reply) => {
+                let _ = reply.send(self.model.view());
+            }
+            CoreEvent::ModelsSearch { query, reply } => {
+                let http = self.http.clone();
+                tokio::spawn(async move {
+                    let _ = reply.send(hub::search(&http, &query).await);
+                });
+            }
+            CoreEvent::ModelChoose(choice) => {
+                self.model.choose(choice, &self.tx, &self.http);
+                self.ui.models(&self.model.view());
+            }
+            CoreEvent::ModelDelete { id, reply } => {
+                let _ = reply.send(self.model.delete(&id));
+                self.ui.models(&self.model.view());
             }
             CoreEvent::Settings { cmd, reply } => {
                 if let SettingsCmd::Set(change) = cmd {
@@ -1632,7 +1674,7 @@ impl Runtime {
                     tracing::warn!("microphone settings did not open: {e}");
                 }
             }
-            Some(TrayKind::HoldHint | TrayKind::LastMinute | TrayKind::MicMissing | TrayKind::ModelReady) | None => {}
+            Some(TrayKind::HoldHint | TrayKind::LastMinute | TrayKind::MicMissing | TrayKind::ModelReady | TrayKind::ModelSwitched) | None => {}
         }
     }
 

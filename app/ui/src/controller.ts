@@ -70,6 +70,7 @@ export class DropController {
   private trayHovered = false;
   /** The names the missing microphone's card shows: the core sends them just before it. */
   private mic: MicNames | null = null;
+  private model: string | null = null;
   /** Quiet mode: false — the frame loop is asleep. calmSince — the frame since which nothing on screen can change. */
   private awake = true;
   private calmSince: number | null = null;
@@ -257,10 +258,15 @@ export class DropController {
     this.mic = { wanted: String(n?.wanted ?? ''), used: String(n?.used ?? '') };
   }
 
+  /** The name of the speech model just switched to, for the card that follows. */
+  modelName(name: string) {
+    this.model = String(name ?? '');
+  }
+
   /** One notice at a time: a new one replaces the content and starts its own countdown; null — the core removes the card. */
   tray(kind: TrayKind | null) {
     // Markup first, before touching the open card: if it throws, the old card keeps its timer and close button.
-    const html = kind == null ? null : trayHtml(kind, this.t, this.mic);
+    const html = kind == null ? null : trayHtml(kind, this.t, this.mic, this.model);
     // No tray card while dragging: the drag ends first.
     if (html != null) this.endDrag(true);
     this.stopTtl();

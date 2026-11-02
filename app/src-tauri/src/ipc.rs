@@ -272,6 +272,18 @@ impl Ui {
         self.emit("cue://model", state);
     }
 
+    /// The Model page's list, to every window (only the main one draws it).
+    pub fn models(&self, view: &cue_core::model::ModelsView) {
+        self.emit("cue://models", view);
+    }
+
+    /// The name of the model just switched to, just before its card: to the Drop, which draws it.
+    pub fn model_name(&self, name: &str) {
+        if let Err(e) = self.app.emit_to(DROP_LABEL, "cue://model-name", name) {
+            tracing::debug!("Drop window: event cue://model-name not sent: {e}");
+        }
+    }
+
     pub fn shake(&self) {
         self.emit("cue://shake", ());
     }

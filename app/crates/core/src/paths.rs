@@ -30,9 +30,14 @@ pub fn history_audio_dir(local_app_data: &Path) -> PathBuf {
     history_dir(local_app_data).join("audio")
 }
 
+/// `<base>\CUE\models`: the speech models, a folder each.
+pub fn models_dir(local_app_data: &Path) -> PathBuf {
+    local_dir(local_app_data).join("models")
+}
+
 /// `<base>\CUE\models\<id>`: a speech model's files (`crate::model::Manifest::id`), downloaded once.
 pub fn model_dir(local_app_data: &Path, id: &str) -> PathBuf {
-    local_dir(local_app_data).join("models").join(id)
+    models_dir(local_app_data).join(id)
 }
 
 /// `%LOCALAPPDATA%`. `None` if the variable is missing, empty or a relative path
