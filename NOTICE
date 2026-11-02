@@ -105,6 +105,12 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+This software's installer includes DirectML.dll, Microsoft DirectX Machine Learning (DirectML) 1.15.4, unchanged, as
+it comes with the ONNX Runtime library above, which loads it at start. Copyright (c) Microsoft Corporation. All rights
+reserved. DirectML is not covered by CUE's license: it is distributed under Microsoft's own license terms for
+DirectML, "MICROSOFT SOFTWARE LICENSE TERMS - MICROSOFT DIRECTX MACHINE LEARNING (DIRECTML)", at
+https://www.nuget.org/packages/Microsoft.AI.DirectML/1.15.4/License. Microsoft licenses it as is, without warranties.
+
 This software includes ort 2.0.0-rc.15 and ort-sys 2.0.0-rc.15, the Rust bindings to ONNX Runtime, dual-licensed
 under MIT or Apache-2.0 and used here under the following license.
 
