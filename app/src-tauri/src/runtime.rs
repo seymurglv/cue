@@ -43,6 +43,11 @@
 //!   the field focused once Ctrl+V went in is read on a thread of its own (`fieldwatch`) until the correction is over,
 //!   a new dictation opens the microphone or the switch goes off; a word the user wrote instead becomes the one
 //!   suggestion (`Offers`), shown on the Drop at rest. The field's text stays in memory: the log gets numbers only;
+//! - a dictation's correction also counts for habits (docs/specs/2026-11-04-habits.md): a form corrected three times in
+//!   one app becomes a habit, its rule asked of the cleanup's connection (5 s, else a template), its card shown at rest
+//!   after the suggestion found before it; the habits of the dictation's app go with its cleanup, and those whose effect
+//!   shows are kept on its history entry; a correction that goes back on a habit three times changes it, and its card
+//!   says so;
 //! - the log gets events, per-stage latencies and error codes; no text, no audio, no keys. Never `Effect` or `Input`
 //!   with `{:?}`: their `Debug` prints text.
 mod ask;
@@ -54,6 +59,7 @@ pub(crate) mod recordings;
 mod state;
 mod tasks;
 
+use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -63,7 +69,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use cue_core::ask::{AnswerPlace, AskContext, MAX_SELECTION_CHARS, SelectionKind, TurnState};
 use cue_core::audio::{Silence, SilenceDetector};
 use cue_core::corrections::{self, Offers};
-use cue_core::flow::{DictationId, Effect, Flow, InsertOutcome, Input, Outcome, PasteHow, SttError, TimerKind};
+use cue_core::flow::{DictationId, Effect, Flow, InsertOutcome, Input, Outcome, PasteHow, RefineOutcome, SttError, TimerKind};
+use cue_core::habits;
 use cue_core::history;
 use cue_core::model::{ModelState, ModelsView};
 use cue_core::refine::RefineContext;
@@ -76,6 +83,7 @@ use cue_core::usage::{self, SttPath, UsageRecord};
 use cue_engines::EngineError;
 use cue_engines::ask as engine_ask;
 use cue_engines::claude::{self, Job, RefineResult};
+use cue_engines::habit;
 use cue_engines::hub;
 use cue_engines::{chat, openrouter};
 use cue_core::connections::Kind;
@@ -124,6 +132,9 @@ const COPY_WAIT: Duration = Duration::from_secs(2);
 const INSERT_CONTEXT_CHARS: usize = 16;
 /// Insert watchdog: the insert thread finishes within ~7 s (see `insert::spawn_inserter`).
 const INSERT_WATCHDOG: Duration = Duration::from_secs(10);
+/// A tray card whose button shows a done label ("Copied", "Removed") keeps it for 1100 ms, then folds in 430 ms
+/// (controller.ts `DONE_HOLD_MS`, the tray's fold): the Drop is not at rest until then.
+const TRAY_DONE_MS: u64 = 1100 + 430;
 /// Warm-up: a request with no key and no text, just for a TLS connection in the shared client's pool. The response
 /// (a refusal) is not needed. The API address, not the site root: the root could redirect to another host.
 const WARM_URL: &str = claude::API_URL;
@@ -146,9 +157,16 @@ pub enum CoreEvent {
     InsertDone { id: DictationId, outcome: InsertOutcome, at: Instant },
     InsertTimeout { id: DictationId, generation: u64 },
     /// The field watch after a paste is over: `span` is the corrected text between the paste's anchors; `stop` is that
-    /// watch's own flag, which tells it from a later one. The text is never logged.
-    Corrected { pasted: String, span: Option<String>, stop: Arc<AtomicBool> },
+    /// watch's own flag, which tells it from a later one; `app` is the dictation's app, when its correction counts for
+    /// habits (`None` for a translation). The text is never logged.
+    Corrected { pasted: String, span: Option<String>, stop: Arc<AtomicBool>, app: Option<String> },
+    /// The rule of the habit being made under `draft`, from the cleanup's connection: `None` (no connection, no answer
+    /// in 5 s, none usable) — the template writes it. Never logged.
+    HabitRule { draft: u64, rule: Option<habits::RuleText> },
     TimerFired { kind: TimerKind, generation: u64 },
+    /// The hold after a tray card's action (`hold_tray`) is over: the card has folded. `generation` tells it from a
+    /// later hold.
+    TrayDone { generation: u64 },
     /// A step of the "Ask" request `task` of dictation `id`.
     AskStep { id: DictationId, task: u64, step: engine_ask::Step },
     /// The Ctrl+C copy of the first question of dictation `id` came: it is its selection. `task` is the request that
@@ -278,15 +296,33 @@ pub struct Runtime {
     last_app: String,
     /// The last tray card sent to the window: its button acts on it.
     tray: Option<TrayKind>,
+    /// A card whose action shows its done label is still on the Drop until it folds (`hold_tray`): that hold's
+    /// generation. The Drop is not at rest meanwhile.
+    tray_closing: Option<u64>,
+    tray_gen: u64,
     /// The dictionary suggestion from a correction (docs/specs/2026-11-02-corrections.md).
     offers: Offers,
     /// The idle Drop is hidden over a full-screen app (the placement thread tells): no suggestion opens then.
     idle_hidden: bool,
-    /// The dictation whose paste is awaited, with its text: the field is watched once it went in.
-    watch_next: Option<(DictationId, String)>,
+    /// The dictation whose paste is awaited, with its text, and its app when its correction counts for habits: the field
+    /// is watched once it went in.
+    watch_next: Option<(DictationId, String, Option<String>)>,
     /// The flag of the field watch running: set to end it early (a new dictation opened the microphone, "Learn from
     /// me" went off).
     field_stop: Option<Arc<AtomicBool>>,
+    /// Habits (docs/specs/2026-11-04-habits.md), for each dictation: the ones sent with its cleanup with its text as
+    /// heard, and those whose effect the cleanup brought (its history entry lists them).
+    habits_sent: ByDictation<(Vec<habits::Habit>, String)>,
+    habits_applied: ByDictation<Vec<history::HabitMark>>,
+    /// Habits waiting for their rule, by the number they were found with.
+    drafts: Vec<(u64, habits::Draft)>,
+    /// Habit cards waiting for the Drop's rest, in the order found, and the one open.
+    habit_cards: VecDeque<(u64, HabitCard)>,
+    habit_card: Option<HabitCard>,
+    /// Numbers the notices as they are found (`next_notice`), the suggestion's (`offer_found`) and each habit's: at rest
+    /// the one found first opens first.
+    notices: u64,
+    offer_found: u64,
     level: LevelGate,
     /// The connection warm-up; the refine prompt cache has its own (`cache_warm`).
     warm: WarmUp,
@@ -379,10 +415,19 @@ impl Runtime {
             last_text: None,
             last_app: String::new(),
             tray: None,
+            tray_closing: None,
+            tray_gen: 0,
             offers: Offers::default(),
             idle_hidden: false,
             watch_next: None,
             field_stop: None,
+            habits_sent: ByDictation::default(),
+            habits_applied: ByDictation::default(),
+            drafts: Vec::new(),
+            habit_cards: VecDeque::new(),
+            habit_card: None,
+            notices: 0,
+            offer_found: 0,
             level: LevelGate::default(),
             warm: WarmUp::default(),
             cache_warm: CacheWarm::default(),
@@ -426,6 +471,7 @@ impl Runtime {
         self.ui.model(self.model.state());
         self.ui.models(&self.model.view());
         forget_soniox_key();
+        self.key_habits();
         while let Some(ev) = rx.recv().await {
             // A crash in one event does not stop the core; the panic hook logs where it happened.
             if catch_unwind(AssertUnwindSafe(|| self.on_event(ev))).is_err() {
@@ -471,7 +517,7 @@ impl Runtime {
             self.exec(e);
         }
         self.sync_answer();
-        self.show_offer();
+        self.show_notice();
     }
 
     /// Once the flow's effects have run: the answer's rows of a follow-up (spec 2 §7 "Listening to the follow-up…";
@@ -510,17 +556,21 @@ impl Runtime {
             CoreEvent::UiAction(UiAction::TrayAction) => self.on_tray_action(),
             CoreEvent::UiAction(UiAction::TrayClose) => {
                 self.tray = None;
-                self.show_offer();
+                self.tray_closing = None;
+                self.habit_card = None;
+                self.show_notice();
             }
             // The flow does not change: the runtime copies the answer.
             CoreEvent::UiAction(UiAction::AnswerCopy) => self.copy_answer(),
             // The Drop's answers to the suggestion; one out of turn (the suggestion it answers is gone) changes nothing.
+            // Once the capsule closes, a habit's card waiting behind it may open.
             CoreEvent::UiAction(UiAction::SuggestAdd) => {
                 if let Some(r) = self.offers.added() {
                     let took = self.learn_word(SettingChange::DictLearn(LearnedWord { word: r.word, heard: r.heard }));
                     if !took {
                         self.offers.undone();
                         self.ui.suggest(None);
+                        self.show_notice();
                     }
                 }
             }
@@ -528,16 +578,19 @@ impl Runtime {
                 if let Some(r) = self.offers.undone() {
                     self.learn_word(SettingChange::DictRemove(r.word));
                     self.ui.suggest(None);
+                    self.show_notice();
                 }
             }
             CoreEvent::UiAction(UiAction::SuggestDismiss) => {
                 if self.offers.dismissed() {
                     self.ui.suggest(self.offers.view().as_ref());
+                    self.show_notice();
                 }
             }
             CoreEvent::UiAction(UiAction::SuggestDone) => {
                 if self.offers.done() {
                     self.ui.suggest(None);
+                    self.show_notice();
                 }
             }
             CoreEvent::UiAction(a) => {
@@ -556,6 +609,7 @@ impl Runtime {
                 let s = self.flow.ui_state();
                 self.emit_state(&s);
                 self.send_mic_names(self.tray);
+                self.send_habit_rule(self.tray);
                 self.ui.tray(self.tray);
                 self.ui.suggest(self.offers.view().as_ref());
                 self.ui.model(self.model.state());
@@ -584,16 +638,17 @@ impl Runtime {
                         a.inserted(at);
                     }
                     // The text awaited goes whatever the outcome; only a paste of this dictation is watched.
-                    if let Some((wanted, pasted)) = self.watch_next.take()
+                    if let Some((wanted, pasted, app)) = self.watch_next.take()
                         && wanted == id
                         && outcome == InsertOutcome::Pasted
                     {
-                        self.watch_field(pasted);
+                        self.watch_field(pasted, app);
                     }
                     self.feed(Input::Inserted { id, outcome });
                 }
             }
-            CoreEvent::Corrected { pasted, span, stop } => self.on_corrected(&pasted, span.as_deref(), &stop),
+            CoreEvent::Corrected { pasted, span, stop, app } => self.on_corrected(&pasted, span.as_deref(), &stop, app.as_deref()),
+            CoreEvent::HabitRule { draft, rule } => self.on_habit_rule(draft, rule),
             CoreEvent::InsertTimeout { id, generation } => {
                 if self.insert_watch.expired(id, generation) {
                     tracing::warn!("insert did not finish within {} s: \"no field\"", INSERT_WATCHDOG.as_secs());
@@ -608,6 +663,12 @@ impl Runtime {
             CoreEvent::TimerFired { kind, generation } => {
                 if self.timers.fire(kind, generation) {
                     self.feed(Input::Timer(kind));
+                }
+            }
+            CoreEvent::TrayDone { generation } => {
+                if self.tray_closing == Some(generation) {
+                    self.tray_closing = None;
+                    self.show_notice();
                 }
             }
             CoreEvent::AskStep { id, task, step } => self.on_ask_step(id, task, step),
@@ -641,7 +702,7 @@ impl Runtime {
             }
             CoreEvent::IdleHidden(hidden) => {
                 self.idle_hidden = hidden;
-                self.show_offer();
+                self.show_notice();
             }
             CoreEvent::Model(news) => {
                 let told = self.model.on_event(news, &self.tx, &self.http);
@@ -660,7 +721,7 @@ impl Runtime {
                 };
                 // "Model is ready" after a download or a switch, only on a Drop at rest: a dictation that waited shows
                 // its text instead.
-                if tray.is_some() && self.tray.is_none() && self.flow.ui_state().phase == UiPhase::Idle {
+                if tray.is_some() && self.tray.is_none() && self.tray_closing.is_none() && self.flow.ui_state().phase == UiPhase::Idle {
                     self.tray = tray;
                     self.ui.tray(self.tray);
                 }
@@ -713,6 +774,11 @@ impl Runtime {
         let s = &self.settings;
         let (target, language, periods) = (s.translate.target(), s.ui.language, s.history.clone());
         let device = s.audio.device.clone();
+        // "Forget all": habits still waiting for their rule or their card do not come back after it.
+        if change == SettingChange::HabitsForget {
+            self.drafts.clear();
+            self.habit_cards.clear();
+        }
         if !apply_setting(&mut self.settings, change, &self.paths.settings, self.can_save_settings) {
             return;
         }
@@ -739,7 +805,11 @@ impl Runtime {
             // Another choice: a microphone missing from now on is told about again.
             self.mic_told.forget();
         }
-        // "Learn from me" off: no field is read from now on, and the suggestion goes.
+        // "Learn from me" off: no field is read from now on, and the suggestion goes; so do the habits waiting for their
+        // rule or their card, the saved ones among them taken out of the list (not declined: they may be learned again),
+        // and a change waiting for its card is taken back, the habits it replaced returning. The newest goes first, so a
+        // change of a habit itself waiting is taken back before it. An open card stays until it closes; its "Undo" still
+        // forgets.
         if !self.settings.learn.enabled() {
             self.watch_next = None;
             if let Some(stop) = self.field_stop.take() {
@@ -749,6 +819,26 @@ impl Runtime {
                 self.ui.suggest(None);
             }
             self.offers = Offers::default();
+            self.drafts.clear();
+            let mut dropped = 0;
+            for (_, card) in self.habit_cards.drain(..).rev() {
+                if card.take_back(&mut self.settings.habits).is_some() {
+                    dropped += 1;
+                }
+            }
+            if dropped > 0 {
+                tracing::info!(dropped, "habits not yet announced dropped");
+                self.save_settings();
+            }
+        }
+        // The habit whose card is open was forgotten here: its card goes.
+        if let Some(card) = &self.habit_card
+            && !self.settings.habits.list.iter().any(|h| h.id == card.id)
+        {
+            self.habit_card = None;
+            self.tray = None;
+            self.ui.tray(None);
+            self.show_notice();
         }
     }
 
@@ -757,14 +847,14 @@ impl Runtime {
     fn learn_word(&mut self, change: SettingChange) -> bool {
         let took = apply_setting(&mut self.settings, change, &self.paths.settings, self.can_save_settings);
         if took {
-            self.ui.settings(&SettingsView::of(&self.settings, self.lang, self.can_save_settings));
+            self.send_settings();
         }
         took
     }
 
     /// The field just pasted into is read until the user's correction is over (docs/specs/2026-11-02-corrections.md).
     /// Only the paste `insert` awaited, and only while "Learn from me" is on.
-    fn watch_field(&mut self, pasted: String) {
+    fn watch_field(&mut self, pasted: String, app: Option<String>) {
         if !self.settings.learn.enabled() {
             return;
         }
@@ -774,15 +864,16 @@ impl Runtime {
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, text, own) = (self.tx.clone(), pasted.clone(), stop.clone());
         if fieldwatch::spawn(text, stop.clone(), move |span| {
-            let _ = tx.send(CoreEvent::Corrected { pasted, span, stop: own });
+            let _ = tx.send(CoreEvent::Corrected { pasted, span, stop: own, app });
         }) {
             self.field_stop = Some(stop);
         }
     }
 
     /// A watch is over: a word the user wrote instead of the one heard becomes the suggestion (the first, when there
-    /// are several). The log gets numbers, never the text.
-    fn on_corrected(&mut self, pasted: &str, span: Option<&str>, stop: &Arc<AtomicBool>) {
+    /// are several), and a dictation's correction counts for habits (`count_habits`). The log gets numbers, never the
+    /// text.
+    fn on_corrected(&mut self, pasted: &str, span: Option<&str>, stop: &Arc<AtomicBool>, app: Option<&str>) {
         // A watch replaced by a later one leaves the later one's flag in place.
         self.field_stop.take_if(|running| Arc::ptr_eq(running, stop));
         if !self.settings.learn.enabled() {
@@ -797,23 +888,178 @@ impl Runtime {
         if let Some(first) = found.into_iter().next() {
             let before = self.offers.view();
             self.offers.offer(first);
+            if self.offers.waiting() {
+                self.offer_found = self.next_notice();
+            }
             // A missed one it replaced (the dot) is gone from the page until the new one opens at rest.
             let after = self.offers.view();
             if after != before {
                 self.ui.suggest(after.as_ref());
             }
-            self.show_offer();
+        }
+        if let Some(app) = app {
+            self.count_habits(app, pasted, span);
+        }
+        self.show_notice();
+    }
+
+    /// The forms of a dictation's correction in `app` are counted (`Habits::count`): a habit of another app whose form
+    /// reached three here holds everywhere now (its row changes, no card), and forms that reached three here together
+    /// become a habit once its rule comes (`ask_rule`). The log gets kinds and numbers.
+    fn count_habits(&mut self, app: &str, pasted: &str, span: &str) {
+        let c = habits::correction(pasted, span);
+        if c.found.is_empty() {
+            return;
+        }
+        let counted = self.settings.habits.count(app, &c, &local_today(), self.lang.code());
+        self.save_settings();
+        let kinds: Vec<&str> = c.found.iter().map(|f| f.form.kind()).collect();
+        tracing::info!(?kinds, widened = counted.widened.len(), new = counted.new.is_some(), "habit forms counted");
+        if counted.grown || !counted.widened.is_empty() {
+            self.send_settings();
+        }
+        // A habit that widened has the id of everywhere now: its card, open or waiting, follows it.
+        follow(&counted.widened, self.habit_card.as_mut(), &mut self.habit_cards);
+        if let Some(draft) = counted.new {
+            self.ask_rule(draft);
         }
     }
 
-    /// A waiting suggestion opens once the Drop is at rest (`at_rest`). Called again after anything that may end a
-    /// busy Drop: every input (the end of a pause among them), a tray card going, the idle Drop showing again once no
-    /// full-screen app is in front.
-    fn show_offer(&mut self) {
+    /// The rule of a habit just found, asked of the cleanup's connection: within `RULE_WAIT_MS`, or at once without a
+    /// connection, `on_habit_rule` gets it or nothing. The habit is numbered now, as found.
+    fn ask_rule(&mut self, draft: habits::Draft) {
+        let n = self.next_notice();
+        let ask = draft.ask();
+        self.drafts.push((n, draft));
+        let (http, s, tx, lang, key) = (self.http.clone(), self.settings.refine.clone(), self.tx.clone(), self.lang.code(), self.cleanup_key());
+        tokio::spawn(async move {
+            let wait = Duration::from_millis(habits::RULE_WAIT_MS);
+            let rule = tokio::time::timeout(wait, habit::rule(&http, key.as_deref(), &s, &ask, lang, wait)).await.ok().flatten();
+            let _ = tx.send(CoreEvent::HabitRule { draft: n, rule });
+        });
+    }
+
+    /// The rule came (or the template writes it): the habit is saved, the main window draws it, and its card waits for
+    /// the Drop's rest. Dropped when "Learn from me" went off meanwhile.
+    fn on_habit_rule(&mut self, n: u64, rule: Option<habits::RuleText>) {
+        let Some(at) = self.drafts.iter().position(|(d, _)| *d == n) else { return };
+        let (_, draft) = self.drafts.remove(at);
+        if !self.settings.learn.enabled() {
+            return;
+        }
+        let from_cleanup = rule.is_some();
+        // A draft of the same forms in this app came first, or the habit widened meanwhile (`merged`): this one adds
+        // to that habit, and its row changes with no second card. Habits that held an opposite of its forms went
+        // (`replaced`): its card says "Habit changed". One of them whose card still waits takes that card's chain
+        // along (`carry`), and that card goes.
+        let habits::Learned { habit, replaced, merged, was } = self.settings.habits.learn(draft, rule, self.lang.code());
+        self.save_settings();
+        let kinds: Vec<&str> = habit.forms.iter().map(habits::Form::kind).collect();
+        tracing::info!(?kinds, n = habit.n, from_cleanup, merged, replaced = replaced.len(), "habit learned");
+        self.send_settings();
+        let replaced = carry(&mut self.habit_cards, replaced);
+        if !merged || !replaced.is_empty() {
+            self.habit_cards.push_back((n, HabitCard { id: habit.id, replaced, was }));
+            self.show_notice();
+        }
+    }
+
+    fn next_notice(&mut self) -> u64 {
+        self.notices += 1;
+        self.notices
+    }
+
+    /// The settings to the main window after a change it did not ask for.
+    fn send_settings(&self) {
+        self.ui.settings(&SettingsView::of(&self.settings, self.lang, self.can_save_settings));
+    }
+
+    /// The cleanup connection's key from the store (a local server has none; `None` too when it cannot be read).
+    fn cleanup_key(&self) -> Option<String> {
+        KeyName::of_connection(self.settings.refine.connection().id).and_then(|name| {
+            keys::lookup(name).unwrap_or_else(|e| {
+                tracing::warn!("{} key: {e}", name.as_str());
+                None
+            })
+        })
+    }
+
+    /// The habits' hash secret from the key store (docs/specs/2026-11-04-habits.md, "The hash's secret"), before the
+    /// first correction is counted. A new one (none was kept, or what was kept is malformed) leaves the counts and the
+    /// declined forms meaningless: they go, the habits' ids are made again, and the file is written. A store that cannot
+    /// be read is left alone: no secret this session, so nothing is counted or declined, and nothing is dropped or
+    /// written; the next start reads it again. So it is without random bytes. The log never gets the secret. Under the
+    /// secret kept, a habit's id made otherwise (a settings.json restored or brought over) is made again and written
+    /// (`Habits::reid`), so an id is always the one its forms and app give.
+    fn key_habits(&mut self) {
+        match keys::habit_secret() {
+            Ok(keys::SecretRead::Kept(secret)) => {
+                self.settings.habits.secret = secret;
+                if self.settings.habits.reid() {
+                    tracing::info!(habits = self.settings.habits.list.len(), "habits: ids made again under the kept secret");
+                    self.save_settings();
+                }
+            }
+            Ok(keys::SecretRead::Made { secret, saved }) => {
+                if let Err(e) = saved {
+                    tracing::warn!("{e}");
+                }
+                let (seen, declined) = self.settings.habits.rekey(secret);
+                let habits = self.settings.habits.list.len();
+                tracing::info!(seen, declined, habits, "habits: a new hash secret, counts and declined forms dropped");
+                if seen + declined + habits > 0 {
+                    self.save_settings();
+                }
+            }
+            Err(e) => tracing::warn!("{e}: no habit is counted this session"),
+        }
+    }
+
+    /// A notice waiting opens once the Drop is at rest and can be clicked (`at_rest`): the dictionary suggestion or a
+    /// habit's card, one at a time, the one found first (`first_notice`). Called again after anything that may end a
+    /// busy Drop: every input (the end of a pause among them), a tray card going, the suggestion's capsule closing, the
+    /// idle Drop showing again once no full-screen app is in front, a habit learned.
+    fn show_notice(&mut self) {
         let s = self.flow.ui_state();
-        let rest = at_rest(s.phase, self.tray.is_some(), self.flow.answer_open(), s.paused, self.idle_hidden);
-        if rest && self.offers.at_rest() {
-            self.ui.suggest(self.offers.view().as_ref());
+        let tray = self.tray.is_some() || self.tray_closing.is_some();
+        if !at_rest(s.phase, tray, self.flow.answer_open(), s.paused, self.idle_hidden) {
+            return;
+        }
+        // A habit forgotten while its card waited has no card: it neither goes first nor holds the suggestion back.
+        let list = &self.settings.habits.list;
+        self.habit_cards.retain(|(_, card)| list.iter().any(|h| h.id == card.id));
+        let offer = self.offers.waiting().then_some(self.offer_found);
+        let card = self.habit_cards.front().map(|(n, _)| *n);
+        match first_notice(offer, card, self.offers.open()) {
+            Some(Notice::Offer) => {
+                if self.offers.at_rest() {
+                    self.ui.suggest(self.offers.view().as_ref());
+                }
+            }
+            Some(Notice::Habit) => self.show_habit_card(),
+            None => {}
+        }
+    }
+
+    /// The next habit's card: its rule to the Drop, then the card ("New habit" or "Habit changed"). One forgotten from
+    /// the main window meanwhile has none.
+    fn show_habit_card(&mut self) {
+        while let Some((_, card)) = self.habit_cards.pop_front() {
+            let Some(rule) = self.settings.habits.list.iter().find(|h| h.id == card.id).map(|h| h.rule.clone()) else { continue };
+            self.tray = Some(card.kind());
+            self.habit_card = Some(card);
+            self.ui.habit_rule(&rule);
+            self.ui.tray(self.tray);
+            return;
+        }
+    }
+
+    /// The rule of the habit whose card is open, before the card goes to a Drop loaded again.
+    fn send_habit_rule(&self, kind: Option<TrayKind>) {
+        if matches!(kind, Some(TrayKind::NewHabit | TrayKind::HabitChanged))
+            && let Some(h) = self.habit_card.as_ref().and_then(|c| self.settings.habits.list.iter().find(|h| h.id == c.id))
+        {
+            self.ui.habit_rule(&h.rule);
         }
     }
 
@@ -899,6 +1145,12 @@ impl Runtime {
             // The result of a cancelled refine (Esc in "Thinking"): after "restore" we wait for the new request.
             return;
         }
+        // Of the habits sent, those whose effect shows in the cleaned text go on its history entry; a raw fallback shows
+        // none.
+        if let Some((sent, raw)) = self.habits_sent.take(id) {
+            let marks = if result.outcome == RefineOutcome::Refined { habits::marks(&sent, &raw, &result.text) } else { Vec::new() };
+            self.habits_applied.put(id, marks);
+        }
         if self.attempt.id == id {
             let now = self.now();
             self.attempt.refine_done(result.usage, result.outcome, now);
@@ -975,6 +1227,8 @@ impl Runtime {
                     self.mic_told.told(wanted);
                 }
                 self.send_mic_names(kind);
+                self.habit_card = None; // the flow's card, or none, takes a habit's place
+                self.tray_closing = None;
                 self.tray = kind;
                 self.ui.tray(kind);
             }
@@ -1268,12 +1522,7 @@ impl Runtime {
         // The connection's key (a local server has none). No key: refine writes the log line itself and returns the raw
         // text.
         let kind = self.settings.refine.connection().kind;
-        let key = KeyName::of_connection(self.settings.refine.connection().id).and_then(|name| {
-            keys::lookup(name).unwrap_or_else(|e| {
-                tracing::warn!("{} key: {e}", name.as_str());
-                None
-            })
-        });
+        let key = self.cleanup_key();
         let now = self.now();
         // "Ask" has a prefix of its own (`ask_warm`).
         if mode != Mode::Ask {
@@ -1290,6 +1539,14 @@ impl Runtime {
             // The language code only, no text.
             tracing::info!(to, "translating");
         }
+        // The habits of this app (or of everywhere) go with a dictation's cleanup, never with a translation or "Ask".
+        let sent: Vec<habits::Habit> = if habits_for(mode, self.settings.learn.enabled(), job) {
+            self.settings.habits.for_app(&stored_app(&self.attempt.app)).cloned().collect()
+        } else {
+            Vec::new()
+        };
+        let ctx = ctx.with_habits(&sent);
+        self.habits_sent.put(id, (sent, raw.clone()));
         let (http, s, tx) = (self.http.clone(), self.settings.refine.clone(), self.tx.clone());
         let dict = self.settings.dictionary.clone();
         let old = self.refine_task.start(id, |task| {
@@ -1326,7 +1583,10 @@ impl Runtime {
         }
         self.final_text = Some((id, text.clone()));
         self.watch_insert(id);
-        self.watch_next = (self.settings.learn.enabled() && self.attempt.mode != Mode::Ask).then(|| (id, text.clone()));
+        // A dictation's correction counts for habits in its app as the history names it; a translation's only offers
+        // words.
+        let habit_app = (self.attempt.mode == Mode::Dictate).then(|| stored_app(&self.attempt.app)).filter(|a| !a.is_empty());
+        self.watch_next = (self.settings.learn.enabled() && self.attempt.mode != Mode::Ask).then(|| (id, text.clone(), habit_app));
         self.dispatch_insert(text, Some(id), None, None);
     }
 
@@ -1830,7 +2090,8 @@ impl Runtime {
     /// coincides with a card change acts on the previous one, accepted). After the button the card closes, and the
     /// window does not report that itself.
     fn on_tray_action(&mut self) {
-        match self.tray.take() {
+        let kind = self.tray.take();
+        match kind {
             Some(TrayKind::NoField) => {
                 if let Some(text) = self.last_result() {
                     self.send_job(InsertJob::Leave { id: None, text }, None);
@@ -1841,9 +2102,49 @@ impl Runtime {
                     tracing::warn!("microphone settings did not open: {e}");
                 }
             }
+            // "Undo" on a habit's card: the habit goes, and its forms are never learned again; a changed habit's card
+            // brings back the habits it replaced, as they were; a merged card, the habit its draft added to.
+            Some(TrayKind::NewHabit | TrayKind::HabitChanged) => {
+                if let Some(card) = self.habit_card.take() {
+                    self.undo_habit(card);
+                }
+            }
             Some(TrayKind::HoldHint | TrayKind::LastMinute | TrayKind::MicMissing | TrayKind::ModelReady | TrayKind::ModelSwitched) | None => {}
         }
-        self.show_offer();
+        // A card with a done label ("Copied", "Removed") stays on the Drop while it shows and folds: nothing opens over
+        // it until then.
+        if matches!(kind, Some(TrayKind::NoField | TrayKind::NewHabit | TrayKind::HabitChanged)) {
+            self.hold_tray();
+        } else {
+            self.show_notice();
+        }
+    }
+
+    /// A habit's card undone (`HabitCard::undo`): a new habit is forgotten, its forms declined; a changed one goes the
+    /// same way and the habits it replaced come back (`Habits::revert`), taking out a habit learned or widened since
+    /// that goes back on one of them (its card, if one waits, goes too). A merged card brings back the habit its draft
+    /// added to as it was, declining nothing. The main window redraws the section.
+    fn undo_habit(&mut self, card: HabitCard) {
+        let (merged, changed) = (card.was.is_some(), !card.replaced.is_empty());
+        if let Some(removed) = card.undo(&mut self.settings.habits) {
+            self.habit_cards.retain(|(_, c)| !removed.iter().any(|h| h.id == c.id));
+            self.save_settings();
+            self.send_settings();
+            tracing::info!(merged, changed, removed = removed.len(), "habit undone");
+        }
+    }
+
+    /// The card just acted on stays for `TRAY_DONE_MS`; then `TrayDone` of this hold opens what waits. A later hold, a
+    /// card closed or another card sent makes this one stale.
+    fn hold_tray(&mut self) {
+        self.tray_gen += 1;
+        let generation = self.tray_gen;
+        self.tray_closing = Some(generation);
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(TRAY_DONE_MS)).await;
+            let _ = tx.send(CoreEvent::TrayDone { generation });
+        });
     }
 
     fn on_finished(&mut self, id: DictationId, outcome: Outcome) {
@@ -1884,7 +2185,12 @@ impl Runtime {
             LastFiles::Commit => {
                 // The history takes the text before `commit_last` moves it out (decision 2).
                 let stamp = self.history.stamp(local_time());
-                let entry = dictation_entry(&self.attempt, self.final_text.as_ref(), raw.as_ref(), stamp);
+                let mut entry = dictation_entry(&self.attempt, self.final_text.as_ref(), raw.as_ref(), stamp);
+                if let Some(e) = entry.as_mut()
+                    && let Some(marks) = self.habits_applied.take(id)
+                {
+                    e.habits = marks;
+                }
                 let committed = self.commit_last(id);
                 // Its recording only once `last\audio.wav` is really this dictation's sound (`committed`).
                 let sound = self.paths.last_wav();
@@ -2140,7 +2446,7 @@ fn dictation_entry(
     let (_, text) = final_text.filter(|(id, _)| *id == a.id)?;
     let raw = raw.filter(|(id, _)| *id == a.id).map(|(_, raw)| raw.clone());
     let (Stamp { ts, id }, app) = (at, stored_app(&a.app));
-    Some(history::Entry { id, ts, mode, app, text: text.clone(), question: None, raw })
+    Some(history::Entry { id, ts, mode, app, text: text.clone(), question: None, raw, habits: Vec::new() })
 }
 
 /// The history entry of an "Ask" turn that ended (decision 2): the question, and the text the model wrote for the field
@@ -2156,7 +2462,7 @@ fn ask_entry(heard: ask::Heard, c: &ask::Conversation, at: Stamp) -> Option<hist
     let text = c.paste_text()?;
     let (Stamp { ts, id }, app) = (at, stored_app(&c.taken.ctx.app));
     let question = Some(turn.question.clone());
-    Some(history::Entry { id, ts, mode: history::Mode::Ask, app, text, question, raw: None })
+    Some(history::Entry { id, ts, mode: history::Mode::Ask, app, text, question, raw: None, habits: Vec::new() })
 }
 
 /// Where a history entry's text goes (decision 3).
@@ -2337,10 +2643,120 @@ fn follow_up_rows(answer_open: bool, recording: bool, phase: UiPhase) -> (bool, 
     (answer_open && recording, answer_open && phase == UiPhase::Error)
 }
 
-/// The Drop is at rest for a suggestion: idle, no tray card, no answer, and shown, so the capsule can be clicked
-/// (paused or over a full-screen app the idle Drop is hidden and lets the mouse through).
+/// The Drop is at rest for a notice (the suggestion, a habit's card): idle, no tray card, no answer, and shown, so the
+/// capsule can be clicked (paused or over a full-screen app the idle Drop is hidden and lets the mouse through).
 fn at_rest(phase: UiPhase, tray: bool, answer_open: bool, paused: bool, hidden: bool) -> bool {
     phase == UiPhase::Idle && !tray && !answer_open && !paused && !hidden
+}
+
+/// Habits go with a dictation's cleanup while "Learn from me" is on: never with a translation or "Ask".
+fn habits_for(mode: Mode, learn_on: bool, job: Job) -> bool {
+    mode == Mode::Dictate && learn_on && matches!(job, Job::Clean | Job::Rewrite)
+}
+
+/// A value for each of the last few dictations, by id: a later dictation's never takes the place of an earlier one's
+/// still waiting for its result. One whose result never came (cancelled, failed) goes once `KEPT` later ones came.
+struct ByDictation<T>(VecDeque<(DictationId, T)>);
+
+impl<T> Default for ByDictation<T> {
+    fn default() -> Self {
+        Self(VecDeque::new())
+    }
+}
+
+impl<T> ByDictation<T> {
+    const KEPT: usize = 4;
+
+    /// The dictation's value, in place of one it had (a retry refines again).
+    fn put(&mut self, id: DictationId, value: T) {
+        self.0.retain(|(i, _)| *i != id);
+        self.0.push_back((id, value));
+        while self.0.len() > Self::KEPT {
+            self.0.pop_front();
+        }
+    }
+
+    fn take(&mut self, id: DictationId) -> Option<T> {
+        let at = self.0.iter().position(|(i, _)| *i == id)?;
+        self.0.remove(at).map(|(_, value)| value)
+    }
+}
+
+/// A habit's card: the habit learned, and the habits it changed (docs/specs/2026-11-04-habits.md, "Changed"), none for a
+/// new one. Its "Undo" brings those back as they were. `was`: the habit a merged draft added to, as it was before.
+#[derive(Clone, Debug, PartialEq)]
+struct HabitCard {
+    id: String,
+    replaced: Vec<habits::Habit>,
+    was: Option<habits::Habit>,
+}
+
+impl HabitCard {
+    fn kind(&self) -> TrayKind {
+        if self.replaced.is_empty() { TrayKind::NewHabit } else { TrayKind::HabitChanged }
+    }
+
+    /// The change taken back without a trace ("Learn from me" off before its card): the habit goes undeclined, the one
+    /// a merged draft added to comes back as it was, and so do the habits it replaced (`Habits::revert`). The habits
+    /// that went for them; `None` when the habit is gone already.
+    fn take_back(self, habits: &mut habits::Habits) -> Option<Vec<habits::Habit>> {
+        let back: Vec<habits::Habit> = self.was.into_iter().chain(self.replaced).collect();
+        habits.revert(&self.id, back, false)
+    }
+
+    /// The card's "Undo": a habit it learned goes and its forms are declined, the habits it replaced coming back
+    /// (`Habits::revert`). A merged card learned no habit: the one its draft added to comes back as it was, with the
+    /// habits it replaced, and nothing is declined (`take_back`). The habits that went for them; `None` when the habit
+    /// is gone already.
+    fn undo(self, habits: &mut habits::Habits) -> Option<Vec<habits::Habit>> {
+        if self.was.is_some() {
+            return self.take_back(habits);
+        }
+        habits.revert(&self.id, self.replaced, true)
+    }
+}
+
+/// The habits a change replaced, for its card: one whose own card still waits comes back as that card would bring
+/// back (the habit its draft added to as it was, then the habits it replaced), and that card goes. So the new card's
+/// "Undo", or "Learn from me" off, takes back both changes.
+fn carry(waiting: &mut VecDeque<(u64, HabitCard)>, replaced: Vec<habits::Habit>) -> Vec<habits::Habit> {
+    let mut out = Vec::new();
+    for h in replaced {
+        match waiting.iter().position(|(_, c)| c.id == h.id).and_then(|at| waiting.remove(at)) {
+            Some((_, card)) => out.extend(card.was.into_iter().chain(card.replaced)),
+            None => out.push(h),
+        }
+    }
+    out
+}
+
+/// The cards of habits that widened (`Counted::widened`: the id each had, the id of everywhere it has now) follow
+/// them: the one open and those waiting.
+fn follow(widened: &[(String, String)], open: Option<&mut HabitCard>, waiting: &mut VecDeque<(u64, HabitCard)>) {
+    for card in waiting.iter_mut().map(|(_, c)| c).chain(open) {
+        if let Some((_, all)) = widened.iter().find(|(had, _)| *had == card.id) {
+            card.id.clone_from(all);
+        }
+    }
+}
+
+/// Which notice opens at rest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Notice {
+    Offer,
+    Habit,
+}
+
+/// The one found first of a waiting suggestion and a habit's card, each by the number it was found with; a card never
+/// opens while the suggestion's capsule is open (`open`: with its ring or "undo"). A missed suggestion's dot does not
+/// hold a card back.
+fn first_notice(offer: Option<u64>, card: Option<u64>, open: bool) -> Option<Notice> {
+    match (offer, card) {
+        (Some(o), Some(c)) if c < o => (!open).then_some(Notice::Habit),
+        (Some(_), _) => Some(Notice::Offer),
+        (None, Some(_)) => (!open).then_some(Notice::Habit),
+        (None, None) => None,
+    }
 }
 
 /// A web page in the default browser (spec 2 §7), or a page of Windows Settings (`ms-settings:`, the welcome window's).
@@ -2521,6 +2937,7 @@ mod tests {
             text: "Hello, world.\nSecond line ".into(),
             question: None,
             raw: Some("uh hello world\nsecond line".into()),
+            habits: Vec::new(),
         };
         assert_eq!(e, expected);
         // Another attempt's text, or none, is not this attempt's result.
@@ -3029,6 +3446,147 @@ mod tests {
         assert!(!at_rest(UiPhase::Idle, false, true, false, false), "an answer");
         assert!(!at_rest(UiPhase::Idle, false, false, true, false), "paused");
         assert!(!at_rest(UiPhase::Idle, false, false, false, true), "over a full-screen app");
+    }
+
+    /// The habits a dictation's cleanup took, and their marks, stay that dictation's.
+    #[test]
+    fn what_a_dictation_sent_is_kept_for_it_alone() {
+        let mut by = ByDictation::default();
+        by.put(DictationId(1), "first");
+        by.put(DictationId(2), "second");
+        assert_eq!(by.take(DictationId(1)), Some("first"), "a later dictation does not take an earlier one's place");
+        assert_eq!(by.take(DictationId(1)), None, "taken once");
+        by.put(DictationId(2), "again");
+        assert_eq!(by.take(DictationId(2)), Some("again"), "a retry's in place of the first try's");
+        for i in 3..10 {
+            by.put(DictationId(i), "later");
+        }
+        assert_eq!(by.0.len(), ByDictation::<&str>::KEPT, "one whose result never came does not stay");
+        assert_eq!(by.take(DictationId(9)), Some("later"));
+    }
+
+    /// Habits go into a dictation's cleanup with "Learn from me" on, and into nothing else.
+    #[test]
+    fn habits_go_only_with_a_dictations_cleanup() {
+        assert!(habits_for(Mode::Dictate, true, Job::Clean));
+        assert!(habits_for(Mode::Dictate, true, Job::Rewrite));
+        assert!(!habits_for(Mode::Dictate, false, Job::Clean), "learn off");
+        assert!(!habits_for(Mode::Dictate, true, Job::Translate("en")), "a translation's job");
+        assert!(!habits_for(Mode::Translate, true, Job::Clean), "translate mode");
+        assert!(!habits_for(Mode::Ask, true, Job::Clean), "Ask");
+    }
+
+    /// The suggestion and a habit's card at rest: the one found first; a card never while the capsule is open.
+    #[test]
+    fn the_notice_found_first_opens_first() {
+        assert_eq!(first_notice(Some(1), Some(2), false), Some(Notice::Offer));
+        assert_eq!(first_notice(Some(3), Some(2), false), Some(Notice::Habit));
+        assert_eq!(first_notice(None, Some(2), true), None, "the capsule is open");
+        assert_eq!(first_notice(None, Some(2), false), Some(Notice::Habit));
+        assert_eq!(first_notice(Some(1), None, false), Some(Notice::Offer));
+        assert_eq!(first_notice(None, None, false), None);
+    }
+
+    /// A habit's card says "New habit", or "Habit changed" when the habit took the place of others.
+    #[test]
+    fn a_card_that_replaced_a_habit_says_it_changed() {
+        let fresh = HabitCard { id: "h1".into(), replaced: Vec::new(), was: None };
+        assert_eq!(fresh.kind(), TrayKind::NewHabit);
+        let old = habits::Habits::default().adopt(draft(vec![habits::Form::Dash], "Word"), None, "en");
+        assert_eq!(HabitCard { id: "h2".into(), replaced: vec![old], was: None }.kind(), TrayKind::HabitChanged);
+    }
+
+    fn secret_habits() -> habits::Habits {
+        habits::Habits { secret: habits::Secret::from_bytes([7; habits::SECRET_BYTES]), ..Default::default() }
+    }
+    fn draft(forms: Vec<habits::Form>, app: &str) -> habits::Draft {
+        habits::Draft { forms, app: app.into(), before: "a".into(), after: "b".into(), n: 3 }
+    }
+    fn card_of(l: habits::Learned) -> HabitCard {
+        HabitCard { id: l.habit.id, replaced: l.replaced, was: l.was }
+    }
+    const STOP: habits::Form = habits::Form::EndMark { mark: '.', removed: true };
+    const ADDED: habits::Form = habits::Form::EndMark { mark: '.', removed: false };
+
+    /// "Undo" on a card that learned a habit: the habit goes and its forms are declined; a changed habit's card brings
+    /// back the habits it replaced, as they were.
+    #[test]
+    fn undo_on_a_card_that_learned_a_habit_forgets_it_and_brings_back_what_it_replaced() {
+        let mut h = secret_habits();
+        let r = h.adopt(draft(vec![STOP], "Telegram"), None, "en");
+        let card = card_of(h.learn(draft(vec![ADDED], "Telegram"), None, "en"));
+        assert_eq!((card.kind(), card.replaced.as_slice()), (TrayKind::HabitChanged, std::slice::from_ref(&r)));
+        assert_eq!(card.undo(&mut h), Some(Vec::new()));
+        assert_eq!(h.list, std::slice::from_ref(&r));
+        assert_eq!(h.declined, [ADDED.hash(&h.secret)]);
+        let card = card_of(h.learn(draft(vec![habits::Form::Dash], "Word"), None, "en"));
+        assert_eq!(card.kind(), TrayKind::NewHabit);
+        assert_eq!(card.undo(&mut h), Some(Vec::new()));
+        assert_eq!(h.list, [r]);
+        assert_eq!(h.declined, [ADDED.hash(&h.secret), habits::Form::Dash.hash(&h.secret)]);
+    }
+
+    /// "Undo" on a merged card: the habit the draft added to comes back as it was (its count, app and rule), with the
+    /// habits the card replaced, and nothing is declined: that habit was never undone. "Learn from me" off before the
+    /// card does the same.
+    #[test]
+    fn undo_on_a_merged_card_restores_the_habit_it_added_to_and_declines_nothing() {
+        let mut h = secret_habits();
+        let x = h.adopt(draft(vec![STOP], "Telegram"), None, "en");
+        let y = h.adopt(draft(vec![ADDED], "Word"), None, "en");
+        let merged = h.learn(draft(vec![STOP], "Telegram"), None, "en");
+        assert!(merged.merged && merged.habit.n == 6);
+        // A merged card that changed a habit too, as a hand-written settings.json can make it: y went for it.
+        h.list.retain(|h| h.id != y.id);
+        let card = HabitCard { replaced: vec![y.clone()], ..card_of(merged) };
+        assert_eq!(card.kind(), TrayKind::HabitChanged);
+        let mut off = h.clone();
+        assert_eq!(card.clone().undo(&mut h), Some(Vec::new()));
+        assert_eq!(h.list, [x, y]);
+        assert!(h.declined.is_empty());
+        assert_eq!(card.take_back(&mut off), Some(Vec::new()));
+        assert_eq!(off, h);
+    }
+
+    /// A change of a habit whose card still waits: that card goes, and the new card carries its chain, so its "Undo",
+    /// or "Learn from me" off, brings back what was there before both.
+    #[test]
+    fn a_change_of_a_habit_whose_card_waits_carries_that_cards_chain() {
+        let mut h = secret_habits();
+        let lower = habits::Form::FirstLetter { lower: true };
+        let r = h.adopt(draft(vec![lower], "Telegram"), None, "en");
+        let a = h.learn(draft(vec![habits::Form::FirstLetter { lower: false }, STOP], "Telegram"), None, "en");
+        assert_eq!(a.replaced, std::slice::from_ref(&r));
+        let mut cards = VecDeque::from([(1, card_of(a))]);
+        let b = h.learn(draft(vec![ADDED], "Telegram"), None, "en");
+        assert_eq!(b.replaced.len(), 1, "it changed the habit whose card waits");
+        let card = HabitCard { replaced: carry(&mut cards, b.replaced.clone()), ..card_of(b) };
+        assert!(cards.is_empty(), "that card goes");
+        assert_eq!((card.kind(), card.replaced.as_slice()), (TrayKind::HabitChanged, std::slice::from_ref(&r)));
+        let mut off = h.clone();
+        assert_eq!(card.clone().take_back(&mut off), Some(Vec::new()));
+        assert_eq!((off.list.as_slice(), off.declined.len()), (std::slice::from_ref(&r), 0));
+        assert_eq!(card.undo(&mut h), Some(Vec::new()));
+        assert_eq!(h.list, std::slice::from_ref(&r));
+        assert_eq!(h.declined, [ADDED.hash(&h.secret)]);
+        // A merged card's habit as it was comes first, then what it replaced; a habit with no card waiting stays.
+        let w = h.adopt(draft(vec![habits::Form::Dash], "Word"), None, "en");
+        let mut cards = VecDeque::from([(2, HabitCard { id: "h2".into(), replaced: vec![r.clone()], was: Some(w.clone()) })]);
+        let mut two = r.clone();
+        two.id = "h2".into();
+        assert_eq!(carry(&mut cards, vec![two, w.clone()]), [w.clone(), r, w]);
+    }
+
+    /// The cards of a habit that widened follow it to the id of everywhere.
+    #[test]
+    fn the_cards_of_a_widened_habit_follow_its_new_id() {
+        let card = |id: &str| HabitCard { id: id.into(), replaced: Vec::new(), was: None };
+        let mut open = card("h1");
+        let mut waiting = VecDeque::from([(1, card("h2")), (2, card("h3"))]);
+        let widened = [("h1".to_owned(), "h9".to_owned()), ("h3".to_owned(), "h9".to_owned())];
+        follow(&widened, Some(&mut open), &mut waiting);
+        assert_eq!(open.id, "h9");
+        assert_eq!(waiting.iter().map(|(_, c)| c.id.as_str()).collect::<Vec<_>>(), ["h2", "h9"]);
     }
 
     #[test]

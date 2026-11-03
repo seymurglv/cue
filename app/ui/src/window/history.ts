@@ -546,9 +546,26 @@ export class HistoryView {
     } else {
       lab.append(h('span', 'hnote', t.notKept));
     }
+    if (e.habits?.length) inner.append(this.habitChips(e));
     inner.append(this.player(e).el);
     det.append(inner);
     return det;
+  }
+
+  /** The habits that shaped the entry's text (docs/specs/2026-11-04-habits.md): a chip each, the habit icon and its
+   *  short name as it was then (a forgotten habit keeps its chip). */
+  private habitChips(e: EntryView): HTMLElement {
+    const box = h('div', 'hhabs');
+    box.setAttribute('role', 'list');
+    box.setAttribute('aria-label', this.ctx.t.habitsApplied);
+    for (const m of e.habits) {
+      const chip = h('span', 'hhab');
+      chip.setAttribute('role', 'listitem');
+      chip.innerHTML = icon('habit');
+      chip.append(m.short);
+      box.append(chip);
+    }
+    return box;
   }
 
   /** The entry's player: the one it has (it keeps playing when the list is drawn again), or a new one that asks the

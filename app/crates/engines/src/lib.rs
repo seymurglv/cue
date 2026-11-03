@@ -4,6 +4,7 @@ pub mod check;
 pub mod claude;
 pub mod download;
 pub mod error;
+pub mod habit;
 pub mod hub;
 pub mod keys;
 pub mod openrouter;

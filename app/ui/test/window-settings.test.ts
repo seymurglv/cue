@@ -333,7 +333,7 @@ describe('The settings tray', () => {
     expect(value()).toBe('Manually');
     await sub('general');
     expect(title()).toBe('General');
-    expect($$('.btray .srow').map((r) => text(r.querySelector('.stx b')))).toEqual(['Start at sign-in', 'Learn from me']);
+    expect($$('.btray .srow').map((r) => text(r.querySelector('.stx b')))).toEqual(['Start at sign-in']);
     expect($('.btray .segc')).toBeNull();
     click($('[data-sw="autostart"]'));
     await settle();
@@ -784,20 +784,15 @@ describe('The settings tray', () => {
     expect(sw.getAttribute('aria-checked')).toBe('false');
   });
 
-  it('"Learn from me" switch sends the learn change', async () => {
+  it('the General page has "Start at sign-in" only: "Learn from me" lives in the Habits heading', async () => {
     page = await mount();
     await open();
     await sub('general');
-    const sw = () => $<HTMLButtonElement>('[data-sw="learn"]')!;
-    expect(sw().getAttribute('role')).toBe('switch');
-    expect(sw().getAttribute('aria-checked')).toBe('true');
-    click(sw());
-    await settle();
-    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'learn', value: false });
-    expect(sw().getAttribute('aria-checked')).toBe('false');
+    expect($('.btray [data-sw="learn"]')).toBeNull();
+    expect($('.btray [data-sw="autostart"]')).not.toBeNull();
   });
 
-  it('settings pushed by the core leave the tray as it is: a draft stays, the "Learn from me" switch follows', async () => {
+  it('settings pushed by the core leave the tray as it is: a draft stays, the Habits switch follows', async () => {
     stub(view({ refineStyle: 'custom' }));
     saved();
     page = await mount();
@@ -809,12 +804,9 @@ describe('The settings tray', () => {
     expect($('.btray textarea.cta')).toBe(field);
     expect(field.value).toBe('a draft not saved yet');
     expect($('.dch[data-word="Marisol"]')).not.toBeNull();
-    key('Escape');
-    await sub('general');
-    const sw = $<HTMLButtonElement>('[data-sw="learn"]')!;
     feeds.settings(view({ refineStyle: 'custom', learn: false }));
-    expect($('[data-sw="learn"]')).toBe(sw);
-    expect(sw.getAttribute('aria-checked')).toBe('false');
+    expect($('.bsec[data-scr="habits"] [data-sw="learn"]')!.getAttribute('aria-checked')).toBe('false');
+    expect($('.btray textarea.cta')).toBe(field);
   });
 
   it('the Cleanup page: the style, the connection card, the key, the model and the note', async () => {

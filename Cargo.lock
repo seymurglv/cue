@@ -876,6 +876,7 @@ version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.21",
 ]
 
@@ -887,6 +888,7 @@ dependencies = [
  "cpal",
  "cue-core",
  "futures-util",
+ "getrandom 0.3.4",
  "hound",
  "http",
  "keyring",

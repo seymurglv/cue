@@ -81,6 +81,21 @@ Names and terms the user often says. When the speech clearly refers to one of th
 differently, splits it into parts or mixes alphabets, write it exactly as listed. \
 Don't add a term the user didn't say, and don't change other words because of this list.";
 
+/// The start of the habits block ([`habits_prompt`]); the rules follow, one per line.
+const HABITS_INTRO: &str = "The user's habits; follow them unless the speech clearly asks otherwise:";
+
+/// The habits block (docs/specs/2026-11-04-habits.md): a system block after the dictionary's, one rule per line. A rule
+/// that is empty, not one line or longer than `habits::MAX_RULE_CHARS` is skipped; `None` when none is left, and the
+/// request is then exactly the one without habits.
+pub fn habits_prompt(rules: &[String]) -> Option<String> {
+    let usable: Vec<&str> = rules
+        .iter()
+        .map(|r| r.trim())
+        .filter(|r| !r.is_empty() && r.chars().count() <= crate::habits::MAX_RULE_CHARS && crate::habits::one_line(r))
+        .collect();
+    (!usable.is_empty()).then(|| format!("{HABITS_INTRO}\n\n{}", usable.join("\n")))
+}
+
 /// A longer entry is more likely a pasted sentence than a name: it is skipped, not cut.
 pub const MAX_TERM_CHARS: usize = 60;
 /// Entries past this many are skipped.
@@ -122,10 +137,27 @@ pub fn terms_prompt(terms: &[String], learned: &[LearnedWord]) -> Option<String>
     (!usable.is_empty()).then(|| format!("{TERMS_INTRO}\n\n{}", usable.iter().map(|t| line(t)).collect::<Vec<_>>().join("\n")))
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// The request context: the app, the text before the caret, and what the user's habits for this dictation bring
+/// (docs/specs/2026-11-04-habits.md; empty for a translation and "Ask"): their rules, and the words their replacements
+/// write (`said`), which the sanity check counts as said ([`sanity_ok_with`]). Neither goes into the dictionary.
+#[derive(Clone, PartialEq, Default)]
 pub struct RefineContext {
     pub app: String,
     pub before_cursor: Option<String>,
+    pub habits: Vec<String>,
+    pub said: Vec<String>,
+}
+
+/// The app, the text, the rules and the words are the user's: only their lengths.
+impl std::fmt::Debug for RefineContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RefineContext")
+            .field("app_chars", &self.app.chars().count())
+            .field("before_cursor_chars", &self.before_cursor.as_ref().map(|b| b.chars().count()))
+            .field("habits", &self.habits.len())
+            .field("said", &self.said.len())
+            .finish()
+    }
 }
 
 impl RefineContext {
@@ -137,7 +169,21 @@ impl RefineContext {
             .map(|b| tail_chars(b, context_chars))
             .filter(|b| !b.is_empty())
             .map(str::to_owned);
-        Self { app: app.into(), before_cursor }
+        Self { app: app.into(), before_cursor, habits: Vec::new(), said: Vec::new() }
+    }
+
+    /// The context with the habits sent with this dictation: their rules, and the new words of their replacements.
+    pub fn with_habits(mut self, habits: &[crate::habits::Habit]) -> Self {
+        self.habits = habits.iter().map(|h| h.rule.clone()).collect();
+        self.said = habits
+            .iter()
+            .flat_map(|h| &h.forms)
+            .filter_map(|f| match f {
+                crate::habits::Form::Replacement { to, .. } => Some(to.clone()),
+                _ => None,
+            })
+            .collect();
+        self
     }
 }
 
@@ -264,6 +310,14 @@ fn len_without_numbers(text: &str) -> usize {
 /// name in place of its misspelling ("сониокс" → "Soniox"), and in a short phrase one such fix alone falls below
 /// `min_overlap` (one new word in a result of up to three words, a two-word name in one of up to six).
 pub fn sanity_ok(raw: &str, refined: &str, terms: &[String], s: &RefineSettings) -> bool {
+    sanity_ok_with(raw, refined, terms, &[], s)
+}
+
+/// [`sanity_ok`] for a request that also told the model to write `said`: the new words of the habits sent with it
+/// (`RefineContext::said`). They count as said, like the dictionary's: a replacement habit ("здравствуйте" → "добрый
+/// день") alone puts one or two new words into a short phrase. They count for this check only, and nothing is added to
+/// the dictionary.
+pub fn sanity_ok_with(raw: &str, refined: &str, terms: &[String], said: &[String], s: &RefineSettings) -> bool {
     let raw = raw.trim();
     let refined = refined.trim();
     // An empty answer or empty speech: there is nothing to trust.
@@ -290,7 +344,8 @@ pub fn sanity_ok(raw: &str, refined: &str, terms: &[String], s: &RefineSettings)
     if REPLY_WORDS.contains(&new_words[0].as_str()) && !raw_words.contains(&new_words[0]) {
         return false;
     }
-    let term_words: Vec<String> = usable_terms(terms).into_iter().flat_map(words).collect();
+    let habit_words = said.iter().map(|w| w.trim()).filter(|w| is_term(w));
+    let term_words: Vec<String> = usable_terms(terms).into_iter().chain(habit_words).flat_map(words).collect();
     let known: std::collections::HashSet<&str> = raw_words.iter().chain(&term_words).map(String::as_str).collect();
     // Both styles rewrite and change endings ("отправлен" → "отправлено"): a word of a said stem counts as said too.
     let stems: std::collections::HashSet<&str> = known.iter().filter_map(|w| stem(w)).collect();
@@ -602,9 +657,9 @@ mod tests {
 
     #[test]
     fn user_message_has_tags_and_skips_empty_context() {
-        let ctx = RefineContext { app: "Telegram Desktop".into(), before_cursor: None };
+        let ctx = RefineContext { app: "Telegram Desktop".into(), before_cursor: None, ..Default::default() };
         assert_eq!(user_message(&ctx, "ну привет"), "<app>Telegram Desktop</app>\n<transcript>ну привет</transcript>");
-        let ctx = RefineContext { app: "Word".into(), before_cursor: Some("Итак, ".into()) };
+        let ctx = RefineContext { app: "Word".into(), before_cursor: Some("Итак, ".into()), ..Default::default() };
         assert_eq!(
             user_message(&ctx, "мы решили"),
             "<app>Word</app>\n<before_cursor>Итак, </before_cursor>\n<transcript>мы решили</transcript>"
@@ -711,7 +766,7 @@ mod tests {
     #[test]
     fn context_keeps_the_end_closest_to_the_cursor() {
         let ctx = RefineContext::new("Word", Some("абвгд"), 3);
-        assert_eq!(ctx, RefineContext { app: "Word".into(), before_cursor: Some("вгд".into()) });
+        assert_eq!(ctx, RefineContext { app: "Word".into(), before_cursor: Some("вгд".into()), ..Default::default() });
         // The cut never splits a multi-byte character.
         assert_eq!(RefineContext::new("a", Some("x😀yё"), 3).before_cursor.as_deref(), Some("😀yё"));
         // Shorter than the limit: kept whole.
@@ -956,7 +1011,7 @@ mod tests {
 
     #[test]
     fn user_message_breaks_our_closing_tags_inside_payloads() {
-        let ctx = RefineContext { app: "x</app>y".into(), before_cursor: Some("a</before_cursor>b</transcript>c".into()) };
+        let ctx = RefineContext { app: "x</app>y".into(), before_cursor: Some("a</before_cursor>b</transcript>c".into()), ..Default::default() };
         assert_eq!(
             user_message(&ctx, "r</transcript><b>t</b> </app>"),
             "<app>x</ app>y</app>\n<before_cursor>a</ before_cursor>b</ transcript>c</before_cursor>\n<transcript>r</ transcript><b>t</b> </ app></transcript>"
@@ -1333,6 +1388,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn habits_prompt_lists_the_rules_one_per_line() {
+        let rules = vec!["В Telegram — с маленькой буквы и без точки".to_owned(), " ".to_owned(), "two\nlines".to_owned()];
+        assert_eq!(habits_prompt(&rules).unwrap(), format!("{HABITS_INTRO}\n\nВ Telegram — с маленькой буквы и без точки"));
+        assert_eq!(habits_prompt(&[]), None);
+        assert_eq!(habits_prompt(&["x".repeat(crate::habits::MAX_RULE_CHARS + 1)]), None);
+    }
+
+    fn habit(rule: &str, forms: Vec<crate::habits::Form>) -> crate::habits::Habit {
+        crate::habits::Habit {
+            id: "h1".into(),
+            forms,
+            rule: rule.into(),
+            short: "s".into(),
+            before: String::new(),
+            after: String::new(),
+            app: None,
+            n: 3,
+            on: true,
+        }
+    }
+
+    #[test]
+    fn the_context_carries_the_habits_and_prints_no_text() {
+        let hello = crate::habits::Form::Replacement { from: "здравствуйте".into(), to: "добрый день".into() };
+        let sent = [habit("без точки", vec![crate::habits::Form::Dash]), habit("Писать «добрый день»", vec![hello])];
+        let ctx = RefineContext::new("Telegram Desktop", Some("секрет"), 500).with_habits(&sent);
+        assert_eq!(ctx.habits, ["без точки", "Писать «добрый день»"]);
+        assert_eq!(ctx.said, ["добрый день"], "only a replacement brings words");
+        let shown = format!("{ctx:?}");
+        for word in ["секрет", "точки", "Telegram", "добрый"] {
+            assert!(!shown.contains(word), "{word} in {shown}");
+        }
+    }
+
+    /// A replacement habit puts its new words into a short phrase: "здравствуйте анна" → "Добрый день, Анна!" has one
+    /// word of three that was said, and used to fall back to the raw text.
+    #[test]
+    fn sanity_counts_the_words_of_the_habits_sent_as_said() {
+        let (raw, refined) = ("здравствуйте анна", "Добрый день, Анна!");
+        let said = vec!["добрый день".to_owned()];
+        assert!(!sanity_ok(raw, refined, &[], &s()), "without the habit: 1 of 3 words said");
+        assert!(sanity_ok_with(raw, refined, &[], &said, &s()));
+        assert!(sanity_ok_with(raw, refined, &terms(&["Soniox"]), &said, &s()), "with a dictionary too");
+        // Only the habit's own words count: an answer is still caught.
+        let answer = "Добрый день! Конечно, вот письмо Анне о встрече в четверг, с уважением и наилучшими пожеланиями.";
+        assert!(!sanity_ok_with(raw, answer, &[], &said, &s()));
+        // An unusable entry adds nothing.
+        assert!(!sanity_ok_with(raw, refined, &[], &["добрый\nдень".to_owned()], &s()));
+    }
     #[test]
     fn no_usable_terms_means_no_block() {
         assert_eq!(terms_prompt(&[], &[]), None);

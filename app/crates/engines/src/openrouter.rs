@@ -21,7 +21,7 @@ pub const API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 /// The public model list: no key, free.
 pub const MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 /// The app name in the `X-Title` header (OpenRouter statistics).
-const TITLE: &str = "CUE";
+pub(crate) const TITLE: &str = "CUE";
 
 /// Response budget headroom for a model whose reasoning cannot be turned off: it goes into the same `max_tokens`,
 /// otherwise the response is cut by length (like `THINKING_HEADROOM` for Claude).
@@ -182,6 +182,18 @@ impl Routing {
     }
 }
 
+/// The request's `provider` field: the fastest provider (`sort: latency`) of those that match `routing`.
+pub(crate) fn provider(routing: Routing) -> Value {
+    let mut provider = json!({ "sort": "latency" });
+    if routing.deny_data_collection {
+        provider["data_collection"] = json!("deny");
+    }
+    if routing.require_parameters {
+        provider["require_parameters"] = json!(true);
+    }
+    provider
+}
+
 /// Refine request body: the app's prompt (with the user's dictionary (`dict`), as for Claude), the [`max_tokens`] budget (with
 /// headroom if reasoning is mandatory), streaming, reasoning per [`Profile::reasoning`], the `{"text": …}` schema (the same
 /// as for Claude), routing per [`Routing`]. Without a cache mark the dictionary block follows the prompt in the same text.
@@ -211,20 +223,13 @@ pub fn request_body_styled(
     if let Job::Translate(_) = job {
         budget = claude::translation_budget(budget);
     }
-    let blocks = claude::system_blocks(dict, job, custom);
+    let blocks = claude::system_blocks(dict, &ctx.habits, job, custom);
     let system = if p.cache_mark {
         blocks
     } else {
         let texts: Vec<&str> = blocks.as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect();
         json!(texts.join("\n\n"))
     };
-    let mut provider = json!({ "sort": "latency" });
-    if routing.deny_data_collection {
-        provider["data_collection"] = json!("deny");
-    }
-    if routing.require_parameters {
-        provider["require_parameters"] = json!(true);
-    }
     let mut v = json!({
         "model": model,
         "messages": [
@@ -233,7 +238,7 @@ pub fn request_body_styled(
         ],
         "max_tokens": budget,
         "stream": true,
-        "provider": provider,
+        "provider": provider(routing),
     });
     if let Some(r) = p.reasoning.param() {
         v["reasoning"] = r;
@@ -347,7 +352,7 @@ async fn refine_at(
     match last {
         Some(Ok(c)) => {
             let usage = c.usage.map(claude_usage).unwrap_or_default();
-            claude::settle(raw, parse_content(&c.content, c.finish_reason.as_deref(), p.structured), dict, s, job, usage)
+            claude::settle(raw, parse_content(&c.content, c.finish_reason.as_deref(), p.structured), dict, &ctx.said, s, job, usage)
         }
         // A refusal before the stream: the key, a limit or the balance is the user's to fix.
         Some(Err(f)) => {
@@ -770,7 +775,7 @@ mod tests {
     const KEY: &str = "sk-or-v1-TEST-0123456789";
 
     fn ctx() -> RefineContext {
-        RefineContext { app: "Telegram Desktop".into(), before_cursor: None }
+        RefineContext { app: "Telegram Desktop".into(), before_cursor: None, ..Default::default() }
     }
 
     // ---- SSE ----

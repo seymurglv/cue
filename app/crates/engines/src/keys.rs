@@ -1,7 +1,9 @@
-//! API keys in Windows Credential Manager (service "CUE"): the keys of the cleanup's cloud connections.
+//! API keys in Windows Credential Manager (service "CUE"): the keys of the cleanup's cloud connections, and the habits'
+//! hash secret (`habit_secret`), under its own name; the same rule holds for it.
 //!
 //! A key's value never reaches the output, the log or an error text — only [`mask`].
 use crate::error::EngineError;
+use cue_core::habits::Secret;
 
 pub const SERVICE: &str = "CUE";
 
@@ -132,6 +134,73 @@ pub fn set(name: KeyName, value: &str) -> Result<(), EngineError> {
         .map_err(|e| write_error(name, e))
 }
 
+/// The habits' hash secret's entry in the store, beside the connections' keys (docs/specs/2026-11-04-habits.md).
+const HABIT_SECRET: &str = "habits-secret";
+
+/// The habits' hash secret as `habit_secret` found it.
+#[derive(Debug, PartialEq)]
+pub enum SecretRead {
+    /// The one the store keeps.
+    Kept(Secret),
+    /// None was kept, or what was kept is malformed: a new one, and whether the store took it.
+    Made { secret: Secret, saved: Result<(), EngineError> },
+}
+
+/// The secret the store gave back: 64 hex digits. Missing (`NoEntry`) or malformed (`BadEncoding`, or text that is not
+/// a secret) is none, and a new one is made. Any other error is the store that cannot be read: an error, and the secret
+/// kept there is left alone. The error text has keyring's reason only: `BadEncoding`'s `Debug` holds the stored bytes.
+fn kept_secret(read: Result<String, keyring::Error>) -> Result<Option<Secret>, EngineError> {
+    match read {
+        Ok(hex) => Ok(Secret::from_hex(hex.trim())),
+        Err(keyring::Error::NoEntry | keyring::Error::BadEncoding(_)) => Ok(None),
+        Err(e) => Err(EngineError::Service(format!("could not read the habits' secret: {e}"))),
+    }
+}
+
+/// 32 random bytes from the system.
+fn new_secret() -> Result<Secret, EngineError> {
+    let mut bytes = [0u8; cue_core::habits::SECRET_BYTES];
+    getrandom::fill(&mut bytes)
+        .map_err(|e| EngineError::Service(format!("no random bytes for the habits' secret: {e}")))?;
+    Ok(Secret::from_bytes(bytes))
+}
+
+/// The store's entry of the habits' hash secret, read.
+fn read_habit_secret() -> Result<String, keyring::Error> {
+    keyring::Entry::new(SERVICE, HABIT_SECRET).and_then(|e| e.get_password())
+}
+
+/// The habits' hash secret kept in the store, without making one (the leak scan): `Ok(None)` when it is missing or
+/// malformed, `Err` when the store cannot be read.
+pub fn kept_habit_secret() -> Result<Option<Secret>, EngineError> {
+    kept_secret(read_habit_secret())
+}
+
+/// What `habit_secret` does with the store's read: the secret kept; else, missing or malformed, one `make` gives,
+/// handed to `save`; an unreadable store is an error, and nothing is made or saved over what it keeps.
+fn secret_from(
+    read: Result<String, keyring::Error>,
+    make: impl FnOnce() -> Result<Secret, EngineError>,
+    save: impl FnOnce(&str) -> Result<(), keyring::Error>,
+) -> Result<SecretRead, EngineError> {
+    if let Some(secret) = kept_secret(read)? {
+        return Ok(SecretRead::Kept(secret));
+    }
+    let secret = make()?;
+    let saved =
+        save(&secret.to_hex()).map_err(|e| EngineError::Service(format!("could not save the habits' secret: {e}")));
+    Ok(SecretRead::Made { secret, saved })
+}
+
+/// The habits' hash secret: the one kept, else (missing or malformed) a new one, saved. A save that fails leaves the
+/// new one for this session (the next start makes another). `Err` when the store cannot be read (the secret is left
+/// unset for the session, nothing is written) or the system gives no random bytes. No text holds the secret.
+pub fn habit_secret() -> Result<SecretRead, EngineError> {
+    secret_from(read_habit_secret(), new_secret, |hex| {
+        keyring::Entry::new(SERVICE, HABIT_SECRET).and_then(|e| e.set_password(hex))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +293,67 @@ mod tests {
         assert!(msg.contains("anthropic") && msg.contains("denied"), "{msg}");
         let too_long = keyring::Error::TooLong("password encoded as UTF-16".into(), 2560);
         assert!(matches!(write_error(KeyName::OpenRouter, too_long), EngineError::Service(_)));
+    }
+
+    /// The habits' secret as the store gives it back. Missing or malformed, it is none and a new one is made; a store
+    /// that cannot be read is an error, which holds nothing the store keeps.
+    #[test]
+    fn a_kept_secret_reads_back_a_missing_or_malformed_one_is_none_and_an_unreadable_one_an_error() {
+        let secret = Secret::from_bytes([0x5c; 32]);
+        assert_eq!(kept_secret(Ok(secret.to_hex())), Ok(Some(secret.clone())));
+        assert_eq!(kept_secret(Ok(format!(" {}\r\n", secret.to_hex()))), Ok(Some(secret)));
+        assert_eq!(kept_secret(Err(keyring::Error::NoEntry)), Ok(None));
+        assert_eq!(kept_secret(Err(keyring::Error::BadEncoding(b"5c5c".to_vec()))), Ok(None));
+        assert_eq!(kept_secret(Ok("not a secret".into())), Ok(None));
+        let err = kept_secret(Err(platform_failure("boom"))).unwrap_err();
+        let EngineError::Service(msg) = &err else { panic!("expected Service, not {err:?}") };
+        assert!(msg.contains("habits' secret") && msg.contains("boom"), "{msg}");
+        let no_access = keyring::Error::NoStorageAccess(Box::new(std::io::Error::other("locked")));
+        assert!(matches!(kept_secret(Err(no_access)), Err(EngineError::Service(_))));
+    }
+
+    /// Only a missing or malformed secret is made anew and written; one that cannot be read is left alone: nothing is
+    /// made, nothing is written over it, and the session counts nothing.
+    #[test]
+    fn only_a_missing_or_malformed_secret_is_made_and_written() {
+        let made = Secret::from_bytes([0x11; 32]);
+        let run = |read: Result<String, keyring::Error>, save: Result<(), keyring::Error>| {
+            let (mut makes, mut writes) = (0, Vec::new());
+            let out = secret_from(
+                read,
+                || {
+                    makes += 1;
+                    Ok(made.clone())
+                },
+                |hex| {
+                    writes.push(hex.to_owned());
+                    save
+                },
+            );
+            (out, makes, writes)
+        };
+        let (out, makes, writes) = run(Err(platform_failure("boom")), Ok(()));
+        assert!(matches!(out, Err(EngineError::Service(_))), "{out:?}");
+        assert_eq!((makes, writes.len()), (0, 0), "an unreadable secret is never written over");
+        for read in [Err(keyring::Error::NoEntry), Err(keyring::Error::BadEncoding(b"x".to_vec())), Ok("zz".into())] {
+            let (out, makes, writes) = run(read, Ok(()));
+            assert_eq!(out, Ok(SecretRead::Made { secret: made.clone(), saved: Ok(()) }));
+            assert_eq!((makes, writes), (1, vec![made.to_hex()]));
+        }
+        let kept = Secret::from_bytes([0x5c; 32]);
+        let (out, makes, writes) = run(Ok(kept.to_hex()), Ok(()));
+        assert_eq!((out, makes, writes.len()), (Ok(SecretRead::Kept(kept)), 0, 0));
+        let (out, _, _) = run(Err(keyring::Error::NoEntry), Err(platform_failure("denied")));
+        let Ok(SecretRead::Made { saved: Err(EngineError::Service(msg)), .. }) = &out else { panic!("{out:?}") };
+        assert!(msg.contains("habits' secret") && msg.contains("denied"), "{msg}");
+    }
+
+    #[test]
+    fn a_new_secret_is_random_and_shows_nothing() {
+        let (a, b) = (new_secret().unwrap(), new_secret().unwrap());
+        assert!(a.is_set() && a != b);
+        assert_eq!(format!("{a:?}"), "Secret(..)");
+        let made = SecretRead::Made { secret: a.clone(), saved: Ok(()) };
+        assert!(!format!("{made:?}").contains(&a.to_hex()[..8]), "the secret made is not shown");
     }
 }

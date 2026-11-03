@@ -29,11 +29,27 @@ pub enum Mode {
     Ask,
 }
 
+/// A habit whose effect showed in an entry's text (docs/specs/2026-11-04-habits.md): its id, and its short name as it
+/// was then, so the entry's chip stays when the habit is forgotten.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HabitMark {
+    pub id: String,
+    pub short: String,
+}
+
+/// A short name may hold the words of a replacement: only its length.
+impl std::fmt::Debug for HabitMark {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HabitMark").field("id", &self.id).field("short_chars", &self.short.chars().count()).finish()
+    }
+}
+
 /// One result. `ts` is the local time it came, `YYYY-MM-DDTHH:MM:SS.mmm`, and its date names the day file; `id` is
 /// unique and starts with `ts` (`audio_file` has its form). `app` is the app the result went to, empty when not known.
 /// For "Ask", `question` is the question and `text` the answer or the text the model wrote. `raw` is the text as it was
 /// heard, before CUE cleaned it up — for a translation, the speech before it was translated. "Ask" has none (its
-/// question is as it was heard), and neither do the entries of earlier versions.
+/// question is as it was heard), and neither do the entries of earlier versions. `habits` are the habits whose effect
+/// showed in a dictation's text.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub id: String,
@@ -45,6 +61,8 @@ pub struct Entry {
     pub question: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub habits: Vec<HabitMark>,
 }
 
 impl std::fmt::Debug for Entry {
@@ -57,6 +75,7 @@ impl std::fmt::Debug for Entry {
             .field("text_chars", &self.text.chars().count())
             .field("question_chars", &self.question.as_ref().map(|q| q.chars().count()))
             .field("raw_chars", &self.raw.as_ref().map(|r| r.chars().count()))
+            .field("habits", &self.habits.len())
             .finish()
     }
 }
@@ -447,7 +466,7 @@ mod tests {
 
     fn entry(ts: &str, mode: Mode, text: &str) -> Entry {
         let (id, app) = (format!("{ts}-1"), "Notepad".into());
-        Entry { id, ts: ts.into(), mode, app, text: text.into(), question: None, raw: None }
+        Entry { id, ts: ts.into(), mode, app, text: text.into(), question: None, raw: None, habits: Vec::new() }
     }
 
     fn ask(ts: &str, question: &str, answer: &str) -> Entry {
@@ -1011,6 +1030,20 @@ mod tests {
             assert_eq!(date_minus(date, 1), None, "{date:?}");
         }
         assert_eq!(date_minus("0000-01-01", 1), None, "before year 0 there is no four-digit date");
+    }
+
+    /// The habits that shaped an entry: written only when there are some, read as none from an earlier line, and
+    /// shown in a log only by their count.
+    #[test]
+    fn an_entry_keeps_the_habits_that_shaped_it() {
+        let mut e = entry("2026-11-04T10:00:00.000", Mode::Dictation, "скинь файл");
+        let line = serde_json::to_value(&e).unwrap();
+        assert!(line.get("habits").is_none());
+        e.habits = vec![HabitMark { id: "h1".into(), short: "без точки".into() }];
+        let line = serde_json::to_string(&e).unwrap();
+        assert!(line.contains(r#""habits":[{"id":"h1","short":"без точки"}]"#), "{line}");
+        assert_eq!(serde_json::from_str::<Entry>(&line).unwrap(), e);
+        assert!(!format!("{e:?}").contains("точки"));
     }
 
     /// The text of an entry is the user's: a log shows only its length.

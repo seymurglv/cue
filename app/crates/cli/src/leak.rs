@@ -10,10 +10,11 @@
 //!   `/c/Users/<name>`), an email address, and an Anthropic or OpenRouter key (`sk-ant-` or `sk-or-` and 40 characters
 //!   more: the made-up keys of the tests are shorter);
 //! - exact matches with what this computer holds, read into memory for the scan only: the keys saved in Credential
-//!   Manager, the history texts, questions and texts as heard of the last 31 days (12 characters or longer), the
-//!   dictionary terms and the microphone names (4 or longer), the Windows user name, computer name and profile path,
-//!   the git user name and email, and the private folders the repository's `.git/info/exclude` names (its folder
-//!   lines, 4 characters or longer);
+//!   Manager (the habits' hash secret among them), the history texts, questions and texts as heard of the last 31
+//!   days (12 characters or longer), the dictionary terms, the habits' examples, replaced words and short names, and
+//!   the microphone names (4 or longer), the Windows user name, computer name and profile path, the git user name and
+//!   email, and the private folders the repository's `.git/info/exclude` names (its folder lines, 4 characters or
+//!   longer);
 //! - recordings: an Ogg stream whose first page holds `OpusHead` (the history's recordings) and a RIFF `WAVE` file
 //!   with its format chunk (the WAVs CUE records, the bench's), at the start of a file or anywhere in one — a file an
 //!   installer stores as it is starts there;
@@ -63,8 +64,12 @@ pub enum Kind {
     ComputerName,
     PrivateFolder(usize),
     SavedKey(&'static str),
+    /// The habits' hash secret, as Credential Manager keeps it (64 hex digits).
+    HabitSecret,
     HistoryText,
     DictionaryTerm(usize),
+    HabitExample(usize),
+    HabitWords(usize),
     MicrophoneName,
     GitName,
     GitEmail,
@@ -83,8 +88,11 @@ impl fmt::Display for Kind {
             Kind::ComputerName => f.write_str("the computer name"),
             Kind::PrivateFolder(i) => write!(f, "private folder {} of .git/info/exclude", i + 1),
             Kind::SavedKey(name) => write!(f, "the saved {name} key"),
+            Kind::HabitSecret => f.write_str("the habits' secret"),
             Kind::HistoryText => f.write_str("a history text"),
             Kind::DictionaryTerm(i) => write!(f, "dictionary term {}", i + 1),
+            Kind::HabitExample(i) => write!(f, "habit example {}", i + 1),
+            Kind::HabitWords(i) => write!(f, "the words or short name of habit {}", i + 1),
             Kind::MicrophoneName => f.write_str("a microphone name"),
             Kind::GitName => f.write_str("the git user name"),
             Kind::GitEmail => f.write_str("the git email"),
@@ -135,11 +143,15 @@ impl Private {
     pub fn summary(&self) -> String {
         let yes_no = |b: bool| if b { "yes" } else { "no" };
         format!(
-            "saved keys {}, history texts {}, dictionary terms {}, microphone names {}, user name {}, computer name \
-             {}, profile path {}, git name {}, git email {}, private folders {}",
+            "saved keys {}, habits' secret {}, history texts {}, dictionary terms {}, habit examples {}, habit words {}, \
+             microphone names {}, user name {}, computer name {}, profile path {}, git name {}, git email {}, private \
+             folders {}",
             self.count(|k| matches!(k, Kind::SavedKey(_))),
+            yes_no(self.count(|k| *k == Kind::HabitSecret) > 0),
             self.count(|k| *k == Kind::HistoryText),
             self.count(|k| matches!(k, Kind::DictionaryTerm(_))),
+            self.count(|k| matches!(k, Kind::HabitExample(_))),
+            self.count(|k| matches!(k, Kind::HabitWords(_))),
             self.count(|k| *k == Kind::MicrophoneName),
             yes_no(self.user_name.is_some()),
             yes_no(self.computer_name.is_some()),
@@ -148,6 +160,29 @@ impl Private {
             yes_no(self.count(|k| *k == Kind::GitEmail) > 0),
             self.count(|k| matches!(k, Kind::PrivateFolder(_))),
         )
+    }
+
+    /// The habits' texts that are the user's: the example, a replacement's words (words of the example, also alone)
+    /// and a short name the cleanup wrote. A short name the template writes for the habit's forms is literals in
+    /// cue.exe (`habits::template`), and so are most rules: neither is looked for. A rule or short name can still hold
+    /// the user's words, which its example or replacement holds too.
+    fn add_habits(&mut self, list: &[cue_core::habits::Habit]) {
+        use cue_core::habits::{template, Form};
+        for (i, habit) in list.iter().enumerate() {
+            for text in [&habit.before, &habit.after] {
+                self.add(Kind::HabitExample(i), text, MIN_NAME_CHARS);
+            }
+            for form in &habit.forms {
+                if let Form::Replacement { from, to } = form {
+                    self.add(Kind::HabitWords(i), from, MIN_NAME_CHARS);
+                    self.add(Kind::HabitWords(i), to, MIN_NAME_CHARS);
+                }
+            }
+            let templated = ["en", "ru"].iter().any(|lang| template(&habit.forms, None, lang).short == habit.short.trim());
+            if !templated {
+                self.add(Kind::HabitWords(i), &habit.short, MIN_NAME_CHARS);
+            }
+        }
     }
 
     /// Reads what this computer holds. Every error text names the store or the file, never a value: the settings
@@ -160,6 +195,12 @@ impl Private {
                 Ok(None) => {}
                 Err(e) => bail!("could not read the saved keys: {e}"),
             }
+        }
+        // The habits' hash secret, as the store keeps it (never made here); missing or malformed, there is none.
+        match keys::kept_habit_secret() {
+            Ok(Some(secret)) => private.add(Kind::HabitSecret, &secret.to_hex(), 1),
+            Ok(None) => {}
+            Err(e) => bail!("could not read the saved keys: {e}"),
         }
 
         let local = cue_core::paths::local_app_data().context("LOCALAPPDATA is not set or is not an absolute path")?;
@@ -181,6 +222,7 @@ impl Private {
             private.add(Kind::DictionaryTerm(after + i), &learned.word, MIN_NAME_CHARS);
             private.add(Kind::DictionaryTerm(after + i), &learned.heard, MIN_NAME_CHARS);
         }
+        private.add_habits(&settings.habits.list);
         let mut microphones: Vec<String> = settings.audio.device.into_iter().collect();
         microphones.extend(cue_platform_win::mic::listed_names().context("Windows did not list the microphones")?);
         microphones.extend(cue_platform_win::mic::default_name());
@@ -876,6 +918,37 @@ mod tests {
         assert_eq!(looked_for, ["Meet Jane at the station", "Kubernetes"]);
     }
 
+    /// A habit's example, a replacement's words and a short name the cleanup wrote are the user's; the words the
+    /// template writes for an end mark are literals in cue.exe, and are not findings.
+    #[test]
+    fn a_habits_example_and_words_are_found_but_not_the_templates() {
+        use cue_core::habits::{Form, Habit};
+        let habit = |forms: Vec<Form>, rule: &str, short: &str, before: &str, after: &str| Habit {
+            id: "h1".into(),
+            forms,
+            rule: rule.into(),
+            short: short.into(),
+            before: before.into(),
+            after: after.into(),
+            app: Some("Telegram".into()),
+            n: 3,
+            on: true,
+        };
+        let stop = Form::EndMark { mark: '.', removed: true };
+        let stop = habit(vec![stop], "В Telegram: без точки в конце", "без точки", "Скинь отчёт.", "скинь отчёт");
+        let hello = Form::Replacement { from: "здравствуйте".into(), to: "добрый день".into() };
+        let hello = habit(vec![hello], "В Telegram — «добрый день»", "приветствие", "Здравствуйте, Анна", "Добрый день, Анна");
+        let mut private = Private::default();
+        private.add_habits(&[stop, hello]);
+        let s = Scanner::new(&private).unwrap();
+        assert_eq!(kinds(&s.scan("msg: скинь отчёт".as_bytes())), [Kind::HabitExample(0)]);
+        assert_eq!(s.scan("без точки в конце | без точки | no full stop".as_bytes()), [], "the template's words");
+        assert_eq!(kinds(&s.scan("x здравствуйте".as_bytes())), [Kind::HabitWords(1)]);
+        assert_eq!(kinds(&s.scan("x добрый день".as_bytes())), [Kind::HabitWords(1)]);
+        assert_eq!(kinds(&s.scan(&utf16le("x приветствие"))), [Kind::HabitWords(1)], "a short name the cleanup wrote");
+        assert_eq!(Kind::HabitWords(1).to_string(), "the words or short name of habit 2");
+    }
+
     #[test]
     fn the_public_name_passes_in_words_but_not_in_a_path_or_an_address() {
         let s = scanner(&[], Some(PUBLIC));
@@ -1129,6 +1202,7 @@ mod tests {
             text: text.into(),
             question: question.map(str::to_owned),
             raw: None,
+            habits: Vec::new(),
         };
         let heard =
             |date: &str, text: &str, raw: &str| history::Entry { raw: Some(raw.into()), ..entry(date, text, None) };
@@ -1182,8 +1256,12 @@ mod tests {
         let shown = format!("{private:?} {}", private.summary());
         assert!(!shown.contains("made-up"), "{shown}");
         assert!(!shown.contains("jdoe") && !shown.to_lowercase().contains("desktop"), "{shown}");
-        assert!(shown.contains("saved keys 1, history texts 1"), "{shown}");
+        assert!(shown.contains("saved keys 1, habits' secret no, history texts 1"), "{shown}");
         assert!(shown.contains("computer name yes") && shown.contains("private folders 1"), "{shown}");
+        private.add(Kind::HabitSecret, &"5c".repeat(32), 1);
+        let shown = format!("{private:?}");
+        assert!(shown.contains("saved keys 1, habits' secret yes") && !shown.contains("5c5c"), "{shown}");
+        assert_eq!(Kind::HabitSecret.to_string(), "the habits' secret");
         assert_eq!(Kind::ComputerName.to_string(), "the computer name");
         assert_eq!(Kind::SavedKey("soniox").to_string(), "the saved soniox key");
         assert_eq!(Kind::DictionaryTerm(2).to_string(), "dictionary term 3");

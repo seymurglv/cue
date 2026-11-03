@@ -21,6 +21,7 @@ const IC={
  tr:SV('<path d="M4 7h11.5M12.5 4l3 3-3 3M16 13H4.5M7.5 10l-3 3 3 3"/>'),
  ask:SV('<path d="M10 3.8v12.4M4.6 6.9l10.8 6.2M15.4 6.9 4.6 13.1"/>'),
  book:SV('<path d="M4 4.8A1.8 1.8 0 0 1 5.8 3H16v11.5H5.8A1.8 1.8 0 0 0 4 16.3zM4 16.3A1.8 1.8 0 0 0 5.8 18H16"/><path d="M10 6.2v5M7.5 8.7h5"/>'),
+ habit:SV('<path d="M4 16.2c2.2-.2 3.6-1 4.8-2.2l6.6-6.6a1.6 1.6 0 0 0-2.3-2.3L6.5 11.7C5.3 12.9 4.5 14.3 4.3 16"/><path d="M15.6 12.6v3M14.1 14.1h3"/>'),
  copy:SV('<rect x="7" y="7" width="9.5" height="10" rx="2"/><path d="M13 7V5a2 2 0 0 0-2-2H5.5a2 2 0 0 0-2 2v6.5a2 2 0 0 0 2 2H7"/>'),
  key:SV('<rect x="2.8" y="5.5" width="14.4" height="9" rx="2"/><path d="M6 8.6h.01M9 8.6h.01M12 8.6h.01M14.4 8.6h.01M6.8 11.6h6.4"/>'),
  timer:SV('<circle cx="10" cy="11" r="6"/><path d="M10 8v3.2l2 1.3M8 2.8h4"/>'),
@@ -59,7 +60,7 @@ class Drop{
   P('sbk',`<span class="mi sbk">${IC.book}</span>`);P('swd','<span class="lab swd"></span>');
   P('sbt','<button class="ib solid sbt"></button>');
   this.dot=el('<i class="sgdot" aria-hidden="true"></i>');this.root.append(this.dot);
-  this.word='';this.missed=false;this.peek=false;
+  this.word='';this.missed=false;this.peek=false;this.aw=false;
   /* The suggestion's time: a timer the mouse over the Drop pauses (sgLeft ms left, counted from sgFrom while it runs).
      The ring only draws it, and with reduced motion it stands still. */
   this.sgLeft=0;this.sgFrom=0;this.sgTimer=null;
@@ -76,7 +77,8 @@ class Drop{
    this.parts.bx.addEventListener('click',()=>api.onEsc());this.parts.ok.addEventListener('click',()=>api.onPress());
    for(const k of ['act','undo','retry'])this.parts[k].addEventListener('click',()=>api.onAction());
    this.parts.sbt.addEventListener('click',()=>{const f=api.onSuggest||(()=>{});if(this.s==='sugg'){this.missed=false;this.peek=false;f('add');this.enter('added')}else if(this.s==='added')f('undo')});
-   this.p.addEventListener('mouseenter',()=>{if(this.missed&&this.s==='idle'){this.peek=true;this.enter('sugg')}});
+   /* a tray card open over the Drop (a habit's) keeps the missed suggestion's capsule closed */
+   this.p.addEventListener('mouseenter',()=>{if(this.missed&&this.s==='idle'&&!this.aw){this.peek=true;this.enter('sugg')}});
    this.p.addEventListener('mouseleave',()=>{if(this.peek&&this.s==='sugg'){this.peek=false;this.enter('idle')}});
    this.p.addEventListener('mouseenter',()=>{this.hov=true;this.sgPause();this.layout()});this.p.addEventListener('mouseleave',()=>{this.hov=false;this.sgRun();this.layout()});
   }
@@ -132,7 +134,7 @@ class Drop{
   if(this.missed){if(this.s==='sugg'||this.s==='added')this.enter('idle');else this.layout()}
   else if(this.s==='idle'||this.s==='sugg')this.enter('sugg');else this.layout()}
  unoffer(){this.word='';this.missed=false;this.peek=false;if(this.s==='sugg'||this.s==='added')this.enter('idle');else this.layout()}
- away(b){this.p.classList.toggle('away',b)}
+ away(b){this.aw=!!b;this.p.classList.toggle('away',b)}
  size(){return {w:this.p.offsetWidth,h:this.p.offsetHeight}}
  frame(now){const v=this.api.voice;this.morph.tick(now,v.lvl,v.jit)}
 }

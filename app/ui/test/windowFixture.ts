@@ -59,13 +59,19 @@ export function view(over: Partial<api.SettingsView> = {}): api.SettingsView {
     connections: CONNECTIONS,
     learned: [],
     learn: true,
+    habits: [],
     ...over,
   };
 }
 
+/** A habit as the core lists it. */
+export function habit(id: string, over: Partial<api.HabitView> = {}): api.HabitView {
+  return { id, rule: 'In Telegram — lower case and no full stop', before: 'Send the file.', after: 'send the file', app: 'Telegram', n: 3, on: true, ...over };
+}
+
 export function entry(id: string, text: string, over: Partial<api.EntryView> = {}): api.EntryView {
   const time = id.slice(11, 16);
-  return { id, time, mode: 'dictation', app: '', text, question: null, raw: null, hasAudio: false, ...over };
+  return { id, time, mode: 'dictation', app: '', text, question: null, raw: null, hasAudio: false, habits: [], ...over };
 }
 
 /** The 25 languages of Parakeet v3 and Ultra. */
@@ -118,6 +124,19 @@ export function stub(settings: api.SettingsView = view()): void {
     }
     if (c.kind === 'dictRemove') {
       now = { ...now, dictionary: now.dictionary.filter((w) => w !== c.value), learned: now.learned.filter((l) => l.word !== c.value) };
+      return now;
+    }
+    // The habits as the core keeps them: one switched in place, one forgotten, or all.
+    if (c.kind === 'habitOn') {
+      now = { ...now, habits: now.habits.map((x) => (x.id === c.value.id ? { ...x, on: c.value.on } : x)) };
+      return now;
+    }
+    if (c.kind === 'habitForget') {
+      now = { ...now, habits: now.habits.filter((x) => x.id !== c.value) };
+      return now;
+    }
+    if (c.kind === 'habitsForget') {
+      now = { ...now, habits: [] };
       return now;
     }
     now = { ...now, [c.kind]: c.value };

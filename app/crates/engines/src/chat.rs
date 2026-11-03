@@ -43,7 +43,7 @@ pub fn request_body(
     if let Job::Translate(_) = job {
         budget = claude::translation_budget(budget);
     }
-    let blocks = claude::system_blocks(dict, job, custom);
+    let blocks = claude::system_blocks(dict, &ctx.habits, job, custom);
     let mut texts: Vec<&str> = blocks.as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect();
     if c.answer == Answer::Object {
         texts.push(OBJECT_NOTE);
@@ -97,7 +97,7 @@ fn request_timeout_ms(c: &Connection, raw: &str, job: Job) -> u64 {
 }
 
 /// A POST to the service's chat completions with the key (if there is one) and the connection's own headers.
-fn post(http: &reqwest::Client, c: &Connection, address: &str, key: &str) -> reqwest::RequestBuilder {
+pub(crate) fn post(http: &reqwest::Client, c: &Connection, address: &str, key: &str) -> reqwest::RequestBuilder {
     let mut req = http.post(format!("{address}/chat/completions"));
     if !key.is_empty() {
         req = req.bearer_auth(key);
@@ -165,7 +165,7 @@ async fn refine_job(
     match last {
         Some(Ok(done)) => {
             let usage = done.usage.map(openrouter::claude_usage).unwrap_or_default();
-            claude::settle(raw, parse_content(&done.content, done.finish_reason.as_deref(), true), dict, s, job, usage)
+            claude::settle(raw, parse_content(&done.content, done.finish_reason.as_deref(), true), dict, &ctx.said, s, job, usage)
         }
         // A refusal before the stream: the key, a limit or the balance is the user's to fix.
         Some(Err(f)) => {
@@ -193,7 +193,7 @@ mod tests {
     const RAW: &str = "ну привет как дела";
 
     fn ctx() -> RefineContext {
-        RefineContext { app: "Telegram Desktop".into(), before_cursor: None }
+        RefineContext { app: "Telegram Desktop".into(), before_cursor: None, ..Default::default() }
     }
 
     fn body(id: &str, job: Job) -> Value {
@@ -252,6 +252,15 @@ mod tests {
         let to_en = body("openai", Job::Translate("en"));
         assert_eq!(to_en["messages"][0]["content"], format!("{SYSTEM_PROMPT}\n\n{}", translate::instruction("en")));
         assert_eq!(to_en["max_completion_tokens"], u64::from(max_tokens(RAW)) * 2);
+    }
+
+    #[test]
+    fn habits_ride_in_the_system_message() {
+        let c = find("openai").unwrap();
+        let with = RefineContext { habits: vec!["No full stop".into()], ..ctx() };
+        let v = request_body(c, "gpt-6-luna", RAW, &with, &Default::default(), Job::Rewrite, None);
+        let block = cue_core::refine::habits_prompt(&with.habits).unwrap();
+        assert_eq!(v["messages"][0]["content"], format!("{SYSTEM_PROMPT}\n\n{block}\n\n{BOLD_PROMPT}"));
     }
 
     #[test]

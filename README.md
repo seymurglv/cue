@@ -86,7 +86,14 @@ question cost, on your computer only (`usage.csv`, see [Costs](#costs)).
   pasted into for up to a minute after each dictation or translation, to notice a word you corrected. The text stays in
   memory: nothing of it is written to disk, to the log or sent anywhere. A word goes into the dictionary only when you
   press **+** on the Drop; from then on the cleanup's connection gets it with the dictionary, with how it was heard.
-  Password fields, CUE's own windows and "Ask" answers are never read.
+  When you correct the same thing a few times, CUE keeps it as a habit: the words around the correction (at most 40
+  characters before and after it) are the only text of a correction it writes to disk. What it counts on the way is
+  kept by a hash made with a random secret of this computer, which Windows Credential Manager keeps beside the keys
+  (never in `settings.json`), so a copy of the file does not tell which words were counted. The cleanup's connection
+  receives the words around the correction once, with the kind of the correction and the app's name, to word the
+  habit's rule; it already received that text when you dictated it. From then on the rule goes with every cleanup
+  request of a dictation in that app, or in every app once the habit holds everywhere. Password fields, CUE's own
+  windows and "Ask" answers are never read.
 - The microphone is open only while CUE records, and while a window shows its level for you to check it.
 - Your history, with the recordings of what you said for the period you choose, settings, logs and the copy of your
   last dictation stay on this computer. CUE has no telemetry: it connects only to the cleanup's connection, to
@@ -111,7 +118,8 @@ the installer's registry key (the last line). To remove everything:
 - the keys: in **Control Panel → Credential Manager → Windows Credentials**, remove under Generic Credentials each
   one named after a connection: `anthropic.CUE`, and those of the others you saved a key for, `openrouter.CUE`,
   `openai.CUE`, `gemini.CUE`, `deepseek.CUE`, `mistral.CUE`, `groq.CUE` and `xai.CUE` (the `soniox.CUE` of earlier
-  versions is already gone: CUE deletes it at its first start);
+  versions is already gone: CUE deletes it at its first start), and `habits-secret.CUE`, the secret the habits' counts
+  are hashed with;
 - the registry key `HKEY_CURRENT_USER\Software\seymurglv`, named after CUE's publisher, where the installer remembers
   the folder CUE was installed in and whether Start at sign-in was on: in Registry Editor.
 
@@ -252,9 +260,9 @@ from source.
     `Ctrl + Win + Shift`, any of the 60), **History** (**Keep history**: Forever, A year, A month (the default), A week
     or Don't keep, older days deleted on their own; **Keep recordings**: A day, A week (the default), A month or Don't
     keep, never longer than the history itself; a shorter period deletes the older ones at once; **Clear history**
-    needs a second press), **General** (Start at sign-in; **Learn from me**, see "Words from your corrections"). A
-    change takes effect at once, without a restart, and is written to `settings.json`.
-- **Words from your corrections** (**Learn from me** in the General settings, on by default). After CUE pastes a
+    needs a second press), **General** (Start at sign-in). A change takes effect at once, without a restart, and is
+    written to `settings.json`.
+- **Words from your corrections** (**Learn from me** in the Habits section's heading, on by default). After CUE pastes a
   dictation or a translation, it reads the field for up to a minute, to see whether you changed a word. When you write
   a name or a term in place of what CUE heard ("Марисоль" → "Marisol"), a couple of seconds after you stop typing the
   Drop grows into a capsule with the word and **+**; a ring around **+** runs out in 8 s, and hovering pauses it. **+**
@@ -263,6 +271,31 @@ from source.
   hovering the Drop opens the capsule again. The cleanup then gets the word with how it was heard ("Marisol — sounds
   like «Марисоль»"). Turned off, no field is read. Only fields that give their text to Windows can be read: where one
   does not (Telegram, some fields inside web pages), nothing is offered.
+- **Habits** (the main window's Habits section, after the Dictionary). The same watch notices how you correct the text
+  of a dictation in an app: the end mark added or taken off, the first letter's case, a word written another way
+  ("здравствуйте" → "добрый день"), numbers as digits, a dash in place of a hyphen. When the same correction has been
+  made three times in one app, CUE keeps it as a habit and says so once: a "New habit" card grows out of the Drop with
+  the rule in a sentence ("In Telegram — lower case and no full stop") and **Undo**, which forgets the habit and never
+  learns that correction again. The card closes by itself after 7 s, and hovering it pauses that; it waits until the
+  Drop is at rest, and never opens together with a dictionary suggestion (the one found first goes first). From then on
+  the habit goes into the cleanup of that app's dictations, to write the text your way (translations and "Ask" take
+  none). When all of a habit's corrections come together in one dictation three times in another app, the habit holds in
+  every app: its row says so, and no card opens. One of them alone there counts for that app, and can become that app's
+  own habit. The same correction learned in two apps makes two habits, one in each; once it holds in every app, they
+  are one. When you go back on a habit in its app three times (the full stop it takes off added again, the capital
+  back, the old words back), the habit changes: the old one goes, the new one is learned, and a "Habit changed" card
+  says the new rule; its **Undo** brings the old habit back as it was and never learns the new one (when the
+  correction only added to a habit already kept, **Undo** brings that habit back as it was, too, and forgets
+  nothing). A habit of every app
+  changes the same way, from three times in any one app, and the change holds everywhere. Two opposite habits never live
+  together, so a habit with an opposite in some app does not spread to every app. The section lists the habits, the
+  newest first, each with its rule, the example, the app, how many times it was corrected and a switch; **Forget** shows
+  on hover, and **Forget all** (a second press confirms it) forgets them all and what was counted. With **Learn from
+  me**, whose switch sits in the section's heading, turned off, the rows are muted and nothing is learned or applied;
+  with no cleanup connected (the chosen connection is a cloud one with no key), a line says that habits work when the
+  cleanup is on. In the History, an entry lists a habit whose effect the cleanup brought (its text shows it, and what
+  you said did not) under how you said it, as a chip with the habit's short name ("без точки"); a habit forgotten later
+  keeps its chip as it was.
 - **A pinned microphone.** A microphone chosen in the settings stays CUE's even when Windows changes its default (a
   headset plugged in, say). When it is not connected, CUE records from the Windows microphone, and a card says so once:
   "*name* not found — recording from *name*".
@@ -300,7 +333,9 @@ The first build downloads ONNX Runtime's prebuilt library, which the `ort` crate
 
 Keys live in Windows Credential Manager under the service name `CUE`, each under its connection's id (`anthropic`,
 `openrouter`, `openai`, `gemini`, `deepseek`, `mistral`, `groq`, `xai`; Credential Manager shows them as
-`anthropic.CUE` and so on). They are never written to files, never printed in full and never logged. Enter a key once
+`anthropic.CUE` and so on). Beside them, `habits-secret` (`habits-secret.CUE`) keeps the random secret the habits'
+counts are hashed with (see [Privacy in detail](#privacy-in-detail)); CUE makes it itself. They are never written to
+files, never printed in full and never logged. Enter a key once
 in the main window (Settings → Cleanup: choose the connection, paste the key and press **Check**), the Anthropic key
 also in the welcome window, or with the command-line tool (input is hidden):
 
@@ -393,14 +428,16 @@ email address by chance: before it leaves this computer, unpack it by hand and s
 
 `leak-scan` looks for paths into a user profile (also URL-encoded), the Windows user name and computer name, email
 addresses and API keys, for exact copies of the keys saved in Credential Manager, the history of the last 31 days, the
-dictionary terms, the microphone names, the git name and email and the private folders that `.git/info/exclude` names
-(its lines ending with `/`), for recordings (Ogg Opus and WAV, also stored inside an installer), and, in text files,
-for long random-looking strings. It prints the file, the offset and the kind of each finding, never the finding
-itself. It exits with 1 when it found anything, and with 2 when it could not read what to look for (a key, the
-settings, the history, the microphone list, git) or a given path, or a given path holds no file. The installer script
-that Tauri writes for the build (`target\dist\release\nsis\x64\installer.nsi`) names files of this computer in its
-`File`, `!include`, icon and path `!define` lines: makensis reads them and stores none of those paths, which the scan
-of the uncompressed installer confirms.
+dictionary terms, the habits' examples (`before` and `after`), the words of their replacements and the short names the
+cleanup wrote (not the rules, nor a short name the template wrote: those are mostly CUE's own words), the microphone
+names, the git name and email and the private folders that `.git/info/exclude` names (its lines ending with `/`), for
+recordings (Ogg Opus and WAV, also stored inside an installer), and, in text files, for long random-looking strings. It
+prints the file, the offset and the kind of each finding, never the finding itself. It exits with 1 when it found
+anything, and with 2 when it could not read what to look for (a key, the settings, the history, the microphone list,
+git) or a given path, or a given path holds no file. The installer script that Tauri writes for the build
+(`target\dist\release\nsis\x64\installer.nsi`) names files of this computer in its `File`, `!include`, icon and path
+`!define` lines: makensis reads them and stores none of those paths, which the scan of the uncompressed installer
+confirms.
 
 Tests and lints:
 
@@ -504,8 +541,23 @@ history is neither written nor cleaned up until a period is chosen in the window
   «Марисоль»"). Removing a word from the main window's Dictionary removes it from both lists. Anything in `learned` that
   is not a word with its `heard` is skipped, and the list is kept in the file only when it is not empty.
 - `learn.enabled` (default `true`): `false` turns "Learn from me" off, and CUE then reads no field after a paste. Only
-  `false` turns it off; any other value reads as on, and the default is not written to the file. The General settings
-  set it too. Example: `"learn": { "enabled": false }`.
+  `false` turns it off; any other value reads as on, and the default is not written to the file. The switch in the
+  Habits section's heading sets it too. `false` also stops habits from being counted, learned and applied. Example:
+  `"learn": { "enabled": false }`.
+- `habits`: what "Learn from me" noticed in the way you correct dictations. Each list is kept in the file only when it
+  is not empty, and anything in it that does not read is skipped.
+  - `seen`: how many times a correction was made in an app, for the habits to come: `{ app, form, n, last }`, the
+    form by its hash (made with this computer's secret) and no text. A count not seen for 30 days is dropped, and at
+    most 300 are kept; a habit's whole set corrected together in another app is counted as one entry, under the
+    habit's id.
+  - `list`: the habits, newest first, at most 50: `{ id, forms, rule, short, before, after, app, n, on }`. `forms` are
+    the kinds of correction with their details, `rule` the sentence the cleanup follows, `short` its short name,
+    `before` and `after` the example (at most 40 characters on each side), `app` the app it holds in (none: everywhere),
+    `n` how many times it was corrected and `on` its switch. The example is the only text of a correction that CUE
+    writes to disk: a replacement's form holds the words it replaced and the ones written instead, which are words of
+    its example (`{ "kind": "replacement", "from": "здравствуйте", "to": "добрый день" }`).
+  - `declined`: the hashes of corrections never to learn again (a habit that was undone or forgotten). **Forget all**
+    empties it.
 - `translate`: the language pair of `Ctrl + Win + Shift`, as the ISO 639-1 codes of the 60 languages CUE knows
   (`en`, `ru`, `de`, `zh`, …). Case and surrounding spaces do not matter, and a locale name reads as its language
   (`"ru-RU"` is `ru`).
@@ -673,12 +725,13 @@ whether the model wrote such words (`text_before_search`) and the error codes of
   list of files; nothing else of yours goes with either.
 - **The cleanup's connection** (Anthropic by default, or the one chosen in the Cleanup settings) receives the
   transcript, the app name, up to `refine.context_chars` (500) characters of text before the caret, your
-  `dictionary.terms` (for a word added from a correction, also how it was heard, `dictionary.learned`) and, with the
-  Custom style, your instructions. Nothing is read from password fields, and the window title is never sent. A
-  translation goes in the same kind of request to the same connection, with the target language added. Through
-  OpenRouter, CUE first asks for providers that do not store requests for training, and only when none of them can
-  take the request, for any provider. Ollama and LM Studio get the request at the address in the Cleanup settings, on
-  this computer unless you change it, so the text then stays here.
+  `dictionary.terms` (for a word added from a correction, also how it was heard, `dictionary.learned`), the rules of the
+  habits that are on for the dictation's app (see Habits below) and, with the Custom style, your instructions. Nothing
+  is read from password fields, and the window title is never sent. A translation goes in the same kind of request to
+  the same connection, with the target language added. Through OpenRouter, CUE first asks for providers that do not
+  store requests for training, and only when none of them can take the request, for any provider. Ollama and LM Studio
+  get the request at the address in the Cleanup settings, on this computer unless you change it, so the text then stays
+  here.
 - **Anthropic, when the cleanup goes through it**: while you record, CUE also sends an empty `HEAD` request without a
   key to open the connection early, so cleanup starts faster. When a dictation starts four minutes or more after the
   last cleanup, CUE sends a cache warm-up: the cleanup request with your dictionary (as the cleanup gets it) and a
@@ -711,6 +764,23 @@ whether the model wrote such words (`text_before_search`) and the error codes of
   dropped: it is not written to a file, not sent anywhere, and not logged. The log gets whether a correction was found
   and numbers (characters, candidates). A word reaches `settings.json` only when you press **+**; **Undo**, or removing
   it from the Dictionary, takes it out again with how it was heard.
+- **Habits.** A dictation's correction is also read for habits, in memory, and counted by hash: `settings.json` keeps
+  the app's name, the hash of the kind of correction, a number and a day, no text. The hash is made with a random secret
+  of this installation (32 bytes, an HMAC), kept in Windows Credential Manager under `habits-secret` beside the keys,
+  never in `settings.json` or the log. When it is missing or malformed, CUE makes a new one at start and drops the
+  counts and the declined corrections (their hashes no longer match); the habits keep working. When Credential Manager
+  cannot be read, the secret kept there is left alone and nothing is counted until the next start. When a correction
+  reaches three in an app, the habit keeps in `settings.json` its rule, its short name and an example: the words around
+  the correction, at most 40 characters on each side, which is the only text of a correction written to disk. The
+  cleanup's connection receives that example once to word the rule, in a short request with the kind of the correction,
+  the example and the app's name, nothing else; it is not written to `usage.csv`. Through OpenRouter it goes only to
+  providers that do not store requests for training, and when none can take it, the rule comes from a template. It is
+  not sent at all without a cleanup connection that can be asked (a cloud one with no key): the rule then comes from the
+  template too, as it does when the answer does not come in 5 s. The rules of the habits that are on go with every
+  cleanup request of a dictation in their app, and those of every app with all, as one line each; translations and "Ask"
+  get none. The log gets "habit forms counted" and "habit learned" with the kinds and numbers, no text. **Learn from
+  me** turned off stops all of it: no field is read, nothing is counted or learned, and no habit goes into a request.
+  **Forget** and **Forget all**, or **Undo** on the card, remove a habit with its example.
 - **Inside CUE:** the Drop and the card windows get the text of the question and the answer, the card's short quote of
   the selection (40 characters at most), and the titles and sites of the sources, to draw them; never the addresses. A
   click on a source asks the core to open it, and the core opens only `http` and `https` pages, in the default browser.

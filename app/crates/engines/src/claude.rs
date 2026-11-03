@@ -1,7 +1,7 @@
 //! Refine through Claude. Never "fails": on any problem it returns the raw text and the reason.
 use cue_core::flow::RefineOutcome;
 use cue_core::refine::{
-    max_tokens, sanity_ok, strip_markup, terms_prompt, tidy_list_items, timeout_ms, user_message, RefineContext, BOLD_PROMPT,
+    max_tokens, sanity_ok_with, strip_markup, habits_prompt, terms_prompt, tidy_list_items, timeout_ms, user_message, RefineContext, BOLD_PROMPT,
     CUSTOM_PREAMBLE, SYSTEM_PROMPT,
 };
 use cue_core::settings::{DictionarySettings, RefineSettings};
@@ -17,7 +17,7 @@ pub const API_VERSION: &str = "2026-10-21";
 pub(crate) const THINKING_HEADROOM: u32 = 2_048;
 
 /// How to turn thinking off: Haiku — `disabled`, Sonnet 5.5 — `between_tools`, Opus 5.5 — not possible (the field is omitted).
-fn thinking_for(model: &str) -> Option<Value> {
+pub(crate) fn thinking_for(model: &str) -> Option<Value> {
     if model.starts_with("claude-haiku") {
         Some(json!({ "type": "disabled" }))
     } else if model.starts_with("claude-sonnet-5-5") {
@@ -28,7 +28,7 @@ fn thinking_for(model: &str) -> Option<Value> {
 }
 
 /// The request's effort: Haiku 5.5 at its own default (`medium`, which Anthropic tunes it for), the others at `low`.
-fn effort_for(model: &str) -> &'static str {
+pub(crate) fn effort_for(model: &str) -> &'static str {
     if model.starts_with("claude-haiku") {
         "medium"
     } else {
@@ -72,7 +72,7 @@ pub fn request_body_styled(model: &str, raw: &str, ctx: &RefineContext, dict: &D
     let mut v = json!({
         "model": model,
         "max_tokens": budget,
-        "system": system_blocks(dict, job, custom),
+        "system": system_blocks(dict, &ctx.habits, job, custom),
         "messages": [{ "role": "user", "content": user_message(ctx, raw) }],
         "output_config": {
             "effort": effort_for(model),
@@ -97,10 +97,10 @@ pub fn request_body_styled(model: &str, raw: &str, ctx: &RefineContext, dict: &D
 }
 
 /// The system blocks of a refine request: the prompt, the dictionary block ([`terms_prompt`]) with the cache mark on the
-/// last of them, then the job's own block after the mark: CUE's cleanup ([`BOLD_PROMPT`]) or the user's instructions
-/// (`custom`), or the translation's. Both styles and the translation read the same cached prefix, so switching never
-/// writes a second cache.
-pub(crate) fn system_blocks(dict: &DictionarySettings, job: Job, custom: Option<&str>) -> Value {
+/// last of them; then, for a cleanup, the habits block ([`habits_prompt`]); then the job's own block: CUE's cleanup
+/// ([`BOLD_PROMPT`]) or the user's instructions (`custom`), or the translation's. Everything after the mark changes
+/// with the app or the job, so the cached prefix is always the same.
+pub(crate) fn system_blocks(dict: &DictionarySettings, habits: &[String], job: Job, custom: Option<&str>) -> Value {
     let mut system = match terms_prompt(&dict.terms, &dict.learned) {
         None => vec![json!({ "type": "text", "text": SYSTEM_PROMPT, "cache_control": { "type": "ephemeral" } })],
         Some(block) => vec![
@@ -108,6 +108,11 @@ pub(crate) fn system_blocks(dict: &DictionarySettings, job: Job, custom: Option<
             json!({ "type": "text", "text": block, "cache_control": { "type": "ephemeral" } }),
         ],
     };
+    if matches!(job, Job::Clean | Job::Rewrite)
+        && let Some(block) = habits_prompt(habits)
+    {
+        system.push(json!({ "type": "text", "text": block }));
+    }
     match job {
         Job::Clean => {}
         Job::Rewrite => {
@@ -134,7 +139,7 @@ pub fn can_warm(model: &str) -> bool {
 /// `max_tokens: 0` is refused together with `output_config.format`, and the format has to stay: the warm-up must build
 /// the exact prefix real refine reads.
 pub fn warm_body(model: &str, dict: &DictionarySettings) -> Value {
-    let ctx = RefineContext { app: String::new(), before_cursor: None };
+    let ctx = RefineContext::default();
     let mut v = request_body(model, ".", &ctx, dict);
     v["max_tokens"] = json!(1);
     v
@@ -207,10 +212,16 @@ pub fn classify_http(status: u16, body: &str) -> RefineOutcome {
 /// of list items ([`tidy_list_items`]): the check judges what will be pasted. Words of the dictionary terms count as
 /// said ([`sanity_ok`]).
 pub fn decide(raw: &str, parsed: Parsed, dict: &DictionarySettings, s: &RefineSettings) -> (String, RefineOutcome) {
+    decide_with(raw, parsed, dict, &[], s)
+}
+
+/// [`decide`] for a request that sent habits: the new words of their replacements (`said`, `RefineContext::said`)
+/// count as said too ([`sanity_ok_with`]), for this answer only.
+pub fn decide_with(raw: &str, parsed: Parsed, dict: &DictionarySettings, said: &[String], s: &RefineSettings) -> (String, RefineOutcome) {
     match parsed {
         Parsed::Text(t) => {
             let t = tidy_list_items(&strip_markup(raw, &t));
-            if sanity_ok(raw, &t, &dict.terms, s) {
+            if sanity_ok_with(raw, &t, &dict.terms, said, s) {
                 (t.trim().to_string(), RefineOutcome::Refined)
             } else {
                 (raw.to_string(), RefineOutcome::RawFallback)
@@ -344,12 +355,21 @@ async fn refine_at(
     let Ok(m) = resp.json::<MessageResp>().await else {
         return raw_fallback(raw, RefineOutcome::RawFallback, Usage::default(), "HTTP 200 response not parsed");
     };
-    settle(raw, parse_response(&m), dict, s, job, m.usage)
+    settle(raw, parse_response(&m), dict, &ctx.said, s, job, m.usage)
 }
 
 /// A parsed answer → what to paste: the answer if it passes its job's check, otherwise the raw text and one log line
-/// with the reason. The tokens are counted either way: they were spent.
-pub(crate) fn settle(raw: &str, parsed: Parsed, dict: &DictionarySettings, s: &RefineSettings, job: Job, usage: Usage) -> RefineResult {
+/// with the reason. The tokens are counted either way: they were spent. `said` are the words the habits sent with a
+/// cleanup write ([`decide_with`]); a translation's check takes none.
+pub(crate) fn settle(
+    raw: &str,
+    parsed: Parsed,
+    dict: &DictionarySettings,
+    said: &[String],
+    s: &RefineSettings,
+    job: Job,
+    usage: Usage,
+) -> RefineResult {
     // The reason, in case the response is rejected.
     let why = match (&parsed, job) {
         (Parsed::Text(_), Job::Clean | Job::Rewrite) => "response failed the sanity check",
@@ -359,7 +379,7 @@ pub(crate) fn settle(raw: &str, parsed: Parsed, dict: &DictionarySettings, s: &R
         (Parsed::Malformed, _) => "response does not match the schema",
     };
     let decided = match job {
-        Job::Clean | Job::Rewrite => decide(raw, parsed, dict, s),
+        Job::Clean | Job::Rewrite => decide_with(raw, parsed, dict, said, s),
         Job::Translate(to) => decide_translation(raw, parsed, dict, to),
     };
     match decided {
@@ -420,6 +440,7 @@ async fn warm_at(url: &str, http: &reqwest::Client, key: &str, model: &str, dict
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cue_core::refine::{habits_prompt, sanity_ok};
     use crate::testing::{capture_logs, fake_api, reply, FakeApi, Reply};
 
     fn dict(terms: &[&str]) -> DictionarySettings {
@@ -427,7 +448,24 @@ mod tests {
     }
 
     fn ctx() -> RefineContext {
-        RefineContext { app: "Telegram Desktop".into(), before_cursor: None }
+        RefineContext { app: "Telegram Desktop".into(), before_cursor: None, ..Default::default() }
+    }
+
+    /// Habits go after the dictionary, behind the cache mark, for a cleanup only; with none the body is the same.
+    #[test]
+    fn habits_go_after_the_dictionary_for_a_cleanup_only() {
+        let rules = vec!["В Telegram — с маленькой буквы и без точки".to_owned()];
+        let with = RefineContext { habits: rules.clone(), ..ctx() };
+        let block = habits_prompt(&rules).unwrap();
+        let v = request_body_for("claude-haiku-5-5", "привет", &with, &dict(&["Soniox"]), Job::Rewrite);
+        let texts: Vec<&str> = v["system"].as_array().unwrap().iter().map(|b| b["text"].as_str().unwrap()).collect();
+        assert_eq!((texts.len(), texts[0], texts[2], texts[3]), (4, SYSTEM_PROMPT, block.as_str(), BOLD_PROMPT));
+        assert!(v["system"][1]["cache_control"].is_object() && v["system"][2].get("cache_control").is_none(), "the cached prefix is the one without habits");
+        assert_eq!(request_body("claude-haiku-5-5", "привет", &with, &dict(&[]))["system"][1]["text"], block);
+        let to_en = request_body_for("claude-haiku-5-5", "привет", &with, &dict(&[]), Job::Translate("en"));
+        assert!(!to_en["system"].to_string().contains("без точки"), "a translation takes none");
+        let none = RefineContext { habits: Vec::new(), ..ctx() };
+        assert_eq!(request_body("claude-haiku-5-5", "привет", &none, &dict(&[])), request_body("claude-haiku-5-5", "привет", &ctx(), &dict(&[])));
     }
 
     #[test]
@@ -563,6 +601,29 @@ mod tests {
         let fixed = || Parsed::Text("Открой GitHub.".into());
         assert_eq!(decide("открой гитхаб", fixed(), &dict(&["GitHub"]), &s), ("Открой GitHub.".into(), RefineOutcome::Refined));
         assert_eq!(decide("открой гитхаб", fixed(), &Default::default(), &s).1, RefineOutcome::RawFallback, "without the dictionary: 1 of 2 words said");
+    }
+
+    /// A replacement habit sent with the cleanup writes words that were never said; its answer is kept, and the words
+    /// count for this answer only: a translation's check is the same with them or without.
+    #[test]
+    fn settle_keeps_the_words_of_a_habit_sent_with_the_cleanup() {
+        let s = RefineSettings::default();
+        let (raw, greeting) = ("здравствуйте анна", || Parsed::Text("Добрый день, Анна!".into()));
+        let said = vec!["добрый день".to_owned()];
+        let no = DictionarySettings::default();
+        let with = settle(raw, greeting(), &no, &said, &s, Job::Rewrite, Usage::default());
+        assert_eq!((with.text.as_str(), with.outcome), ("Добрый день, Анна!", RefineOutcome::Refined));
+        let without = settle(raw, greeting(), &no, &[], &s, Job::Rewrite, Usage::default());
+        assert_eq!((without.text.as_str(), without.outcome), (raw, RefineOutcome::RawFallback));
+        assert_eq!(settle(raw, greeting(), &no, &said, &s, Job::Clean, Usage::default()).outcome, RefineOutcome::Refined);
+        for answer in ["Hello, Anna!", "Добрый день, Анна!"] {
+            let translated = |said: &[String]| {
+                let r = settle(raw, Parsed::Text(answer.into()), &no, said, &s, Job::Translate("en"), Usage::default());
+                (r.text, r.outcome)
+            };
+            assert_eq!(translated(&said), translated(&[]), "{answer}");
+        }
+        assert_eq!(no, DictionarySettings::default(), "nothing went into the dictionary");
     }
 
     #[test]

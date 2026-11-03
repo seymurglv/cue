@@ -50,6 +50,8 @@ pub struct SettingsView {
     pub learned: Vec<LearnedView>,
     /// "Learn from me".
     pub learn: bool,
+    /// The habits, the newest first, as the main window's Habits section draws them (docs/specs/2026-11-04-habits.md).
+    pub habits: Vec<HabitView>,
     /// CUE's cleanup or the user's instructions, and those instructions.
     pub refine_style: RefineStyle,
     pub refine_custom: String,
@@ -66,6 +68,19 @@ pub struct SettingsView {
 pub struct LearnedView {
     pub word: String,
     pub heard: String,
+}
+
+/// A habit as the Habits section draws it: its rule, its example, the app it holds in (`None`: everywhere), how many
+/// times it was corrected, and whether it is on.
+#[derive(Clone, PartialEq, serde::Serialize)]
+pub struct HabitView {
+    pub id: String,
+    pub rule: String,
+    pub before: String,
+    pub after: String,
+    pub app: Option<String>,
+    pub n: u32,
+    pub on: bool,
 }
 
 /// A connection as the Cleanup page lists it.
@@ -130,6 +145,12 @@ impl SettingsView {
                 .map(|l| LearnedView { word: l.word.clone(), heard: l.heard.clone() })
                 .collect(),
             learn: s.learn.enabled(),
+            habits: s
+                .habits
+                .list
+                .iter()
+                .map(|h| HabitView { id: h.id.clone(), rule: h.rule.clone(), before: h.before.clone(), after: h.after.clone(), app: h.app.clone(), n: h.n, on: h.on })
+                .collect(),
             refine_style: s.refine.style,
             refine_custom: s.refine.custom.clone(),
             refine_connection: s.refine.connection().id,
@@ -154,6 +175,7 @@ impl std::fmt::Debug for SettingsView {
             .field("dictionary", &self.dictionary.len())
             .field("learned", &self.learned.len())
             .field("learn", &self.learn)
+            .field("habits", &self.habits.len())
             .field("refine_style", &self.refine_style)
             .field("refine_custom_chars", &self.refine_custom.chars().count())
             .field("refine_connection", &self.refine_connection)
@@ -179,6 +201,8 @@ pub struct EntryView {
     pub question: Option<String>,
     pub raw: Option<String>,
     pub has_audio: bool,
+    /// …and the habits whose effect showed in its text, by their short names.
+    pub habits: Vec<history::HabitMark>,
 }
 
 impl EntryView {
@@ -193,6 +217,7 @@ impl EntryView {
             question: e.question.clone(),
             raw: e.raw.clone(),
             has_audio,
+            habits: e.habits.clone(),
         }
     }
 }
@@ -208,6 +233,7 @@ impl std::fmt::Debug for EntryView {
             .field("question_chars", &self.question.as_ref().map(|q| q.chars().count()))
             .field("raw_chars", &self.raw.as_ref().map(|r| r.chars().count()))
             .field("has_audio", &self.has_audio)
+            .field("habits", &self.habits.len())
             .finish()
     }
 }
@@ -379,6 +405,14 @@ impl Ui {
         }
     }
 
+    /// The rule of the habit just learned, just before its card (docs/specs/2026-11-04-habits.md): to the Drop, which
+    /// draws it.
+    pub fn habit_rule(&self, rule: &str) {
+        if let Err(e) = self.app.emit_to(DROP_LABEL, "cue://habit-rule", rule) {
+            tracing::debug!("Drop window: event cue://habit-rule not sent: {e}");
+        }
+    }
+
     pub fn shake(&self) {
         self.emit("cue://shake", ());
     }
@@ -529,7 +563,7 @@ mod tests {
         let mut names: Vec<&str> = view.as_object().unwrap().keys().map(String::as_str).collect();
         names.sort_unstable();
         let expected =
-            ["connections", "dictionary", "historyAudio", "historyKeep", "lang", "languages", "learn", "learned", "micDevice", "refineAddress", "refineConnection", "refineCustom", "refineModel", "refineStyle", "saved", "translateTarget", "uiLanguage"];
+            ["connections", "dictionary", "habits", "historyAudio", "historyKeep", "lang", "languages", "learn", "learned", "micDevice", "refineAddress", "refineConnection", "refineCustom", "refineModel", "refineStyle", "saved", "translateTarget", "uiLanguage"];
         assert_eq!(names, expected);
         let defaults = [
             ("historyKeep", json!("month")),
@@ -541,6 +575,7 @@ mod tests {
             ("saved", json!(true)),
             ("dictionary", json!([])),
             ("learned", json!([])),
+            ("habits", json!([])),
             ("learn", json!(true)),
             ("refineStyle", json!("default")),
             ("refineCustom", json!("")),
@@ -613,6 +648,18 @@ mod tests {
         assert_eq!(serde_json::to_value(SettingsView::of(&s, Lang::En, true)).unwrap()["learn"], json!(false));
     }
 
+    /// The habits as the section draws them; a log shows only their count.
+    #[test]
+    fn settings_view_has_the_habits() {
+        let mut s = Settings::default();
+        let d = cue_core::habits::Draft { forms: vec![cue_core::habits::Form::Dash], app: "Word".into(), before: "a - b".into(), after: "a — b".into(), n: 3 };
+        let id = s.habits.adopt(d, None, "en").id;
+        let view = serde_json::to_value(SettingsView::of(&s, Lang::En, true)).unwrap();
+        let expected = json!([{ "id": id, "rule": "In Word: a dash between words, not a hyphen", "before": "a - b", "after": "a — b", "app": "Word", "n": 3, "on": true }]);
+        assert_eq!(view["habits"], expected);
+        assert!(!format!("{:?}", SettingsView::of(&s, Lang::En, true)).contains("a — b"));
+    }
+
     #[test]
     fn entry_view_has_the_time_of_day() {
         let e = history::Entry {
@@ -623,6 +670,7 @@ mod tests {
             text: "private answer".into(),
             question: Some("secret question".into()),
             raw: None,
+            habits: Vec::new(),
         };
         let view = EntryView::of(&e, false);
         let expected = json!({
@@ -634,12 +682,31 @@ mod tests {
             "question": "secret question",
             "raw": null,
             "hasAudio": false,
+            "habits": [],
         });
         assert_eq!(serde_json::to_value(&view).unwrap(), expected);
         let shown = format!("{view:?}");
         assert!(!shown.contains("private") && !shown.contains("secret"), "{shown}");
         let dictation = history::Entry { mode: history::Mode::Dictation, question: None, ..e };
         assert_eq!(serde_json::to_value(EntryView::of(&dictation, false)).unwrap()["question"], Value::Null);
+    }
+
+    /// The habits that shaped a dictation go to the window with it, by their short names; a log shows their count.
+    #[test]
+    fn entry_view_has_the_habits_that_shaped_it() {
+        let e = history::Entry {
+            id: "2026-11-04T10:00:00.000-1".into(),
+            ts: "2026-11-04T10:00:00.000".into(),
+            mode: history::Mode::Dictation,
+            app: "Telegram Desktop".into(),
+            text: "скинь файл".into(),
+            question: None,
+            raw: Some("Скинь файл".into()),
+            habits: vec![history::HabitMark { id: "h1".into(), short: "без точки".into() }],
+        };
+        let view = serde_json::to_value(EntryView::of(&e, false)).unwrap();
+        assert_eq!(view["habits"], json!([{ "id": "h1", "short": "без точки" }]));
+        assert!(!format!("{:?}", EntryView::of(&e, false)).contains("точки"));
     }
 
     /// A dictation's text as it was heard goes to the main window with it, and whether its recording plays; a log
@@ -654,6 +721,7 @@ mod tests {
             text: "Clean words.".into(),
             question: None,
             raw: Some("uh secret words".into()),
+            habits: Vec::new(),
         };
         let view = serde_json::to_value(EntryView::of(&e, true)).unwrap();
         assert_eq!((&view["raw"], &view["hasAudio"]), (&json!("uh secret words"), &json!(true)));
@@ -708,6 +776,7 @@ mod tests {
             text: "Hello.".into(),
             question: None,
             raw: None,
+            habits: Vec::new(),
         };
         EntryView::of(&e, false)
     }

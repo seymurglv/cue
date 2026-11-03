@@ -2,12 +2,14 @@
 //! dictionary, how a watched field's text becomes the corrected span, and the one suggestion the Drop offers.
 //! Plain code over strings: the platform reads the field, the runtime shows the suggestion.
 
+use std::ops::Range;
+
 use crate::refine;
 
 /// The most words a pasted or a corrected text may have for the diff; a longer one is not looked at.
 pub const MAX_TOKENS: usize = 400;
 /// The longest run of words, on either side, that counts as one replacement.
-const MAX_RUN: usize = 3;
+pub(crate) const MAX_RUN: usize = 3;
 /// Punctuation trimmed off a word's ends before it is compared or offered (not `+`, `#`, `-`: C++, C#, GPT-4).
 const EDGE: &[char] = &['.', ',', ';', ':', '!', '?', '…', '"', '\'', '«', '»', '„', '“', '”', '(', ')', '[', ']'];
 /// A word right after one of these starts a sentence.
@@ -37,20 +39,36 @@ struct Change {
     sentence_start: bool,
 }
 
-fn clean(s: &str) -> &str {
+pub(crate) fn clean(s: &str) -> &str {
     s.trim_matches(EDGE)
 }
 
-fn key(token: &str) -> String {
+pub(crate) fn key(token: &str) -> String {
     clean(token).to_lowercase()
 }
 
-/// The replaced runs of one to three words on each side, aligned word by word (the longest common subsequence of the
-/// words compared without case and outer punctuation). Deleted and inserted words are not runs; of a run with more new
-/// words than old ones, the new side keeps only its leading names and terms.
-fn changes(pasted: &str, corrected: &str) -> Vec<Change> {
-    let a: Vec<&str> = pasted.split_whitespace().collect();
-    let b: Vec<&str> = corrected.split_whitespace().collect();
+/// The words of a text as the diff splits them: by white space.
+pub(crate) fn words(text: &str) -> Vec<&str> {
+    text.split_whitespace().collect()
+}
+
+/// One replaced run: the words `old` of the pasted text gave way to the words `new` of the corrected one; neither is
+/// empty.
+pub(crate) struct Run {
+    pub old: Range<usize>,
+    pub new: Range<usize>,
+}
+
+/// A word at `j` of `b` starts a sentence: the first one, or one after `.`, `!`, `?` or `…` (closing quotes and a
+/// bracket aside).
+pub(crate) fn sentence_start(b: &[&str], j: usize) -> bool {
+    j == 0 || b[j - 1].trim_end_matches(['"', '»', '”', ')']).ends_with(SENTENCE_END)
+}
+
+/// The replaced runs of any length, aligned word by word (the longest common subsequence of the words compared without
+/// case and outer punctuation). Deleted and inserted words are not runs; texts of more than `MAX_TOKENS` words have
+/// none.
+pub(crate) fn runs(a: &[&str], b: &[&str]) -> Vec<Run> {
     if a.len() > MAX_TOKENS || b.len() > MAX_TOKENS {
         return Vec::new();
     }
@@ -63,25 +81,13 @@ fn changes(pasted: &str, corrected: &str) -> Vec<Change> {
             lcs[i][j] = if ka[i] == kb[j] { lcs[i + 1][j + 1] + 1 } else { lcs[i + 1][j].max(lcs[i][j + 1]) };
         }
     }
-    let starts = |j: usize| j == 0 || b[j - 1].trim_end_matches(['"', '»', '”', ')']).ends_with(SENTENCE_END);
     let (mut i, mut j, mut gi, mut gj) = (0, 0, 0, 0);
     let mut out = Vec::new();
     loop {
         let end = i == a.len() && j == b.len();
         if end || (i < a.len() && j < b.len() && ka[i] == kb[j]) {
-            let (old, mut new) = (&a[gi..i], &b[gj..j]);
-            // More words written than were heard: only the leading ones that are each a name or a term belong to the
-            // word, the rest is text typed on after it ("Марго и скажи" for "марине" is "Марго").
-            if new.len() > old.len() {
-                let named = new.iter().enumerate().take_while(|&(k, w)| looks_like_name(clean(w), starts(gj + k), corrected));
-                new = &new[..named.count()];
-            }
-            if !old.is_empty() && !new.is_empty() && old.len() <= MAX_RUN && new.len() <= MAX_RUN {
-                out.push(Change {
-                    heard: clean(&old.join(" ")).to_owned(),
-                    word: clean(&new.join(" ")).to_owned(),
-                    sentence_start: starts(gj),
-                });
+            if gi < i && gj < j {
+                out.push(Run { old: gi..i, new: gj..j });
             }
             if end {
                 break;
@@ -98,10 +104,37 @@ fn changes(pasted: &str, corrected: &str) -> Vec<Change> {
     out
 }
 
+/// The replaced runs of one to three words on each side (see [`runs`]); of a run with more new words than old ones,
+/// the new side keeps only its leading names and terms.
+fn changes(pasted: &str, corrected: &str) -> Vec<Change> {
+    let (a, b) = (words(pasted), words(corrected));
+    let mut out = Vec::new();
+    for r in runs(&a, &b) {
+        let (old, mut new) = (&a[r.old], &b[r.new.clone()]);
+        // More words written than were heard: only the leading ones that are each a name or a term belong to the
+        // word, the rest is text typed on after it ("Марго и скажи" for "марине" is "Марго").
+        if new.len() > old.len() {
+            let named = new
+                .iter()
+                .enumerate()
+                .take_while(|&(k, w)| looks_like_name(clean(w), sentence_start(&b, r.new.start + k), corrected));
+            new = &new[..named.count()];
+        }
+        if !new.is_empty() && old.len() <= MAX_RUN && new.len() <= MAX_RUN {
+            out.push(Change {
+                heard: clean(&old.join(" ")).to_owned(),
+                word: clean(&new.join(" ")).to_owned(),
+                sentence_start: sentence_start(&b, r.new.start),
+            });
+        }
+    }
+    out
+}
+
 /// Whether `word` looks like a name or a term: a capital inside it (GitHub, New York's second word), a digit with a
 /// letter (GPT-4), letters of the other alphabet than the text around it, or a capital first letter where no sentence
 /// starts. It must hold a letter.
-fn looks_like_name(word: &str, sentence_start: bool, text: &str) -> bool {
+pub(crate) fn looks_like_name(word: &str, sentence_start: bool, text: &str) -> bool {
     if !word.chars().any(char::is_alphabetic) {
         return false;
     }
@@ -121,7 +154,7 @@ fn is_cyrillic(c: char) -> bool {
 
 /// The word holds Latin letters in a mostly Cyrillic text, or Cyrillic ones in a mostly Latin text (the word's own
 /// letters are counted out of the text).
-fn other_alphabet(word: &str, text: &str) -> bool {
+pub(crate) fn other_alphabet(word: &str, text: &str) -> bool {
     let count = |s: &str, f: fn(char) -> bool| s.chars().filter(|&c| f(c)).count();
     let (lat, cyr) = (count(text, is_latin) - count(word, is_latin), count(text, is_cyrillic) - count(word, is_cyrillic));
     (word.chars().any(is_latin) && cyr > lat) || (word.chars().any(is_cyrillic) && lat > cyr)
@@ -273,6 +306,16 @@ impl Offers {
             Some((r, Stage::Missed)) => Some(SuggestView { word: r.word.clone(), missed: true }),
             _ => None,
         }
+    }
+
+    /// Found while the Drop was busy: it opens at the next rest.
+    pub fn waiting(&self) -> bool {
+        matches!(self.cur, Some((_, Stage::Waiting)))
+    }
+
+    /// The capsule is open: with its ring, or showing "undo".
+    pub fn open(&self) -> bool {
+        matches!(self.cur, Some((_, Stage::Open | Stage::Added)))
     }
 
     /// The 8 s ring ran out.
@@ -600,5 +643,22 @@ mod tests {
         let v = SuggestView { word: "Marisol".into(), missed: true };
         assert_eq!(serde_json::to_value(&v).unwrap(), serde_json::json!({ "word": "Marisol", "missed": true }));
         assert!(!format!("{v:?}").contains("Marisol"));
+    }
+
+    #[test]
+    fn waiting_and_open_say_where_the_suggestion_is() {
+        let mut o = Offers::default();
+        assert!(!o.waiting() && !o.open());
+        o.offer(marisol());
+        assert!(o.waiting() && !o.open());
+        o.at_rest();
+        assert!(!o.waiting() && o.open());
+        o.added();
+        assert!(o.open(), "showing undo");
+        o.done();
+        o.offer(marisol());
+        o.at_rest();
+        o.dismissed();
+        assert!(!o.waiting() && !o.open(), "a missed one is a dot");
     }
 }

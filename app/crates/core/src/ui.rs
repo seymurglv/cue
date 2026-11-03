@@ -56,6 +56,12 @@ pub enum TrayKind {
     /// Another speech model, chosen on the Model page, has loaded and recognizes now: its name comes to the Drop just
     /// before the card.
     ModelSwitched,
+    /// A habit was just learned (docs/specs/2026-11-04-habits.md): its rule comes to the Drop just before the card, and
+    /// the card's button undoes it.
+    NewHabit,
+    /// A habit took the place of its opposite (docs/specs/2026-11-04-habits.md, "Changed"): the new rule comes to the
+    /// Drop just before the card, and the card's button brings the old habit back.
+    HabitChanged,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -149,6 +155,8 @@ mod tests {
             (TrayKind::MicMissing, "micMissing"),
             (TrayKind::ModelReady, "modelReady"),
             (TrayKind::ModelSwitched, "modelSwitched"),
+            (TrayKind::NewHabit, "newHabit"),
+            (TrayKind::HabitChanged, "habitChanged"),
         ];
         for (v, name) in trays {
             assert_eq!(json(v), format!("\"{name}\""));

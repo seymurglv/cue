@@ -90,8 +90,8 @@ describe('The history', () => {
     expect($('.bmore button')!.hidden).toBe(true);
     expect($('.hempty')!.hidden).toBe(true);
     // Under the list only "Show earlier": the period and Clear history are on the tray's History page.
-    expect($$('.bsec .bmore')).toHaveLength(1);
-    expect($$('.bsec .bmore > *')).toHaveLength(1);
+    expect($$('.bsec[data-scr="history"] .bmore')).toHaveLength(1);
+    expect($$('.bsec[data-scr="history"] .bmore > *')).toHaveLength(1);
     expect($('.bsec [data-dd="hkeep"], .bsec [data-hclear]')).toBeNull();
   });
 
@@ -487,6 +487,30 @@ describe('How it was said', () => {
   const said = entry(`${TODAY}T10:40:00.000-1`, "So I think we should move the call to Thursday. We're going to ship it.", {
     app: 'Outlook',
     raw: "so um I think we should uh move the call to thursday we're gonna ship it",
+  });
+
+  it('an entry a habit shaped lists it under how it was said, by its short name', async () => {
+    const shaped = entry(`${TODAY}T11:00:00.000-1`, 'send the file', { app: 'Telegram', raw: 'Send the file.', habits: [{ id: 'h1', short: 'no full stop' }] });
+    core.historyPage.mockResolvedValue(pageOf(shaped, said));
+    page = await mount();
+    openRow(shaped.id);
+    const box = rowOf(shaped.id).querySelector('.hdet .hhabs')!;
+    expect(box.getAttribute('aria-label')).toBe('Habits applied');
+    const chips = [...box.querySelectorAll('.hhab')];
+    expect(chips.map((c) => text(c))).toEqual(['no full stop']);
+    expect(chips[0].querySelector('svg')).not.toBeNull();
+    openRow(said.id);
+    expect(rowOf(said.id).querySelector('.hdet .hhabs')).toBeNull();
+  });
+
+  it('a short name is text, never markup', async () => {
+    const shaped = entry(`${TODAY}T11:00:00.000-2`, 'x', { raw: 'X', habits: [{ id: 'h2', short: '<b>bold</b>' }] });
+    core.historyPage.mockResolvedValue(pageOf(shaped));
+    page = await mount();
+    openRow(shaped.id);
+    const chip = rowOf(shaped.id).querySelector('.hhab')!;
+    expect(chip.querySelector('b')).toBeNull();
+    expect(text(chip)).toBe('<b>bold</b>');
   });
 
   it('a dictation opens to its words as heard, its cleanup marked, and closes again', async () => {

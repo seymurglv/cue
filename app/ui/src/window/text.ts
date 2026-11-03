@@ -20,13 +20,31 @@ export interface WinText {
   dictHintLearned: string;
   /** A learned chip's tooltip; {HEARD} is how it was heard. */
   dictHeard: string;
+  /** "Learn from me": the switch in the Habits heading. */
   learn: string;
-  learnHint: string;
   dictAdd: string;
   dictNew: string;
   dictRemove: string;
   /** A word's remove button for a screen reader ({NAME} — the word). */
   dictRemoveWord: string;
+  /** The Habits section (docs/specs/2026-11-04-habits.md): its heading (also the header's link), the hint, the line
+   *  when no cleanup is connected, the empty list, "Forget all" and its second press, a row's forget button (its name
+   *  for a screen reader: {NAME} — the rule), its switch's tooltips, where it holds ({NAME} — the app), how many times,
+   *  and the History's chips for a screen reader. */
+  habits: string;
+  habitsHint: string;
+  habitsNoCleanup: string;
+  habitsEmpty: string;
+  habitsForgetAll: string;
+  habitsForgetAgain: string;
+  habitForget: string;
+  habitForgetName: string;
+  habitOff: string;
+  habitOn: string;
+  habitEverywhere: string;
+  habitIn: string;
+  habitTimes: Forms;
+  habitsApplied: string;
   /** The page's containers for a screen reader: the scrolling page, the header's links, the history's list. */
   main: string;
   sections: string;
@@ -196,11 +214,24 @@ export const en: WinText = {
   dictHintLearned: '— from your corrections: CUE noticed the change and offered the word.',
   dictHeard: 'sounds like «{HEARD}»',
   learn: 'Learn from me',
-  learnHint: 'CUE notices your corrections and offers words for the dictionary. Everything stays on this computer.',
   dictAdd: 'Word',
   dictNew: 'New word, Enter',
   dictRemove: 'Remove',
   dictRemoveWord: 'Delete the word {NAME}',
+  habits: 'Habits',
+  habitsHint: 'How you correct text after a dictation. When a correction repeats, CUE remembers it and writes it that way itself. Kept only on this computer.',
+  habitsNoCleanup: 'Habits work when the cleanup is on.',
+  habitsEmpty: 'Nothing yet. CUE will notice when you correct the same thing a few times.',
+  habitsForgetAll: 'Forget all',
+  habitsForgetAgain: 'Press again',
+  habitForget: 'Forget',
+  habitForgetName: 'Forget: {NAME}',
+  habitOff: 'Turn off',
+  habitOn: 'Turn on',
+  habitEverywhere: 'everywhere',
+  habitIn: 'in {NAME}',
+  habitTimes: ['time', 'times'],
+  habitsApplied: 'Habits applied',
   main: 'Main window',
   sections: 'Sections',
   entries: 'History entries',
@@ -354,11 +385,24 @@ export const ru: WinText = {
   dictHintLearned: '— из ваших правок: CUE заметил замену и предложил слово.',
   dictHeard: 'звучит как «{HEARD}»',
   learn: 'Учиться у меня',
-  learnHint: 'CUE замечает ваши правки и предлагает слова для словаря. Всё остаётся на этом компьютере.',
   dictAdd: 'Слово',
   dictNew: 'Новое слово, Enter',
   dictRemove: 'Удалить',
   dictRemoveWord: 'Удалить слово {NAME}',
+  habits: 'Привычки',
+  habitsHint: 'Как вы правите текст после диктовки. Когда правка повторяется, CUE запоминает её и дальше пишет так сам. Хранится только на этом компьютере.',
+  habitsNoCleanup: 'Привычки работают, когда включена очистка.',
+  habitsEmpty: 'Пока ничего. CUE заметит, если вы несколько раз поправите одно и то же.',
+  habitsForgetAll: 'Забыть всё',
+  habitsForgetAgain: 'Нажмите ещё раз',
+  habitForget: 'Забыть',
+  habitForgetName: 'Забыть: {NAME}',
+  habitOff: 'Выключить',
+  habitOn: 'Включить',
+  habitEverywhere: 'везде',
+  habitIn: 'в {NAME}',
+  habitTimes: ['раз', 'раза', 'раз'],
+  habitsApplied: 'Применённые привычки',
   main: 'Главное окно',
   sections: 'Разделы',
   entries: 'Записи истории',

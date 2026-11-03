@@ -1,17 +1,17 @@
 // Interface texts in English (default) and Russian. The core picks the language once from the Windows UI language
 // and sets it in the Drop window before any script runs (window.__CUE_LANG__); the tray menu uses the same value.
 export type Lang = 'en' | 'ru';
-export type TrayKind = 'noField' | 'micSilent' | 'holdHint' | 'lastMinute' | 'micMissing' | 'modelReady' | 'modelSwitched';
+export type TrayKind = 'noField' | 'micSilent' | 'holdHint' | 'lastMinute' | 'micMissing' | 'modelReady' | 'modelSwitched' | 'newHabit' | 'habitChanged';
 export type ErrorCause = 'model' | 'cpu' | 'stt' | 'claudeKey' | 'translate';
 
 export const KEY_NAME = 'Ctrl + Win';
 
 /** Look and timing of a tray card: the same in every language. */
 export interface TrayLook {
-  icon: 'copy' | 'mic' | 'key' | 'timer' | 'model';
+  icon: 'copy' | 'mic' | 'key' | 'timer' | 'model' | 'habit';
   tone: '' | 'warn' | 'ask' | 'ok';
   /** Icon of the action button; null — the card has no button. */
-  act: 'copy' | 'gear' | 'ok' | null;
+  act: 'copy' | 'gear' | 'ok' | 'undo' | null;
   /** Closes by itself after this many ms; 0 — stays until closed. */
   ttl: number;
 }
@@ -24,12 +24,14 @@ export const TRAYS: Record<TrayKind, TrayLook> = {
   micMissing: { icon: 'mic', tone: 'warn', act: null, ttl: 6000 },
   modelReady: { icon: 'model', tone: 'ok', act: null, ttl: 5000 },
   modelSwitched: { icon: 'model', tone: 'ok', act: null, ttl: 5000 },
+  newHabit: { icon: 'habit', tone: 'ok', act: 'undo', ttl: 7000 },
+  habitChanged: { icon: 'habit', tone: 'ok', act: 'undo', ttl: 7000 },
 };
 
 export interface TrayText {
   title: string;
   /** Trusted HTML: may contain <b>; {KEY} becomes <kbd>KEY_NAME</kbd>; {WANTED} and {USED} become the device names,
-   *  {NAME} the speech model's, escaped. */
+   *  {NAME} the speech model's, {RULE} the habit's rule, escaped. */
   body: string;
   /** Button label: present exactly when TRAYS[kind].act is not null. */
   act?: string;
@@ -37,6 +39,8 @@ export interface TrayText {
   done?: string;
   /** In place of {USED} when Windows gave the microphone no name, of {NAME} when the model's name did not come. */
   unnamed?: string;
+  /** The body alone, when {RULE} came empty (the card with no rule to say). */
+  bare?: string;
 }
 
 /** Labels of the Drop's own buttons and parts (drop.js gets them through its api). */
@@ -118,6 +122,18 @@ export const en: Dict = {
       body: '<b>{NAME}</b>',
       unnamed: 'The model you chose',
     },
+    newHabit: {
+      title: 'New habit',
+      body: '{RULE}. CUE writes it this way from now on.',
+      act: 'Undo', done: 'Removed',
+      bare: 'CUE writes it this way from now on.',
+    },
+    habitChanged: {
+      title: 'Habit changed',
+      body: '{RULE}. CUE writes it this way from now on.',
+      act: 'Undo', done: 'Restored',
+      bare: 'CUE writes it this way from now on.',
+    },
   },
   error: {
     model: 'Model did not download',
@@ -191,6 +207,18 @@ export const ru: Dict = {
       title: 'Модель готова',
       body: '<b>{NAME}</b>',
       unnamed: 'Выбранная модель',
+    },
+    newHabit: {
+      title: 'Новая привычка',
+      body: '{RULE}. Дальше CUE пишет так сам.',
+      act: 'Отменить', done: 'Убрано',
+      bare: 'Дальше CUE пишет так сам.',
+    },
+    habitChanged: {
+      title: 'Привычка изменилась',
+      body: '{RULE}. Дальше CUE пишет так сам.',
+      act: 'Отменить', done: 'Возвращено',
+      bare: 'Дальше CUE пишет так сам.',
     },
   },
   error: {

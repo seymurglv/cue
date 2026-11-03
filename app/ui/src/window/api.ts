@@ -22,6 +22,8 @@ export interface EntryView {
   question: string | null;
   raw: string | null;
   hasAudio: boolean;
+  /** The habits whose effect showed in its text, by their short names as they were then. */
+  habits: { id: string; short: string }[];
 }
 /** One day, `YYYY-MM-DD`, entries newest first. */
 export interface DayView {
@@ -57,6 +59,17 @@ export interface ConnectionView {
   local: boolean;
   models: ModelView[];
 }
+/** A habit as the Habits section draws it: its rule, its example, the app it holds in (null — everywhere), how many
+ *  times it was corrected, and whether it is on. */
+export interface HabitView {
+  id: string;
+  rule: string;
+  before: string;
+  after: string;
+  app: string | null;
+  n: number;
+  on: boolean;
+}
 /** The settings as the core holds them. `historyKeep` is null while the period is unknown (nothing is written to the
  *  history or deleted from it until the user picks one); `historyAudio` — how long recordings are kept, as the user
  *  chose it, null while unknown (none is recorded until the user picks one); `micDevice` null — the Windows microphone;
@@ -85,6 +98,8 @@ export interface SettingsView {
   learned: { word: string; heard: string }[];
   /** "Learn from me". */
   learn: boolean;
+  /** The habits, the newest first (docs/specs/2026-11-04-habits.md). */
+  habits: HabitView[];
 }
 export type SettingChange =
   | { kind: 'historyKeep'; value: Keep }
@@ -99,7 +114,10 @@ export type SettingChange =
   | { kind: 'refineAddress'; value: string }
   | { kind: 'dictAdd'; value: string }
   | { kind: 'dictRemove'; value: string }
-  | { kind: 'learn'; value: boolean };
+  | { kind: 'learn'; value: boolean }
+  | { kind: 'habitOn'; value: { id: string; on: boolean } }
+  | { kind: 'habitForget'; value: string }
+  | { kind: 'habitsForget' };
 
 /** The keys of the cleanup's cloud connections, each under its connection's id. */
 export type KeyName = 'anthropic' | 'openrouter' | 'openai' | 'gemini' | 'deepseek' | 'mistral' | 'groq' | 'xai';

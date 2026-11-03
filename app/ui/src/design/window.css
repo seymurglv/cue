@@ -182,6 +182,10 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .hraw s{color:var(--faint);text-decoration-thickness:1px}
 .hraw mark{color:var(--text)}
 .hraw ins{text-decoration:none;color:var(--text);background:color-mix(in srgb,var(--ok) 15%,transparent);border-radius:3px;padding:0 3px}
+/* The habits that shaped an entry: small chips under how it was said. */
+.hhabs{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.hhab{display:inline-flex;align-items:center;gap:4px;height:22px;padding:0 8px;border-radius:999px;font-size:11px;line-height:1;color:var(--text);background:color-mix(in srgb,var(--ok) 12%,transparent)}
+.hhab svg{width:12px;height:12px;color:var(--ok)}
 /* the recording: play/pause, a thin line of how far it played, its length */
 .hplay{display:flex;align-items:center;gap:10px;margin:10px 0 2px}
 .hpb{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:var(--text);color:var(--bg);transition:opacity .2s}
@@ -280,6 +284,36 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .dnew.open .dni{opacity:1;pointer-events:auto}
 .dni.bad{animation:shake .4s}
 @keyframes shake{25%{transform:translateX(-4px)}50%{transform:translateX(4px)}75%{transform:translateX(-2px)}}
+/* The Habits section (docs/specs/2026-11-04-habits.md, design stage 5, variant A): the switch at the heading's right,
+   a row per habit — the rule, its example struck → green, where and how many times, "Forget" on hover and a switch. Off
+   (a habit, or "Learn from me"), the words take --muted: never opacity, so they keep their contrast. */
+.bsec>h3 .h3r{order:6;display:flex;align-items:center;gap:8px;font-size:12px;font-weight:400;color:var(--muted)}
+.bsec>h3 em.lbl{display:inline-flex}
+.hnocl{margin:-4px 0 10px;font-size:12px;color:var(--warn-ink)}
+.habl{display:flex;flex-direction:column;margin:0 -8px}
+.hw.anim{overflow:hidden;transition:height .45s var(--e-sm),opacity .3s}
+.hw.shut{height:0!important;opacity:0}
+.hb{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto auto;column-gap:10px;align-items:center;padding:8px;border-radius:8px;transition:background .2s}
+.hb:hover{background:color-mix(in srgb,var(--text) 4%,transparent)}
+/* An off row keeps the plain background on hover: under its 6 % tint the muted "after" would fall below 4.5:1. */
+.hb.off:hover,.habl.paused .hb:hover{background:none}
+.hb.new{animation:rowIn .6s var(--e-spring),habHl 2.8s var(--e-out)}
+@keyframes habHl{0%,30%{background:color-mix(in srgb,var(--ok) 14%,transparent)}}
+.hbx{min-width:0}
+.hrule{display:block;font-size:13px;font-weight:500;line-height:20px;color:var(--text);transition:color .25s}
+.hex{font-size:12px;line-height:18px;color:var(--muted)}
+.hex s{text-decoration-thickness:1px}
+.hex ins{-webkit-box-decoration-break:clone;box-decoration-break:clone;text-decoration:none;color:var(--text);background:color-mix(in srgb,var(--ok) 15%,transparent);border-radius:3px;padding:0 3px;transition:background .25s,color .25s}
+.hmeta{margin-left:6px;white-space:nowrap}
+.app .hmeta svg{display:inline-block;width:12px;height:12px;vertical-align:-2px;margin-right:3px}
+.hdel{opacity:0;transition:opacity .2s,background .2s,color .2s}
+.hb:hover .hdel,.hdel:focus-visible{opacity:1}
+.hb.off .hrule,.habl.paused .hrule{color:var(--muted)}
+.hb.off ins,.habl.paused ins{background:color-mix(in srgb,var(--text) 6%,transparent);color:var(--muted)}
+.hbempty{margin:0;font-size:12px;color:var(--muted);animation:msIn .3s var(--e-out) both}
+.bsec[data-scr=habits] .bmore{margin-top:10px}
+.bmore button.armed{color:var(--warn-ink)}
+@media (prefers-reduced-motion:reduce){.hb.new{animation:none}.hw.anim{transition:none}.hbempty{animation:none}}
 /* the header's links: each scrolls to its section; the current one is darker */
 .lk{margin-left:auto;display:flex;gap:16px}
 .lk~.gear{margin-left:0}

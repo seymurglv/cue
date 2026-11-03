@@ -846,7 +846,7 @@ mod tests {
 
     fn entry(ts: &str, text: &str) -> Entry {
         let (id, app) = (format!("{ts}-1"), "Notepad".into());
-        Entry { id, ts: ts.into(), mode: Mode::Dictation, app, text: text.into(), question: None, raw: None }
+        Entry { id, ts: ts.into(), mode: Mode::Dictation, app, text: text.into(), question: None, raw: None, habits: Vec::new() }
     }
 
     /// The window opens on today and yesterday; "Show earlier" brings the days with entries before the last one shown.

@@ -40,6 +40,8 @@ ort = "=2.0.0-rc.15"
 # Checking the downloaded model's files.
 sha1 = "0.10"
 sha2 = "0.10"
+# The habits' hash secret (cue-engines::keys): 32 random bytes from the system. Already in Cargo.lock through tauri.
+getrandom = "0.3"
 # The leak scan of a build (cue-cli): exact texts and fixed patterns over bytes.
 aho-corasick = "1"
 regex = "1"

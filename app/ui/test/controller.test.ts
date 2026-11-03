@@ -21,7 +21,7 @@ const shown = () =>
     .sort();
 const hover = (inside: boolean) => document.querySelector('.drop')!.dispatchEvent(new MouseEvent(inside ? 'mouseenter' : 'mouseleave'));
 const CUE = () => (window as any).CUE;
-const KINDS: TrayKind[] = ['noField', 'micSilent', 'holdHint', 'lastMinute', 'micMissing', 'modelReady', 'modelSwitched'];
+const KINDS: TrayKind[] = ['noField', 'micSilent', 'holdHint', 'lastMinute', 'micMissing', 'modelReady', 'modelSwitched', 'newHabit', 'habitChanged'];
 
 beforeEach(() => {
   document.body.innerHTML = '<div id="stage"></div>';
@@ -1039,12 +1039,13 @@ describe('Tray card', () => {
       const t = DICTS[lang];
       for (const kind of KINDS) {
         const box = document.createElement('div');
-        box.innerHTML = trayHtml(kind, t, { wanted: 'Headset', used: 'Microphone' }, 'Parakeet v3');
+        box.innerHTML = trayHtml(kind, t, { wanted: 'Headset', used: 'Microphone' }, 'Parakeet v3', 'In Telegram');
         const body = t.tray[kind].body
           .replace('{KEY}', `<kbd>${KEY_NAME}</kbd>`)
           .replace('{WANTED}', 'Headset')
           .replace('{USED}', 'Microphone')
-          .replace('{NAME}', 'Parakeet v3');
+          .replace('{NAME}', 'Parakeet v3')
+          .replace('{RULE}', 'In Telegram');
         expect(box.querySelector('.nhd b')!.textContent, `${lang}.${kind}`).toBe(t.tray[kind].title);
         expect(box.querySelector('.xb')!.getAttribute('aria-label'), `${lang}.${kind}`).toBe(t.close);
         expect(box.querySelector('.nbd')!.innerHTML, `${lang}.${kind}`).toBe(body);
@@ -1083,6 +1084,22 @@ describe('Russian interface', () => {
     const letters = [...document.querySelectorAll('.tray .lbl span')];
     expect(letters.map((s) => s.textContent).join('')).toBe('Скопировано');
     expect(letters.filter((s) => s.classList.contains('ch-in')).map((s) => s.textContent).join('')).toBe('но');
+  });
+  it('the habit card in Russian: «Отменить» becomes «Убрано»', () => {
+    ctl.habitRule('В Telegram — с маленькой буквы и без точки');
+    ctl.tray('newHabit');
+    expect(document.querySelector('.tray .nhd b')!.textContent).toBe('Новая привычка');
+    expect(document.querySelector('.tray .nbd')!.textContent).toBe('В Telegram — с маленькой буквы и без точки. Дальше CUE пишет так сам.');
+    (document.querySelector('.tray [data-act]') as HTMLButtonElement).click();
+    expect([...document.querySelectorAll('.tray .lbl span')].map((s) => s.textContent).join('')).toBe('Убрано');
+  });
+  it('the changed habit card in Russian: «Отменить» becomes «Возвращено»', () => {
+    ctl.habitRule('В Telegram — с точкой в конце');
+    ctl.tray('habitChanged');
+    expect(document.querySelector('.tray .nhd b')!.textContent).toBe('Привычка изменилась');
+    expect(document.querySelector('.tray .nbd')!.textContent).toBe('В Telegram — с точкой в конце. Дальше CUE пишет так сам.');
+    (document.querySelector('.tray [data-act]') as HTMLButtonElement).click();
+    expect([...document.querySelectorAll('.tray .lbl span')].map((s) => s.textContent).join('')).toBe('Возвращено');
   });
 });
 
@@ -1199,6 +1216,130 @@ describe('Tray card closes on a timer', () => {
     xb.click();
     vi.advanceTimersByTime(60_000);
     expect(sent).toEqual(['trayClose']);
+  });
+});
+
+describe('New habit card', () => {
+  const box = () => document.querySelector('.tray') as HTMLElement;
+  const isOpen = () => box().classList.contains('open');
+  const act = () => box().querySelector('[data-act]') as HTMLButtonElement;
+  const RULE = 'In Telegram — lower case and no full stop';
+
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('says the rule under "New habit", with the habit icon in green', () => {
+    ctl.habitRule(RULE);
+    ctl.tray('newHabit');
+    expect(box().querySelector('.nhd b')!.textContent).toBe('New habit');
+    expect(box().querySelector('.nbd')!.textContent).toBe(`${RULE}. CUE writes it this way from now on.`);
+    const nic = box().querySelector('.nic')!;
+    expect(nic.classList.contains('tone-ok')).toBe(true);
+    const icon = document.createElement('span');
+    icon.innerHTML = CUE().IC.habit;
+    expect(nic.innerHTML).toBe(icon.innerHTML);
+    expect(act().querySelector('.lbl')!.getAttribute('data-t')).toBe('Undo');
+  });
+
+  it('closes by itself after 7 s; hovering pauses it', () => {
+    ctl.habitRule(RULE);
+    ctl.tray('newHabit');
+    box().dispatchEvent(new MouseEvent('mouseenter'));
+    vi.advanceTimersByTime(30_000);
+    expect(isOpen()).toBe(true);
+    box().dispatchEvent(new MouseEvent('mouseleave'));
+    vi.advanceTimersByTime(7000 - 1);
+    expect(isOpen()).toBe(true);
+    vi.advanceTimersByTime(1);
+    expect(isOpen()).toBe(false);
+    expect(sent).toEqual(['trayClose']);
+  });
+
+  it('"Undo" turns into "Removed", tells the core, and the card closes a moment later', () => {
+    ctl.habitRule(RULE);
+    ctl.tray('newHabit');
+    act().click();
+    expect(sent).toEqual(['trayAction']);
+    const letters = [...box().querySelectorAll('.lbl span')].map((s) => s.textContent).join('');
+    expect(letters).toBe('Removed');
+    expect(act().disabled).toBe(true);
+    vi.advanceTimersByTime(1100);
+    expect(isOpen()).toBe(false);
+    expect(sent).toEqual(['trayAction']);
+  });
+
+  it('without a rule the card says only the sentence', () => {
+    ctl.tray('newHabit');
+    expect(box().querySelector('.nbd')!.textContent).toBe('CUE writes it this way from now on.');
+  });
+
+  it('a second card does not repeat the old rule', () => {
+    ctl.habitRule(RULE);
+    ctl.tray('newHabit');
+    ctl.tray('newHabit');
+    expect(box().querySelector('.nbd')!.textContent).toBe('CUE writes it this way from now on.');
+    ctl.habitRule(RULE);
+    ctl.tray(null);
+    ctl.tray('newHabit');
+    expect(box().querySelector('.nbd')!.textContent).toBe('CUE writes it this way from now on.');
+  });
+
+  it('a rule that ends with its own stop gets no extra full stop', () => {
+    ctl.habitRule('Is it a question?');
+    ctl.tray('newHabit');
+    expect(box().querySelector('.nbd')!.textContent).toBe('Is it a question? CUE writes it this way from now on.');
+  });
+
+  it('the rule goes in as text', () => {
+    ctl.habitRule('<b>x</b>');
+    ctl.tray('newHabit');
+    expect(box().querySelector('.nbd b')).toBeNull();
+    expect(box().querySelector('.nbd')!.textContent).toContain('<b>x</b>');
+  });
+});
+
+describe('Habit changed card', () => {
+  const box = () => document.querySelector('.tray') as HTMLElement;
+  const isOpen = () => box().classList.contains('open');
+  const act = () => box().querySelector('[data-act]') as HTMLButtonElement;
+  const RULE = 'In Telegram — a full stop at the end';
+
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('says the new rule under "Habit changed", with the habit icon in green', () => {
+    ctl.habitRule(RULE);
+    ctl.tray('habitChanged');
+    expect(box().querySelector('.nhd b')!.textContent).toBe('Habit changed');
+    expect(box().querySelector('.nbd')!.textContent).toBe(`${RULE}. CUE writes it this way from now on.`);
+    const nic = box().querySelector('.nic')!;
+    expect(nic.classList.contains('tone-ok')).toBe(true);
+    const icon = document.createElement('span');
+    icon.innerHTML = CUE().IC.habit;
+    expect(nic.innerHTML).toBe(icon.innerHTML);
+    expect(act().querySelector('.lbl')!.getAttribute('data-t')).toBe('Undo');
+  });
+
+  it('closes by itself after 7 s', () => {
+    ctl.habitRule(RULE);
+    ctl.tray('habitChanged');
+    vi.advanceTimersByTime(7000 - 1);
+    expect(isOpen()).toBe(true);
+    vi.advanceTimersByTime(1);
+    expect(isOpen()).toBe(false);
+    expect(sent).toEqual(['trayClose']);
+  });
+
+  it('"Undo" turns into "Restored", tells the core, and the card closes a moment later', () => {
+    ctl.habitRule(RULE);
+    ctl.tray('habitChanged');
+    act().click();
+    expect(sent).toEqual(['trayAction']);
+    expect([...box().querySelectorAll('.lbl span')].map((s) => s.textContent).join('')).toBe('Restored');
+    expect(act().disabled).toBe(true);
+    vi.advanceTimersByTime(1100);
+    expect(isOpen()).toBe(false);
+    expect(sent).toEqual(['trayAction']);
   });
 });
 
@@ -1599,6 +1740,20 @@ describe('Dictionary suggestion', () => {
     drop().dispatchEvent(new MouseEvent('mouseleave'));
     expect(drop().dataset.s).toBe('idle');
     expect(dot().classList.contains('on')).toBe(true);
+  });
+
+  it('hovering a missed one while a habit card is open leaves the capsule closed', () => {
+    ctl.suggest({ word: 'Marisol', missed: true });
+    ctl.habitRule('В Telegram — с маленькой буквы и без точки');
+    ctl.tray('newHabit');
+    drop().dispatchEvent(new MouseEvent('mouseenter'));
+    expect(drop().dataset.s).toBe('idle');
+    expect(drop().classList.contains('sgwait')).toBe(false);
+    drop().dispatchEvent(new MouseEvent('mouseleave'));
+    ctl.tray(null);
+    vi.advanceTimersByTime(1000);
+    drop().dispatchEvent(new MouseEvent('mouseenter'));
+    expect(drop().dataset.s).toBe('sugg');
   });
 
   it('nothing folds the capsule away; a dictation drops it locally too', () => {

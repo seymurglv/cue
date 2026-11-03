@@ -74,6 +74,7 @@ export class DropController {
   /** The names the missing microphone's card shows: the core sends them just before it. */
   private mic: MicNames | null = null;
   private model: string | null = null;
+  private rule: string | null = null;
   /** Quiet mode: false — the frame loop is asleep. calmSince — the frame since which nothing on screen can change. */
   private awake = true;
   private calmSince: number | null = null;
@@ -279,10 +280,17 @@ export class DropController {
     this.model = String(name ?? '');
   }
 
+  /** The rule of the habit just learned, for the card that follows. */
+  habitRule(rule: string) {
+    this.rule = String(rule ?? '');
+  }
+
   /** One notice at a time: a new one replaces the content and starts its own countdown; null — the core removes the card. */
   tray(kind: TrayKind | null) {
     // Markup first, before touching the open card: if it throws, the old card keeps its timer and close button.
-    const html = kind == null ? null : trayHtml(kind, this.t, this.mic, this.model);
+    const html = kind == null ? null : trayHtml(kind, this.t, this.mic, this.model, this.rule);
+    // The rule belongs to the card that follows it: any later card starts without one.
+    this.rule = null;
     // No tray card while dragging: the drag ends first.
     if (html != null) this.endDrag(true);
     this.stopTtl();

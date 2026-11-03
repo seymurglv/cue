@@ -33,6 +33,8 @@ machine, so it is tested without windows, a microphone, a model, a network or a 
     `audio_to_delete`, `prune_audio`, `sweep_audio_temps`, `clear_audio`).
   - `corrections`: which replaced words could go into the dictionary (`candidates`), how a watched field's text
     becomes the corrected span (`Watch`), and the one suggestion the Drop offers (`Offers`).
+  - `habits`: the corrections that repeat (see Habits): the kinds and their forms (`Form`, `correction`), the counts, the
+    habits and the rule's request and template (`Habits`, `Habit`, `Draft`), and the check of a result (`marks`).
   - `settings` (with `SettingChange`, one change from the main window), `usage` (CSV rows, costs, monthly summary),
     `paths`.
 - **`cue-engines`** (`app/crates/engines`): `stt` (the session facade over the model on this computer, and Retry's
@@ -41,7 +43,7 @@ machine, so it is tested without windows, a microphone, a model, a network or a 
   (the model's files: resumed, checked, renamed), `claude` (refine and translation requests and responses, the cache
   warm-up), `ask` (the streaming "Ask" request, its event parser and decision, `run` and its cache warm-up `warm`),
   `keys` (Windows Credential Manager, and the deletion of the Soniox key of earlier versions), `check` (free key
-  probes), `error`. `openrouter` is the cleanup's OpenRouter
+  probes), `habit` (the rule request of a habit just learned), `error`. `openrouter` is the cleanup's OpenRouter
   connection (`refine`, `translate`: the same system blocks, checks and fallbacks as `claude`, each model's profile in
   `model_profile`) and holds the server-sent-events reader that "Ask", `chat` and the `refine_compare` example use too;
   `chat` is the cleanup over any other OpenAI-compatible service (OpenAI, Gemini, DeepSeek, Mistral, Groq, xAI, Ollama,
@@ -59,14 +61,14 @@ machine, so it is tested without windows, a microphone, a model, a network or a 
   `ipc`, `drop_window`, `card_window`, `main_window`, `welcome_window` and `commands` (the main and welcome windows and
   their commands), `micpreview` (the microphone level of the settings and of the welcome window), `tray` and
   `trayicon`, `logging`; `nsis/` holds the installer's script and hooks.
-- **`app/ui`**: `main.ts` (events, commands, frame loop), `controller.ts` (`DropController`), `trays.ts`,
-  `answer.ts` (the "Ask" answer, one view for the tray and the card), `markdown.ts` (its safe Markdown), `card.ts` and
-  `cardPage.ts` (the card window), `strings.ts`, `window.html` with `window/` (the main window: `page.ts`,
-  `history.ts`, `said.ts` (how an entry was said, and its player), `settings.ts`, `text.ts`, `icons.ts`, `api.ts`, and
-  `model.ts`, `keys.ts` and `mic.ts`, the speech model's block and the key and microphone rows the welcome window
-  shares), `welcome.html` with `welcome/` (`page.ts`, `steps.ts`, `text.ts`, `welcome.css`),
-  and `design/` (Drop, tray card, answer and animation code, styles including the main and welcome windows'
-  `window.css`, the Bebas Neue and Montserrat ExtraBold fonts).
+- **`app/ui`**: `main.ts` (events, commands, frame loop), `controller.ts` (`DropController`), `trays.ts`, `answer.ts`
+  (the "Ask" answer, one view for the tray and the card), `markdown.ts` (its safe Markdown), `card.ts` and `cardPage.ts`
+  (the card window), `strings.ts`, `window.html` with `window/` (the main window: `page.ts`, `history.ts`, `said.ts`
+  (how an entry was said, and its player), `habits.ts` (the Habits section), `settings.ts`, `text.ts`, `icons.ts`,
+  `api.ts`, and `model.ts`, `keys.ts` and `mic.ts`, the speech model's block and the key and microphone rows the welcome
+  window shares), `welcome.html` with `welcome/` (`page.ts`, `steps.ts`, `text.ts`, `welcome.css`), and `design/` (Drop,
+  tray card, answer and animation code, styles including the main and welcome windows' `window.css`, the Bebas Neue and
+  Montserrat ExtraBold fonts).
 - **`cue-cli`** (`app/crates/cli`: keys, usage and `leak-scan`, see Installer and release build) and **`cue-bench`**
   (`bench`): developer tools. `scripts/build-release.ps1` builds the installer.
 
@@ -542,6 +544,124 @@ the suggestion stay as they are. The loop and `Watch` are tested with scripted r
 The field's text lives in memory only, on `cue-field` and in the event that ends the watch. It is never written to disk
 or to the log, which gets "correction found" with the span's length and the number of candidates, or "correction:
 none"; the `Debug` of `Replacement`, `Step` and `SuggestView` prints lengths.
+
+## Habits
+
+When the same correction of a dictation is made three times in an app, CUE keeps it as a habit, says so once, and asks
+the cleanup to write that app's dictations that way (`learn.enabled` covers it: off, nothing below runs). Habits take
+the correction watch's end: the path from there to a card, and on to a result:
+
+1. `CoreEvent::Corrected { pasted, span, stop, app }` carries the app the watch started for, as the history names it
+   (`stored_app`: the executable's file description). `on_corrected` offers the dictionary candidate as before and then
+   `count_habits`; a dictation whose app is not known, and a translation, are not counted.
+2. `habits::correction` reads the pair into `Found` forms (`Form`: `EndMark`, `FirstLetter`, `Replacement`, `Digits`,
+   `Dash`, each with its detail) over `corrections::runs`, the alignment `candidates` also uses, split out so that a
+   run the dictionary cuts is still whole for habits. A correction shares no form with a paste that has no word in
+   common, one end mark swapped for another is neither an end mark nor a first letter, and a replacement longer than
+   `MAX_EXAMPLE_CHARS` (40) is no form. The correction's example is the changed words with their neighbours, cut to
+   40 characters on each side. A form is counted by its hash under this installation's secret
+   (`Form::hash(&Secret)`: HMAC-SHA-256 of its kind and detail, written out over `sha2`, the first 8 bytes; a habit's
+   id, `habits::id_of`, is FNV-1a over its forms' hashes and its app, none for every app, so the same forms make one
+   habit per app). The secret (`habits::Secret`, 32 random bytes) is kept in Credential Manager
+   (`keys::habit_secret`, the entry `habits-secret`); `Runtime::run` sets it before the first event (`key_habits`).
+   A missing or malformed one is made anew and goes through `Habits::rekey`: `seen` and `declined` go, the ids are
+   made again. Under the secret kept, `Habits::reid` makes again any id made otherwise (a settings.json restored or
+   brought over; a set counted under the old id follows it), and the file is written when one changed. A store that cannot be read is left alone (`keys::secret_from` neither makes nor writes): the session
+   has no secret. It never reaches settings.json (`#[serde(skip)]`) or a log (`Secret(..)`), and without one nothing
+   is counted or declined (`Habits::forget` only removes the habit).
+3. `Habits::count` keeps `seen`, a count by app and hash with the day it last grew (30 days, `MAX_SEEN` 300), once per
+   form per dictation; a hash in `declined` is skipped. A form already in a habit of the app, or of every app, grows
+   that habit's `n`. A habit of another app whose forms all came together in the correction counts once for this app,
+   under its id (a form already counted on a habit of this app or of every app is in no set); when that set reaches
+   `LEARN_AT` (3) the habit widens (`Habits::widen`): its app is cleared, the rule loses its "In <app>" start
+   (`habits::unscoped`), it takes the id of every app, the counts add up, habits of the same forms in other apps fold
+   into it (their counts added), its set's and its forms' counts go in every app (none follows the new id), and
+   `send_settings` redraws the section without a card. `Counted::widened` pairs each id that went with the new one:
+   `follow` moves the open card and the waiting ones to it, and `habits.ts` keeps the row of an app's habit gone with
+   the same example for the habit of every app that took its place, so the row changes in place. A habit's form alone in another app counts for that app as any form does. The other forms that reach three
+   together become one `Draft`, with the example and `n`.
+4. `ask_rule` numbers the draft as found (`next_notice`), keeps it in `drafts` and spawns the request
+   `cue_engines::habit::rule` through the cleanup's own connection and model, as the cleanup would use them
+   (`cleanup_key`; the Messages API, OpenRouter or `chat`; over OpenRouter with the routing of the cleanup's first try,
+   `Routing::STRICT` through `openrouter::provider`, and a "no provider" is not asked again with less).
+   `habits::rule_messages` builds it: instructions that name the interface language, and a user message that holds the
+   kind(s), the example and the app, nothing else. The answer is a `{rule, short}` object (`read_rule` accepts a rule of
+   at most `MAX_RULE_CHARS` (80) on one line, and a short name of at most `MAX_SHORT_CHARS`). With no key for a cloud
+   connection, an error, an answer that cannot be used, or no answer within `RULE_WAIT_MS` (5 s), `habits::template`
+   writes the rule and the short name from the kinds; a scoped habit's rule starts with the app. The request is not a
+   usage row, and its log line says why it fell back, never the answer.
+5. `CoreEvent::HabitRule` reaches `on_habit_rule`, which drops the draft if "Learn from me" went off meanwhile, else
+   `Habits::learn` (the habit goes first in `list`, past `MAX_HABITS` the oldest go; its id is `id_of` its forms and
+   app),
+   saves the settings, logs "habit learned" with the kinds, `n` and whether the cleanup wrote the rule, and sends the
+   main window `cue://settings`. Its card is queued in `habit_cards`. Two drafts of the same forms in one app (the
+   second reached three while the first waited for its rule) make one habit: when the second's rule comes, `learn`
+   finds the first's id and adds the second's count to it, with no second card (the runtime reads `Learned.merged`,
+   also in the log line; `Learned.was` keeps that habit as it was); a draft whose forms' habit widened meanwhile adds
+   to that habit of every app the same way. A habit of another app is never added to: the draft makes its own app's
+   habit, with its own id. `learn` (`adopt` keeps only its `habit`) also takes out the habits holding an opposite of the draft's forms
+   (`Form::opposite`: an end mark removed and added, lower case and a capital, a replacement and its reverse) in its app
+   or in every app, not declined; when one of them held everywhere, the new habit does too and the opposites of every
+   app go with it. They come back in `Learned.replaced`, kept on the card (`HabitCard`); one whose own card still
+   waits is swapped by `carry` for what that card would bring back (`was`, then its `replaced`), and that card goes,
+   so the new card takes back both changes. A habit with an opposite habit in some app never widens
+   (`Habits::opposed`). A merged draft that also replaced habits still gets a card.
+6. `show_notice` opens what waits when the Drop is at rest (`at_rest`, as for a dictionary suggestion), one notice at a
+   time: `first_notice` compares the suggestion's number (`offer_found`) with the first card's, so the one found first
+   goes first, and a card waits while the suggestion's capsule is open or shows "undo" (a missed suggestion's dot does
+   not hold it back). A habit is "found" when its forms reach three, though its card can open only once its rule came.
+   `show_habit_card` sends the rule to the Drop on `cue://habit-rule`, then the plain tray kind `newHabit`, or
+   `habitChanged` for a card with replaced habits, on `cue://tray`; the page draws the card with the rule, closes it
+   after 7 s, and pauses at the mouse like the others. `trayAction` on it goes to `undo_habit` (`HabitCard::undo`): a
+   card that learned a habit calls `Habits::revert(id, replaced, true)`, so the habit goes, its hashes join `declined`,
+   and the replaced habits come back as they were; a merged card learned no habit, so it calls `take_back` (the habit
+   its draft added to comes back as `was`, with the replaced ones) and declines nothing. The Undo wins: a habit learned or widened since that
+   goes back on one brought back, in its app or where either holds everywhere, is removed (not declined) and returned,
+   and its card, if one waits, is dropped. `hold_tray` keeps the Drop busy for the done label ("Removed", or "Restored"
+   on `habitChanged`) until the card has folded (`TRAY_DONE_MS`, then `TrayDone`), so nothing opens over it. A card
+   whose habit was forgotten from the main window meanwhile is skipped. "Learn from me" turned off drops the drafts and
+   the cards waiting, and reverts a change waiting for its card without declining (`HabitCard::take_back`:
+   `Habits::revert(id, replaced, false)`, the newest first; a merged habit comes back as `was`); a card already open
+   stays until it closes. A habit widened while its card is open: the card keeps the rule it opened with (the one with
+   the app), while the section shows the new one. The drafts and the cards waiting live in memory only. Quitting CUE
+   loses a draft, and the counts that went into it are not given back, so that correction is counted from zero again; it
+   loses a card not yet shown too, and its habit stays in the list unannounced.
+
+The other `SettingChange`s are `HabitOn { id, on }` and `HabitsForget`, which empties `seen`, `list` and `declined`
+together (a form at two would otherwise become a habit at the next correction), each answered with the settings.
+`SettingsView.habits` lists the habits for the section (id, rule, example, the app's name, `n`, on); `habits.ts` draws
+the section, with the line for no cleanup connected (the chosen connection is a cloud one with no saved key, checked
+when the section is drawn, when the connection changes and when the window gets the focus back).
+
+The request side. Where the cleanup request is built (`Runtime::refine`), `habits_for` allows habits only for a
+dictation with "Learn from me" on and a Clean or Rewrite job: a translation and "Ask" take none. `Habits::for_app` takes
+the habits that are on and belong to the dictation's app or to every app (an unknown app gets the latter),
+`RefineContext::with_habits` carries their rules and their replacements' new words (`said`), and `refine::habits_prompt`
+writes the rules as a block of one rule per line under a short intro, a rule over `MAX_RULE_CHARS` skipped. The Messages
+API (`claude::system_blocks`) and the other connections put the block after the cache mark, behind the dictionary block
+and before the style's block: it changes with the app, so the cached prefix stays the one every dictation reads. With no
+habit the request is the one without the block, byte for byte. The answer's sanity check (`claude::settle` →
+`decide_with` → `sanity_ok_with`) counts the `said` words as said, as it does the dictionary's terms, for that answer
+only: a short phrase whose greeting a habit replaced ("здравствуйте анна" → "Добрый день, Анна!", 1 word of 3 said) is
+otherwise rejected and the raw text pasted. Nothing goes into the dictionary, and a translation's check takes none.
+
+The runtime keeps the habits sent, with the text as heard, for each dictation (`ByDictation`, the last four by id), so a
+later dictation's cleanup never takes an earlier one's place. When a refined result comes back, `habits::marks` runs
+each sent habit's applied check on its text and on the text as heard (`Habit::applied`: every form shows in it: the end
+mark is absent or present as the form says, the first letter has the case, the replacement's words are there and the old
+ones are not, a digit is there, a dash stands and no spaced hyphen), and the ones the cleanup brought (they show in its
+text and not in the text as heard: the recognizer may have written the digits, or no full stop, itself) become
+`Entry.habits`, a list of `{ id, short }` on the history entry. A raw fallback marks none. The History's detail lists
+them under how the entry was said, as chips; a habit forgotten later keeps its short name on the entry, so its chip
+shows as it was.
+
+Text on disk and in logs: `habits.seen` holds the app's name, a hash, a number and a day, no text; the habit holds its
+rule, its short name and the example (`before`, `after`, at most 40 characters each), which is the only text of a
+correction ever written. The log gets "habit forms counted" and "habit learned" with kinds and numbers, and `leak-scan`
+looks for the examples' `before` and `after`, the replacements' `from` and `to` and a short name the cleanup wrote (not
+the rule, nor a short name the template writes for the habit's forms: CUE's own literals). A replacement's words are
+words of its example, so `forms` holds no text the example does not. The `Debug` of `Form`, `Found`, `Correction`,
+`Seen`, `Habit`, `Draft`, `RuleAsk`, `RuleText`, `HabitMark` and `RefineContext` prints lengths and counts, never text.
 
 ## Ask
 
@@ -1075,8 +1195,8 @@ again.
   page), how long recordings are kept (`historyAudio`: A day, A week, A month, Don't keep), each not set while
   unknown, and Clear history. A shorter period deletes the older ones at once; the page stops what plays and reads the
   list again.
-- **General**: Start at sign-in, **Learn from me** (`learn.enabled`, a `SettingChange::Learn`; see Corrections), and the
-  interface language (Auto, English, Русский), which switches every window at once (see The Drop and tray cards).
+- **General**: Start at sign-in and the interface language (Auto, English, Русский), which switches every window at
+  once (see The Drop and tray cards).
 
 ## Welcome window
 

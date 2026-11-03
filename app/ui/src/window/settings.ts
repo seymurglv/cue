@@ -133,6 +133,7 @@ export class SettingsTray {
       this.paintCleanupValue();
       this.paintCard();
       this.fit();
+      this.ctx.keysChanged?.();
     });
     this.mic = new MicRows(ctx, () => this.current, () => {
       if (this.sub === 'mic') this.redraw();
@@ -293,12 +294,6 @@ export class SettingsTray {
   /** The settings changed: the page shown shows the new values. */
   settingsChanged(): void {
     if (this.isOpen) this.redraw();
-  }
-
-  /** "Learn from me" changed outside the tray: its switch, where the page shown has it, says so; nothing else moves. */
-  learnChanged(): void {
-    if (!this.isOpen) return;
-    this.current?.querySelector('[data-sw="learn"]')?.setAttribute('aria-checked', String(this.ctx.settings?.learn ?? true));
   }
 
   /** The microphone's level on the meter (only the microphone page has one). */
@@ -462,7 +457,6 @@ export class SettingsTray {
     else if ((b = t.closest<HTMLElement>('[data-dd="haudio"]'))) this.audioMenu(b);
     else if ((b = t.closest<HTMLElement>('[data-hclear]'))) this.clearPressed(b);
     else if (t.closest('[data-sw="autostart"]')) void this.toggleAutostart();
-    else if (t.closest('[data-sw="learn"]')) void this.ctx.change({ kind: 'learn', value: !(this.ctx.settings?.learn ?? true) });
     else if ((b = t.closest<HTMLElement>('.segc button')) && b.getAttribute('aria-pressed') !== 'true') {
       const v = b.dataset.v!;
       const seg = b.closest<HTMLElement>('.segc')!.dataset.seg;
@@ -809,13 +803,7 @@ export class SettingsTray {
     sw.setAttribute('aria-checked', String(!!this.autostart));
     sw.setAttribute('aria-label', t.autostart);
     sw.disabled = this.autostart === null;
-    const learn = h('button', 'sw');
-    learn.type = 'button';
-    learn.dataset.sw = 'learn';
-    learn.setAttribute('role', 'switch');
-    learn.setAttribute('aria-checked', String(this.ctx.settings?.learn ?? true));
-    learn.setAttribute('aria-label', t.learn);
-    return [srow(t.autostart, null, sw).row, srow(t.learn, t.learnHint, learn).row];
+    return [srow(t.autostart, null, sw).row];
   }
 
   private async readAutostart(): Promise<void> {

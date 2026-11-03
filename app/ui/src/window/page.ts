@@ -1,6 +1,7 @@
 // The main window's page (spec 3 §1–3): the header — the dictation mark and CUE on the left, links to the sections and the
-// gear on the right — the Today and History sections, and the settings tray that grows out of the gear. A link scrolls
-// to its section; the link of the section under the header is the darker one. Ported from the approved design (stage 5).
+// gear on the right — the Today and History sections, the Dictionary and Habits sections, and the settings tray that
+// grows out of the gear. A link scrolls to its section; the link of the section under the header is the darker one.
+// Ported from the approved design (stage 5).
 // The page draws nothing until the core has told it the settings: the language is SettingsView.lang (the window has
 // no language set before its script runs). It follows new history entries over its own channel, opened before the
 // first page is asked for.
@@ -17,6 +18,7 @@ import { icon } from './icons';
 import { SettingsTray } from './settings';
 import { TodayView } from './today';
 import { DictionaryView } from './dictionary';
+import { HabitsView } from './habits';
 import { TEXTS, isoDate, pickLang, type Lang, type WinText } from './text';
 
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
@@ -66,6 +68,8 @@ export interface Ctx {
   closeMenu(): void;
   /** A setting through the core; the page takes the settings it answers with (null — refused or no answer). */
   change(c: SettingChange): Promise<SettingsView | null>;
+  /** A key was saved or checked in the tray: the Habits section asks again whether the cleanup has one. */
+  keysChanged?(): void;
 }
 
 export interface PageOptions {
@@ -252,6 +256,7 @@ export class WindowPage implements Ctx {
   readonly history: HistoryView;
   readonly numbers: TodayView;
   readonly dict: DictionaryView;
+  readonly habits: HabitsView;
   readonly tray: SettingsTray;
   readonly reduced: () => boolean;
   private readonly now: () => Date;
@@ -267,6 +272,7 @@ export class WindowPage implements Ctx {
     this.history = new HistoryView(this);
     this.numbers = new TodayView(this);
     this.dict = new DictionaryView(this);
+    this.habits = new HabitsView(this);
     this.tray = new SettingsTray(this, () => this.history.clear());
     const signal = this.off.signal;
     const dark = window.matchMedia?.(DARK);
@@ -289,6 +295,7 @@ export class WindowPage implements Ctx {
     window.addEventListener('focus', () => {
       this.history.followDate();
       void this.numbers.load();
+      void this.habits.recheck();
       this.tray.regained();
     }, { signal });
     // The microphone stays open only while its settings page is shown; recordings stop and give back their URLs.
@@ -363,6 +370,10 @@ export class WindowPage implements Ctx {
     }
   }
 
+  keysChanged(): void {
+    void this.habits.recheck();
+  }
+
   menu(button: HTMLElement, items: MenuItem[], pick: (value: string) => void, note?: string, align?: MenuAlign, wide?: boolean): void {
     this.menus.show(button, items, pick, note, align, wide);
   }
@@ -391,18 +402,19 @@ export class WindowPage implements Ctx {
     } else {
       this.tray.settingsChanged();
       this.dict.render();
+      this.habits.render();
     }
     if (audioChanged) this.history.release();
     if (keepChanged || audioChanged) void this.history.reload();
   }
 
-  /** Settings the core sent by itself (a word learned or taken back from the Drop): only the Dictionary is drawn
-   *  again, and the "Learn from me" switch set where it is. The tray is not redrawn: a draft in it (the instructions
-   *  are saved when their field loses focus) stays as typed. */
+  /** Settings the core sent by itself (a word learned or taken back from the Drop, a habit learned, widened or undone
+   *  from its card): the Dictionary and the Habits are drawn again. The tray is not redrawn: a draft in it (the
+   *  instructions are saved when their field loses focus) stays as typed. */
   private pushed(view: SettingsView): void {
     this.settings = view;
     this.dict.render();
-    this.tray.learnChanged();
+    this.habits.render();
   }
 
   /** The window's content in the current language; the History section and the tray keep their state. */
@@ -432,13 +444,15 @@ export class WindowPage implements Ctx {
     const todaySec = section('today', t.todayNav);
     const sec = section('history', t.history);
     const dictSec = section('dictionary', t.dictionary);
-    this.sections = [todaySec, sec, dictSec];
+    const habitsSec = section('habits', t.habits);
+    this.sections = [todaySec, sec, dictSec, habitsSec];
     const nav = h('nav', 'lk');
     nav.setAttribute('aria-label', t.sections);
     this.links = [
       ['today', t.todayNav],
       ['history', t.history],
       ['dictionary', t.dictionary],
+      ['habits', t.habits],
     ].map(([go, label]) => {
       const b = h('button', '', label);
       b.type = 'button';
@@ -448,7 +462,7 @@ export class WindowPage implements Ctx {
     });
     nav.append(...this.links);
     bh.append(logo, nav, gear);
-    col.append(todaySec, sec, dictSec);
+    col.append(todaySec, sec, dictSec, habitsSec);
     bsc.append(bh, col);
     bsc.addEventListener('scroll', () => {
       bh.classList.toggle('sc', bsc.scrollTop > 4);
@@ -465,6 +479,7 @@ export class WindowPage implements Ctx {
     this.numbers.mount(todaySec);
     this.history.mount(sec);
     this.dict.mount(dictSec);
+    this.habits.mount(habitsSec);
     this.markCurrent(bh);
     this.tray.mount(tray, gear);
     document.fonts?.ready?.then(() => this.tray.refit());

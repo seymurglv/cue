@@ -3,6 +3,7 @@ pub mod audio;
 pub mod connections;
 pub mod corrections;
 pub mod flow;
+pub mod habits;
 pub mod history;
 pub mod model;
 pub mod paths;

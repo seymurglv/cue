@@ -1,8 +1,9 @@
 //! settings.json: engine and models, refine thresholds, the hint counter, bench, interface language, where the Drop
-//! sits, the user's dictionary, the translation pair, "Ask", the pinned microphone, how long the history keeps its days
+//! sits, the user's dictionary, the habits, the translation pair, "Ask", the pinned microphone, how long the history keeps its days
 //! and their recordings, prices for usage accounting. The main window changes a setting one at a time
 //! (`SettingChange`).
 use crate::connections::{self, Connection, Model};
+use crate::habits::Habits;
 use crate::refine;
 use crate::translate;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -704,6 +705,12 @@ pub enum SettingChange {
     DictLearn(LearnedWord),
     /// "Learn from me" on or off.
     Learn(bool),
+    /// A habit on or off (docs/specs/2026-11-04-habits.md).
+    HabitOn { id: String, on: bool },
+    /// A habit forgotten from the main window or its card's "Undo": its forms are never learned again.
+    HabitForget(String),
+    /// "Forget all": every habit, the counts and the declined forms.
+    HabitsForget,
 }
 
 fn period_or_refuse<'de, D: Deserializer<'de>, K: PeriodName>(deserializer: D) -> Result<K, D::Error> {
@@ -737,6 +744,10 @@ impl std::fmt::Debug for SettingChange {
                 .field("heard_chars", &l.heard.chars().count())
                 .finish(),
             Self::Learn(on) => f.debug_tuple("Learn").field(on).finish(),
+            // The ids are hashes, never text.
+            Self::HabitOn { id, on } => f.debug_struct("HabitOn").field("id", id).field("on", on).finish(),
+            Self::HabitForget(id) => f.debug_tuple("HabitForget").field(id).finish(),
+            Self::HabitsForget => f.write_str("HabitsForget"),
         }
     }
 }
@@ -751,6 +762,8 @@ impl Settings {
     /// and any once the dictionary holds `refine::MAX_TERMS` words. Removing takes the word as it is written.
     /// `DictLearn` puts a word in the same way, with how it was heard (refused too when that is no term); `Learn` sets
     /// "Learn from me", whose default (on) is written as no value.
+    /// `HabitOn` switches a habit, `HabitForget` forgets one and declines its forms, `HabitsForget` forgets them all;
+    /// each is refused when it changes nothing.
     pub fn apply(&mut self, change: SettingChange) -> bool {
         match change {
             SettingChange::HistoryAudio(keep) => set_if_changed(&mut self.history.audio, Period::Set(keep)),
@@ -812,6 +825,9 @@ impl Settings {
                 d.terms.len() != terms || d.learned.len() != learned
             }
             SettingChange::Learn(on) => set_if_changed(&mut self.learn.enabled, (!on).then_some(false)),
+            SettingChange::HabitOn { id, on } => self.habits.switch(&id, on),
+            SettingChange::HabitForget(id) => self.habits.forget(&id),
+            SettingChange::HabitsForget => self.habits.forget_all(),
         }
     }
 }
@@ -873,6 +889,9 @@ pub struct Settings {
     /// "Learn from me". Not written while it is on, like `translate`.
     #[serde(deserialize_with = "section_or_default", skip_serializing_if = "LearnSettings::is_default")]
     pub learn: LearnSettings,
+    /// Habits (docs/specs/2026-11-04-habits.md): counts, habits and declined forms. Not written while empty.
+    #[serde(deserialize_with = "section_or_default", skip_serializing_if = "Habits::is_default")]
+    pub habits: Habits,
     /// Not written while every field is the default, like `ui`.
     #[serde(deserialize_with = "section_or_default", skip_serializing_if = "TranslateSettings::is_default")]
     pub translate: TranslateSettings,
@@ -948,6 +967,7 @@ impl Default for Settings {
             drop: DropSettings::default(),
             dictionary: DictionarySettings::default(),
             learn: LearnSettings::default(),
+            habits: Habits::default(),
             translate: TranslateSettings::default(),
             ask: AskSettings::default(),
             audio: AudioSettings::default(),
@@ -2164,6 +2184,51 @@ mod tests {
             assert!(!shown.contains("Marisol") && !shown.contains("Марисоль"), "only lengths: {shown}");
             assert!(shown.contains("word_chars: 7") && shown.contains("heard_chars: 8"), "{shown}");
         }
+    }
+
+    /// The habits keep their own section, written only when there is something in it; the window changes one at a time.
+    #[test]
+    fn habits_are_kept_in_their_section_and_changed_one_at_a_time() {
+        let mut s = Settings::default();
+        // The secret, as the runtime sets it from the key store: never written.
+        s.habits.secret = crate::habits::Secret::from_bytes([7; crate::habits::SECRET_BYTES]);
+        assert!(serde_json::to_value(&s).unwrap().get("habits").is_none(), "nothing written while there are none");
+        let d = crate::habits::Draft { forms: vec![crate::habits::Form::Dash], app: "Word".into(), before: "a - b".into(), after: "a — b".into(), n: 3 };
+        let id = s.habits.adopt(d, None, "en").id;
+        assert_eq!(serde_json::to_value(&s).unwrap()["habits"]["list"][0]["after"], "a — b");
+        assert!(s.apply(SettingChange::HabitOn { id: id.clone(), on: false }));
+        assert!(!s.apply(SettingChange::HabitOn { id: id.clone(), on: false }), "no change");
+        assert!(!s.habits.list[0].on);
+        assert!(s.apply(SettingChange::HabitForget(id.clone())));
+        assert_eq!(s.habits.declined, [crate::habits::Form::Dash.hash(&s.habits.secret)]);
+        assert!(!s.apply(SettingChange::HabitForget(id)), "already gone");
+        assert!(s.apply(SettingChange::HabitsForget));
+        assert!(!s.apply(SettingChange::HabitsForget), "nothing left");
+        let read = |json: serde_json::Value| serde_json::from_value::<SettingChange>(json).unwrap();
+        assert_eq!(read(serde_json::json!({ "kind": "habitOn", "value": { "id": "h1", "on": true } })), SettingChange::HabitOn { id: "h1".into(), on: true });
+        assert_eq!(read(serde_json::json!({ "kind": "habitForget", "value": "h1" })), SettingChange::HabitForget("h1".into()));
+        assert_eq!(read(serde_json::json!({ "kind": "habitsForget" })), SettingChange::HabitsForget);
+        let s: Settings = serde_json::from_str(r#"{"habits":"nonsense"}"#).unwrap();
+        assert!(s.habits.is_default());
+    }
+
+    /// A habit's example and rule are the user's words: neither the settings nor a change show them in a log.
+    #[test]
+    fn debug_shows_no_habit_text() {
+        let mut s = Settings::default();
+        let d = crate::habits::Draft {
+            forms: vec![crate::habits::Form::Replacement { from: "здравствуйте".into(), to: "добрый день".into() }],
+            app: "Почта".into(),
+            before: "Здравствуйте, Анна!".into(),
+            after: "Добрый день, Анна!".into(),
+            n: 3,
+        };
+        let id = s.habits.adopt(d, None, "ru").id;
+        let shown = format!("{s:?} {:?} {:?}", SettingChange::HabitOn { id: id.clone(), on: false }, SettingChange::HabitForget(id));
+        for word in ["Анна", "добрый", "здравствуйте", "Почта"] {
+            assert!(!shown.contains(word), "{word} in a log");
+        }
+        assert_eq!(format!("{:?}", SettingChange::HabitsForget), "HabitsForget");
     }
 
     #[test]
