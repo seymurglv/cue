@@ -82,6 +82,7 @@ describe('Dictionaries and language', () => {
     expect(en.close).toBe('Close');
     expect(en.drop).toEqual({
       cancel: 'Cancel · Esc', cancelName: 'Cancel', restore: 'Restore', retry: 'Retry', done: 'Done', cancelled: 'Cancelled', ask: 'Ask',
+      learnAdd: 'Add to dictionary', learnUndo: 'Undo',
     });
   });
 
@@ -1063,7 +1064,7 @@ describe('Russian interface', () => {
     const title = (sel: string) => document.querySelector(sel)!.getAttribute('title');
     expect(title('.drop .ib.soft')).toBe('Отменить · Esc');
     expect(document.querySelector('.drop .ib.soft')!.getAttribute('aria-label')).toBe('Отменить');
-    expect([...document.querySelectorAll('.drop .ib.solid')].map((e) => e.getAttribute('title'))).toEqual(['Вернуть', 'Повторить', 'Готово']);
+    expect([...document.querySelectorAll('.drop .ib.solid:not(.sbt)')].map((e) => e.getAttribute('title'))).toEqual(['Вернуть', 'Повторить', 'Готово']);
     ctl.apply({ ...base, phase: 'cancel' });
     hover(true);
     expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Отменено');
@@ -1538,5 +1539,180 @@ describe('"Ask" answer in the tray', () => {
     ctl.answer(done({ listening: true }));
     expect(wakes).toBeGreaterThan(before);
     expect(ctl.frame(t + 16)).toBe(true);
+  });
+});
+
+describe('Dictionary suggestion', () => {
+  const drop = () => document.querySelector('.drop') as HTMLElement;
+  const btn = () => drop().querySelector('.sbt') as HTMLButtonElement;
+  const dot = () => document.querySelector('.sgdot') as HTMLElement;
+  const ring = () => btn().querySelector('.ring circle') as SVGElement;
+  const ringEnd = () => ring().dispatchEvent(new Event('animationend', { bubbles: true }));
+
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('opens the capsule with the word and adds it', () => {
+    ctl.suggest({ word: 'Marisol', missed: false });
+    expect(drop().dataset.s).toBe('sugg');
+    expect(drop().querySelector('.swd')!.textContent).toContain('Marisol');
+    expect(btn().getAttribute('aria-label')).toBe('Add to dictionary');
+    btn().click();
+    expect(sent).toEqual(['suggestAdd']);
+    expect(drop().dataset.s).toBe('added');
+    expect(drop().querySelector('.sbk')!.classList.contains('ok')).toBe(true);
+    expect(btn().getAttribute('aria-label')).toBe('Undo');
+  });
+
+  it('undo takes the word out; the end of its ring closes', () => {
+    ctl.suggest({ word: 'Marisol', missed: false });
+    btn().click();
+    btn().click();
+    expect(sent).toEqual(['suggestAdd', 'suggestUndo']);
+    ctl.suggest(null); // the core answers an undo with nothing
+    expect(drop().dataset.s).toBe('idle');
+    ctl.suggest({ word: 'Marisol', missed: false });
+    btn().click();
+    vi.advanceTimersByTime(6000 - 1);
+    expect(sent.at(-1)).toBe('suggestAdd');
+    vi.advanceTimersByTime(1);
+    expect(sent.at(-1)).toBe('suggestDone');
+    expect(drop().dataset.s).toBe('idle');
+  });
+
+  it('a ring run out tells the core, and the missed one waits as a dot', () => {
+    ctl.suggest({ word: 'Marisol', missed: false });
+    vi.advanceTimersByTime(8000 - 1);
+    expect(sent).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(sent).toEqual(['suggestDismiss']);
+    ctl.suggest({ word: 'Marisol', missed: true });
+    expect(drop().dataset.s).toBe('idle');
+    expect(dot().classList.contains('on')).toBe(true);
+  });
+
+  it('hovering a missed one opens the capsule without a ring, leaving folds it back', () => {
+    ctl.suggest({ word: 'Marisol', missed: true });
+    drop().dispatchEvent(new MouseEvent('mouseenter'));
+    expect(drop().dataset.s).toBe('sugg');
+    expect(drop().classList.contains('sgwait')).toBe(true);
+    drop().dispatchEvent(new MouseEvent('mouseleave'));
+    expect(drop().dataset.s).toBe('idle');
+    expect(dot().classList.contains('on')).toBe(true);
+  });
+
+  it('nothing folds the capsule away; a dictation drops it locally too', () => {
+    ctl.suggest({ word: 'Marisol', missed: false });
+    ctl.suggest(null);
+    expect(drop().dataset.s).toBe('idle');
+    expect(dot().classList.contains('on')).toBe(false);
+    ctl.suggest({ word: 'Marisol', missed: true });
+    ctl.apply({ phase: 'start', error: null, retry: false, paused: false, mode: 'dictate' });
+    expect(dot().classList.contains('on')).toBe(false);
+  });
+
+  it('an idle state while the capsule is open keeps it open', () => {
+    ctl.suggest({ word: 'Marisol', missed: false });
+    ctl.apply({ phase: 'idle', error: null, retry: false, paused: false, mode: 'dictate' });
+    expect(drop().dataset.s).toBe('sugg');
+  });
+
+  it('a hover-opened missed capsule never runs out', () => {
+    ctl.suggest({ word: 'Marisol', missed: true });
+    drop().dispatchEvent(new MouseEvent('mouseenter'));
+    vi.advanceTimersByTime(60_000);
+    expect(sent).toEqual([]);
+    expect(drop().dataset.s).toBe('sugg');
+    drop().dispatchEvent(new MouseEvent('mouseleave'));
+    vi.advanceTimersByTime(60_000);
+    expect(sent).toEqual([]);
+    expect(dot().classList.contains('on')).toBe(true);
+  });
+
+  it('hover pauses the 8 s, leaving resumes it from what is left', () => {
+    ctl.suggest({ word: 'Marisol', missed: false });
+    vi.advanceTimersByTime(3000);
+    drop().dispatchEvent(new MouseEvent('mouseenter'));
+    vi.advanceTimersByTime(60_000);
+    expect(sent).toEqual([]);
+    drop().dispatchEvent(new MouseEvent('mouseleave'));
+    vi.advanceTimersByTime(5000 - 1);
+    expect(sent).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(sent).toEqual(['suggestDismiss']);
+  });
+
+  it('the 6 s after "+" waits while the mouse is on the capsule', () => {
+    ctl.suggest({ word: 'Marisol', missed: false });
+    drop().dispatchEvent(new MouseEvent('mouseenter'));
+    btn().click();
+    vi.advanceTimersByTime(60_000);
+    expect(sent).toEqual(['suggestAdd']);
+    drop().dispatchEvent(new MouseEvent('mouseleave'));
+    vi.advanceTimersByTime(6000);
+    expect(sent).toEqual(['suggestAdd', 'suggestDone']);
+  });
+
+  it('the time is kept without the ring: its end alone does nothing (reduced motion has none)', () => {
+    ctl.suggest({ word: 'Marisol', missed: false });
+    ringEnd();
+    expect(sent).toEqual([]);
+    expect(drop().dataset.s).toBe('sugg');
+    btn().click();
+    ringEnd();
+    expect(sent).toEqual(['suggestAdd']);
+    expect(drop().dataset.s).toBe('added');
+  });
+
+  it('a dictation stops the time of an open capsule', () => {
+    ctl.suggest({ word: 'Marisol', missed: false });
+    ctl.apply({ ...base, phase: 'start' });
+    vi.advanceTimersByTime(60_000);
+    expect(sent).toEqual([]);
+  });
+
+  it('the dot hides with the idle-hidden Drop and while the Drop steps aside', () => {
+    const sheet = document.createElement('style');
+    sheet.textContent = ['../src/app.css', '../src/design/drop.css'].map((f) => readFileSync(join(__dirname, f), 'utf8')).join(' ');
+    document.head.append(sheet);
+    try {
+      ctl.suggest({ word: 'Marisol', missed: true });
+      expect(getComputedStyle(dot()).opacity).not.toBe('0');
+      document.body.classList.add('idle-hidden');
+      expect(getComputedStyle(dot()).opacity).toBe('0');
+      document.body.classList.remove('idle-hidden');
+      drop().classList.add('away');
+      expect(getComputedStyle(dot()).opacity).toBe('0');
+    } finally {
+      sheet.remove();
+    }
+  });
+
+  it('the capsule hides with the idle-hidden Drop: nothing is drawn that cannot be clicked', () => {
+    const sheet = document.createElement('style');
+    sheet.textContent = readFileSync(join(__dirname, '../src/app.css'), 'utf8');
+    document.head.append(sheet);
+    try {
+      for (const added of [false, true]) {
+        ctl.suggest({ word: 'Marisol', missed: false });
+        if (added) btn().click();
+        expect(drop().dataset.s).toBe(added ? 'added' : 'sugg');
+        expect(getComputedStyle(drop()).opacity).not.toBe('0');
+        document.body.classList.add('idle-hidden');
+        expect(getComputedStyle(drop()).opacity).toBe('0');
+        expect(getComputedStyle(drop()).pointerEvents).toBe('none');
+        document.body.classList.remove('idle-hidden');
+      }
+      ctl.apply({ ...base, phase: 'listen' });
+      document.body.classList.add('idle-hidden');
+      expect(getComputedStyle(drop()).opacity).not.toBe('0');
+    } finally {
+      sheet.remove();
+    }
+  });
+
+  it('the word goes in as text', () => {
+    ctl.suggest({ word: '<b>x</b>', missed: false });
+    expect(drop().querySelector('.swd b')).toBeNull();
   });
 });

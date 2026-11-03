@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use cue_core::flow::RefineOutcome;
 use cue_core::refine::{max_tokens, timeout_ms, user_message, RefineContext};
-use cue_core::settings::RefineSettings;
+use cue_core::settings::{DictionarySettings, RefineSettings};
 use cue_core::translate;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -182,17 +182,17 @@ impl Routing {
     }
 }
 
-/// Refine request body: the app's prompt (with the dictionary `terms`, as for Claude), the [`max_tokens`] budget (with
+/// Refine request body: the app's prompt (with the user's dictionary (`dict`), as for Claude), the [`max_tokens`] budget (with
 /// headroom if reasoning is mandatory), streaming, reasoning per [`Profile::reasoning`], the `{"text": …}` schema (the same
 /// as for Claude), routing per [`Routing`]. Without a cache mark the dictionary block follows the prompt in the same text.
-pub fn request_body(model: &str, p: &Profile, routing: Routing, raw: &str, ctx: &RefineContext, terms: &[String]) -> Value {
-    request_body_for(model, p, routing, raw, ctx, terms, Job::Clean)
+pub fn request_body(model: &str, p: &Profile, routing: Routing, raw: &str, ctx: &RefineContext, dict: &DictionarySettings) -> Value {
+    request_body_for(model, p, routing, raw, ctx, dict, Job::Clean)
 }
 
 /// [`request_body`] for a job: the system blocks of the Claude request for that job ([`claude::system_blocks`]), as they
 /// are with a cache mark, joined into one text without one; a translation doubles the budget, as for Claude.
-pub fn request_body_for(model: &str, p: &Profile, routing: Routing, raw: &str, ctx: &RefineContext, terms: &[String], job: Job) -> Value {
-    request_body_styled(model, p, routing, raw, ctx, terms, job, None)
+pub fn request_body_for(model: &str, p: &Profile, routing: Routing, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, job: Job) -> Value {
+    request_body_styled(model, p, routing, raw, ctx, dict, job, None)
 }
 
 /// [`request_body_for`] with the user's instructions (`custom`, the custom style) in place of CUE's own block.
@@ -203,7 +203,7 @@ pub fn request_body_styled(
     routing: Routing,
     raw: &str,
     ctx: &RefineContext,
-    terms: &[String],
+    dict: &DictionarySettings,
     job: Job,
     custom: Option<&str>,
 ) -> Value {
@@ -211,7 +211,7 @@ pub fn request_body_styled(
     if let Job::Translate(_) = job {
         budget = claude::translation_budget(budget);
     }
-    let blocks = claude::system_blocks(terms, job, custom);
+    let blocks = claude::system_blocks(dict, job, custom);
     let system = if p.cache_mark {
         blocks
     } else {
@@ -276,8 +276,8 @@ fn request_timeout_ms(p: &Profile, raw: &str, job: Job) -> u64 {
 
 /// One cleanup over OpenRouter, with the model picked for it and in the style of `s`. Like [`claude::refine`], it never "fails": with no
 /// key, on a failure, a refusal or an unusable answer the raw text comes back, with one log line of the reason.
-pub async fn refine(http: &reqwest::Client, key: Option<&str>, raw: &str, ctx: &RefineContext, terms: &[String], s: &RefineSettings) -> RefineResult {
-    refine_at(API_URL, http, key, raw, ctx, terms, s, Job::Rewrite).await
+pub async fn refine(http: &reqwest::Client, key: Option<&str>, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, s: &RefineSettings) -> RefineResult {
+    refine_at(API_URL, http, key, raw, ctx, dict, s, Job::Rewrite).await
 }
 
 /// One translation over OpenRouter (see [`claude::translate`]).
@@ -286,11 +286,11 @@ pub async fn translate(
     key: Option<&str>,
     raw: &str,
     ctx: &RefineContext,
-    terms: &[String],
+    dict: &DictionarySettings,
     s: &RefineSettings,
     to: &'static str,
 ) -> RefineResult {
-    refine_at(API_URL, http, key, raw, ctx, terms, s, Job::Translate(to)).await
+    refine_at(API_URL, http, key, raw, ctx, dict, s, Job::Translate(to)).await
 }
 
 /// A failure worth a second request: no answer (network, timeout, a stream cut or failed midway) or the service failed
@@ -318,7 +318,7 @@ async fn refine_at(
     key: Option<&str>,
     raw: &str,
     ctx: &RefineContext,
-    terms: &[String],
+    dict: &DictionarySettings,
     s: &RefineSettings,
     job: Job,
 ) -> RefineResult {
@@ -328,7 +328,7 @@ async fn refine_at(
     let model = s.model_for("openrouter").id;
     let p = model_profile(model);
     let timeout = request_timeout_ms(&p, raw, job);
-    let body = |routing| request_body_styled(model, &p, routing, raw, ctx, terms, job, s.custom_text());
+    let body = |routing| request_body_styled(model, &p, routing, raw, ctx, dict, job, s.custom_text());
     // As for Claude: a failure worth it is asked once more, with twice the time.
     let mut why = String::new();
     let mut last = None;
@@ -347,7 +347,7 @@ async fn refine_at(
     match last {
         Some(Ok(c)) => {
             let usage = c.usage.map(claude_usage).unwrap_or_default();
-            claude::settle(raw, parse_content(&c.content, c.finish_reason.as_deref(), p.structured), terms, s, job, usage)
+            claude::settle(raw, parse_content(&c.content, c.finish_reason.as_deref(), p.structured), dict, s, job, usage)
         }
         // A refusal before the stream: the key, a limit or the balance is the user's to fix.
         Some(Err(f)) => {
@@ -763,6 +763,10 @@ mod tests {
     use cue_core::refine::{terms_prompt, BOLD_PROMPT, SYSTEM_PROMPT};
     use cue_core::settings::RefineStyle;
 
+    fn dict(terms: &[&str]) -> DictionarySettings {
+        DictionarySettings { terms: terms.iter().map(|t| t.to_string()).collect(), ..Default::default() }
+    }
+
     const KEY: &str = "sk-or-v1-TEST-0123456789";
 
     fn ctx() -> RefineContext {
@@ -1006,7 +1010,7 @@ mod tests {
     #[test]
     fn body_uses_app_prompt_budget_stream_and_routing() {
         let raw = "ну привет как дела";
-        let v = request_body("openai/gpt-6-luna", &profile(true, Reasoning::EffortNone, false), Routing::STRICT, raw, &ctx(), &[]);
+        let v = request_body("openai/gpt-6-luna", &profile(true, Reasoning::EffortNone, false), Routing::STRICT, raw, &ctx(), &Default::default());
         assert_eq!(v["model"], "openai/gpt-6-luna");
         assert_eq!(v["messages"][0], json!({ "role": "system", "content": SYSTEM_PROMPT }));
         assert_eq!(v["messages"][1], json!({ "role": "user", "content": user_message(&ctx(), raw) }));
@@ -1018,7 +1022,7 @@ mod tests {
         assert_eq!(rf["type"], "json_schema");
         assert_eq!(rf["json_schema"]["strict"], true);
         assert_eq!(rf["json_schema"]["name"], "refined_text");
-        let claude = crate::claude::request_body("claude-haiku-5-5", raw, &ctx(), &[]);
+        let claude = crate::claude::request_body("claude-haiku-5-5", raw, &ctx(), &Default::default());
         assert_eq!(rf["json_schema"]["schema"], claude["output_config"]["format"]["schema"], "the same schema as for Claude");
         // Usage always comes (`usage: {include: true}` is deprecated); sampling is left alone, as for Claude.
         for absent in ["usage", "temperature", "top_p", "top_k", "stream_options"] {
@@ -1042,7 +1046,7 @@ mod tests {
     fn body_plain_text_mandatory_reasoning_cache_mark_and_allow() {
         let raw = "ну привет как дела";
         let allow = Routing { deny_data_collection: false, require_parameters: true };
-        let v = request_body("x/y", &profile(false, Reasoning::Lowest(Some("low".into())), true), allow, raw, &ctx(), &[]);
+        let v = request_body("x/y", &profile(false, Reasoning::Lowest(Some("low".into())), true), allow, raw, &ctx(), &Default::default());
         assert!(v.get("response_format").is_none(), "no schema means plain text");
         assert_eq!(v["max_tokens"], max_tokens(raw) + REASONING_HEADROOM, "headroom for mandatory reasoning");
         assert_eq!(REASONING_HEADROOM, 2_048);
@@ -1053,7 +1057,7 @@ mod tests {
             json!([{ "type": "text", "text": SYSTEM_PROMPT, "cache_control": { "type": "ephemeral" } }])
         );
         let loose = Routing { deny_data_collection: false, require_parameters: false };
-        let v = request_body("x/y", &profile(false, Reasoning::Absent, false), loose, raw, &ctx(), &[]);
+        let v = request_body("x/y", &profile(false, Reasoning::Absent, false), loose, raw, &ctx(), &Default::default());
         assert_eq!(v["provider"], json!({ "sort": "latency" }));
         assert!(v.get("reasoning").is_none());
         assert_eq!(v["max_tokens"], max_tokens(raw));
@@ -1061,15 +1065,15 @@ mod tests {
 
     #[test]
     fn body_carries_the_dictionary_like_the_claude_request() {
-        let (raw, terms) = ("ну привет", vec!["Soniox".to_owned()]);
-        let block = terms_prompt(&terms).unwrap();
+        let (raw, terms) = ("ну привет", dict(&["Soniox"]));
+        let block = terms_prompt(&terms.terms, &[]).unwrap();
         let marked = request_body("x/y", &profile(true, Reasoning::Absent, true), Routing::STRICT, raw, &ctx(), &terms);
         let claude = crate::claude::request_body("claude-haiku-5-5", raw, &ctx(), &terms);
         assert_eq!(marked["messages"][0]["content"], claude["system"], "the same blocks and cache mark as for Claude");
         let plain = request_body("x/y", &profile(true, Reasoning::Absent, false), Routing::STRICT, raw, &ctx(), &terms);
         assert_eq!(plain["messages"][0]["content"], json!(format!("{SYSTEM_PROMPT}\n\n{block}")));
         // No usable term: the prompt alone, as before.
-        let none = request_body("x/y", &profile(true, Reasoning::Absent, false), Routing::STRICT, raw, &ctx(), &[" ".to_owned()]);
+        let none = request_body("x/y", &profile(true, Reasoning::Absent, false), Routing::STRICT, raw, &ctx(), &dict(&[" "]));
         assert_eq!(none["messages"][0]["content"], json!(SYSTEM_PROMPT));
     }
 
@@ -1095,7 +1099,7 @@ mod tests {
     const LONG: Duration = Duration::from_secs(10);
 
     async fn call(api: &crate::testing::FakeApi, timeout: Duration) -> Result<Completion, Failure> {
-        let body = request_body("openai/gpt-6-luna", &profile(true, Reasoning::EffortNone, false), Routing::STRICT, "ну привет как дела", &ctx(), &[]);
+        let body = request_body("openai/gpt-6-luna", &profile(true, Reasoning::EffortNone, false), Routing::STRICT, "ну привет как дела", &ctx(), &Default::default());
         complete_at(&format!("{}/api/v1/chat/completions", api.base), &http(), KEY, &body, timeout).await
     }
 
@@ -1116,7 +1120,7 @@ mod tests {
         assert_eq!(req.header("x-title"), ["CUE"]);
         assert_eq!(req.header("content-type"), ["application/json"]);
         let sent: Value = serde_json::from_slice(&req.body).unwrap();
-        let body = request_body("openai/gpt-6-luna", &profile(true, Reasoning::EffortNone, false), Routing::STRICT, "ну привет как дела", &ctx(), &[]);
+        let body = request_body("openai/gpt-6-luna", &profile(true, Reasoning::EffortNone, false), Routing::STRICT, "ну привет как дела", &ctx(), &Default::default());
         assert_eq!(sent, body);
     }
 
@@ -1129,7 +1133,7 @@ mod tests {
         .await;
         let url = format!("{}/api/v1/chat/completions", api.base);
         let p = profile(true, Reasoning::EffortNone, false);
-        let body = |r: Routing| request_body("openai/gpt-6-luna", &p, r, "ну привет", &ctx(), &[]);
+        let body = |r: Routing| request_body("openai/gpt-6-luna", &p, r, "ну привет", &ctx(), &Default::default());
         let routed = complete_routed_at(&url, &http(), KEY, first, LONG, body).await;
         (routed, api)
     }
@@ -1168,7 +1172,7 @@ mod tests {
         let api = fake_api(|_, _, _| reply(401, r#"{"error":{"code":401,"message":"bad key"}}"#)).await;
         let url = format!("{}/api/v1/chat/completions", api.base);
         let p = profile(true, Reasoning::EffortNone, false);
-        let r = complete_routed_at(&url, &http(), KEY, Routing::STRICT, LONG, |rt| request_body("m", &p, rt, "да", &ctx(), &[])).await;
+        let r = complete_routed_at(&url, &http(), KEY, Routing::STRICT, LONG, |rt| request_body("m", &p, rt, "да", &ctx(), &Default::default())).await;
         assert!(r.result.unwrap_err().error.is_key_problem());
         assert_eq!((r.routing, r.refusals.len(), api.calls().len()), (Routing::STRICT, 0, 1));
     }
@@ -1181,7 +1185,7 @@ mod tests {
         let pieces = vec![stream("\n").into_bytes()];
         let api = fake_api(move |_, _, _| Reply::Stream(200, pieces.clone(), Duration::from_millis(50))).await;
         let (http, url) = (http(), format!("{}/api/v1/chat/completions", api.base));
-        let body = request_body("openai/gpt-6-luna", &profile(true, Reasoning::EffortNone, false), Routing::STRICT, "ну привет", &ctx(), &[]);
+        let body = request_body("openai/gpt-6-luna", &profile(true, Reasoning::EffortNone, false), Routing::STRICT, "ну привет", &ctx(), &Default::default());
         for _ in 0..3 {
             let t0 = Instant::now();
             complete_at(&url, &http, KEY, &body, LONG).await.unwrap();
@@ -1323,13 +1327,13 @@ mod tests {
     /// Both styles and the translation send the blocks the Claude request sends, in the same order.
     #[test]
     fn job_blocks_are_the_claude_ones() {
-        let (raw, terms) = ("ну привет", vec!["Soniox".to_owned()]);
+        let (raw, terms) = ("ну привет", dict(&["Soniox"]));
         let p = profile(true, Reasoning::Absent, true);
         for job in [Job::Clean, Job::Rewrite, Job::Translate("en")] {
-            for terms in [&[][..], &terms[..]] {
+            for terms in [&dict(&[]), &terms] {
                 let v = request_body_for("x/y", &p, Routing::STRICT, raw, &ctx(), terms, job);
                 let claude = crate::claude::request_body_for("claude-haiku-5-5", raw, &ctx(), terms, job);
-                assert_eq!(v["messages"][0]["content"], claude["system"], "{job:?}, {} terms", terms.len());
+                assert_eq!(v["messages"][0]["content"], claude["system"], "{job:?}, {} terms", terms.terms.len());
             }
         }
         // A careful cleanup is the body `request_body` builds.
@@ -1343,9 +1347,9 @@ mod tests {
     fn job_blocks_without_a_cache_mark_join_the_prompt() {
         let raw = "ну привет";
         let p = profile(true, Reasoning::Absent, false);
-        let bold = request_body_for("x/y", &p, Routing::STRICT, raw, &ctx(), &[], Job::Rewrite);
+        let bold = request_body_for("x/y", &p, Routing::STRICT, raw, &ctx(), &Default::default(), Job::Rewrite);
         assert_eq!(bold["messages"][0]["content"], json!(format!("{SYSTEM_PROMPT}\n\n{BOLD_PROMPT}")));
-        let to_en = request_body_for("x/y", &p, Routing::STRICT, raw, &ctx(), &[], Job::Translate("en"));
+        let to_en = request_body_for("x/y", &p, Routing::STRICT, raw, &ctx(), &Default::default(), Job::Translate("en"));
         assert_eq!(to_en["messages"][0]["content"], json!(format!("{SYSTEM_PROMPT}\n\n{}", translate::instruction("en"))));
     }
 
@@ -1353,11 +1357,11 @@ mod tests {
     fn a_translation_doubles_the_budget() {
         let raw = "ну привет";
         let p = profile(true, Reasoning::Lowest(Some("low".into())), true);
-        let clean = request_body_for("x/y", &p, Routing::STRICT, raw, &ctx(), &[], Job::Clean);
-        let to_en = request_body_for("x/y", &p, Routing::STRICT, raw, &ctx(), &[], Job::Translate("en"));
+        let clean = request_body_for("x/y", &p, Routing::STRICT, raw, &ctx(), &Default::default(), Job::Clean);
+        let to_en = request_body_for("x/y", &p, Routing::STRICT, raw, &ctx(), &Default::default(), Job::Translate("en"));
         assert_eq!(to_en["max_tokens"], clean["max_tokens"].as_u64().unwrap() * 2);
         let long = "слово ".repeat(9_000);
-        assert_eq!(request_body_for("x/y", &p, Routing::STRICT, &long, &ctx(), &[], Job::Translate("en"))["max_tokens"], 16_000);
+        assert_eq!(request_body_for("x/y", &p, Routing::STRICT, &long, &ctx(), &Default::default(), Job::Translate("en"))["max_tokens"], 16_000);
     }
 
     #[test]
@@ -1396,7 +1400,7 @@ mod tests {
         let api = fake_api(route).await;
         let (logs, _guard) = capture_logs();
         let url = format!("{}/api/v1/chat/completions", api.base);
-        let r = refine_at(&url, &http(), key, RAW, &ctx(), &[], &s, job).await;
+        let r = refine_at(&url, &http(), key, RAW, &ctx(), &Default::default(), &s, job).await;
         let lines = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::")).cloned().collect();
         (r, lines, api)
     }
@@ -1425,7 +1429,7 @@ mod tests {
         assert_eq!(req.header("authorization"), [format!("Bearer {KEY}").as_str()]);
         let sent: Value = serde_json::from_slice(&req.body).unwrap();
         let p = model_profile("anthropic/claude-sonnet-5.5");
-        assert_eq!(sent, request_body_for("anthropic/claude-sonnet-5.5", &p, Routing::STRICT, RAW, &ctx(), &[], Job::Clean));
+        assert_eq!(sent, request_body_for("anthropic/claude-sonnet-5.5", &p, Routing::STRICT, RAW, &ctx(), &Default::default(), Job::Clean));
     }
 
     #[tokio::test]
@@ -1438,11 +1442,11 @@ mod tests {
                 if let Some(text) = custom {
                     (s.style, s.custom) = (RefineStyle::Custom, text.into());
                 }
-                let r = refine_at(&url, &http(), Some(KEY), RAW, &ctx(), &[], &s, Job::Rewrite).await;
+                let r = refine_at(&url, &http(), Some(KEY), RAW, &ctx(), &Default::default(), &s, Job::Rewrite).await;
                 assert_eq!(r.outcome, RefineOutcome::Refined, "{model}");
                 let sent: Value = serde_json::from_slice(&api.body(0)).unwrap();
                 assert_eq!(sent["model"], model);
-                let expected = request_body_styled(model, &model_profile(model), Routing::STRICT, RAW, &ctx(), &[], Job::Rewrite, custom);
+                let expected = request_body_styled(model, &model_profile(model), Routing::STRICT, RAW, &ctx(), &Default::default(), Job::Rewrite, custom);
                 assert_eq!(sent, expected);
             }
         }
@@ -1500,6 +1504,6 @@ mod tests {
         assert!(lines.is_empty(), "{lines:?}");
         let sent: Value = serde_json::from_slice(&api.body(0)).unwrap();
         let p = model_profile("anthropic/claude-haiku-5.5");
-        assert_eq!(sent, request_body_for("anthropic/claude-haiku-5.5", &p, Routing::STRICT, RAW, &ctx(), &[], Job::Translate("en")));
+        assert_eq!(sent, request_body_for("anthropic/claude-haiku-5.5", &p, Routing::STRICT, RAW, &ctx(), &Default::default(), Job::Translate("en")));
     }
 }

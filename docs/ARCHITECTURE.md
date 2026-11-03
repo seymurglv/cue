@@ -31,6 +31,8 @@ machine, so it is tested without windows, a microphone, a model, a network or a 
   - `history`: the history's day files (`Entry`, `append`, the pages, `search`, `find`, `prune` by the retention
     period, `clear`) and the names and deletions of its recordings folder (`audio_file`, `audio_snapshot`,
     `audio_to_delete`, `prune_audio`, `sweep_audio_temps`, `clear_audio`).
+  - `corrections`: which replaced words could go into the dictionary (`candidates`), how a watched field's text
+    becomes the corrected span (`Watch`), and the one suggestion the Drop offers (`Offers`).
   - `settings` (with `SettingChange`, one change from the main window), `usage` (CSV rows, costs, monthly summary),
     `paths`.
 - **`cue-engines`** (`app/crates/engines`): `stt` (the session facade over the model on this computer, and Retry's
@@ -48,10 +50,10 @@ machine, so it is tested without windows, a microphone, a model, a network or a 
   switched the mode is held), `input` (`SendInput`, modifier state), `clipboard` (paste, and the `Ctrl + C` fallback
   of "Ask"), `focus` (UI Automation: the field, the text before the caret, the selection; and the window under the
   main window, for Paste again), `selection` (when to copy the selection, where it is on screen), `cardplace` (where
-  the "Ask" card goes), `mic` (cpal; a pinned microphone found by its name; whether Windows denies CUE the
-  microphone), `wav`, `opus` and `ogg` (a WAV into Ogg Opus: libopus 1.3.1 in its Rust translation `unsafe-libopus`,
-  the pages written here), `dropwin` (window styles, moves,
-  the z-order guard), `placement` (the four places, the nearest place, monitors), `power`.
+  the "Ask" card goes), `fieldwatch` (the field pasted into, read again to notice a correction), `mic` (cpal; a
+  pinned microphone found by its name; whether Windows denies CUE the microphone), `wav`, `opus` and `ogg` (a WAV
+  into Ogg Opus: libopus 1.3.1 in its Rust translation `unsafe-libopus`, the pages written here), `dropwin` (window
+  styles, moves, the z-order guard), `placement` (the four places, the nearest place, monitors), `power`.
 - **`cue`** (`app/src-tauri`): startup, the `runtime` actor (with `runtime::ask`, the conversation of an open answer,
   `runtime::recordings`, the history's recordings, and `runtime::model`, the speech model's download, load and state),
   `ipc`, `drop_window`, `card_window`, `main_window`, `welcome_window` and `commands` (the main and welcome windows and
@@ -92,6 +94,9 @@ machine, so it is tested without windows, a microphone, a model, a network or a 
   fallback of "Ask". Every job ends within about 7 s ("Insert below" within about 9 s); the core also keeps a 10 s
   watchdog. A late copy of the fallback is watched on `cue-late-copy`, and its removal from the Win+V history runs on
   `cue-clip-history` (WinRT); both are short-lived.
+- **`cue-field`**: after a paste, UI Automation on a COM thread of its own reads the field pasted into every 0.4 s, for
+  60 s at most, to notice a correction (see Corrections). One at a time: a new dictation, a new watch or "Learn from
+  me" turned off ends the one running. It sends the core a `CoreEvent::Corrected` when it is over.
 - **`cue-card`**: moves, shows and hides the "Ask" card window.
 - **`cue-mic`** (cpal; it also lists the devices to find a pinned microphone) with `cue-mic-events` forwarding
   frames; `cue-mic-stop` closes a microphone off the core thread (and off the main thread for the preview).
@@ -484,6 +489,60 @@ list or folder tree, or nowhere at all. Apps that expose nothing to UI Automatio
 then put in the clipboard normally, without markers, and the "Nowhere to paste" card offers Copy. The same happens
 if the keys are not released in time, if Ctrl+V is not delivered (an elevated window), or if the 10 s watchdog fires.
 
+## Corrections
+
+CUE notices when the user corrects a word it pasted and offers the word for the dictionary (`learn.enabled`, on by
+default; off, no field is read). The path from a paste to a suggestion:
+
+1. `insert` keeps what is pasted (`watch_next`, only for a dictation or a translation, never an "Ask" answer, and only
+   while `learn.enabled`). When `InsertDone` reports the paste as `Pasted`, the runtime starts `fieldwatch::spawn` on
+   the thread `cue-field`, with a stop flag (`field_stop`) that a new dictation (`OpenMic`), a newer watch or "Learn
+   from me" turned off sets.
+2. The thread asks UI Automation for the focused element once, right after the paste, and keeps it: not a password
+   field, not a window of CUE's own, with a text pattern or else a value pattern. It reads that element only (focus
+   moving to another window or to CUE changes nothing) every 400 ms (`READ_EVERY_MS`), at most 60 s (`WATCH_MS`), and a
+   field of more than 20,000 characters is cut there.
+3. `Watch` (in `cue-core`, over plain strings) finds the pasted text in the first reading: the text before it and after
+   it are the anchors, and a paste not found within 2 s means no correction. The watch is over 2.5 s after the field's
+   last change (`SETTLE_MS`), when the field empties (it was sent: the last reading counts), when the element can no
+   longer be read, or at the stop flag. The corrected span is the text between the anchors in the last reading; with
+   the anchors gone (a cleared and retyped field), or nothing changed, there is none.
+4. The thread ends with `CoreEvent::Corrected { pasted, span, stop }`. `corrections::candidates` aligns the pasted text
+   and the span word by word (the longest common subsequence of the words, compared without case and outer punctuation)
+   and returns the replaced runs of one to three words as `Replacement { heard, word }`. Of a run with more words
+   written than heard, only the leading ones that each look like a name or a term belong to the word; the rest is text
+   typed on after it ("позвони Марго и скажи" for "позвони марине" offers "Марго"). A run is a candidate when the new
+   text differs from the old by more than case and punctuation, is not in `dictionary.terms` in any case, passes
+   `refine::is_term` with the heard text too, and looks like a name or a term: a capital inside it, a digit, letters of
+   the other alphabet than the text around it, or a capital first letter that does not start a sentence. Deletions,
+   insertions and ordinary lowercase words are not candidates. Texts of more than 400 words are not looked at.
+5. The first candidate goes to `Offers`, which holds one suggestion at a time (a waiting or a missed one is replaced, an
+   open or just added one stays). It opens once the Drop is at rest and can be clicked (`show_offer` over `at_rest`:
+   idle, no tray card, no answer, not paused, not hidden over a full-screen app, which the placement thread tells the
+   core with `CoreEvent::IdleHidden` as it tells the page), and the runtime sends the Drop `cue://suggest`
+   (`{ word, missed }` or nothing). Paused or over a full-screen app, the page hides an open capsule as it hides the
+   idle bar.
+6. The Drop's page grows the capsule from the word and reports `suggestAdd`, `suggestUndo`, `suggestDismiss` (its 8 s
+   ran out) and `suggestDone` (the 6 s after adding ran out) through `drop_action`; an action out of turn changes
+   nothing. The times are timers in `drop.js` that the mouse over the Drop pauses; the rings only draw them, and with
+   reduced motion they stand still. `suggestAdd` becomes `SettingChange::DictLearn`, applied and written like the main
+   window's own changes, and the main window gets the settings on `cue://settings` (it draws the Dictionary again,
+   nothing else); `suggestUndo` becomes `DictRemove`. The dismissed suggestion stays as `missed`, a dot next to the idle
+   bar, until the next dictation opens the microphone; hovering the Drop opens the capsule without a ring.
+
+`dictionary.learned` keeps each added word with how it was heard, newest first; each is also in `dictionary.terms`.
+`DictRemove` takes a word out of both. The cleanup's dictionary block writes a learned word with how it was heard
+("Marisol — sounds like «Марисоль»"), when that is a usable term, and the other words as before.
+
+`fieldwatch`'s `FieldReader` (one method, `read`, giving the field's text or `None` once it can no longer be read) and
+`Pace` (the clock and the wait) are what `run` is written over; the UI Automation field is only the Windows
+`FieldReader`, so another system plugs in its own reader and its own `spawn`, and the loop, `Watch`, the candidates and
+the suggestion stay as they are. The loop and `Watch` are tested with scripted readings, without UI Automation.
+
+The field's text lives in memory only, on `cue-field` and in the event that ends the watch. It is never written to disk
+or to the log, which gets "correction found" with the span's length and the number of candidates, or "correction:
+none"; the `Debug` of `Replacement`, `Step` and `SuggestView` prints lengths.
+
 ## Ask
 
 "Ask" (`Ctrl + Win + Alt`) is a dictation whose text becomes a question to Claude (`ask.model`, Haiku 5.5 by default).
@@ -694,12 +753,13 @@ After the window is created and placed, `cue-placement` is the only CUE code tha
 `SetWindowPos(SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS)`; Windows itself still resizes it, and may move it, when its scale
 changes. At rest the thread checks every 0.5 s that the window is centered on its place's anchor on the foreground
 window's monitor, runs the z-order guard, and hides the idle strip over full-screen apps
-(`SHQueryUserNotificationState`) and while paused. The window is always centered on the anchor at its current size,
-never at the size it would have at the target monitor's scale. The anchor lies a few dozen px inside the target monitor,
-so most of a window centered on it is on that monitor whatever the two scales; Windows takes a window's scale from the
-monitor it shares the most area with, so it gives the window the target's scale and size, and the next check centers it
-again. Placed at the predicted size, most of the window could stay on the old monitor, whose scale it would then keep,
-so it would never arrive. While the window is hidden the thread only waits for the next check.
+(`SHQueryUserNotificationState`, told to the page and to the core) and while paused. The window is always centered on
+the anchor at its current size, never at the size it would have at the target monitor's scale. The anchor lies a few
+dozen px inside the target monitor, so most of a window centered on it is on that monitor whatever the two scales;
+Windows takes a window's scale from the monitor it shares the most area with, so it gives the window the target's scale
+and size, and the next check centers it again. Placed at the predicted size, most of the window could stay on the old
+monitor, whose scale it would then keep, so it would never arrive. While the window is hidden the thread only waits for
+the next check.
 
 **Dragging.** Only the idle Drop can be dragged, once hover has opened it. The page watches a press of the primary mouse
 button on it: a move of more than 4 px with the button down starts a drag (`drop_drag` `start`); a press that moves less
@@ -751,13 +811,14 @@ answer, or none when it closes: sent at once for a new turn, an end or an openin
 stream) and `cue://card-place` (for the card: which side of the selection, where the arrow is, how tall the card may
 grow), `cue://mic-names` (for the Drop alone: the two names of the "Another microphone" card, sent just before
 it), and `cue://model` (to every window: the speech model's `ModelState` whenever it changes; the main and welcome
-windows draw it, see The speech model). Window → core commands: `drop_action` (`cancel`, `finish`, `undo`, `retry`,
-`dismiss`, `trayAction`, `trayClose`, and the answer's `answerInsert`, `answerBelow`, `answerReplace`, `answerCopy`,
-`answerRetry`, `answerClose`), `answer_source` (the number of a source chip clicked), `drop_hit_rects`, `drop_drag`
-(`start`, `end`), `drop_ready`, after which the core resends the current state, card, `idle-hidden`, place and open
-answer, and, from the card window, `card_hit_rects` and `card_ready`, after which the core resends the state, the card's
-place and the open answer. The place also comes in an initialization script, so the first frame is already laid out for
-it.
+windows draw it, see The speech model), and `cue://suggest` (for the Drop alone: the word of the suggestion and whether
+it was missed, or none; see Corrections). Window → core commands: `drop_action` (`cancel`, `finish`, `undo`, `retry`,
+`dismiss`, `trayAction`, `trayClose`, the answer's `answerInsert`, `answerBelow`, `answerReplace`, `answerCopy`,
+`answerRetry`, `answerClose`, and the suggestion's `suggestAdd`, `suggestUndo`, `suggestDismiss`, `suggestDone`),
+`answer_source` (the number of a source chip clicked), `drop_hit_rects`, `drop_drag` (`start`, `end`), `drop_ready`,
+after which the core resends the current state, card, suggestion, `idle-hidden`, place and open answer, and, from the
+card window, `card_hit_rects` and `card_ready`, after which the core resends the state, the card's place and the open
+answer. The place also comes in an initialization script, so the first frame is already laid out for it.
 
 The windows get the text of an "Ask" question and its answer, the card's quote of the selection (`quote_of`, 40
 characters at most), and the titles and sites of its sources, to draw them; never a source's address. A click on a
@@ -1014,8 +1075,8 @@ again.
   page), how long recordings are kept (`historyAudio`: A day, A week, A month, Don't keep), each not set while
   unknown, and Clear history. A shorter period deletes the older ones at once; the page stops what plays and reads the
   list again.
-- **General**: Start at sign-in, and the interface language (Auto, English, Русский), which switches every window at
-  once (see The Drop and tray cards).
+- **General**: Start at sign-in, **Learn from me** (`learn.enabled`, a `SettingChange::Learn`; see Corrections), and the
+  interface language (Auto, English, Русский), which switches every window at once (see The Drop and tray cards).
 
 ## Welcome window
 
@@ -1103,7 +1164,8 @@ reads as `auto`) is likewise written only when it is not `auto`, `drop.position`
 any case and with spaces trimmed; any other value, or a `drop` that is not an object, reads as `bottom`) only when it
 is not `bottom`, and `dictionary` only when its list is not empty. `dictionary.terms` is kept as written; a value that
 is not a list reads as an empty list and items that are not strings are skipped, so a typo there never makes the file
-unreadable.
+unreadable. `dictionary.learned` (`{ word, heard }` items, newest first) reads the same way and is written only when it
+is not empty; `learn.enabled` is turned off only by `false` and written only then.
 The `translate` fields (`target`, `home`, `speech`) go through `translate::known`: trimmed, lowercased, the first
 subtag of a locale name (`ru-RU`, `zh-Hans-CN`), the aliases `nb`/`nn` → `no`, `fil` → `tl`, `iw` → `he`, `in` → `id`;
 anything else (`auto`, an unknown code, a number) reads as nothing, that is the default, and a `translate` that is not
@@ -1226,8 +1288,10 @@ icon and path `!define`s); makensis stores none of them.
   forward, each step's hold of the hotkey, whether Windows allows the microphone, and the name of a link that did not
   open; for the speech model, its state changes, the bytes and seconds of a download, the load time, the files a
   check deleted, each recognition's audio length, time and whether the other alphabet was masked out, and whether the
-  Soniox key of an earlier version was deleted. Never logged: dictation text, text before the caret, translations,
-  dictionary terms, questions, answers, selected text, written texts, history entries, microphone names, the addresses
+  Soniox key of an earlier version was deleted; for the correction watch, whether a correction was found, the length of
+  its span and the number of candidates. Never logged: dictation text, text before the caret, translations,
+  dictionary terms and the words learned, the text of a field read after a paste, questions, answers, selected text,
+  written texts, history entries, microphone names, the addresses
   and titles of sources, where the selection is on screen, audio, API keys, response bodies. `Effect` and `Input` are
   never logged with `{:?}`, since their `Debug` prints text.
 - WebSocket handshake tracing is switched off by a fixed filter, since it would include the `Authorization` header.

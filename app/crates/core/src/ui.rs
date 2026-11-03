@@ -78,6 +78,14 @@ pub enum UiAction {
     Dismiss,
     TrayAction,
     TrayClose,
+    /// The suggestion's "+": the word goes into the dictionary.
+    SuggestAdd,
+    /// "Undo" after "+": the word comes out again.
+    SuggestUndo,
+    /// The suggestion's 8 s ring ran out: it waits as a dot.
+    SuggestDismiss,
+    /// The 6 s ring after "+" ran out.
+    SuggestDone,
     /// Buttons of an "Ask" answer (spec 2 §7): paste it at the caret, below the selection, over the selection; copy it;
     /// ask again after a failure; close it.
     AnswerInsert,
@@ -159,6 +167,10 @@ mod tests {
             ("answerCopy", UiAction::AnswerCopy),
             ("answerRetry", UiAction::AnswerRetry),
             ("answerClose", UiAction::AnswerClose),
+            ("suggestAdd", UiAction::SuggestAdd),
+            ("suggestUndo", UiAction::SuggestUndo),
+            ("suggestDismiss", UiAction::SuggestDismiss),
+            ("suggestDone", UiAction::SuggestDone),
         ];
         for (name, v) in actions {
             assert_eq!(serde_json::from_str::<UiAction>(&format!("\"{name}\"")).unwrap(), v);

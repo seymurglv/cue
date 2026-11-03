@@ -33,6 +33,7 @@
 /* at the side places the idle strip stands upright against the edge: as high as the Drop, a fifth of it wide */
 :is([data-place=left],[data-place=right]) .drop[data-s=idle]:not(.hov){height:var(--h);min-width:calc(var(--h) / 5);padding-left:0;padding-right:0}
 .drop.away{opacity:0!important;transition:opacity .18s}
+.drop.away ~ .sgdot{opacity:0!important}
 .drop svg{display:block;overflow:visible}
 .pt{flex:none;overflow:hidden;max-width:0;opacity:0;margin-left:0;margin-right:0;transition:max-width .5s var(--e-spring),opacity .22s,margin .4s var(--e-out)}
 .pt.on{opacity:1;margin-left:calc(4 * var(--u));margin-right:calc(4 * var(--u));transition:max-width .5s var(--e-spring),opacity .3s .06s,margin .4s var(--e-out)}
@@ -60,6 +61,17 @@
 .ring circle{fill:none;stroke:currentColor;stroke-width:1.7;stroke-dasharray:100;stroke-dashoffset:0;opacity:.5}
 .drop[data-s=cancel] .ib .ring circle{animation:deplete 3.6s linear forwards}
 @keyframes deplete{to{stroke-dashoffset:100}}
+/* The dictionary suggestion: the Drop's capsule book · word · button, and the dot of a missed one. */
+.drop .sbk{transition:color .3s}
+.drop .sbk.ok{color:var(--ok)}
+.drop[data-s=sugg] .sbt .ring circle{animation:deplete 8s linear forwards}
+.drop[data-s=added] .sbt .ring circle{animation:deplete 6s linear forwards}
+.drop:hover .sbt .ring circle{animation-play-state:paused}
+.drop.sgwait .sbt .ring{display:none}
+.sgdot{position:absolute;left:calc(100% + 5px);bottom:1px;width:5px;height:5px;border-radius:50%;background:var(--ok);
+  box-shadow:0 0 0 1.5px rgba(18,18,20,.9);opacity:0;transform:scale(0);transition:transform .4s var(--e-spring),opacity .2s}
+.sgdot.on{opacity:1;transform:scale(1)}
+@media (prefers-reduced-motion:reduce){.sgdot{transition:none}}
 .mi,.why{width:calc(20 * var(--u));height:calc(24 * var(--u));display:grid;place-items:center}
 .mi{color:rgba(255,255,255,.85)}
 .mi.ask{color:var(--ask)}

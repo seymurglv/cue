@@ -39,6 +39,10 @@
 //!   change, the whole file is written, and what depends on it follows at once (the translation pair, the interface
 //!   language, the history's period); its "Paste again" and "Copy" of a history entry go through the insert thread like
 //!   any paste (`CoreEvent::HistoryText`);
+//! - a dictation's or a translation's paste is watched while "Learn from me" is on (docs/specs/2026-11-02-corrections.md):
+//!   the field focused once Ctrl+V went in is read on a thread of its own (`fieldwatch`) until the correction is over,
+//!   a new dictation opens the microphone or the switch goes off; a word the user wrote instead becomes the one
+//!   suggestion (`Offers`), shown on the Drop at rest. The field's text stays in memory: the log gets numbers only;
 //! - the log gets events, per-stage latencies and error codes; no text, no audio, no keys. Never `Effect` or `Input`
 //!   with `{:?}`: their `Debug` prints text.
 mod ask;
@@ -53,17 +57,18 @@ mod tasks;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cue_core::ask::{AnswerPlace, AskContext, MAX_SELECTION_CHARS, SelectionKind, TurnState};
 use cue_core::audio::{Silence, SilenceDetector};
+use cue_core::corrections::{self, Offers};
 use cue_core::flow::{DictationId, Effect, Flow, InsertOutcome, Input, Outcome, PasteHow, SttError, TimerKind};
 use cue_core::history;
 use cue_core::model::{ModelState, ModelsView};
 use cue_core::refine::RefineContext;
 use cue_core::stats;
-use cue_core::settings::{self, AudioKeep, DropPosition, HistorySettings, Keep, Period, SettingChange, Settings};
+use cue_core::settings::{self, AudioKeep, DropPosition, HistorySettings, Keep, LearnedWord, Period, SettingChange, Settings};
 use cue_core::speech;
 use cue_core::translate;
 use cue_core::ui::{Mode, TrayKind, UiAction, UiPhase, UiState};
@@ -79,6 +84,7 @@ use cue_engines::stt::{self, Engine, SttOutput, SttSession};
 use cue_platform_win::cardplace::{self, CARD};
 use cue_platform_win::chord::HotkeyEvent;
 use cue_platform_win::clipboard::{WinKeys, cloud_clipboard_uploads, may_paste};
+use cue_platform_win::fieldwatch;
 use cue_platform_win::focus::{Editability, FocusInfo, FocusWorker, SelectionRead, WindowRef};
 use cue_platform_win::hook;
 use cue_platform_win::mic::{self, MicEvent, MicHandle};
@@ -139,6 +145,9 @@ pub enum CoreEvent {
     /// `at` is the moment of Ctrl+V (or of the "no field" decision): the latency is counted up to it.
     InsertDone { id: DictationId, outcome: InsertOutcome, at: Instant },
     InsertTimeout { id: DictationId, generation: u64 },
+    /// The field watch after a paste is over: `span` is the corrected text between the paste's anchors; `stop` is that
+    /// watch's own flag, which tells it from a later one. The text is never logged.
+    Corrected { pasted: String, span: Option<String>, stop: Arc<AtomicBool> },
     TimerFired { kind: TimerKind, generation: u64 },
     /// A step of the "Ask" request `task` of dictation `id`.
     AskStep { id: DictationId, task: u64, step: engine_ask::Step },
@@ -157,6 +166,8 @@ pub enum CoreEvent {
     Wake,
     /// The Drop was dragged to a new place: saved in settings.json.
     DropMoved(DropPosition),
+    /// The idle Drop hid over a full-screen app (`true`) or shows again (`false`).
+    IdleHidden(bool),
     /// The main window reads the settings or changes one (spec 3 §3). The answer is always the settings as the core
     /// holds them after the command.
     Settings { cmd: SettingsCmd, reply: tokio::sync::oneshot::Sender<SettingsView> },
@@ -267,6 +278,15 @@ pub struct Runtime {
     last_app: String,
     /// The last tray card sent to the window: its button acts on it.
     tray: Option<TrayKind>,
+    /// The dictionary suggestion from a correction (docs/specs/2026-11-02-corrections.md).
+    offers: Offers,
+    /// The idle Drop is hidden over a full-screen app (the placement thread tells): no suggestion opens then.
+    idle_hidden: bool,
+    /// The dictation whose paste is awaited, with its text: the field is watched once it went in.
+    watch_next: Option<(DictationId, String)>,
+    /// The flag of the field watch running: set to end it early (a new dictation opened the microphone, "Learn from
+    /// me" went off).
+    field_stop: Option<Arc<AtomicBool>>,
     level: LevelGate,
     /// The connection warm-up; the refine prompt cache has its own (`cache_warm`).
     warm: WarmUp,
@@ -359,6 +379,10 @@ impl Runtime {
             last_text: None,
             last_app: String::new(),
             tray: None,
+            offers: Offers::default(),
+            idle_hidden: false,
+            watch_next: None,
+            field_stop: None,
             level: LevelGate::default(),
             warm: WarmUp::default(),
             cache_warm: CacheWarm::default(),
@@ -447,6 +471,7 @@ impl Runtime {
             self.exec(e);
         }
         self.sync_answer();
+        self.show_offer();
     }
 
     /// Once the flow's effects have run: the answer's rows of a follow-up (spec 2 §7 "Listening to the follow-up…";
@@ -483,9 +508,38 @@ impl Runtime {
             }
             CoreEvent::Input(i) => self.feed(i),
             CoreEvent::UiAction(UiAction::TrayAction) => self.on_tray_action(),
-            CoreEvent::UiAction(UiAction::TrayClose) => self.tray = None,
+            CoreEvent::UiAction(UiAction::TrayClose) => {
+                self.tray = None;
+                self.show_offer();
+            }
             // The flow does not change: the runtime copies the answer.
             CoreEvent::UiAction(UiAction::AnswerCopy) => self.copy_answer(),
+            // The Drop's answers to the suggestion; one out of turn (the suggestion it answers is gone) changes nothing.
+            CoreEvent::UiAction(UiAction::SuggestAdd) => {
+                if let Some(r) = self.offers.added() {
+                    let took = self.learn_word(SettingChange::DictLearn(LearnedWord { word: r.word, heard: r.heard }));
+                    if !took {
+                        self.offers.undone();
+                        self.ui.suggest(None);
+                    }
+                }
+            }
+            CoreEvent::UiAction(UiAction::SuggestUndo) => {
+                if let Some(r) = self.offers.undone() {
+                    self.learn_word(SettingChange::DictRemove(r.word));
+                    self.ui.suggest(None);
+                }
+            }
+            CoreEvent::UiAction(UiAction::SuggestDismiss) => {
+                if self.offers.dismissed() {
+                    self.ui.suggest(self.offers.view().as_ref());
+                }
+            }
+            CoreEvent::UiAction(UiAction::SuggestDone) => {
+                if self.offers.done() {
+                    self.ui.suggest(None);
+                }
+            }
             CoreEvent::UiAction(a) => {
                 // "Restore" (the flow accepts it only in "Cancelled"): the dictation latency is counted from it.
                 let now = self.now();
@@ -503,6 +557,7 @@ impl Runtime {
                 self.emit_state(&s);
                 self.send_mic_names(self.tray);
                 self.ui.tray(self.tray);
+                self.ui.suggest(self.offers.view().as_ref());
                 self.ui.model(self.model.state());
                 self.ui.resend_idle_hidden();
                 self.ui.resend_place();
@@ -528,12 +583,21 @@ impl Runtime {
                     if let Some(a) = self.attempt_for(id) {
                         a.inserted(at);
                     }
+                    // The text awaited goes whatever the outcome; only a paste of this dictation is watched.
+                    if let Some((wanted, pasted)) = self.watch_next.take()
+                        && wanted == id
+                        && outcome == InsertOutcome::Pasted
+                    {
+                        self.watch_field(pasted);
+                    }
                     self.feed(Input::Inserted { id, outcome });
                 }
             }
+            CoreEvent::Corrected { pasted, span, stop } => self.on_corrected(&pasted, span.as_deref(), &stop),
             CoreEvent::InsertTimeout { id, generation } => {
                 if self.insert_watch.expired(id, generation) {
                     tracing::warn!("insert did not finish within {} s: \"no field\"", INSERT_WATCHDOG.as_secs());
+                    self.watch_next = None;
                     let now = self.now();
                     if let Some(a) = self.attempt_for(id) {
                         a.inserted(now);
@@ -574,6 +638,10 @@ impl Runtime {
             CoreEvent::DropMoved(place) => {
                 self.settings.drop.position = place;
                 self.save_settings();
+            }
+            CoreEvent::IdleHidden(hidden) => {
+                self.idle_hidden = hidden;
+                self.show_offer();
             }
             CoreEvent::Model(news) => {
                 let told = self.model.on_event(news, &self.tx, &self.http);
@@ -671,6 +739,82 @@ impl Runtime {
             // Another choice: a microphone missing from now on is told about again.
             self.mic_told.forget();
         }
+        // "Learn from me" off: no field is read from now on, and the suggestion goes.
+        if !self.settings.learn.enabled() {
+            self.watch_next = None;
+            if let Some(stop) = self.field_stop.take() {
+                stop.store(true, Ordering::Relaxed);
+            }
+            if self.offers.dictation_started() {
+                self.ui.suggest(None);
+            }
+            self.offers = Offers::default();
+        }
+    }
+
+    /// A change from the Drop's suggestion: applied and written like the window's own, and the main window gets the
+    /// settings (its Dictionary draws the word). False when the change was refused.
+    fn learn_word(&mut self, change: SettingChange) -> bool {
+        let took = apply_setting(&mut self.settings, change, &self.paths.settings, self.can_save_settings);
+        if took {
+            self.ui.settings(&SettingsView::of(&self.settings, self.lang, self.can_save_settings));
+        }
+        took
+    }
+
+    /// The field just pasted into is read until the user's correction is over (docs/specs/2026-11-02-corrections.md).
+    /// Only the paste `insert` awaited, and only while "Learn from me" is on.
+    fn watch_field(&mut self, pasted: String) {
+        if !self.settings.learn.enabled() {
+            return;
+        }
+        if let Some(old) = self.field_stop.take() {
+            old.store(true, Ordering::Relaxed);
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, text, own) = (self.tx.clone(), pasted.clone(), stop.clone());
+        if fieldwatch::spawn(text, stop.clone(), move |span| {
+            let _ = tx.send(CoreEvent::Corrected { pasted, span, stop: own });
+        }) {
+            self.field_stop = Some(stop);
+        }
+    }
+
+    /// A watch is over: a word the user wrote instead of the one heard becomes the suggestion (the first, when there
+    /// are several). The log gets numbers, never the text.
+    fn on_corrected(&mut self, pasted: &str, span: Option<&str>, stop: &Arc<AtomicBool>) {
+        // A watch replaced by a later one leaves the later one's flag in place.
+        self.field_stop.take_if(|running| Arc::ptr_eq(running, stop));
+        if !self.settings.learn.enabled() {
+            return;
+        }
+        let Some(span) = span else {
+            tracing::info!("correction: none");
+            return;
+        };
+        let found = corrections::candidates(pasted, span, &self.settings.dictionary.terms);
+        tracing::info!(chars = span.chars().count(), candidates = found.len(), "correction found");
+        if let Some(first) = found.into_iter().next() {
+            let before = self.offers.view();
+            self.offers.offer(first);
+            // A missed one it replaced (the dot) is gone from the page until the new one opens at rest.
+            let after = self.offers.view();
+            if after != before {
+                self.ui.suggest(after.as_ref());
+            }
+            self.show_offer();
+        }
+    }
+
+    /// A waiting suggestion opens once the Drop is at rest (`at_rest`). Called again after anything that may end a
+    /// busy Drop: every input (the end of a pause among them), a tray card going, the idle Drop showing again once no
+    /// full-screen app is in front.
+    fn show_offer(&mut self) {
+        let s = self.flow.ui_state();
+        let rest = at_rest(s.phase, self.tray.is_some(), self.flow.answer_open(), s.paused, self.idle_hidden);
+        if rest && self.offers.at_rest() {
+            self.ui.suggest(self.offers.view().as_ref());
+        }
     }
 
     fn on_mic(&mut self, id: DictationId, ev: MicEvent) {
@@ -766,7 +910,15 @@ impl Runtime {
 
     fn exec(&mut self, e: Effect) {
         match e {
-            Effect::OpenMic { id } => self.open_mic(id),
+            Effect::OpenMic { id } => {
+                if let Some(stop) = &self.field_stop {
+                    stop.store(true, Ordering::Relaxed);
+                }
+                if self.offers.dictation_started() {
+                    self.ui.suggest(None);
+                }
+                self.open_mic(id)
+            }
             Effect::StopMic { id, keep } => self.stop_mic(id, keep),
             Effect::StartStt { id } => self.start_stt(id),
             Effect::FinishStt { id } => self.finish_stt(id),
@@ -1046,9 +1198,9 @@ impl Runtime {
             return;
         }
         let Ok(Some(key)) = keys::lookup(KeyName::Anthropic) else { return };
-        let (http, tx, terms) = (self.http.clone(), self.tx.clone(), self.settings.dictionary.terms.clone());
+        let (http, tx, dict) = (self.http.clone(), self.tx.clone(), self.settings.dictionary.clone());
         tokio::spawn(async move {
-            if let Some(usage) = claude::warm(&http, &key, &model, &terms).await {
+            if let Some(usage) = claude::warm(&http, &key, &model, &dict).await {
                 let _ = tx.send(CoreEvent::Warmed { usage, model });
             }
         });
@@ -1139,7 +1291,7 @@ impl Runtime {
             tracing::info!(to, "translating");
         }
         let (http, s, tx) = (self.http.clone(), self.settings.refine.clone(), self.tx.clone());
-        let terms = self.settings.dictionary.terms.clone();
+        let dict = self.settings.dictionary.clone();
         let old = self.refine_task.start(id, |task| {
             tokio::spawn(async move {
                 let fallback_raw = raw.clone();
@@ -1148,14 +1300,14 @@ impl Runtime {
                     let key = key.as_deref();
                     // The connection picks the client; the settings give it the model and the style.
                     match (kind, job) {
-                        (Kind::Anthropic, Job::Clean | Job::Rewrite) => claude::refine(&http, key, s.model().id, &raw, &ctx, &terms, &s).await,
+                        (Kind::Anthropic, Job::Clean | Job::Rewrite) => claude::refine(&http, key, s.model().id, &raw, &ctx, &dict, &s).await,
                         (Kind::Anthropic, Job::Translate(to)) => {
-                            claude::translate(&http, key, s.model().id, &raw, &ctx, &terms, &s, to).await
+                            claude::translate(&http, key, s.model().id, &raw, &ctx, &dict, &s, to).await
                         }
-                        (Kind::OpenRouter, Job::Clean | Job::Rewrite) => openrouter::refine(&http, key, &raw, &ctx, &terms, &s).await,
-                        (Kind::OpenRouter, Job::Translate(to)) => openrouter::translate(&http, key, &raw, &ctx, &terms, &s, to).await,
-                        (Kind::Chat, Job::Clean | Job::Rewrite) => chat::refine(&http, key, &raw, &ctx, &terms, &s).await,
-                        (Kind::Chat, Job::Translate(to)) => chat::translate(&http, key, &raw, &ctx, &terms, &s, to).await,
+                        (Kind::OpenRouter, Job::Clean | Job::Rewrite) => openrouter::refine(&http, key, &raw, &ctx, &dict, &s).await,
+                        (Kind::OpenRouter, Job::Translate(to)) => openrouter::translate(&http, key, &raw, &ctx, &dict, &s, to).await,
+                        (Kind::Chat, Job::Clean | Job::Rewrite) => chat::refine(&http, key, &raw, &ctx, &dict, &s).await,
+                        (Kind::Chat, Job::Translate(to)) => chat::translate(&http, key, &raw, &ctx, &dict, &s, to).await,
                     }
                 };
                 let result = guarded("refine", body, move || refine_panicked(fallback_raw)).await;
@@ -1174,6 +1326,7 @@ impl Runtime {
         }
         self.final_text = Some((id, text.clone()));
         self.watch_insert(id);
+        self.watch_next = (self.settings.learn.enabled() && self.attempt.mode != Mode::Ask).then(|| (id, text.clone()));
         self.dispatch_insert(text, Some(id), None, None);
     }
 
@@ -1690,6 +1843,7 @@ impl Runtime {
             }
             Some(TrayKind::HoldHint | TrayKind::LastMinute | TrayKind::MicMissing | TrayKind::ModelReady | TrayKind::ModelSwitched) | None => {}
         }
+        self.show_offer();
     }
 
     fn on_finished(&mut self, id: DictationId, outcome: Outcome) {
@@ -2181,6 +2335,12 @@ fn local_time() -> String {
 /// closed.
 fn follow_up_rows(answer_open: bool, recording: bool, phase: UiPhase) -> (bool, bool) {
     (answer_open && recording, answer_open && phase == UiPhase::Error)
+}
+
+/// The Drop is at rest for a suggestion: idle, no tray card, no answer, and shown, so the capsule can be clicked
+/// (paused or over a full-screen app the idle Drop is hidden and lets the mouse through).
+fn at_rest(phase: UiPhase, tray: bool, answer_open: bool, paused: bool, hidden: bool) -> bool {
+    phase == UiPhase::Idle && !tray && !answer_open && !paused && !hidden
 }
 
 /// A web page in the default browser (spec 2 §7), or a page of Windows Settings (`ms-settings:`, the welcome window's).
@@ -2857,6 +3017,18 @@ mod tests {
         assert_eq!(follow_up_rows(true, false, UiPhase::Answer), (false, false));
         assert_eq!(follow_up_rows(false, true, UiPhase::Listen), (false, false), "a dictation records");
         assert_eq!(follow_up_rows(false, false, UiPhase::Error), (false, false), "the Drop's own error");
+    }
+
+    /// A suggestion opens only on a Drop that can be seen and clicked: idle, no tray card, no answer, not paused, not
+    /// hidden over a full-screen app.
+    #[test]
+    fn a_suggestion_opens_only_on_the_shown_idle_drop() {
+        assert!(at_rest(UiPhase::Idle, false, false, false, false));
+        assert!(!at_rest(UiPhase::Done, false, false, false, false));
+        assert!(!at_rest(UiPhase::Idle, true, false, false, false), "a tray card");
+        assert!(!at_rest(UiPhase::Idle, false, true, false, false), "an answer");
+        assert!(!at_rest(UiPhase::Idle, false, false, true, false), "paused");
+        assert!(!at_rest(UiPhase::Idle, false, false, false, true), "over a full-screen app");
     }
 
     #[test]

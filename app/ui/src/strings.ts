@@ -49,6 +49,9 @@ export interface DropText {
   done: string;
   cancelled: string;
   ask: string;
+  /** The dictionary suggestion's buttons: tooltip and accessible name. */
+  learnAdd: string;
+  learnUndo: string;
 }
 
 /** Texts of an "Ask" answer (spec 2 §7). `about` puts in the selection's start at {Q}. */
@@ -132,6 +135,8 @@ export const en: Dict = {
     done: 'Done',
     cancelled: 'Cancelled',
     ask: 'Ask',
+    learnAdd: 'Add to dictionary',
+    learnUndo: 'Undo',
   },
   answer: {
     insert: 'Insert',
@@ -204,6 +209,8 @@ export const ru: Dict = {
     done: 'Готово',
     cancelled: 'Отменено',
     ask: 'Спросить',
+    learnAdd: 'Добавить в словарь',
+    learnUndo: 'Отменить',
   },
   answer: {
     insert: 'Вставить',

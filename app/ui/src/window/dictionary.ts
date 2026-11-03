@@ -70,7 +70,11 @@ export class DictionaryView {
       if (!this.input.value.trim()) this.closeAdd();
     });
     this.add.append(open, this.input);
-    sec.append(h3, h('p', 'dhint', t.dictHint), this.flow, this.add);
+    // One space in the text, before the book; the book's own margin is the space after it.
+    const hint = h('p', 'dhint', t.dictHint + ' ');
+    hint.insertAdjacentHTML('beforeend', icon('book'));
+    hint.append(t.dictHintLearned);
+    sec.append(h3, hint, this.flow, this.add);
     this.render();
   }
 
@@ -85,6 +89,13 @@ export class DictionaryView {
       chip.setAttribute('role', 'listitem');
       chip.dataset.word = w;
       chip.append(w);
+      const learned = this.ctx.settings?.learned?.find((l) => l.word === w);
+      if (learned) {
+        const g = h('i', 'g');
+        g.innerHTML = icon('book');
+        chip.append(g);
+        chip.title = t.dictHeard.replace('{HEARD}', () => learned.heard);
+      }
       const x = iconButton('dx', 'x', t.dictRemove);
       x.setAttribute('aria-label', fill(t.dictRemoveWord, w));
       x.dataset.remove = '';

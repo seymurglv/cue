@@ -16,6 +16,12 @@ export interface WinText {
    *  placeholder, a word's remove button. */
   dictionary: string;
   dictHint: string;
+  /** The hint's second half, after the green book. */
+  dictHintLearned: string;
+  /** A learned chip's tooltip; {HEARD} is how it was heard. */
+  dictHeard: string;
+  learn: string;
+  learnHint: string;
   dictAdd: string;
   dictNew: string;
   dictRemove: string;
@@ -187,6 +193,10 @@ export const en: WinText = {
   history: 'History',
   dictionary: 'Dictionary',
   dictHint: 'Words CUE must write right.',
+  dictHintLearned: '— from your corrections: CUE noticed the change and offered the word.',
+  dictHeard: 'sounds like «{HEARD}»',
+  learn: 'Learn from me',
+  learnHint: 'CUE notices your corrections and offers words for the dictionary. Everything stays on this computer.',
   dictAdd: 'Word',
   dictNew: 'New word, Enter',
   dictRemove: 'Remove',
@@ -341,6 +351,10 @@ export const ru: WinText = {
   history: 'История',
   dictionary: 'Словарь',
   dictHint: 'Слова, которые CUE должен писать правильно.',
+  dictHintLearned: '— из ваших правок: CUE заметил замену и предложил слово.',
+  dictHeard: 'звучит как «{HEARD}»',
+  learn: 'Учиться у меня',
+  learnHint: 'CUE замечает ваши правки и предлагает слова для словаря. Всё остаётся на этом компьютере.',
   dictAdd: 'Слово',
   dictNew: 'Новое слово, Enter',
   dictRemove: 'Удалить',

@@ -326,6 +326,7 @@ export class WindowPage implements Ctx {
     this.setLang(view?.lang);
     this.build();
     api.onMicLevel((level) => this.tray.level(level)).catch((e) => logFailed('following the microphone level', e));
+    api.onSettings((v) => this.pushed(v)).catch((e) => logFailed('following the settings', e));
     // The speech model's state: asked once, then followed.
     api.onModel((m) => this.tray.setModel(m)).catch((e) => logFailed('following the speech model', e));
     api.modelGet().then((m) => this.tray.setModel(m), (e) => logFailed('reading the speech model', e));
@@ -393,6 +394,15 @@ export class WindowPage implements Ctx {
     }
     if (audioChanged) this.history.release();
     if (keepChanged || audioChanged) void this.history.reload();
+  }
+
+  /** Settings the core sent by itself (a word learned or taken back from the Drop): only the Dictionary is drawn
+   *  again, and the "Learn from me" switch set where it is. The tray is not redrawn: a draft in it (the instructions
+   *  are saved when their field loses focus) stays as typed. */
+  private pushed(view: SettingsView): void {
+    this.settings = view;
+    this.dict.render();
+    this.tray.learnChanged();
   }
 
   /** The window's content in the current language; the History section and the tray keep their state. */

@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context};
 use cue_core::flow::RefineOutcome;
 use cue_core::refine::{timeout_ms, RefineContext};
-use cue_core::settings::{Pricing, RefineSettings, RefineStyle};
+use cue_core::settings::{DictionarySettings, Pricing, RefineSettings, RefineStyle};
 use cue_core::translate;
 use cue_engines::claude::{self, Job, Parsed};
 use cue_engines::keys::{self, KeyName};
@@ -303,11 +303,11 @@ fn ms(d: Duration) -> u64 {
 
 /// The app's direct path — `claude::refine` as is (its timeout is `timeout_ms`, 3 s), or `claude::translate` for a
 /// phrase with `to` (`translate::timeout_ms`, a second more); total time only.
-async fn direct_call(http: &reqwest::Client, key: &str, p: &Phrase, ctx: &RefineContext, terms: &[String], s: &RefineSettings) -> Call {
+async fn direct_call(http: &reqwest::Client, key: &str, p: &Phrase, ctx: &RefineContext, dict: &DictionarySettings, s: &RefineSettings) -> Call {
     let t0 = Instant::now();
     let (r, timeout) = match p.to {
-        None => (claude::refine(http, Some(key), DIRECT, &p.raw, ctx, terms, s).await, timeout_ms(&p.raw)),
-        Some(to) => (claude::translate(http, Some(key), DIRECT, &p.raw, ctx, terms, s, to).await, translate::timeout_ms(&p.raw)),
+        None => (claude::refine(http, Some(key), DIRECT, &p.raw, ctx, dict, s).await, timeout_ms(&p.raw)),
+        Some(to) => (claude::translate(http, Some(key), DIRECT, &p.raw, ctx, dict, s, to).await, translate::timeout_ms(&p.raw)),
     };
     let total_ms = ms(t0.elapsed());
     let u = r.usage;
@@ -350,10 +350,10 @@ async fn router_call(
     routing: &mut Routing,
     p: &Phrase,
     ctx: &RefineContext,
-    terms: &[String],
+    dict: &DictionarySettings,
     s: &RefineSettings,
 ) -> Call {
-    let body = |r: Routing| openrouter::request_body_styled(id, profile, r, &p.raw, ctx, terms, Job::Rewrite, s.custom_text());
+    let body = |r: Routing| openrouter::request_body_styled(id, profile, r, &p.raw, ctx, dict, Job::Rewrite, s.custom_text());
     let routed = openrouter::complete_routed(http, key, *routing, ROUTER_TIMEOUT, body).await;
     let (result, used, elapsed) = (routed.result, routed.routing, ms(routed.elapsed));
     if result.is_ok() {
@@ -370,7 +370,7 @@ async fn router_call(
         Ok(c) => {
             let parsed = openrouter::parse_content(&c.content, c.finish_reason.as_deref(), profile.structured);
             let parsed_kind = parsed_name(&parsed);
-            let (output, outcome) = claude::decide(&p.raw, parsed, terms, s);
+            let (output, outcome) = claude::decide(&p.raw, parsed, dict, s);
             let u = c.usage.unwrap_or_default();
             let (cost_usd, cost_source) = match (c.usage, u.cost) {
                 (_, Some(cost)) => (cost, "openrouter"),
@@ -668,6 +668,7 @@ async fn main() -> anyhow::Result<()> {
         args.runs,
         args.max_usd
     );
+    let dict = DictionarySettings { terms: args.terms.clone(), ..Default::default() };
     if !args.terms.is_empty() {
         println!("dictionary: {} entries", args.terms.len());
     }
@@ -712,10 +713,10 @@ async fn main() -> anyhow::Result<()> {
                 let cold = lane.calls == 0;
                 lane.calls += 1;
                 let mut call = match &lane.engine {
-                    Engine::Direct => direct_call(&http, direct_key.as_deref().unwrap_or_default(), p, &ctx, &args.terms, &s).await,
+                    Engine::Direct => direct_call(&http, direct_key.as_deref().unwrap_or_default(), p, &ctx, &dict, &s).await,
                     Engine::Router { info, profile } => {
                         let key = router_key.as_deref().unwrap_or_default();
-                        router_call(&http, key, &lane.id, info, profile, &mut lane.routing, p, &ctx, &args.terms, &s).await
+                        router_call(&http, key, &lane.id, info, profile, &mut lane.routing, p, &ctx, &dict, &s).await
                     }
                 };
                 call.seq = calls.len() + 1;

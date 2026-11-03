@@ -81,6 +81,10 @@ export interface SettingsView {
   refineModel: string;
   refineAddress: string;
   connections: ConnectionView[];
+  /** Words added from a correction, with how they were heard. */
+  learned: { word: string; heard: string }[];
+  /** "Learn from me". */
+  learn: boolean;
 }
 export type SettingChange =
   | { kind: 'historyKeep'; value: Keep }
@@ -94,7 +98,8 @@ export type SettingChange =
   | { kind: 'refineModel'; value: string }
   | { kind: 'refineAddress'; value: string }
   | { kind: 'dictAdd'; value: string }
-  | { kind: 'dictRemove'; value: string };
+  | { kind: 'dictRemove'; value: string }
+  | { kind: 'learn'; value: boolean };
 
 /** The keys of the cleanup's cloud connections, each under its connection's id. */
 export type KeyName = 'anthropic' | 'openrouter' | 'openai' | 'gemini' | 'deepseek' | 'mistral' | 'groq' | 'xai';
@@ -192,6 +197,10 @@ export type ModelState =
   | { state: 'ready'; total: number }
   | { state: 'failed'; done: number; total: number }
   | { state: 'unsupported' };
+/** Settings the core changed by itself (a word added from the Drop's suggestion). */
+export async function onSettings(cb: (v: SettingsView) => void): Promise<void> {
+  await getCurrentWebviewWindow().listen<SettingsView>('cue://settings', (e) => cb(e.payload));
+}
 export const modelGet = () => invoke<ModelState>('model_get');
 /** Retry the model's download from where it stopped; the new state comes as `cue://model`. */
 export const modelRetry = () => invoke<void>('model_retry');

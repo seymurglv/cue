@@ -175,6 +175,12 @@ impl Private {
         for (i, term) in settings.dictionary.terms.iter().enumerate() {
             private.add(Kind::DictionaryTerm(i), term, MIN_NAME_CHARS);
         }
+        // The words learned from suggestions are in `terms` too; what was heard instead is the user's as well.
+        let after = settings.dictionary.terms.len();
+        for (i, learned) in settings.dictionary.learned.iter().enumerate() {
+            private.add(Kind::DictionaryTerm(after + i), &learned.word, MIN_NAME_CHARS);
+            private.add(Kind::DictionaryTerm(after + i), &learned.heard, MIN_NAME_CHARS);
+        }
         let mut microphones: Vec<String> = settings.audio.device.into_iter().collect();
         microphones.extend(cue_platform_win::mic::listed_names().context("Windows did not list the microphones")?);
         microphones.extend(cue_platform_win::mic::default_name());

@@ -46,6 +46,10 @@ pub struct SettingsView {
     pub saved: bool,
     /// The dictionary's words as settings.json keeps them, the newest first.
     pub dictionary: Vec<String>,
+    /// The dictionary's words added from a suggestion, with how they were heard (the green book's tooltip).
+    pub learned: Vec<LearnedView>,
+    /// "Learn from me".
+    pub learn: bool,
     /// CUE's cleanup or the user's instructions, and those instructions.
     pub refine_style: RefineStyle,
     pub refine_custom: String,
@@ -55,6 +59,13 @@ pub struct SettingsView {
     pub refine_address: String,
     /// Every connection the cleanup can go through, with its models, the recommended one first.
     pub connections: Vec<ConnectionView>,
+}
+
+/// A word added from a suggestion after a correction, and what recognition heard instead.
+#[derive(Clone, PartialEq, serde::Serialize)]
+pub struct LearnedView {
+    pub word: String,
+    pub heard: String,
 }
 
 /// A connection as the Cleanup page lists it.
@@ -112,6 +123,13 @@ impl SettingsView {
             languages: translate::LANGUAGES,
             saved,
             dictionary: s.dictionary.terms.clone(),
+            learned: s
+                .dictionary
+                .learned
+                .iter()
+                .map(|l| LearnedView { word: l.word.clone(), heard: l.heard.clone() })
+                .collect(),
+            learn: s.learn.enabled(),
             refine_style: s.refine.style,
             refine_custom: s.refine.custom.clone(),
             refine_connection: s.refine.connection().id,
@@ -134,6 +152,8 @@ impl std::fmt::Debug for SettingsView {
             .field("languages", &self.languages.len())
             .field("saved", &self.saved)
             .field("dictionary", &self.dictionary.len())
+            .field("learned", &self.learned.len())
+            .field("learn", &self.learn)
             .field("refine_style", &self.refine_style)
             .field("refine_custom_chars", &self.refine_custom.chars().count())
             .field("refine_connection", &self.refine_connection)
@@ -313,6 +333,21 @@ impl Ui {
         self.emit("cue://tray", k);
     }
 
+    /// The dictionary suggestion, to the Drop (docs/specs/2026-11-02-corrections.md); `None` folds it away.
+    pub fn suggest(&self, v: Option<&cue_core::corrections::SuggestView>) {
+        if let Err(e) = self.app.emit_to(DROP_LABEL, "cue://suggest", v) {
+            tracing::debug!("Drop window: event cue://suggest not sent: {e}");
+        }
+    }
+
+    /// The settings after a change the window did not ask for (a word added from the Drop): to the main window, which
+    /// draws the dictionary. No other window gets the dictionary or the cleanup's instructions.
+    pub fn settings(&self, v: &SettingsView) {
+        if let Err(e) = self.app.emit_to(MAIN_LABEL, "cue://settings", v) {
+            tracing::debug!("main window: event cue://settings not sent: {e}");
+        }
+    }
+
     /// The pinned microphone that is not there and the one recording instead (spec 3 §3), just before their card: to
     /// the Drop, which draws it.
     pub fn mic_names(&self, wanted: &str, used: &str) {
@@ -483,7 +518,7 @@ pub fn card_ready(window: WebviewWindow, core: State<'_, CoreTx>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cue_core::settings::{Period, SettingChange};
+    use cue_core::settings::{LearnedWord, Period, SettingChange};
     use serde_json::{Value, json};
 
     /// The names the main window reads.
@@ -494,7 +529,7 @@ mod tests {
         let mut names: Vec<&str> = view.as_object().unwrap().keys().map(String::as_str).collect();
         names.sort_unstable();
         let expected =
-            ["connections", "dictionary", "historyAudio", "historyKeep", "lang", "languages", "micDevice", "refineAddress", "refineConnection", "refineCustom", "refineModel", "refineStyle", "saved", "translateTarget", "uiLanguage"];
+            ["connections", "dictionary", "historyAudio", "historyKeep", "lang", "languages", "learn", "learned", "micDevice", "refineAddress", "refineConnection", "refineCustom", "refineModel", "refineStyle", "saved", "translateTarget", "uiLanguage"];
         assert_eq!(names, expected);
         let defaults = [
             ("historyKeep", json!("month")),
@@ -505,6 +540,8 @@ mod tests {
             ("lang", json!("en")),
             ("saved", json!(true)),
             ("dictionary", json!([])),
+            ("learned", json!([])),
+            ("learn", json!(true)),
             ("refineStyle", json!("default")),
             ("refineCustom", json!("")),
             ("refineConnection", json!("anthropic")),
@@ -558,6 +595,22 @@ mod tests {
         s.history.audio = Period::Unknown(json!("fortnight"));
         let view = serde_json::to_value(SettingsView::of(&s, Lang::Ru, false)).unwrap();
         assert_eq!((&view["historyKeep"], &view["historyAudio"]), (&Value::Null, &Value::Null));
+    }
+
+    /// A word added from a suggestion: the window gets it with how it was heard, the log only the count.
+    #[test]
+    fn settings_view_has_the_learned_words() {
+        let mut s = Settings::default();
+        let word = LearnedWord { word: "Marisol".into(), heard: "Марисоль".into() };
+        assert!(s.apply(SettingChange::DictLearn(word)));
+        let view = serde_json::to_value(SettingsView::of(&s, Lang::En, true)).unwrap();
+        assert_eq!(view["learned"], json!([{ "word": "Marisol", "heard": "Марисоль" }]));
+        assert_eq!(view["dictionary"], json!(["Marisol"]));
+        let logged = format!("{:?}", SettingsView::of(&s, Lang::En, true));
+        assert!(!logged.contains("Marisol") && !logged.contains("Марисоль"), "no word in a log");
+
+        assert!(s.apply(SettingChange::Learn(false)));
+        assert_eq!(serde_json::to_value(SettingsView::of(&s, Lang::En, true)).unwrap()["learn"], json!(false));
     }
 
     #[test]

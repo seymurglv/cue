@@ -151,10 +151,20 @@ fn setup(
     drop_window::spawn_hit_test(win.clone(), hits.clone());
     let (drag_tx, drag_rx) = std::sync::mpsc::channel();
     app.manage(drop_window::Placer::new(drag_tx));
-    let tx = core_tx.clone();
-    drop_window::spawn_placement(win, ui.clone(), place, drag_rx, hits, move |p| {
-        let _ = tx.send(CoreEvent::DropMoved(p));
-    });
+    let (tx, hide_tx) = (core_tx.clone(), core_tx.clone());
+    drop_window::spawn_placement(
+        win,
+        ui.clone(),
+        place,
+        drag_rx,
+        hits,
+        move |p| {
+            let _ = tx.send(CoreEvent::DropMoved(p));
+        },
+        move |hidden| {
+            let _ = hide_tx.send(CoreEvent::IdleHidden(hidden));
+        },
+    );
     // The "Ask" card at the selection; without it, answers go to the tray.
     let card = match card_window::create(app.handle(), lang) {
         Ok(win) => {

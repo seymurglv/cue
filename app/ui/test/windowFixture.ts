@@ -57,6 +57,8 @@ export function view(over: Partial<api.SettingsView> = {}): api.SettingsView {
     refineModel: 'claude-haiku-5-5',
     refineAddress: 'https://api.anthropic.com/v1',
     connections: CONNECTIONS,
+    learned: [],
+    learn: true,
     ...over,
   };
 }
@@ -91,6 +93,7 @@ export const feeds: {
   state: (s: api.CoreState) => void;
   model: (m: api.ModelState) => void;
   models: (m: api.ModelsView) => void;
+  settings: (v: api.SettingsView) => void;
 } = {
   entry: () => {},
   level: () => {},
@@ -98,6 +101,7 @@ export const feeds: {
   state: () => {},
   model: () => {},
   models: () => {},
+  settings: () => {},
 };
 
 /** Answers of a core that holds `settings` and changes them as asked. */
@@ -113,7 +117,7 @@ export function stub(settings: api.SettingsView = view()): void {
       return now;
     }
     if (c.kind === 'dictRemove') {
-      now = { ...now, dictionary: now.dictionary.filter((w) => w !== c.value) };
+      now = { ...now, dictionary: now.dictionary.filter((w) => w !== c.value), learned: now.learned.filter((l) => l.word !== c.value) };
       return now;
     }
     now = { ...now, [c.kind]: c.value };
@@ -157,6 +161,9 @@ export function stub(settings: api.SettingsView = view()): void {
   core.modelRetry.mockResolvedValue(undefined);
   core.onModel.mockImplementation(async (cb) => {
     feeds.model = cb;
+  });
+  core.onSettings.mockImplementation(async (cb) => {
+    feeds.settings = cb;
   });
   core.modelsGet.mockResolvedValue(modelsView());
   core.onModels.mockImplementation(async (cb) => {

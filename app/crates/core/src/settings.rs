@@ -223,12 +223,38 @@ impl<'de> Deserialize<'de> for DropSettings {
 
 /// Names and terms the user often says (product names, people, jargon), written as they should appear. Only the
 /// refine request gets them, as a cached block after the system prompt (`refine::terms_prompt`, which also drops
-/// unusable entries); recognition does not take them.
+/// unusable entries); recognition does not take them. `learned` holds the words added from a suggestion, newest
+/// first; each is in `terms` too.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DictionarySettings {
     #[serde(deserialize_with = "strings_or_nothing")]
     pub terms: Vec<String>,
+    #[serde(deserialize_with = "learned_or_nothing", skip_serializing_if = "Vec::is_empty")]
+    pub learned: Vec<LearnedWord>,
+}
+
+/// A word added from a suggestion after a correction, with what recognition heard instead; refine is told both.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct LearnedWord {
+    pub word: String,
+    pub heard: String,
+}
+
+/// Either may be a name: only their lengths.
+impl std::fmt::Debug for LearnedWord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LearnedWord")
+            .field("word_chars", &self.word.chars().count())
+            .field("heard_chars", &self.heard.chars().count())
+            .finish()
+    }
+}
+
+fn learned_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<LearnedWord>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let serde_json::Value::Array(items) = value else { return Ok(Vec::new()) };
+    Ok(items.into_iter().filter_map(|item| serde_json::from_value(item).ok()).collect())
 }
 
 /// A list of strings, kept as written (trimming and the other rules apply on use). Anything other than a list
@@ -291,6 +317,25 @@ const DEFAULT_TARGET: &str = "en";
 /// it is not written back.
 fn target_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
     Ok(language_or_nothing(deserializer)?.filter(|code| code != DEFAULT_TARGET))
+}
+
+/// "Learn from me": after a paste CUE reads the field to notice a correction (docs/specs/2026-11-02-corrections.md).
+/// On by default; only `false` is written.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LearnSettings {
+    #[serde(deserialize_with = "off_or_nothing", skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+impl LearnSettings {
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// "Ask" (spec 2 §9). Every field is optional: a missing or invalid value reads as the default, and a default — also one
@@ -654,6 +699,11 @@ pub enum SettingChange {
     DictAdd(String),
     /// A word out of the dictionary, as it is written there.
     DictRemove(String),
+    /// A word from a suggestion: first in the dictionary, with how it was heard; refused like `DictAdd`, and when
+    /// `heard` could not go into the request.
+    DictLearn(LearnedWord),
+    /// "Learn from me" on or off.
+    Learn(bool),
 }
 
 fn period_or_refuse<'de, D: Deserializer<'de>, K: PeriodName>(deserializer: D) -> Result<K, D::Error> {
@@ -681,6 +731,12 @@ impl std::fmt::Debug for SettingChange {
             // A word of the dictionary may be a name: only its length.
             Self::DictAdd(word) => f.debug_struct("DictAdd").field("chars", &word.chars().count()).finish(),
             Self::DictRemove(word) => f.debug_struct("DictRemove").field("chars", &word.chars().count()).finish(),
+            Self::DictLearn(l) => f
+                .debug_struct("DictLearn")
+                .field("chars", &l.word.chars().count())
+                .field("heard_chars", &l.heard.chars().count())
+                .finish(),
+            Self::Learn(on) => f.debug_tuple("Learn").field(on).finish(),
         }
     }
 }
@@ -693,6 +749,8 @@ impl Settings {
     /// language (`en`) as no value. A period set here makes an unknown one known. A dictionary word is trimmed and put
     /// first; refused are one the refine request could not take (`refine::is_term`), one already there in any case,
     /// and any once the dictionary holds `refine::MAX_TERMS` words. Removing takes the word as it is written.
+    /// `DictLearn` puts a word in the same way, with how it was heard (refused too when that is no term); `Learn` sets
+    /// "Learn from me", whose default (on) is written as no value.
     pub fn apply(&mut self, change: SettingChange) -> bool {
         match change {
             SettingChange::HistoryAudio(keep) => set_if_changed(&mut self.history.audio, Period::Set(keep)),
@@ -736,21 +794,24 @@ impl Settings {
                 let chosen = (url != c.base_url).then(|| url.to_owned());
                 set_entry(&mut self.refine.addresses, c.id, chosen)
             }
-            SettingChange::DictAdd(word) => {
-                let word = word.trim();
-                let terms = &mut self.dictionary.terms;
-                let taken = terms.iter().any(|t| t.trim().to_lowercase() == word.to_lowercase());
-                if !refine::is_term(word) || taken || terms.len() >= refine::MAX_TERMS {
+            SettingChange::DictAdd(word) => self.dictionary.put_first(word.trim()),
+            SettingChange::DictLearn(l) => {
+                let (word, heard) = (l.word.trim(), l.heard.trim());
+                if !refine::is_term(heard) || !self.dictionary.put_first(word) {
                     return false;
                 }
-                terms.insert(0, word.to_owned());
+                self.dictionary.learned.retain(|x| x.word.to_lowercase() != word.to_lowercase());
+                self.dictionary.learned.insert(0, LearnedWord { word: word.to_owned(), heard: heard.to_owned() });
                 true
             }
             SettingChange::DictRemove(word) => {
-                let before = self.dictionary.terms.len();
-                self.dictionary.terms.retain(|t| *t != word);
-                self.dictionary.terms.len() != before
+                let d = &mut self.dictionary;
+                let (terms, learned) = (d.terms.len(), d.learned.len());
+                d.terms.retain(|t| *t != word);
+                d.learned.retain(|l| l.word != word);
+                d.terms.len() != terms || d.learned.len() != learned
             }
+            SettingChange::Learn(on) => set_if_changed(&mut self.learn.enabled, (!on).then_some(false)),
         }
     }
 }
@@ -809,6 +870,9 @@ pub struct Settings {
     /// Not written while the list is empty, like `ui`.
     #[serde(skip_serializing_if = "DictionarySettings::is_default")]
     pub dictionary: DictionarySettings,
+    /// "Learn from me". Not written while it is on, like `translate`.
+    #[serde(deserialize_with = "section_or_default", skip_serializing_if = "LearnSettings::is_default")]
+    pub learn: LearnSettings,
     /// Not written while every field is the default, like `ui`.
     #[serde(deserialize_with = "section_or_default", skip_serializing_if = "TranslateSettings::is_default")]
     pub translate: TranslateSettings,
@@ -883,6 +947,7 @@ impl Default for Settings {
             ui: UiSettings::default(),
             drop: DropSettings::default(),
             dictionary: DictionarySettings::default(),
+            learn: LearnSettings::default(),
             translate: TranslateSettings::default(),
             ask: AskSettings::default(),
             audio: AudioSettings::default(),
@@ -905,6 +970,16 @@ impl DropSettings {
 }
 
 impl DictionarySettings {
+    /// A word first in `terms`: refused when empty, not one line, too long, there in any case, or the list is full.
+    fn put_first(&mut self, word: &str) -> bool {
+        let taken = self.terms.iter().any(|t| t.trim().to_lowercase() == word.to_lowercase());
+        if !refine::is_term(word) || taken || self.terms.len() >= refine::MAX_TERMS {
+            return false;
+        }
+        self.terms.insert(0, word.to_owned());
+        true
+    }
+
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -1987,6 +2062,9 @@ mod tests {
         assert_eq!(read(r#"{"kind":"uiLanguage","value":"ru"}"#).unwrap(), SettingChange::UiLanguage(UiLanguage::Ru));
         assert_eq!(read(r#"{"kind":"refineStyle","value":"custom"}"#).unwrap(), SettingChange::RefineStyle(RefineStyle::Custom));
         assert_eq!(read(r#"{"kind":"refineCustom","value":"кратко"}"#).unwrap(), SettingChange::RefineCustom("кратко".into()));
+        assert_eq!(read(r#"{"kind":"learn","value":false}"#).unwrap(), SettingChange::Learn(false));
+        let word = LearnedWord { word: "GitHub".into(), heard: "гитхаб".into() };
+        assert_eq!(read(r#"{"kind":"dictLearn","value":{"word":"GitHub","heard":"гитхаб"}}"#).unwrap(), SettingChange::DictLearn(word));
         assert_eq!(read(r#"{"kind":"refineConnection","value":"openai"}"#).unwrap(), SettingChange::RefineConnection("openai".into()));
         assert_eq!(read(r#"{"kind":"refineModel","value":"gpt-6.1-terra"}"#).unwrap(), SettingChange::RefineModel("gpt-6.1-terra".into()));
         let address = SettingChange::RefineAddress("http://localhost:1/v1".into());
@@ -2026,7 +2104,8 @@ mod tests {
         let unknown = SettingChange::TranslateTarget("my secret".into());
         assert!(!format!("{unknown:?}").contains("secret"));
         assert!(format!("{:?}", SettingChange::TranslateTarget("de".into())).contains("de"));
-        for change in [SettingChange::DictAdd("Jane Doe".into()), SettingChange::DictRemove("Jane Doe".into())] {
+        let learn = SettingChange::DictLearn(learned("Jane Doe", "Джейн Доу"));
+        for change in [SettingChange::DictAdd("Jane Doe".into()), SettingChange::DictRemove("Jane Doe".into()), learn] {
             assert!(!format!("{change:?}").contains("Jane"), "a dictionary word may be a name");
         }
     }
@@ -2051,5 +2130,69 @@ mod tests {
         assert!(!s.apply(SettingChange::DictAdd("one more".into())), "the dictionary is full");
         let change: SettingChange = serde_json::from_value(serde_json::json!({ "kind": "dictAdd", "value": "GitHub" })).unwrap();
         assert_eq!(change, SettingChange::DictAdd("GitHub".into()));
+    }
+
+    fn learned(word: &str, heard: &str) -> LearnedWord {
+        LearnedWord { word: word.into(), heard: heard.into() }
+    }
+
+    /// A word from a suggestion goes into both lists, first; it is refused like a typed one, and when what was heard
+    /// cannot go into the request; removing the word takes it out of both.
+    #[test]
+    fn a_learned_word_joins_the_dictionary_with_how_it_was_heard() {
+        let mut s = Settings::default();
+        assert!(s.apply(SettingChange::DictAdd("Soniox".into())));
+        assert!(s.apply(SettingChange::DictLearn(learned(" Marisol ", " Марисоль "))));
+        assert_eq!(s.dictionary.terms, ["Marisol", "Soniox"]);
+        assert_eq!(s.dictionary.learned, [learned("Marisol", "Марисоль")]);
+        assert!(!s.apply(SettingChange::DictLearn(learned("marisol", "марисоль"))), "already there");
+        assert!(!s.apply(SettingChange::DictLearn(learned("GitHub", "a\nb"))), "heard on two lines");
+        assert!(!s.apply(SettingChange::DictLearn(learned("", "пусто"))));
+        assert!(s.apply(SettingChange::DictRemove("Marisol".into())));
+        assert!(s.dictionary.learned.is_empty() && s.dictionary.terms == ["Soniox"]);
+        let change: SettingChange =
+            serde_json::from_value(serde_json::json!({ "kind": "dictLearn", "value": { "word": "GitHub", "heard": "гитхаб" } })).unwrap();
+        assert_eq!(change, SettingChange::DictLearn(learned("GitHub", "гитхаб")));
+        let change: SettingChange = serde_json::from_value(serde_json::json!({ "kind": "learn", "value": false })).unwrap();
+        assert_eq!(change, SettingChange::Learn(false));
+        let change = SettingChange::DictLearn(learned("Marisol", "Марисоль"));
+        let shown = format!("{change:?}");
+        assert!(!shown.contains("Marisol") && !shown.contains("Марисоль"), "a learned word may be a name: {shown}");
+        let mut s = Settings::default();
+        s.dictionary.learned = vec![learned("Marisol", "Марисоль")];
+        for shown in [format!("{:?}", s.dictionary.learned[0]), format!("{:?}", s.dictionary)] {
+            assert!(!shown.contains("Marisol") && !shown.contains("Марисоль"), "only lengths: {shown}");
+            assert!(shown.contains("word_chars: 7") && shown.contains("heard_chars: 8"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn learning_is_on_by_default_and_only_off_is_written() {
+        let mut s = Settings::default();
+        assert!(s.learn.enabled());
+        assert!(s.apply(SettingChange::Learn(false)));
+        assert!(!s.learn.enabled());
+        assert_eq!(serde_json::to_value(&s).unwrap()["learn"], serde_json::json!({ "enabled": false }));
+        assert!(!s.apply(SettingChange::Learn(false)), "no change");
+        assert!(s.apply(SettingChange::Learn(true)));
+        assert!(serde_json::to_value(&s).unwrap().get("learn").is_none(), "the default is not written");
+        for odd in [r#"{"learn":5}"#, r#"{"learn":{"enabled":"no"}}"#, r#"{"learn":{"enabled":null}}"#] {
+            let s: Settings = serde_json::from_str(odd).unwrap();
+            assert!(s.learn.enabled(), "{odd}");
+        }
+    }
+
+    #[test]
+    fn learned_words_read_leniently_and_an_empty_list_is_not_written() {
+        let s: Settings = serde_json::from_str(
+            r#"{"dictionary":{"terms":["Marisol"],"learned":[{"word":"Marisol","heard":"Марисоль"},{"word":1},"x"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.dictionary.learned, [learned("Marisol", "Марисоль")]);
+        let s: Settings = serde_json::from_str(r#"{"dictionary":{"terms":["A"],"learned":7}}"#).unwrap();
+        assert!(s.dictionary.learned.is_empty());
+        let mut s = Settings::default();
+        s.dictionary.terms = vec!["A".into()];
+        assert!(serde_json::to_value(&s).unwrap()["dictionary"].get("learned").is_none());
     }
 }

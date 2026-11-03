@@ -20,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
     let http = reqwest::Client::new();
     let t0 = std::time::Instant::now();
     // Without a dictionary: `refine_compare --terms` checks one.
-    let r = cue_engines::claude::refine(&http, Some(&key), "claude-haiku-5-5", &raw, &ctx, &[], &s).await;
+    let r = cue_engines::claude::refine(&http, Some(&key), "claude-haiku-5-5", &raw, &ctx, &Default::default(), &s).await;
     println!("{app} — {:?} in {} ms: {}", r.outcome, t0.elapsed().as_millis(), r.text);
     let u = r.usage;
     println!(

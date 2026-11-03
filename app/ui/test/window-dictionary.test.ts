@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { $, $$, NOW, click, core, key, mount, settle, stub, text, view } from './windowFixture';
+import { $, $$, NOW, click, core, feeds, key, mount, settle, stub, text, view } from './windowFixture';
 import type { WindowPage } from '../src/window/page';
 import { MAX_WORD_CHARS, refusedWord } from '../src/window/dictionary';
 
@@ -34,6 +34,28 @@ afterEach(() => {
 });
 
 describe('The dictionary', () => {
+  it('a word from a correction has the green book and says how it was heard', async () => {
+    stub(view({ dictionary: ['Marisol', 'Soniox'], learned: [{ word: 'Marisol', heard: 'Марисоль' }] }));
+    page = await mount();
+    const chip = $<HTMLElement>('.dch[data-word="Marisol"]')!;
+    expect(chip.querySelector('.g svg')).not.toBeNull();
+    expect(chip.title).toBe('sounds like «Марисоль»');
+    expect($<HTMLElement>('.dch[data-word="Soniox"]')!.querySelector('.g')).toBeNull();
+  });
+
+  it('the hint tells what the green book means', async () => {
+    page = await mount();
+    const hint = $('.dhint')!;
+    expect(hint.textContent).toBe('Words CUE must write right. — from your corrections: CUE noticed the change and offered the word.');
+    expect(hint.querySelector('svg')).not.toBeNull();
+  });
+
+  it('settings pushed by the core redraw the dictionary', async () => {
+    page = await mount();
+    feeds.settings(view({ dictionary: ['Marisol'], learned: [{ word: 'Marisol', heard: 'Марисоль' }] }));
+    expect($('.dch[data-word="Marisol"] .g')).not.toBeNull();
+  });
+
   it('shows the words as chips with their count', async () => {
     page = await mount();
     expect(text($('[data-scr=dictionary] h3'))).toBe('Dictionary2');

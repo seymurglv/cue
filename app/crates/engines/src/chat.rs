@@ -9,7 +9,7 @@ use std::time::Duration;
 use cue_core::connections::{Answer, CacheHint, Connection};
 use cue_core::flow::RefineOutcome;
 use cue_core::refine::{max_tokens, timeout_ms, user_message, RefineContext};
-use cue_core::settings::RefineSettings;
+use cue_core::settings::{DictionarySettings, RefineSettings};
 use cue_core::translate;
 use serde_json::{json, Value};
 
@@ -35,7 +35,7 @@ pub fn request_body(
     model: &str,
     raw: &str,
     ctx: &RefineContext,
-    terms: &[String],
+    dict: &DictionarySettings,
     job: Job,
     custom: Option<&str>,
 ) -> Value {
@@ -43,7 +43,7 @@ pub fn request_body(
     if let Job::Translate(_) = job {
         budget = claude::translation_budget(budget);
     }
-    let blocks = claude::system_blocks(terms, job, custom);
+    let blocks = claude::system_blocks(dict, job, custom);
     let mut texts: Vec<&str> = blocks.as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect();
     if c.answer == Answer::Object {
         texts.push(OBJECT_NOTE);
@@ -109,8 +109,8 @@ fn post(http: &reqwest::Client, c: &Connection, address: &str, key: &str) -> req
 }
 
 /// One cleanup over the connection and model of `s`, in its style.
-pub async fn refine(http: &reqwest::Client, key: Option<&str>, raw: &str, ctx: &RefineContext, terms: &[String], s: &RefineSettings) -> RefineResult {
-    refine_job(http, key, raw, ctx, terms, s, Job::Rewrite).await
+pub async fn refine(http: &reqwest::Client, key: Option<&str>, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, s: &RefineSettings) -> RefineResult {
+    refine_job(http, key, raw, ctx, dict, s, Job::Rewrite).await
 }
 
 /// One translation over the connection and model of `s` (see [`claude::translate`]).
@@ -119,11 +119,11 @@ pub async fn translate(
     key: Option<&str>,
     raw: &str,
     ctx: &RefineContext,
-    terms: &[String],
+    dict: &DictionarySettings,
     s: &RefineSettings,
     to: &'static str,
 ) -> RefineResult {
-    refine_job(http, key, raw, ctx, terms, s, Job::Translate(to)).await
+    refine_job(http, key, raw, ctx, dict, s, Job::Translate(to)).await
 }
 
 /// [`refine`] or [`translate`]; the address is the connection's in `s` (tests point it at their own service).
@@ -132,7 +132,7 @@ async fn refine_job(
     key: Option<&str>,
     raw: &str,
     ctx: &RefineContext,
-    terms: &[String],
+    dict: &DictionarySettings,
     s: &RefineSettings,
     job: Job,
 ) -> RefineResult {
@@ -146,7 +146,7 @@ async fn refine_job(
         }
     };
     let timeout = request_timeout_ms(c, raw, job);
-    let body = request_body(c, s.model().id, raw, ctx, terms, job, s.custom_text());
+    let body = request_body(c, s.model().id, raw, ctx, dict, job, s.custom_text());
     // As for Claude: a failure worth it is asked once more, with twice the time.
     let mut why = String::new();
     let mut last = None;
@@ -165,7 +165,7 @@ async fn refine_job(
     match last {
         Some(Ok(done)) => {
             let usage = done.usage.map(openrouter::claude_usage).unwrap_or_default();
-            claude::settle(raw, parse_content(&done.content, done.finish_reason.as_deref(), true), terms, s, job, usage)
+            claude::settle(raw, parse_content(&done.content, done.finish_reason.as_deref(), true), dict, s, job, usage)
         }
         // A refusal before the stream: the key, a limit or the balance is the user's to fix.
         Some(Err(f)) => {
@@ -198,7 +198,7 @@ mod tests {
 
     fn body(id: &str, job: Job) -> Value {
         let c = find(id).unwrap();
-        request_body(c, c.recommended().id, RAW, &ctx(), &[], job, None)
+        request_body(c, c.recommended().id, RAW, &ctx(), &Default::default(), job, None)
     }
 
     #[test]
@@ -214,7 +214,7 @@ mod tests {
         assert_eq!(v["stream_options"], json!({ "include_usage": true }));
         let rf = &v["response_format"];
         assert_eq!((rf["type"].as_str(), rf["json_schema"]["strict"].as_bool()), (Some("json_schema"), Some(true)));
-        let claude = claude::request_body("claude-haiku-5-5", RAW, &ctx(), &[]);
+        let claude = claude::request_body("claude-haiku-5-5", RAW, &ctx(), &Default::default());
         assert_eq!(rf["json_schema"]["schema"], claude["output_config"]["format"]["schema"], "the same schema as for Claude");
         for absent in ["prompt_cache_key", "temperature", "provider", "reasoning"] {
             assert!(v.get(absent).is_none(), "{absent}");
@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn the_style_and_the_translation_blocks_are_claude_s() {
         let c = find("openai").unwrap();
-        let custom = request_body(c, "gpt-6-luna", RAW, &ctx(), &[], Job::Rewrite, Some("пиши коротко"));
+        let custom = request_body(c, "gpt-6-luna", RAW, &ctx(), &Default::default(), Job::Rewrite, Some("пиши коротко"));
         assert_eq!(custom["messages"][0]["content"], format!("{SYSTEM_PROMPT}\n\n{CUSTOM_PREAMBLE}пиши коротко"));
         let to_en = body("openai", Job::Translate("en"));
         assert_eq!(to_en["messages"][0]["content"], format!("{SYSTEM_PROMPT}\n\n{}", translate::instruction("en")));
@@ -298,7 +298,7 @@ mod tests {
     {
         let api = fake_api(route).await;
         let (logs, _guard) = capture_logs();
-        let r = refine(&http(), key, RAW, &ctx(), &[], &s(over(id, &format!("{}/v1", api.base)))).await;
+        let r = refine(&http(), key, RAW, &ctx(), &Default::default(), &s(over(id, &format!("{}/v1", api.base)))).await;
         let lines = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::")).cloned().collect();
         (r, lines, api)
     }
@@ -337,7 +337,7 @@ mod tests {
         let req = &api.seen()[0];
         assert_eq!(req.header("x-grok-conv-id"), [CACHE_NAME]);
         let sent: Value = serde_json::from_slice(&req.body).unwrap();
-        assert_eq!(sent, request_body(find("xai").unwrap(), "grok-4.3", RAW, &ctx(), &[], Job::Rewrite, Some("пиши коротко")));
+        assert_eq!(sent, request_body(find("xai").unwrap(), "grok-4.3", RAW, &ctx(), &Default::default(), Job::Rewrite, Some("пиши коротко")));
     }
 
     #[tokio::test]

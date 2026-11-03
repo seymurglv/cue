@@ -38,7 +38,8 @@ dictionary. Everything stays on this computer." / «CUE замечает ваш�
 
 ## How a correction is found
 
-**Watcher** (`cue-platform-win`). It starts only after a dictation or a translation was pasted with Ctrl+V into a field
+**Watcher** (`cue-platform-win`, behind a field-reading trait so another system can supply its own reader; the
+anchoring and the span are plain code over strings). It starts only after a dictation or a translation was pasted with Ctrl+V into a field
 whose text UI Automation gives (TextPattern, else ValuePattern), and only while `learn.enabled`.
 
 - At the paste it keeps the element it pasted into and a snapshot of its text, and finds the pasted text in it: the
@@ -59,7 +60,8 @@ text:
 
 - differs from the old one by more than case and punctuation;
 - looks like a name or a term: it starts with a capital letter, holds Latin letters in Cyrillic text (or the
-  reverse), holds a digit, or has a capital inside (`GitHub`);
+  reverse), holds a digit, or has a capital inside (`GitHub`). A capital alone does not count for the first word of a
+  sentence (the start of the text, or after `.`, `!`, `?` or `…`): there it is a name only with one of the other signs;
 - is not in the dictionary already (any case) and passes `refine::is_term`.
 
 Deletions, inserted words and ordinary lowercase words are not candidates.
@@ -77,10 +79,13 @@ their `heard`, and `SettingsView.learn` is the switch.
 
 ## The Drop
 
-A new Drop state, `suggest`, owned by the core's flow like the trays: the core sends the word when the Drop is at rest,
-the page grows the capsule (its width from the word), and reports `SuggestAdd`, `SuggestUndo`, `SuggestDismiss` (ring
-ran out) and hover. `missed` keeps the dot until the next `StartStt`. The native window grows and shrinks with the
-capsule the way it does for trays (`drop_window`).
+The core keeps the suggestion (`corrections::Offers`) and sends it to the Drop page as `cue://suggest`
+(`{ word, missed }` or nothing) once the Drop is at rest: idle, no tray card, no answer. The page grows the capsule
+(its width from the word) and reports `suggestAdd`, `suggestUndo`, `suggestDismiss` (the 8 s ring ran out) and
+`suggestDone` (the 6 s ring ran out). `missed` keeps the dot until the next dictation opens the microphone; hovering
+the Drop then opens the capsule without a ring, and leaving it folds the capsule back to the dot. The Drop's window does
+not change: it is already large and transparent, and the capsule's rectangle goes into the click-through rectangles
+like the Drop's.
 
 ## Out of scope
 

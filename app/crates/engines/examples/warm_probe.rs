@@ -29,18 +29,18 @@ async fn main() -> anyhow::Result<()> {
     let http = reqwest::Client::new();
 
     let t0 = Instant::now();
-    let Some(warm) = claude::warm(&http, &key, MODEL, &[]).await else {
+    let Some(warm) = claude::warm(&http, &key, MODEL, &Default::default()).await else {
         bail!("the warm-up got no usable answer in {} ms", t0.elapsed().as_millis());
     };
     println!("warm-up in {} ms: {}", t0.elapsed().as_millis(), tokens(&warm));
 
     let ctx = RefineContext::new("Telegram Desktop", None, s.context_chars);
     let t0 = Instant::now();
-    let r = claude::refine(&http, Some(&key), MODEL, PHRASE, &ctx, &[], &s).await;
+    let r = claude::refine(&http, Some(&key), MODEL, PHRASE, &ctx, &Default::default(), &s).await;
     println!("refine {:?} in {} ms: {}", r.outcome, t0.elapsed().as_millis(), tokens(&r.usage));
 
     let t0 = Instant::now();
-    let r = claude::translate(&http, Some(&key), MODEL, PHRASE, &ctx, &[], &s, "en").await;
+    let r = claude::translate(&http, Some(&key), MODEL, PHRASE, &ctx, &Default::default(), &s, "en").await;
     println!("translate to en {:?} in {} ms: {}", r.outcome, t0.elapsed().as_millis(), tokens(&r.usage));
     Ok(())
 }

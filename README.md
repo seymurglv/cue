@@ -82,6 +82,11 @@ question cost, on your computer only (`usage.csv`, see [Costs](#costs)).
   LM Studio on this computer the text stays here.
 - **Anthropic** receives your questions to "Ask", with the text you selected, whatever the cleanup goes through.
   Nothing is read from password fields.
+- **Your corrections stay on this computer.** With **Learn from me** on (it is by default), CUE reads the field it
+  pasted into for up to a minute after each dictation or translation, to notice a word you corrected. The text stays in
+  memory: nothing of it is written to disk, to the log or sent anywhere. A word goes into the dictionary only when you
+  press **+** on the Drop; from then on the cleanup's connection gets it with the dictionary, with how it was heard.
+  Password fields, CUE's own windows and "Ask" answers are never read.
 - The microphone is open only while CUE records, and while a window shows its level for you to check it.
 - Your history, with the recordings of what you said for the period you choose, settings, logs and the copy of your
   last dictation stay on this computer. CUE has no telemetry: it connects only to the cleanup's connection, to
@@ -217,7 +222,8 @@ from source.
   - **Dictionary:** the names and terms CUE must write right, as chips, the newest first (`dictionary.terms`, see
     Settings). **+ Word** opens a field: type a word and press `Enter` to add it (a repeat in any case, an empty one or
     one longer than 60 characters is refused); the cross on a chip, shown on hover, removes it. The cleanup uses the
-    change from the next dictation on.
+    change from the next dictation on. A word added from a suggestion (see "Words from your corrections") has a green
+    book, and its hint says how CUE heard it.
   - **History:** every result of CUE, newest first, with its time, mode and app: dictations, translations, "Ask"
     answers (the question and the answer) and texts "Ask" wrote into a field; a translation and "Ask" show their mode
     as a small icon, a plain dictation none. The list stays short: today shows its latest 7 rows and the rest under
@@ -246,8 +252,17 @@ from source.
     `Ctrl + Win + Shift`, any of the 60), **History** (**Keep history**: Forever, A year, A month (the default), A week
     or Don't keep, older days deleted on their own; **Keep recordings**: A day, A week (the default), A month or Don't
     keep, never longer than the history itself; a shorter period deletes the older ones at once; **Clear history**
-    needs a second press), **General** (Start at sign-in). A change takes effect at once, without a restart, and is
-    written to `settings.json`.
+    needs a second press), **General** (Start at sign-in; **Learn from me**, see "Words from your corrections"). A
+    change takes effect at once, without a restart, and is written to `settings.json`.
+- **Words from your corrections** (**Learn from me** in the General settings, on by default). After CUE pastes a
+  dictation or a translation, it reads the field for up to a minute, to see whether you changed a word. When you write
+  a name or a term in place of what CUE heard ("Марисоль" → "Marisol"), a couple of seconds after you stop typing the
+  Drop grows into a capsule with the word and **+**; a ring around **+** runs out in 8 s, and hovering pauses it. **+**
+  adds the word to the dictionary with how it was heard, and turns into **Undo**, which takes it out again (6 s). A
+  suggestion not pressed in time folds into a green dot next to the Drop, which stays until the next dictation starts;
+  hovering the Drop opens the capsule again. The cleanup then gets the word with how it was heard ("Marisol — sounds
+  like «Марисоль»"). Turned off, no field is read. Only fields that give their text to Windows can be read: where one
+  does not (Telegram, some fields inside web pages), nothing is offered.
 - **A pinned microphone.** A microphone chosen in the settings stays CUE's even when Windows changes its default (a
   headset plugged in, say). When it is not connected, CUE records from the Windows microphone, and a card says so once:
   "*name* not found — recording from *name*".
@@ -483,6 +498,14 @@ history is neither written nor cleaned up until a period is chosen in the window
   trimmed; empty ones, ones with a line break, ones longer than 60 characters and exact repeats (case-sensitive) are
   skipped, and only the first 200 are used. A value that is not a list reads as an empty list. The block is kept in
   the file only when the list is not empty.
+- `dictionary.learned`: the words added from the Drop's suggestions, newest first, each with how it was heard:
+  `"dictionary": { "terms": ["Marisol"], "learned": [{ "word": "Marisol", "heard": "Марисоль" }] }`. Each is also in
+  `terms`, which the cleanup reads as before; it gets a learned word with how it was heard ("Marisol — sounds like
+  «Марисоль»"). Removing a word from the main window's Dictionary removes it from both lists. Anything in `learned` that
+  is not a word with its `heard` is skipped, and the list is kept in the file only when it is not empty.
+- `learn.enabled` (default `true`): `false` turns "Learn from me" off, and CUE then reads no field after a paste. Only
+  `false` turns it off; any other value reads as on, and the default is not written to the file. The General settings
+  set it too. Example: `"learn": { "enabled": false }`.
 - `translate`: the language pair of `Ctrl + Win + Shift`, as the ISO 639-1 codes of the 60 languages CUE knows
   (`en`, `ru`, `de`, `zh`, …). Case and surrounding spaces do not matter, and a locale name reads as its language
   (`"ru-RU"` is `ru`).
@@ -650,16 +673,17 @@ whether the model wrote such words (`text_before_search`) and the error codes of
   list of files; nothing else of yours goes with either.
 - **The cleanup's connection** (Anthropic by default, or the one chosen in the Cleanup settings) receives the
   transcript, the app name, up to `refine.context_chars` (500) characters of text before the caret, your
-  `dictionary.terms` and, with the Custom style, your instructions. Nothing is read from password fields, and the
-  window title is never sent. A translation goes in the same kind of request to the same connection, with the target
-  language added. Through OpenRouter, CUE first asks for providers that do not store requests for training, and only
-  when none of them can take the request, for any provider. Ollama and LM Studio get the request at the address in
-  the Cleanup settings, on this computer unless you change it, so the text then stays here.
+  `dictionary.terms` (for a word added from a correction, also how it was heard, `dictionary.learned`) and, with the
+  Custom style, your instructions. Nothing is read from password fields, and the window title is never sent. A
+  translation goes in the same kind of request to the same connection, with the target language added. Through
+  OpenRouter, CUE first asks for providers that do not store requests for training, and only when none of them can
+  take the request, for any provider. Ollama and LM Studio get the request at the address in the Cleanup settings, on
+  this computer unless you change it, so the text then stays here.
 - **Anthropic, when the cleanup goes through it**: while you record, CUE also sends an empty `HEAD` request without a
   key to open the connection early, so cleanup starts faster. When a dictation starts four minutes or more after the
-  last cleanup, CUE sends a cache warm-up: the cleanup request with your `dictionary.terms` and a one-character
-  placeholder instead of a transcript, without the app name or any text before the caret, so the first cleanup after
-  a pause reads the prompt from Anthropic's cache. Over the other connections there is neither.
+  last cleanup, CUE sends a cache warm-up: the cleanup request with your dictionary (as the cleanup gets it) and a
+  one-character placeholder instead of a transcript, without the app name or any text before the caret, so the first
+  cleanup after a pause reads the prompt from Anthropic's cache. Over the other connections there is neither.
 - **"Ask"** always goes to Anthropic, whatever the cleanup's connection. It sends the question (as it was
   recognized), the selected text (up to 8,000 characters: a longer selection goes as its start and its end), up to
   `refine.context_chars` (500) characters before the caret, the app name and today's local date; a follow-up sends
@@ -679,6 +703,14 @@ whether the model wrote such words (`text_before_search`) and the error codes of
   limitations). CUE's own writes (each paste, and your clipboard put back) carry the marks that keep them out of the
   history and the cloud clipboard, but the app's copy carries none: with clipboard sync set to manual, it can be sent
   to your other devices from Win+V by hand for as long as it stays there.
+- **Learn from me.** While it is on, after a dictation or a translation was pasted with `Ctrl + V` into a field that
+  gives its text to Windows (UI Automation), CUE reads that one field every 0.4 s, for 60 s at most. It stops when the
+  text has not changed for 2.5 s after a change, when the field empties (the message was sent), when the field can no
+  longer be read or when you start a dictation. Password fields, CUE's own windows and "Ask" answers are not read, and
+  neither is any other field than the one pasted into. The field's text lives in memory while CUE watches and is then
+  dropped: it is not written to a file, not sent anywhere, and not logged. The log gets whether a correction was found
+  and numbers (characters, candidates). A word reaches `settings.json` only when you press **+**; **Undo**, or removing
+  it from the Dictionary, takes it out again with how it was heard.
 - **Inside CUE:** the Drop and the card windows get the text of the question and the answer, the card's short quote of
   the selection (40 characters at most), and the titles and sites of the sources, to draw them; never the addresses. A
   click on a source asks the core to open it, and the core opens only `http` and `https` pages, in the default browser.
@@ -763,6 +795,9 @@ whether the model wrote such words (`text_before_search`) and the error codes of
   terminal outside that list that does not report its selection, a question asked there would press `Ctrl + C`, which
   stops the program running in it.
 - Reading a selection through the `Ctrl + C` fallback in a Store (UWP) app was not checked live.
+- "Learn from me" reads a field only when Windows gives its text: it works in Claude and in a Brave address bar, and
+  Telegram and fields inside web pages may not give theirs, so nothing is offered there. A correction is noticed only
+  for a word written in place of another (not a deleted or an added one) that looks like a name or a term.
 
 ## Repository layout
 

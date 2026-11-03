@@ -4,7 +4,7 @@ use cue_core::refine::{
     max_tokens, sanity_ok, strip_markup, terms_prompt, tidy_list_items, timeout_ms, user_message, RefineContext, BOLD_PROMPT,
     CUSTOM_PREAMBLE, SYSTEM_PROMPT,
 };
-use cue_core::settings::RefineSettings;
+use cue_core::settings::{DictionarySettings, RefineSettings};
 use cue_core::translate::{self, translation_ok};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -51,28 +51,28 @@ pub enum Job {
 /// Messages API request body: the system prompt with a cache mark, a response strictly in the `{"text": …}` schema,
 /// effort ([`effort_for`]) and thinking ([`thinking_for`]) per model.
 ///
-/// The user's dictionary `terms` go in a second system block after the unchanged prompt ([`terms_prompt`]), and the
+/// The user's dictionary (`dict`) goes in a second system block after the unchanged prompt ([`terms_prompt`]), and the
 /// cache mark moves to that last block: the cached prefix covers both. With no usable term the body is the same, byte
 /// for byte, as without a dictionary.
-pub fn request_body(model: &str, raw: &str, ctx: &RefineContext, terms: &[String]) -> Value {
-    request_body_for(model, raw, ctx, terms, Job::Clean)
+pub fn request_body(model: &str, raw: &str, ctx: &RefineContext, dict: &DictionarySettings) -> Value {
+    request_body_for(model, raw, ctx, dict, Job::Clean)
 }
 
 /// [`request_body`] for a job. A translation adds one system block after the cache mark: the cached prefix is the one
 /// plain dictation uses, so translating never writes a second cache. The answer may be longer in tokens than the speech
 /// (another alphabet), so the budget doubles.
-pub fn request_body_for(model: &str, raw: &str, ctx: &RefineContext, terms: &[String], job: Job) -> Value {
-    request_body_styled(model, raw, ctx, terms, job, None)
+pub fn request_body_for(model: &str, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, job: Job) -> Value {
+    request_body_styled(model, raw, ctx, dict, job, None)
 }
 
 /// [`request_body_for`] with the user's instructions (`custom`, the custom style) in place of CUE's own block.
-pub fn request_body_styled(model: &str, raw: &str, ctx: &RefineContext, terms: &[String], job: Job, custom: Option<&str>) -> Value {
+pub fn request_body_styled(model: &str, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, job: Job, custom: Option<&str>) -> Value {
     let thinking = thinking_for(model);
     let budget = max_tokens(raw) + if thinking.is_none() { THINKING_HEADROOM } else { 0 };
     let mut v = json!({
         "model": model,
         "max_tokens": budget,
-        "system": system_blocks(terms, job, custom),
+        "system": system_blocks(dict, job, custom),
         "messages": [{ "role": "user", "content": user_message(ctx, raw) }],
         "output_config": {
             "effort": effort_for(model),
@@ -100,8 +100,8 @@ pub fn request_body_styled(model: &str, raw: &str, ctx: &RefineContext, terms: &
 /// last of them, then the job's own block after the mark: CUE's cleanup ([`BOLD_PROMPT`]) or the user's instructions
 /// (`custom`), or the translation's. Both styles and the translation read the same cached prefix, so switching never
 /// writes a second cache.
-pub(crate) fn system_blocks(terms: &[String], job: Job, custom: Option<&str>) -> Value {
-    let mut system = match terms_prompt(terms) {
+pub(crate) fn system_blocks(dict: &DictionarySettings, job: Job, custom: Option<&str>) -> Value {
+    let mut system = match terms_prompt(&dict.terms, &dict.learned) {
         None => vec![json!({ "type": "text", "text": SYSTEM_PROMPT, "cache_control": { "type": "ephemeral" } })],
         Some(block) => vec![
             json!({ "type": "text", "text": SYSTEM_PROMPT }),
@@ -133,9 +133,9 @@ pub fn can_warm(model: &str) -> bool {
 /// The cache warm-up (spec 2 §6.3): the dictation request with a one-character transcript and `max_tokens: 1`.
 /// `max_tokens: 0` is refused together with `output_config.format`, and the format has to stay: the warm-up must build
 /// the exact prefix real refine reads.
-pub fn warm_body(model: &str, terms: &[String]) -> Value {
+pub fn warm_body(model: &str, dict: &DictionarySettings) -> Value {
     let ctx = RefineContext { app: String::new(), before_cursor: None };
-    let mut v = request_body(model, ".", &ctx, terms);
+    let mut v = request_body(model, ".", &ctx, dict);
     v["max_tokens"] = json!(1);
     v
 }
@@ -204,13 +204,13 @@ pub fn classify_http(status: u16, body: &str) -> RefineOutcome {
 
 /// The refined text if it passes the sanity check; otherwise the raw one.
 /// Markdown markup is stripped before the check ([`strip_markup`]), and so are trailing commas and semicolons
-/// of list items ([`tidy_list_items`]): the check judges what will be pasted. Words of the dictionary `terms` count as
+/// of list items ([`tidy_list_items`]): the check judges what will be pasted. Words of the dictionary terms count as
 /// said ([`sanity_ok`]).
-pub fn decide(raw: &str, parsed: Parsed, terms: &[String], s: &RefineSettings) -> (String, RefineOutcome) {
+pub fn decide(raw: &str, parsed: Parsed, dict: &DictionarySettings, s: &RefineSettings) -> (String, RefineOutcome) {
     match parsed {
         Parsed::Text(t) => {
             let t = tidy_list_items(&strip_markup(raw, &t));
-            if sanity_ok(raw, &t, terms, s) {
+            if sanity_ok(raw, &t, &dict.terms, s) {
                 (t.trim().to_string(), RefineOutcome::Refined)
             } else {
                 (raw.to_string(), RefineOutcome::RawFallback)
@@ -221,11 +221,11 @@ pub fn decide(raw: &str, parsed: Parsed, terms: &[String], s: &RefineSettings) -
 }
 
 /// The translation if it passes [`translation_ok`]; markup and list punctuation are stripped first, as in [`decide`].
-pub fn decide_translation(raw: &str, parsed: Parsed, terms: &[String], to: &str) -> (String, RefineOutcome) {
+pub fn decide_translation(raw: &str, parsed: Parsed, dict: &DictionarySettings, to: &str) -> (String, RefineOutcome) {
     match parsed {
         Parsed::Text(t) => {
             let t = tidy_list_items(&strip_markup(raw, &t));
-            if translation_ok(raw, &t, terms, to) {
+            if translation_ok(raw, &t, &dict.terms, to) {
                 (t.trim().to_string(), RefineOutcome::Refined)
             } else {
                 (raw.to_string(), RefineOutcome::RawFallback)
@@ -244,17 +244,17 @@ pub struct RefineResult {
 
 /// One refine request. With no key, on a network failure, timeout, refusal or unusable response — the raw text.
 /// A failure writes one log line — the reason and the outcome: no raw text, no refined text, no response body.
-/// `terms` is the user's dictionary (`dictionary.terms`), see [`request_body`].
+/// `dict` is the user's dictionary (`settings.dictionary`), see [`request_body`].
 pub async fn refine(
     http: &reqwest::Client,
     key: Option<&str>,
     model: &str,
     raw: &str,
     ctx: &RefineContext,
-    terms: &[String],
+    dict: &DictionarySettings,
     s: &RefineSettings,
 ) -> RefineResult {
-    refine_at(API_URL, http, key, model, raw, ctx, terms, s, Job::Rewrite).await
+    refine_at(API_URL, http, key, model, raw, ctx, dict, s, Job::Rewrite).await
 }
 
 /// One translation request (spec 2 §5): the refine request with the translation block. Never "fails": on any problem
@@ -267,11 +267,11 @@ pub async fn translate(
     model: &str,
     raw: &str,
     ctx: &RefineContext,
-    terms: &[String],
+    dict: &DictionarySettings,
     s: &RefineSettings,
     to: &'static str,
 ) -> RefineResult {
-    refine_at(API_URL, http, key, model, raw, ctx, terms, s, Job::Translate(to)).await
+    refine_at(API_URL, http, key, model, raw, ctx, dict, s, Job::Translate(to)).await
 }
 
 /// Timeout headroom for a model whose thinking cannot be turned off (Opus 5.5): thinking runs before the response,
@@ -306,14 +306,14 @@ async fn refine_at(
     model: &str,
     raw: &str,
     ctx: &RefineContext,
-    terms: &[String],
+    dict: &DictionarySettings,
     s: &RefineSettings,
     job: Job,
 ) -> RefineResult {
     let Some(key) = key else {
         return raw_fallback(raw, RefineOutcome::RawKeyProblem, Usage::default(), "no Anthropic key");
     };
-    let body = request_body_styled(model, raw, ctx, terms, job, s.custom_text());
+    let body = request_body_styled(model, raw, ctx, dict, job, s.custom_text());
     let timeout = request_timeout_ms(model, raw, job);
     // A timeout, a network failure or an overloaded service is asked once more, with twice the time: the raw text is
     // pasted only when the second request fails too.
@@ -344,12 +344,12 @@ async fn refine_at(
     let Ok(m) = resp.json::<MessageResp>().await else {
         return raw_fallback(raw, RefineOutcome::RawFallback, Usage::default(), "HTTP 200 response not parsed");
     };
-    settle(raw, parse_response(&m), terms, s, job, m.usage)
+    settle(raw, parse_response(&m), dict, s, job, m.usage)
 }
 
 /// A parsed answer → what to paste: the answer if it passes its job's check, otherwise the raw text and one log line
 /// with the reason. The tokens are counted either way: they were spent.
-pub(crate) fn settle(raw: &str, parsed: Parsed, terms: &[String], s: &RefineSettings, job: Job, usage: Usage) -> RefineResult {
+pub(crate) fn settle(raw: &str, parsed: Parsed, dict: &DictionarySettings, s: &RefineSettings, job: Job, usage: Usage) -> RefineResult {
     // The reason, in case the response is rejected.
     let why = match (&parsed, job) {
         (Parsed::Text(_), Job::Clean | Job::Rewrite) => "response failed the sanity check",
@@ -359,8 +359,8 @@ pub(crate) fn settle(raw: &str, parsed: Parsed, terms: &[String], s: &RefineSett
         (Parsed::Malformed, _) => "response does not match the schema",
     };
     let decided = match job {
-        Job::Clean | Job::Rewrite => decide(raw, parsed, terms, s),
-        Job::Translate(to) => decide_translation(raw, parsed, terms, to),
+        Job::Clean | Job::Rewrite => decide(raw, parsed, dict, s),
+        Job::Translate(to) => decide_translation(raw, parsed, dict, to),
     };
     match decided {
         (text, RefineOutcome::Refined) => RefineResult { text, outcome: RefineOutcome::Refined, usage },
@@ -393,15 +393,15 @@ struct WarmResp {
 
 /// One cache warm-up request ([`warm_body`]): the tokens paid for on HTTP 200. On any problem, one log line with the
 /// reason only (neither the key nor the response body) and `None`: the dictation goes on, its refine writes the cache.
-pub async fn warm(http: &reqwest::Client, key: &str, model: &str, terms: &[String]) -> Option<Usage> {
-    warm_at(API_URL, http, key, model, terms).await
+pub async fn warm(http: &reqwest::Client, key: &str, model: &str, dict: &DictionarySettings) -> Option<Usage> {
+    warm_at(API_URL, http, key, model, dict).await
 }
 
 /// [`warm`] against the URL `url`; tests substitute their own service.
-async fn warm_at(url: &str, http: &reqwest::Client, key: &str, model: &str, terms: &[String]) -> Option<Usage> {
+async fn warm_at(url: &str, http: &reqwest::Client, key: &str, model: &str, dict: &DictionarySettings) -> Option<Usage> {
     let send = messages_post(http, url, key)
         .timeout(std::time::Duration::from_millis(WARM_TIMEOUT_MS))
-        .json(&warm_body(model, terms))
+        .json(&warm_body(model, dict))
         .send()
         .await;
     let why = match send {
@@ -422,13 +422,17 @@ mod tests {
     use super::*;
     use crate::testing::{capture_logs, fake_api, reply, FakeApi, Reply};
 
+    fn dict(terms: &[&str]) -> DictionarySettings {
+        DictionarySettings { terms: terms.iter().map(|t| t.to_string()).collect(), ..Default::default() }
+    }
+
     fn ctx() -> RefineContext {
         RefineContext { app: "Telegram Desktop".into(), before_cursor: None }
     }
 
     #[test]
     fn body_for_haiku() {
-        let v = request_body("claude-haiku-5-5", "ну привет", &ctx(), &[]);
+        let v = request_body("claude-haiku-5-5", "ну привет", &ctx(), &Default::default());
         assert_eq!(v["model"], "claude-haiku-5-5");
         assert_eq!(v["max_tokens"], 521);
         assert_eq!(v["thinking"], json!({"type": "disabled"}));
@@ -459,16 +463,27 @@ mod tests {
     /// stays the same, so an update brings no cache write.
     #[test]
     fn body_without_terms_is_unchanged() {
-        let unusable = ["".to_owned(), "  ".to_owned(), "Claude\nHaiku".to_owned(), "x".repeat(61)];
-        for terms in [&[][..], &unusable[..]] {
-            let body = serde_json::to_string(&request_body("claude-haiku-5-5", "ну привет", &ctx(), terms)).unwrap();
-            assert_eq!(body, golden_body(), "{terms:?}");
+        let long = "x".repeat(61);
+        for terms in [dict(&[]), dict(&["", "  ", "Claude\nHaiku", &long])] {
+            let body = serde_json::to_string(&request_body("claude-haiku-5-5", "ну привет", &ctx(), &terms)).unwrap();
+            assert_eq!(body, golden_body(), "{:?}", terms.terms);
         }
     }
 
     #[test]
+    fn a_learned_word_reaches_the_request_with_how_it_sounds() {
+        let dict = DictionarySettings {
+            terms: vec!["Marisol".to_owned()],
+            learned: vec![cue_core::settings::LearnedWord { word: "Marisol".into(), heard: "Марисоль".into() }],
+        };
+        let body = request_body("claude-haiku-5-5", "ну привет", &ctx(), &dict);
+        let text = body["system"][1]["text"].as_str().unwrap();
+        assert!(text.contains("Marisol — sounds like «Марисоль»"), "{text}");
+    }
+
+    #[test]
     fn terms_go_in_a_second_system_block_with_the_cache_mark() {
-        let terms = vec!["Soniox".to_owned(), " GitHub ".to_owned()];
+        let terms = dict(&["Soniox", " GitHub "]);
         let with = request_body("claude-haiku-5-5", "ну привет", &ctx(), &terms);
         // The prompt block comes first, unchanged; the mark is on the last block, so the cached prefix covers both.
         let block = "Names and terms the user often says. When the speech clearly refers to one of them, even if the transcript \
@@ -481,7 +496,7 @@ mod tests {
         assert_eq!(with["system"], expected);
         // Nothing else in the body changes.
         let mut rest = with.clone();
-        rest["system"] = request_body("claude-haiku-5-5", "ну привет", &ctx(), &[])["system"].clone();
+        rest["system"] = request_body("claude-haiku-5-5", "ну привет", &ctx(), &Default::default())["system"].clone();
         assert_eq!(serde_json::to_string(&rest).unwrap(), golden_body());
         for model in ["claude-sonnet-5-5", "claude-opus-5-5"] {
             assert_eq!(request_body(model, "x", &ctx(), &terms)["system"], expected, "{model}");
@@ -490,16 +505,16 @@ mod tests {
 
     #[test]
     fn thinking_per_model() {
-        assert_eq!(request_body("claude-sonnet-5-5", "x", &ctx(), &[])["thinking"], json!({"type": "between_tools"}));
-        assert!(request_body("claude-opus-5-5", "x", &ctx(), &[]).get("thinking").is_none());
+        assert_eq!(request_body("claude-sonnet-5-5", "x", &ctx(), &Default::default())["thinking"], json!({"type": "between_tools"}));
+        assert!(request_body("claude-opus-5-5", "x", &ctx(), &Default::default()).get("thinking").is_none());
     }
 
     #[test]
     fn opus_gets_thinking_headroom() {
         let raw = "ну привет";
-        assert_eq!(request_body("claude-haiku-5-5", raw, &ctx(), &[])["max_tokens"], max_tokens(raw));
-        assert_eq!(request_body("claude-sonnet-5-5", raw, &ctx(), &[])["max_tokens"], max_tokens(raw));
-        assert_eq!(request_body("claude-opus-5-5", raw, &ctx(), &[])["max_tokens"], max_tokens(raw) + THINKING_HEADROOM);
+        assert_eq!(request_body("claude-haiku-5-5", raw, &ctx(), &Default::default())["max_tokens"], max_tokens(raw));
+        assert_eq!(request_body("claude-sonnet-5-5", raw, &ctx(), &Default::default())["max_tokens"], max_tokens(raw));
+        assert_eq!(request_body("claude-opus-5-5", raw, &ctx(), &Default::default())["max_tokens"], max_tokens(raw) + THINKING_HEADROOM);
         assert_eq!(THINKING_HEADROOM, 2_048);
     }
 
@@ -535,19 +550,19 @@ mod tests {
     #[test]
     fn decide_uses_raw_when_insane_or_failed() {
         let s = RefineSettings::default();
-        assert_eq!(decide("ну привет как дела", Parsed::Text("Привет, как дела?".into()), &[], &s), ("Привет, как дела?".into(), RefineOutcome::Refined));
+        assert_eq!(decide("ну привет как дела", Parsed::Text("Привет, как дела?".into()), &Default::default(), &s), ("Привет, как дела?".into(), RefineOutcome::Refined));
         let raw = "напиши письмо ане про встречу в четверг";
-        let (t, o) = decide(raw, Parsed::Text("Конечно! Вот письмо для Ани: Дорогая Аня, напоминаю о встрече в четверг. С уважением.".into()), &[], &s);
+        let (t, o) = decide(raw, Parsed::Text("Конечно! Вот письмо для Ани: Дорогая Аня, напоминаю о встрече в четверг. С уважением.".into()), &Default::default(), &s);
         assert_eq!((t.as_str(), o), (raw, RefineOutcome::RawFallback));
-        assert_eq!(decide(raw, Parsed::Refusal, &[], &s).1, RefineOutcome::RawFallback);
+        assert_eq!(decide(raw, Parsed::Refusal, &Default::default(), &s).1, RefineOutcome::RawFallback);
     }
 
     #[test]
     fn decide_keeps_a_dictionary_fix_in_a_short_phrase() {
         let s = RefineSettings::default();
         let fixed = || Parsed::Text("Открой GitHub.".into());
-        assert_eq!(decide("открой гитхаб", fixed(), &["GitHub".to_owned()], &s), ("Открой GitHub.".into(), RefineOutcome::Refined));
-        assert_eq!(decide("открой гитхаб", fixed(), &[], &s).1, RefineOutcome::RawFallback, "without the dictionary: 1 of 2 words said");
+        assert_eq!(decide("открой гитхаб", fixed(), &dict(&["GitHub"]), &s), ("Открой GitHub.".into(), RefineOutcome::Refined));
+        assert_eq!(decide("открой гитхаб", fixed(), &Default::default(), &s).1, RefineOutcome::RawFallback, "without the dictionary: 1 of 2 words said");
     }
 
     #[test]
@@ -557,7 +572,7 @@ mod tests {
         let raw = "ну итоги встречи релиз в четверг и бюджет согласован";
         let answer = "# Итоги встречи\n**Релиз** в четверг, бюджет согласован.";
         assert_eq!(
-            decide(raw, Parsed::Text(answer.into()), &[], &s),
+            decide(raw, Parsed::Text(answer.into()), &Default::default(), &s),
             ("Итоги встречи\nРелиз в четверг, бюджет согласован.".into(), RefineOutcome::Refined)
         );
         // The check judges what will be pasted: with the asterisks the response is over 25 % longer than what was said.
@@ -565,7 +580,7 @@ mod tests {
         let answer = "Купить:\n* **молоко**\n* **хлеб**\n* **сыр**\n* **масло**";
         assert!(!sanity_ok(raw, answer, &[], &s), "with the markup the check fails");
         assert_eq!(
-            decide(raw, Parsed::Text(answer.into()), &[], &s),
+            decide(raw, Parsed::Text(answer.into()), &Default::default(), &s),
             ("Купить:\n- молоко\n- хлеб\n- сыр\n- масло".into(), RefineOutcome::Refined)
         );
     }
@@ -577,13 +592,13 @@ mod tests {
         let raw = "взять с собой зонт куртку и термос";
         let answer = "Взять с собой:\n- зонт;\n- куртку;\n- термос.";
         assert_eq!(
-            decide(raw, Parsed::Text(answer.into()), &[], &s),
+            decide(raw, Parsed::Text(answer.into()), &Default::default(), &s),
             ("Взять с собой:\n- зонт\n- куртку\n- термос.".into(), RefineOutcome::Refined)
         );
         // Together with markup stripping: `* ` → `- `, then the trailing commas.
         let answer = "Взять с собой:\n* **зонт**,\n* **куртку**,\n* **термос**";
         assert_eq!(
-            decide(raw, Parsed::Text(answer.into()), &[], &s),
+            decide(raw, Parsed::Text(answer.into()), &Default::default(), &s),
             ("Взять с собой:\n- зонт\n- куртку\n- термос".into(), RefineOutcome::Refined)
         );
     }
@@ -601,8 +616,8 @@ mod tests {
 
     #[test]
     fn translation_adds_a_block_after_the_cache_mark() {
-        let plain = request_body("claude-haiku-5-5", "ну привет", &ctx(), &[]);
-        let tr = request_body_for("claude-haiku-5-5", "ну привет", &ctx(), &[], Job::Translate("en"));
+        let plain = request_body("claude-haiku-5-5", "ну привет", &ctx(), &Default::default());
+        let tr = request_body_for("claude-haiku-5-5", "ну привет", &ctx(), &Default::default(), Job::Translate("en"));
         let system = tr["system"].as_array().unwrap();
         assert_eq!(system.len(), 2);
         assert_eq!(system[0], plain["system"][0], "the cached prompt block is the same, mark included");
@@ -615,7 +630,7 @@ mod tests {
 
     #[test]
     fn translation_with_terms_keeps_the_mark_on_the_terms_block() {
-        let terms = vec!["Soniox".to_owned()];
+        let terms = dict(&["Soniox"]);
         let tr = request_body_for("claude-haiku-5-5", "x", &ctx(), &terms, Job::Translate("ru"));
         let system = tr["system"].as_array().unwrap();
         assert_eq!(system.len(), 3);
@@ -625,7 +640,7 @@ mod tests {
 
     #[test]
     fn a_cleanup_job_is_the_plain_body() {
-        let terms = vec!["Soniox".to_owned()];
+        let terms = dict(&["Soniox"]);
         for model in ["claude-haiku-5-5", "claude-opus-5-5"] {
             assert_eq!(request_body_for(model, "x", &ctx(), &terms, Job::Clean), request_body(model, "x", &ctx(), &terms));
         }
@@ -643,8 +658,7 @@ mod tests {
 
     #[test]
     fn bold_refine_adds_its_block_after_the_cache_mark() {
-        let terms = ["Soniox".to_owned()];
-        for t in [&[][..], &terms[..]] {
+        for t in [&dict(&[]), &dict(&["Soniox"])] {
             let clean = request_body_for("claude-sonnet-5-5", "ну привет", &ctx(), t, Job::Clean);
             let bold = request_body_for("claude-sonnet-5-5", "ну привет", &ctx(), t, Job::Rewrite);
             let mut system = clean["system"].as_array().unwrap().clone();
@@ -658,7 +672,7 @@ mod tests {
 
     #[test]
     fn sonnet_stays_at_low_effort_with_thinking_between_tools() {
-        let v = request_body("claude-sonnet-5-5", "ну привет", &ctx(), &[]);
+        let v = request_body("claude-sonnet-5-5", "ну привет", &ctx(), &Default::default());
         assert_eq!((v["output_config"]["effort"].as_str(), &v["thinking"]), (Some("low"), &json!({"type": "between_tools"})));
         assert_eq!(request_timeout_ms("claude-sonnet-5-5", "ну привет", Job::Rewrite), timeout_ms("ну привет"));
     }
@@ -667,8 +681,7 @@ mod tests {
     /// is the same in either style.
     #[test]
     fn custom_instructions_take_the_bold_block_s_place() {
-        let terms = ["Soniox".to_owned()];
-        for t in [&[][..], &terms[..]] {
+        for t in [&dict(&[]), &dict(&["Soniox"])] {
             let bold = request_body_for("claude-haiku-5-5", "ну привет", &ctx(), t, Job::Rewrite);
             let custom = request_body_styled("claude-haiku-5-5", "ну привет", &ctx(), t, Job::Rewrite, Some("пиши коротко"));
             let mut system = bold["system"].as_array().unwrap().clone();
@@ -686,9 +699,9 @@ mod tests {
     #[test]
     fn decide_translation_checks_the_script_not_the_words() {
         let raw = "ну привет";
-        assert_eq!(decide_translation(raw, Parsed::Text("**Hello.**".into()), &[], "en"), ("Hello.".into(), RefineOutcome::Refined));
-        assert_eq!(decide_translation(raw, Parsed::Text("Ну привет.".into()), &[], "en"), (raw.into(), RefineOutcome::RawFallback));
-        assert_eq!(decide_translation(raw, Parsed::Truncated, &[], "en"), (raw.into(), RefineOutcome::RawFallback));
+        assert_eq!(decide_translation(raw, Parsed::Text("**Hello.**".into()), &Default::default(), "en"), ("Hello.".into(), RefineOutcome::Refined));
+        assert_eq!(decide_translation(raw, Parsed::Text("Ну привет.".into()), &Default::default(), "en"), (raw.into(), RefineOutcome::RawFallback));
+        assert_eq!(decide_translation(raw, Parsed::Truncated, &Default::default(), "en"), (raw.into(), RefineOutcome::RawFallback));
     }
 
     // ---- The whole refine against a fake Messages API. ----
@@ -734,7 +747,7 @@ mod tests {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let (logs, _guard) = capture_logs();
         let url = format!("{}/v1/messages", api.base);
-        let r = refine_at(&url, &http, key, "claude-haiku-5-5", raw, &ctx(), &[], &RefineSettings::default(), job).await;
+        let r = refine_at(&url, &http, key, "claude-haiku-5-5", raw, &ctx(), &Default::default(), &RefineSettings::default(), job).await;
         let lines = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::claude")).cloned().collect();
         (r, lines, api)
     }
@@ -773,7 +786,7 @@ mod tests {
         assert_eq!(req.header("anthropic-version"), ["2026-10-21"]);
         assert_eq!(req.header("content-type"), ["application/json"], "exactly one content-type");
         let body: Value = serde_json::from_slice(&req.body).unwrap();
-        assert_eq!(body, request_body("claude-haiku-5-5", RAW, &ctx(), &[]));
+        assert_eq!(body, request_body("claude-haiku-5-5", RAW, &ctx(), &Default::default()));
         assert_eq!(req.body, serde_json::to_vec(&body).unwrap(), "the body goes out exactly as `request_body` serializes");
         for banned in ["temperature", "top_p", "top_k"] {
             assert!(body.get(banned).is_none(), "{banned} is not sent");
@@ -785,7 +798,7 @@ mod tests {
         let api = fake_api(|_, _, _| reply(200, &message("Привет, как дела?", "end_turn"))).await;
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let url = format!("{}/v1/messages", api.base);
-        let terms = vec!["Soniox".to_owned()];
+        let terms = dict(&["Soniox"]);
         let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", RAW, &ctx(), &terms, &RefineSettings::default(), Job::Clean).await;
         assert_eq!(r.outcome, RefineOutcome::Refined);
         assert_eq!(api.body(0), serde_json::to_vec(&request_body("claude-haiku-5-5", RAW, &ctx(), &terms)).unwrap());
@@ -797,9 +810,9 @@ mod tests {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let url = format!("{}/v1/messages", api.base);
         let s = RefineSettings::default();
-        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", "открой гитхаб", &ctx(), &["GitHub".to_owned()], &s, Job::Clean).await;
+        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", "открой гитхаб", &ctx(), &dict(&["GitHub"]), &s, Job::Clean).await;
         assert_eq!((r.text.as_str(), r.outcome), ("Открой GitHub.", RefineOutcome::Refined));
-        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", "открой гитхаб", &ctx(), &[], &s, Job::Clean).await;
+        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", "открой гитхаб", &ctx(), &Default::default(), &s, Job::Clean).await;
         assert_eq!((r.text.as_str(), r.outcome), ("открой гитхаб", RefineOutcome::RawFallback));
     }
 
@@ -900,7 +913,7 @@ mod tests {
         assert_eq!((r.text.as_str(), r.outcome, r.usage), ("Hello.", RefineOutcome::Refined, USAGE));
         assert!(lines.is_empty(), "a success leaves the log alone: {lines:?}");
         let body: Value = serde_json::from_slice(&api.body(0)).unwrap();
-        assert_eq!(body, request_body_for("claude-haiku-5-5", SPEECH, &ctx(), &[], Job::Translate("en")));
+        assert_eq!(body, request_body_for("claude-haiku-5-5", SPEECH, &ctx(), &Default::default(), Job::Translate("en")));
         assert_eq!(body["system"][1]["text"], translate::instruction("en"), "the translation block is sent");
     }
 
@@ -918,7 +931,7 @@ mod tests {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let url = format!("{}/v1/messages", api.base);
         let (s, raw, job) = (RefineSettings::default(), "кубернетес и докер", Job::Translate("en"));
-        let terms = ["Kubernetes".to_owned(), "Docker".to_owned()];
+        let terms = dict(&["Kubernetes", "Docker"]);
         let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", raw, &ctx(), &terms, &s, job).await;
         assert_eq!((r.text.as_str(), r.outcome), (raw, RefineOutcome::RawFallback));
     }
@@ -936,8 +949,7 @@ mod tests {
     /// answer format; a translation adds its block after that prefix.
     #[test]
     fn warm_body_builds_the_dictation_prefix() {
-        let terms = ["Soniox".to_owned()];
-        for t in [&[][..], &terms[..]] {
+        for t in [&dict(&[]), &dict(&["Soniox"])] {
             for model in ["claude-haiku-5-5", "claude-sonnet-5-5"] {
                 let warm = warm_body(model, t);
                 let real = request_body(model, "ну привет", &ctx(), t);
@@ -968,7 +980,7 @@ mod tests {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let (logs, _guard) = capture_logs();
         let url = format!("{}/v1/messages", api.base);
-        let u = warm_at(&url, &http, KEY, "claude-haiku-5-5", &[]).await;
+        let u = warm_at(&url, &http, KEY, "claude-haiku-5-5", &Default::default()).await;
         let lines = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::claude")).cloned().collect();
         (u, lines, api)
     }
@@ -989,7 +1001,7 @@ mod tests {
         assert_eq!(api.calls(), ["POST /v1/messages"]);
         assert_eq!(req.header("x-api-key"), [KEY]);
         assert_eq!(req.header("anthropic-version"), ["2026-10-21"]);
-        assert_eq!(req.body, serde_json::to_vec(&warm_body("claude-haiku-5-5", &[])).unwrap());
+        assert_eq!(req.body, serde_json::to_vec(&warm_body("claude-haiku-5-5", &Default::default())).unwrap());
     }
 
     #[tokio::test]

@@ -9,7 +9,7 @@ import './design/drop.js';
 import { invoke, type InvokeArgs } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { Answer } from './answer';
-import { DropController, type DragPhase, type UiState, type UiAction } from './controller';
+import { DropController, type DragPhase, type UiState, type UiAction, type Suggest } from './controller';
 import { pickLang, type TrayKind } from './strings';
 import type { MicNames } from './trays';
 
@@ -64,6 +64,7 @@ async function start() {
     listen<MicNames>('cue://mic-names', (e) => ctl.micNames(e.payload)),
     listen<string>('cue://model-name', (e) => ctl.modelName(e.payload)),
     listen<TrayKind | null>('cue://tray', (e) => ctl.tray(e.payload)),
+    listen<Suggest | null>('cue://suggest', (e) => ctl.suggest(e.payload)),
     listen('cue://shake', () => ctl.shake()),
     listen<boolean>('cue://idle-hidden', (e) => ctl.idleHidden(e.payload)),
     listen<string>('cue://place', (e) => ctl.place(e.payload)),

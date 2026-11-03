@@ -1,5 +1,5 @@
 //! Refine: the request text for the model and the rules around its answer.
-use crate::settings::RefineSettings;
+use crate::settings::{LearnedWord, RefineSettings};
 
 /// The constant part of the request; it is cached. The result is what the user meant to type: every slip of speech
 /// and of the recognizer is fixed, while their words, tone and meaning stay theirs.
@@ -110,11 +110,16 @@ pub fn is_term(term: &str) -> bool {
     !term.is_empty() && one_line && term.chars().count() <= MAX_TERM_CHARS
 }
 
-/// The dictionary block: a second system block after the unchanged `SYSTEM_PROMPT`. `None` when no usable term is
-/// left: the request is then exactly the one without a dictionary.
-pub fn terms_prompt(terms: &[String]) -> Option<String> {
+/// The dictionary block: a second system block after the unchanged `SYSTEM_PROMPT`, one term per line; a word added
+/// from a suggestion also says how recognition heard it. `None` when no usable term is left: the request is then
+/// exactly the one without a dictionary.
+pub fn terms_prompt(terms: &[String], learned: &[LearnedWord]) -> Option<String> {
     let usable = usable_terms(terms);
-    (!usable.is_empty()).then(|| format!("{TERMS_INTRO}\n\n{}", usable.join("\n")))
+    let line = |t: &str| match learned.iter().find(|l| l.word.trim() == t) {
+        Some(l) if is_term(l.heard.trim()) => format!("{t} — sounds like «{}»", l.heard.trim()),
+        _ => t.to_owned(),
+    };
+    (!usable.is_empty()).then(|| format!("{TERMS_INTRO}\n\n{}", usable.iter().map(|t| line(t)).collect::<Vec<_>>().join("\n")))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1275,7 +1280,7 @@ mod tests {
 
     #[test]
     fn terms_prompt_lists_terms_one_per_line_after_the_rules() {
-        let block = terms_prompt(&terms(&["Soniox", " Claude Haiku ", "Soniox", "", "GitHub"])).unwrap();
+        let block = terms_prompt(&terms(&["Soniox", " Claude Haiku ", "Soniox", "", "GitHub"]), &[]).unwrap();
         assert_eq!(block, format!("{TERMS_INTRO}\n\nSoniox\nClaude Haiku\nGitHub"));
         for phrase in [
             "Names and terms the user often says.",
@@ -1315,8 +1320,22 @@ mod tests {
     }
 
     #[test]
+    fn learned_words_say_how_they_sound() {
+        let learned = [LearnedWord { word: "Marisol".into(), heard: "Марисоль".into() }];
+        let block = terms_prompt(&terms(&["Soniox", "Marisol"]), &learned).unwrap();
+        assert_eq!(block, format!("{TERMS_INTRO}\n\nSoniox\nMarisol — sounds like «Марисоль»"));
+        let orphan = [LearnedWord { word: "Gone".into(), heard: "гон".into() }];
+        assert_eq!(terms_prompt(&terms(&["Soniox"]), &orphan).unwrap(), format!("{TERMS_INTRO}\n\nSoniox"), "only words in the list");
+        // A hand-edited `heard` that is empty or on several lines is not put into the prompt.
+        for heard in ["a\nb", "", "  "] {
+            let odd = [LearnedWord { word: "Marisol".into(), heard: heard.into() }];
+            assert_eq!(terms_prompt(&terms(&["Marisol"]), &odd).unwrap(), format!("{TERMS_INTRO}\n\nMarisol"), "{heard:?}");
+        }
+    }
+
+    #[test]
     fn no_usable_terms_means_no_block() {
-        assert_eq!(terms_prompt(&[]), None);
-        assert_eq!(terms_prompt(&terms(&["", "  ", "a\nb", &"x".repeat(MAX_TERM_CHARS + 1)])), None);
+        assert_eq!(terms_prompt(&[], &[]), None);
+        assert_eq!(terms_prompt(&terms(&["", "  ", "a\nb", &"x".repeat(MAX_TERM_CHARS + 1)]), &[]), None);
     }
 }

@@ -333,7 +333,7 @@ describe('The settings tray', () => {
     expect(value()).toBe('Manually');
     await sub('general');
     expect(title()).toBe('General');
-    expect($$('.btray .srow').map((r) => text(r.querySelector('.stx b')))).toEqual(['Start at sign-in']);
+    expect($$('.btray .srow').map((r) => text(r.querySelector('.stx b')))).toEqual(['Start at sign-in', 'Learn from me']);
     expect($('.btray .segc')).toBeNull();
     click($('[data-sw="autostart"]'));
     await settle();
@@ -781,6 +781,39 @@ describe('The settings tray', () => {
     click(sw);
     await settle();
     expect(core.autostartSet).toHaveBeenLastCalledWith(false);
+    expect(sw.getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('"Learn from me" switch sends the learn change', async () => {
+    page = await mount();
+    await open();
+    await sub('general');
+    const sw = () => $<HTMLButtonElement>('[data-sw="learn"]')!;
+    expect(sw().getAttribute('role')).toBe('switch');
+    expect(sw().getAttribute('aria-checked')).toBe('true');
+    click(sw());
+    await settle();
+    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'learn', value: false });
+    expect(sw().getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('settings pushed by the core leave the tray as it is: a draft stays, the "Learn from me" switch follows', async () => {
+    stub(view({ refineStyle: 'custom' }));
+    saved();
+    page = await mount();
+    await open();
+    await sub('cleanup');
+    const field = $<HTMLTextAreaElement>('.btray textarea.cta')!;
+    field.value = 'a draft not saved yet';
+    feeds.settings(view({ refineStyle: 'custom', dictionary: ['Marisol'], learned: [{ word: 'Marisol', heard: 'Марисоль' }] }));
+    expect($('.btray textarea.cta')).toBe(field);
+    expect(field.value).toBe('a draft not saved yet');
+    expect($('.dch[data-word="Marisol"]')).not.toBeNull();
+    key('Escape');
+    await sub('general');
+    const sw = $<HTMLButtonElement>('[data-sw="learn"]')!;
+    feeds.settings(view({ refineStyle: 'custom', learn: false }));
+    expect($('[data-sw="learn"]')).toBe(sw);
     expect(sw.getAttribute('aria-checked')).toBe('false');
   });
 

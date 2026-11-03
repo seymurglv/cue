@@ -1,6 +1,7 @@
 pub mod cardplace;
 pub mod chord;
 pub mod clipboard;
+pub mod fieldwatch;
 pub mod focus;
 pub mod mic;
 mod ogg;

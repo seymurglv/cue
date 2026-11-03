@@ -213,6 +213,7 @@ pub fn spawn_hit_test(win: WebviewWindow, state: HitState) {
 /// rest, every 0.5 s: the Drop goes to its place on the monitor of the foreground window (again after a scale change),
 /// the z-order guard runs, and over a full-screen app the idle strip hides. While dragged, the Drop follows the cursor;
 /// when let go, it snaps to the nearest place, which is saved through `moved` (to settings.json) and sent to the page.
+/// `hidden` hears every change of the idle strip's hiding, as the page does.
 pub fn spawn_placement(
     win: WebviewWindow,
     ui: Ui,
@@ -220,6 +221,7 @@ pub fn spawn_placement(
     drags: Receiver<DragPhase>,
     hits: HitState,
     moved: impl Fn(DropPosition) + Send + 'static,
+    hidden: impl Fn(bool) + Send + 'static,
 ) {
     let spawned = std::thread::Builder::new().name("cue-placement".into()).spawn(move || {
         // HWND is not Send, so we get it inside the thread: one request to the window thread.
@@ -231,7 +233,7 @@ pub fn spawn_placement(
             }
         };
         let mut desk = WinDesk { hwnd, ui: ui.clone(), moved: Box::new(moved) };
-        let mut keeper = Keeper::new(hwnd, ui);
+        let mut keeper = Keeper::new(hwnd, ui, Box::new(hidden));
         let mut motion = Motion::new(place);
         let mut next_tick = Instant::now();
         loop {
@@ -496,11 +498,13 @@ struct Keeper {
     move_failed: bool,
     /// The window gets `idle-hidden` only on a change; at the start it assumes "don't hide".
     busy: bool,
+    /// Told the same changes as the window (the core opens a waiting suggestion only on a shown Drop).
+    told: Box<dyn Fn(bool) + Send>,
 }
 
 impl Keeper {
-    fn new(hwnd: HWND, ui: Ui) -> Self {
-        Self { hwnd, ui, guard: ZGuard::default(), move_failed: false, busy: false }
+    fn new(hwnd: HWND, ui: Ui, told: Box<dyn Fn(bool) + Send>) -> Self {
+        Self { hwnd, ui, guard: ZGuard::default(), move_failed: false, busy: false, told }
     }
 
     fn tick(&mut self, place: DropPosition, rect: PxRect, scale: f64) {
@@ -530,6 +534,7 @@ impl Keeper {
         if busy != self.busy {
             self.busy = busy;
             self.ui.idle_hidden(busy);
+            (self.told)(busy);
         }
     }
 

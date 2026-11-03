@@ -8,7 +8,10 @@ export type Phase = 'idle' | 'start' | 'listen' | 'think' | 'done' | 'empty' | '
  *  and Shift switches dictation and translation while recording; the Drop only shows it. */
 export type Mode = 'dictate' | 'translate' | 'ask';
 export interface UiState { phase: Phase; error: ErrorCause | null; retry: boolean; paused: boolean; mode: Mode }
-export type UiAction = 'cancel' | 'finish' | 'undo' | 'retry' | 'dismiss' | 'trayAction' | 'trayClose' | AnswerCommand;
+export type UiAction = 'cancel' | 'finish' | 'undo' | 'retry' | 'dismiss' | 'trayAction' | 'trayClose' | 'suggestAdd' | 'suggestUndo' | 'suggestDismiss' | 'suggestDone' | AnswerCommand;
+
+/** The dictionary suggestion from the core (cue://suggest): the word, and whether it was missed (the dot). */
+export interface Suggest { word: string; missed: boolean }
 export interface Rect { x: number; y: number; w: number; h: number }
 /** Where the Drop sits on the screen; the layout follows it (drop.css, [data-place]). */
 export type Place = 'bottom' | 'top' | 'left' | 'right';
@@ -101,6 +104,10 @@ export class DropController {
       onEsc: () => this.io.send(this.state.phase === 'error' ? 'dismiss' : 'cancel'),
       onPress: () => this.io.send('finish'),
       onAction: () => this.io.send(this.state.phase === 'cancel' ? 'undo' : 'retry'),
+      onSuggest: (k: 'add' | 'undo' | 'expire' | 'done') => {
+        this.io.send(k === 'add' ? 'suggestAdd' : k === 'undo' ? 'suggestUndo' : k === 'expire' ? 'suggestDismiss' : 'suggestDone');
+        this.wake();
+      },
     };
     this.host.dataset.place = pickPlace(place);
     this.drop = new (CUE().Drop)(host, api);
@@ -160,11 +167,20 @@ export class DropController {
     if (s.phase !== prev && (s.phase === 'listen' || prev === 'listen')) this.resetVoice();
     // A new mode during start-up or recording re-enters the phase: drop.js picks the mark's shape and icon by mode there.
     // An open answer rests the Drop: it looks idle (and steps aside while the answer is in the tray).
-    if (s.phase !== prev || s.phase === 'error' || (s.mode ?? 'dictate') !== prevMode) this.drop.enter(s.phase === 'answer' ? 'idle' : s.phase);
+    // An idle state does not fold an open suggestion: its own ring or the core's null does.
+    const keep = s.phase === 'idle' && (this.drop.s === 'sugg' || this.drop.s === 'added');
+    if (!keep && (s.phase !== prev || s.phase === 'error' || (s.mode ?? 'dictate') !== prevMode)) this.drop.enter(s.phase === 'answer' ? 'idle' : s.phase);
     else this.drop.layout();
     // The core takes the answer's buttons only in its answer phase; during a follow-up they wait.
     this.view.ready(s.phase === 'answer');
     this.syncIdle();
+    this.wake();
+  }
+
+  /** The core's suggestion: shown only on the idle Drop (the core sends it at rest); null folds it away. */
+  suggest(v: Suggest | null) {
+    if (v) this.drop.offer(v.word, v.missed);
+    else this.drop.unoffer();
     this.wake();
   }
 
@@ -404,7 +420,7 @@ export class DropController {
     }
     // The latest rectangles were sent above — click-through stays correct while asleep.
     const calm = (this.state.phase === 'idle' || this.state.phase === 'error' || this.state.phase === 'answer') && !answering
-      && !this.drop.hov && !this.trayBox.isOpen && this.trayEl.hidden && !this.dragging && this.press == null;
+      && this.drop.s !== 'sugg' && this.drop.s !== 'added' && !this.drop.hov && !this.trayBox.isOpen && this.trayEl.hidden && !this.dragging && this.press == null;
     if (!calm) {
       this.calmSince = null;
       return true;

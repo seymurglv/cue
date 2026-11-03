@@ -348,6 +348,8 @@ impl Flow {
             }
             // The tray card carries out its own buttons; they do not change the flow.
             Input::Ui(UiAction::TrayAction | UiAction::TrayClose) => {}
+            // The suggestion belongs to the runtime's offers; the flow does not change.
+            Input::Ui(UiAction::SuggestAdd | UiAction::SuggestUndo | UiAction::SuggestDismiss | UiAction::SuggestDone) => {}
             Input::PasteLast => self.on_paste_last(&mut fx),
             Input::TogglePause => self.on_toggle_pause(&mut fx),
             Input::WelcomeGate(held) => self.welcome = held,
