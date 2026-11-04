@@ -50,6 +50,7 @@ pub fn create(app: &AppHandle, lang: Lang) -> anyhow::Result<WebviewWindow> {
         .inner_size(w, h)
         .visible(false)
         .build()?;
+    crate::webview_health::watch(&win);
     // Before the first show, as for the Drop: no activation on any show, move or z-order change.
     dropwin::make_non_activating(win.hwnd()?)?;
     win.set_ignore_cursor_events(true)?;

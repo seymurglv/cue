@@ -12,6 +12,7 @@ mod paths;
 mod runtime;
 mod tray;
 mod trayicon;
+mod webview_health;
 mod welcome_window;
 
 use std::sync::mpsc::Sender;
@@ -149,25 +150,34 @@ fn setup(
     let ui = ipc::Ui::new(app.handle().clone(), place);
     // New history entries reach the main window over the channel its page opens.
     app.manage(ui.history_feed());
-    let win = drop_window::create(app.handle(), lang, place)?;
-    let hits = app.state::<drop_window::HitState>().inner().clone();
-    drop_window::spawn_hit_test(win.clone(), hits.clone());
-    let (drag_tx, drag_rx) = std::sync::mpsc::channel();
-    app.manage(drop_window::Placer::new(drag_tx));
-    let (tx, hide_tx) = (core_tx.clone(), core_tx.clone());
-    drop_window::spawn_placement(
-        win,
-        ui.clone(),
-        place,
-        drag_rx,
-        hits,
-        move |p| {
-            let _ = tx.send(CoreEvent::DropMoved(p));
-        },
-        move |hidden| {
-            let _ = hide_tx.send(CoreEvent::IdleHidden(hidden));
-        },
-    );
+    // Started again after a loss of WebView2 (`webview_health`), CUE keeps running without the Drop if WebView2 is not
+    // back yet: dictation and the tray still work, as they did before the restart. A launch by the user stops instead.
+    match drop_window::create(app.handle(), lang, place) {
+        Ok(win) => {
+            let hits = app.state::<drop_window::HitState>().inner().clone();
+            drop_window::spawn_hit_test(win.clone(), hits.clone());
+            let (drag_tx, drag_rx) = std::sync::mpsc::channel();
+            app.manage(drop_window::Placer::new(drag_tx));
+            let (tx, hide_tx) = (core_tx.clone(), core_tx.clone());
+            drop_window::spawn_placement(
+                win,
+                ui.clone(),
+                place,
+                drag_rx,
+                hits,
+                move |p| {
+                    let _ = tx.send(CoreEvent::DropMoved(p));
+                },
+                move |hidden| {
+                    let _ = hide_tx.send(CoreEvent::IdleHidden(hidden));
+                },
+            );
+        }
+        Err(e) if webview_health::restarted() => {
+            tracing::error!("Drop window not created after a WebView2 restart: {e:#}; quit and start CUE again");
+        }
+        Err(e) => return Err(e),
+    }
     // The "Ask" card at the selection; without it, answers go to the tray.
     let card = match card_window::create(app.handle(), lang) {
         Ok(win) => {
@@ -184,7 +194,9 @@ fn setup(
     tray::create(app.handle(), core_tx.clone(), paths.logs.clone(), lang).context("tray icon not created")?;
     // A key missing, or `--welcome`: the welcome window. Before the hook: the core hears that it holds the hotkey ahead
     // of any chord.
-    welcome_window::open_at_start(app.handle(), &refine, welcome_window::asks_welcome(std::env::args_os()));
+    // `--welcome` is the user's ask at launch: a restart after a loss of WebView2 carries it along, but does not ask again.
+    let asked = welcome_window::asks_welcome(std::env::args_os()) && !webview_health::restarted();
+    welcome_window::open_at_start(app.handle(), &refine, asked);
 
     let (hk_tx, hk_rx) = std::sync::mpsc::channel::<HotkeyEvent>();
     start_hook(&hk_tx);

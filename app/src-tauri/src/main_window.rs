@@ -95,6 +95,7 @@ fn create(app: &AppHandle) -> tauri::Result<()> {
         .theme(None)
         .focused(true)
         .build()?;
+    crate::webview_health::watch(&win);
     let handle = app.clone();
     win.on_window_event(move |ev| {
         if let WindowEvent::Destroyed = ev {

@@ -17,6 +17,7 @@ cue-platform-win.workspace = true
 tauri.workspace = true
 tauri-plugin-single-instance.workspace = true
 tauri-plugin-autostart.workspace = true
+webview2-com.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

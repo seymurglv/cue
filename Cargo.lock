@@ -886,6 +886,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "webview2-com",
  "windows",
 ]
 

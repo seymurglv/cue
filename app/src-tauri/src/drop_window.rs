@@ -131,6 +131,7 @@ pub fn create(app: &AppHandle, lang: Lang, place: DropPosition) -> anyhow::Resul
         .inner_size(w, h)
         .visible(false)
         .build()?;
+    crate::webview_health::watch(&win);
     let hwnd = win.hwnd()?;
     // Before the first show: from then on the subclass keeps the style and the no-activate show through any tao action.
     dropwin::make_non_activating(hwnd)?;

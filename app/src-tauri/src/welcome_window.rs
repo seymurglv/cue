@@ -143,6 +143,7 @@ fn create(app: &AppHandle, hold: Hold) -> tauri::Result<()> {
         .theme(None)
         .focused(true)
         .build()?;
+    crate::webview_health::watch(&win);
     let hold = Mutex::new(Some(hold));
     win.on_window_event(move |ev| on_event(&hold, ev));
     // Opened at startup or from a second launch, a new window does not always come in front by itself.
