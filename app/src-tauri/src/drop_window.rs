@@ -172,9 +172,23 @@ fn place_init_script(place: DropPosition) -> String {
     format!("window.__CUE_PLACE__ = {:?};", place.code())
 }
 
-/// ~60 times a second while the window is visible: it takes the mouse only over its page's rectangles (the Drop's capsule
-/// and tray cards; the "Ask" card in the card window). The window position and scale are read straight from the HWND; the
-/// thread goes to the window thread only to switch. Ends when the window is gone.
+/// The hit test's pace near the window: ~60 times a second, so the capsule takes the mouse as the cursor comes.
+const HIT_NEAR: Duration = Duration::from_millis(16);
+/// Its pace while the window is hidden or the cursor is far from it: a few times a second, so CUE at rest does not wake
+/// the processor 60 times a second for nothing.
+const HIT_FAR: Duration = Duration::from_millis(100);
+/// "Far" is this many logical pixels outside the window: the fastest cursor crosses it in more than 100 ms.
+const NEAR_MARGIN: f64 = 300.0;
+
+/// Whether the cursor at (x, y), in the window's logical pixels, is within `NEAR_MARGIN` of a window of size `window`.
+fn near(x: f64, y: f64, window: (f64, f64)) -> bool {
+    (-NEAR_MARGIN..=window.0 + NEAR_MARGIN).contains(&x) && (-NEAR_MARGIN..=window.1 + NEAR_MARGIN).contains(&y)
+}
+
+/// While the window is visible: it takes the mouse only over its page's rectangles (the Drop's capsule and tray cards;
+/// the "Ask" card in the card window), checked ~60 times a second with the cursor near the window, a few times a second
+/// otherwise and while it is hidden. The window position and scale are read straight from the HWND; the thread goes to
+/// the window thread only to switch. Ends when the window is gone.
 pub fn spawn_hit_test(win: WebviewWindow, state: HitState) {
     std::thread::Builder::new()
         .name("cue-hit-test".into())
@@ -188,17 +202,22 @@ pub fn spawn_hit_test(win: WebviewWindow, state: HitState) {
                 }
             };
             let mut ignoring = true;
+            let mut pace = HIT_NEAR;
             loop {
-                std::thread::sleep(Duration::from_millis(16));
+                std::thread::sleep(pace);
                 let (rect, scale) = match dropwin::observe(hwnd) {
                     Seen::Gone => break,
-                    Seen::Hidden => continue,
+                    Seen::Hidden => {
+                        pace = HIT_FAR;
+                        continue;
+                    }
                     Seen::Shown { rect, scale } => (rect, scale),
                 };
                 let (cx, cy) = placement::cursor_pos();
                 let x = f64::from(cx - rect.left) / scale;
                 let y = f64::from(cy - rect.top) / scale;
                 let window = (f64::from(rect.width()) / scale, f64::from(rect.height()) / scale);
+                pace = if near(x, y, window) { HIT_NEAR } else { HIT_FAR };
                 let moving = state.moving.load(Ordering::Relaxed);
                 let over = hit(&state.rects.lock().unwrap(), x, y, window, moving);
                 // If it failed, retry on the next tick; a closed window is caught by observe.
@@ -597,6 +616,16 @@ pub fn drop_hit_rects(window: WebviewWindow, rects: Vec<HitRect>, state: tauri::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hit test checks fast only with the cursor within the margin of the window, on every side.
+    #[test]
+    fn the_cursor_is_near_within_the_margin_of_the_window() {
+        let window = (200.0, 60.0);
+        assert!(near(100.0, 30.0, window), "over the window");
+        assert!(near(-NEAR_MARGIN, 30.0, window) && near(200.0 + NEAR_MARGIN, 30.0, window), "at the margin's edge");
+        assert!(near(100.0, -NEAR_MARGIN, window) && near(100.0, 60.0 + NEAR_MARGIN, window));
+        assert!(!near(-NEAR_MARGIN - 1.0, 30.0, window) && !near(100.0, 60.0 + NEAR_MARGIN + 1.0, window), "beyond it");
+    }
 
     #[test]
     fn inside_and_outside() {

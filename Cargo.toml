@@ -9,6 +9,13 @@ members = [
   "bench",
 ]
 
+# The installer's program: the Rust code optimized across crates as one, and no symbol table in cue.exe (the PDB
+# beside it keeps them). Panics still unwind: CUE catches them on its threads (`catch_unwind`) and works on.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
 [workspace.package]
 version = "0.1.3"
 edition = "2024"

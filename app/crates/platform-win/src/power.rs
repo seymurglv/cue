@@ -169,6 +169,34 @@ fn power_event(msg: u32, wparam: usize) -> Option<PowerEvent> {
     }
 }
 
+/// Windows may run a process it takes for a background one at low speed on the efficient cores (EcoQoS, "power
+/// throttling"): the speech model then recognizes about six times slower (measured with examples/stt_probe.rs).
+/// `full_speed(true)` asks Windows not to slow CUE down, while a dictation records and is worked on; `false` gives the
+/// choice back to Windows, so CUE at rest costs as little as Windows can make it. `false` when Windows refused (a
+/// version without the setting): CUE works on as Windows decides.
+pub fn full_speed(on: bool) -> bool {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetProcessInformation,
+    };
+    // Execution speed under CUE's control and not throttled; or under Windows' control again.
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: if on { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
+        StateMask: 0,
+    };
+    // SAFETY: `state` lives through the call, and the size passed is its own.
+    let set = unsafe {
+        SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            std::ptr::from_ref(&state).cast(),
+            size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        )
+    };
+    set.is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +248,13 @@ mod tests {
     fn high_bits_of_wparam_are_not_truncated() {
         let wparam = (1usize << 32) | PBT_APMRESUMEAUTOMATIC as usize;
         assert_eq!(power_event(WM_POWERBROADCAST, wparam), None);
+    }
+
+    /// Windows 11 takes both: full speed asked for, then the choice given back.
+    #[test]
+    fn full_speed_is_asked_for_and_given_back() {
+        assert!(full_speed(true));
+        assert!(full_speed(false));
     }
 
     /// Session notifications are on — no more attempts.

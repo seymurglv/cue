@@ -102,7 +102,7 @@ use cue_platform_win::mic::{self, MicEvent, MicHandle};
 use cue_platform_win::selection::{copies_line, needs_copy_fallback};
 use cue_platform_win::terminal::terminal_app;
 use cue_platform_win::wav::WavSink;
-use cue_platform_win::{placement, selection};
+use cue_platform_win::{placement, power, selection};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
@@ -319,6 +319,8 @@ pub struct Runtime {
     offers: Offers,
     /// The idle Drop is hidden over a full-screen app (the placement thread tells): no suggestion opens then.
     idle_hidden: bool,
+    /// Windows was asked not to slow CUE down: a dictation records or is worked on (`power::full_speed`).
+    full_speed: bool,
     /// The dictation whose paste is awaited, with its text, and its app when its correction counts for habits: the field
     /// is watched once it went in.
     watch_next: Option<(DictationId, String, Option<String>)>,
@@ -436,6 +438,7 @@ impl Runtime {
             tray_gen: 0,
             offers: Offers::default(),
             idle_hidden: false,
+            full_speed: false,
             watch_next: None,
             field_stop: None,
             habits_sent: ByDictation::default(),
@@ -570,6 +573,12 @@ impl Runtime {
                         self.take_ask_context(id);
                     }
                 }
+            }
+            CoreEvent::Input(Input::SessionLocked) => {
+                self.feed(Input::SessionLocked);
+                // Locked or asleep, nobody dictates for a while: the speech model is let go, once the dictation the
+                // lock ended is recognized.
+                self.model.rest_soon();
             }
             CoreEvent::Input(i) => self.feed(i),
             CoreEvent::UiAction(UiAction::TrayAction) => self.on_tray_action(),
@@ -1316,6 +1325,15 @@ impl Runtime {
 
     /// The only place the state goes out to the window and the tray icon; the voice-level rule lives here too.
     fn emit_state(&mut self, s: &UiState) {
+        let busy = works(s.phase);
+        if busy != self.full_speed {
+            self.full_speed = busy;
+            if !power::full_speed(busy) {
+                tracing::debug!(busy, "Windows did not take the processor speed asked for");
+            }
+            // A speech model let go at rest loads as the dictation starts; one ending starts the wait before it rests.
+            self.model.busy(busy, &self.tx);
+        }
         self.level.phase(s.phase);
         self.ui.state(s);
         crate::tray::sync(self.ui.app(), TrayLook::of(s), s.paused);
@@ -2765,6 +2783,11 @@ fn at_rest(phase: UiPhase, tray: bool, answer_open: bool, paused: bool, hidden: 
     phase == UiPhase::Idle && !tray && !answer_open && !paused && !hidden
 }
 
+/// A dictation records or is worked on (recognized, cleaned up, answered): CUE asks for full speed then.
+fn works(phase: UiPhase) -> bool {
+    matches!(phase, UiPhase::Start | UiPhase::Listen | UiPhase::Think)
+}
+
 /// Habits go with a dictation's cleanup while "Learn from me" is on: never with a translation or "Ask".
 fn habits_for(mode: Mode, learn_on: bool, job: Job) -> bool {
     mode == Mode::Dictate && learn_on && matches!(job, Job::Clean | Job::Rewrite)
@@ -3598,6 +3621,12 @@ mod tests {
         assert!(!at_rest(UiPhase::Idle, false, true, false, false), "an answer");
         assert!(!at_rest(UiPhase::Idle, false, false, true, false), "paused");
         assert!(!at_rest(UiPhase::Idle, false, false, false, true), "over a full-screen app");
+        for p in [UiPhase::Start, UiPhase::Listen, UiPhase::Think] {
+            assert!(works(p), "{p:?}");
+        }
+        for p in [UiPhase::Idle, UiPhase::Done, UiPhase::Empty, UiPhase::Cancel, UiPhase::Error, UiPhase::Answer] {
+            assert!(!works(p), "{p:?}");
+        }
     }
 
     /// The habits a dictation's cleanup took, and their marks, stay that dictation's.

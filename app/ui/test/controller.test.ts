@@ -553,10 +553,13 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
     for (const prop of ['left', 'top', 'transform']) expect(pv).toContain(`${prop} .3s`);
   });
 
-  it('at rest the strip breathes; on hover it stops and the keys are soft plates in the system type', () => {
+  it('coming to rest the strip breathes three times; on hover it stops and the keys are soft plates in the system type', () => {
     ctl.apply(base);
     const anim = () => getComputedStyle(drop()).getPropertyValue('animation');
     expect(anim()).toContain('idle-breathe 3.2s');
+    // Three breaths, then still: an endless one kept WebView2 drawing all day.
+    expect(anim()).not.toContain('infinite');
+    expect(anim()).toMatch(/idle-breathe 3\.2s 3\b/);
     hover(true);
     expect(anim()).not.toContain('idle-breathe');
     for (const key of document.querySelectorAll('.drop .kc .key')) {

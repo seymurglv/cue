@@ -3,6 +3,10 @@
 //! and a switch to another model, downloaded and loaded beside it, which takes the slot only once it has loaded. A
 //! dictation never waits for a load once CUE has been running a few seconds; one finished while the model is still
 //! downloading waits in "Thinking".
+//!
+//! A model at rest is let go: after [`REST_AFTER`] without a dictation, and when the session locks or the computer
+//! sleeps, its memory (about 0.75 GB) is freed, the windows still show it ready, and the next dictation loads it again
+//! as it starts (about 1.3 s, while the speaker talks); that dictation is recognized whole at the end.
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -23,6 +27,8 @@ use super::CoreEvent;
 pub const WAIT_FOR_MODEL: Duration = Duration::from_secs(30 * 60);
 /// The longest a recognition of a ready model may take: a 9-minute dictation takes well under a minute.
 pub const RECOGNIZE_TIMEOUT: Duration = Duration::from_secs(120);
+/// A loaded model is let go after this long without a dictation.
+pub const REST_AFTER: Duration = Duration::from_secs(15 * 60);
 
 /// The room a download needs on the drive: its bytes and a tenth more.
 pub(crate) fn room_for(bytes: u64) -> u64 {
@@ -39,6 +45,8 @@ pub enum ModelEvent {
     Verified { removed: usize },
     /// A found model's files were asked of Hugging Face.
     Pinned(Result<Manifest, PinError>),
+    /// The model in use has rested long enough without a dictation: it is let go.
+    Rest,
 }
 
 /// A background step of one job: the model in use's, or a switch's. A step of a job no longer running (a switch
@@ -57,7 +65,8 @@ pub fn state_after(state: ModelState, event: &ModelEvent, present: u64, total: u
         ModelEvent::Loaded(Ok(_)) => ModelState::Ready { total },
         ModelEvent::Loaded(Err(EngineError::Unsupported(_))) => ModelState::Unsupported,
         // A load failure is reported once its files are checked again (`Verified`).
-        ModelEvent::Loaded(Err(_)) | ModelEvent::Pinned(_) => state,
+        // A model let go at rest is still ready for the windows: the next dictation loads it.
+        ModelEvent::Loaded(Err(_)) | ModelEvent::Pinned(_) | ModelEvent::Rest => state,
         ModelEvent::Verified { .. } => ModelState::Failed { done: present, total },
     }
 }
@@ -224,6 +233,15 @@ pub struct ModelKeeper {
     switching: Option<AbortHandle>,
     load: Loader,
     free: FreeSpace,
+    /// The model in use was let go at rest: the next dictation loads it again.
+    resting: bool,
+    /// A dictation records or is worked on: the model is not let go meanwhile.
+    busy: bool,
+    /// The session locked or the computer went to sleep during a dictation: the model is let go once it ends.
+    rest_when_done: bool,
+    /// The wait before the model is let go, started when a dictation ends.
+    rest_timer: Option<AbortHandle>,
+    rest_after: Duration,
 }
 
 impl ModelKeeper {
@@ -250,6 +268,70 @@ impl ModelKeeper {
             switching: None,
             load,
             free,
+            resting: false,
+            busy: false,
+            rest_when_done: false,
+            rest_timer: None,
+            rest_after: REST_AFTER,
+        }
+    }
+
+    /// A dictation started (`true`) or ended (`false`). One starting loads a model let go at rest; one ending starts
+    /// the wait after which the model is let go ([`REST_AFTER`]), or lets it go now after a lock or sleep came during it.
+    pub fn busy(&mut self, busy: bool, tx: &UnboundedSender<CoreEvent>) {
+        self.busy = busy;
+        if let Some(timer) = self.rest_timer.take() {
+            timer.abort();
+        }
+        if busy {
+            self.wake(tx);
+        } else if std::mem::take(&mut self.rest_when_done) {
+            self.rest();
+        } else {
+            self.arm_rest(tx);
+        }
+    }
+
+    /// The wait before the model in use is let go starts again.
+    fn arm_rest(&mut self, tx: &UnboundedSender<CoreEvent>) {
+        if let Some(timer) = self.rest_timer.take() {
+            timer.abort();
+        }
+        let (tx, job, after) = (tx.clone(), self.job, self.rest_after);
+        self.rest_timer = Some(
+            tokio::spawn(async move {
+                tokio::time::sleep(after).await;
+                let _ = tx.send(CoreEvent::Model(ModelNews { job, event: ModelEvent::Rest }));
+            })
+            .abort_handle(),
+        );
+    }
+
+    /// The session locked or the computer goes to sleep: the model is let go now, or once the dictation ends.
+    pub fn rest_soon(&mut self) {
+        if self.busy {
+            self.rest_when_done = true;
+        } else {
+            self.rest();
+        }
+    }
+
+    /// The model in use, ready and not recognizing, is let go: its memory is freed once a recognition still holding it
+    /// ends. The windows still show it ready.
+    fn rest(&mut self) {
+        if self.busy || self.resting || !matches!(self.state, ModelState::Ready { .. }) || !self.slot.is_ready() {
+            return;
+        }
+        tracing::info!(model = self.current.id, "speech model: let go at rest");
+        self.resting = true;
+        self.slot.pending();
+    }
+
+    /// A model let go at rest loads again.
+    fn wake(&mut self, tx: &UnboundedSender<CoreEvent>) {
+        if std::mem::take(&mut self.resting) {
+            tracing::info!(model = self.current.id, "speech model: loads again for a dictation");
+            self.spawn_load(self.job, &self.current.id, tx);
         }
     }
 
@@ -386,6 +468,10 @@ impl ModelKeeper {
             }
             ModelEvent::Loaded(Ok(model)) => {
                 self.slot.ready(model);
+                // Loaded with no dictation going on (at start, after a download): it rests from now on.
+                if !self.busy {
+                    self.arm_rest(tx);
+                }
                 if std::mem::take(&mut self.downloaded) {
                     return Told::Ready;
                 }
@@ -396,6 +482,7 @@ impl ModelKeeper {
                 self.slot.failed(e);
                 self.spawn_verify(self.job, self.current.clone(), tx);
             }
+            ModelEvent::Rest => self.rest(),
             ModelEvent::Progress { .. } | ModelEvent::Verified { .. } | ModelEvent::Pinned(_) => {}
         }
         Told::Nothing
@@ -443,6 +530,11 @@ impl ModelKeeper {
                 self.state = ModelState::Ready { total: m.total() };
                 self.job = job;
                 self.downloaded = false;
+                // The new model is in the slot, loaded: whatever rested was the old one. It rests from now on.
+                self.resting = false;
+                if !self.busy {
+                    self.arm_rest(tx);
+                }
                 let told = Told::Switched { id: m.id.clone(), name: m.name.clone() };
                 self.current = m;
                 return told;
@@ -456,6 +548,7 @@ impl ModelKeeper {
                 let (done, total) = present(&s.manifest, &self.models);
                 s.state = if removed > 0 { EntryState::Failed { done, total } } else { EntryState::NotRunnable };
             }
+            ModelEvent::Rest => {}
         }
         Told::Nothing
     }
@@ -774,6 +867,53 @@ mod tests {
 
     fn cramped(_: &Path) -> Option<u64> {
         Some(0)
+    }
+
+    #[tokio::test]
+    async fn a_model_at_rest_is_let_go_and_loads_again_for_the_next_dictation() {
+        let models = folder("rest");
+        let m = fake(&models, "here", true);
+        let mut b = Bench::new(&models, &m.id, roomy).await;
+        b.keeper.rest_after = Duration::from_millis(50);
+        b.keeper.busy(false, &b.tx);
+        b.settle().await;
+        assert!(!b.keeper.slot().is_ready(), "let go after the wait");
+        assert_eq!(b.keeper.state(), ModelState::Ready { total: 1 }, "the windows still show it ready");
+        assert_eq!(b.state_of(&m.id), EntryState::InUse);
+        b.keeper.busy(true, &b.tx);
+        b.settle().await;
+        assert_eq!(b.in_slot(), m.id, "a dictation loads it again");
+        std::fs::remove_dir_all(models).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_model_is_never_let_go_during_a_dictation() {
+        let models = folder("busy");
+        let m = fake(&models, "here", true);
+        let mut b = Bench::new(&models, &m.id, roomy).await;
+        b.keeper.rest_after = Duration::from_millis(50);
+        b.keeper.busy(false, &b.tx);
+        b.keeper.busy(true, &b.tx);
+        b.settle().await;
+        assert!(b.keeper.slot().is_ready(), "a dictation stops the wait");
+        b.keeper.rest_soon();
+        assert!(b.keeper.slot().is_ready(), "a lock during a dictation waits for its end");
+        b.keeper.busy(false, &b.tx);
+        assert!(!b.keeper.slot().is_ready(), "and lets the model go as it ends");
+        std::fs::remove_dir_all(models).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_lock_at_rest_lets_the_model_go_at_once() {
+        let models = folder("lock");
+        let m = fake(&models, "here", true);
+        let mut b = Bench::new(&models, &m.id, roomy).await;
+        b.keeper.rest_soon();
+        assert!(!b.keeper.slot().is_ready());
+        b.keeper.busy(true, &b.tx);
+        b.settle().await;
+        assert_eq!(b.in_slot(), m.id);
+        std::fs::remove_dir_all(models).unwrap();
     }
 
     #[tokio::test]

@@ -18,9 +18,15 @@
 .pv{z-index:6;display:flex;justify-content:center;align-items:flex-end;pointer-events:none}
 .drop{--u:calc(var(--h) / 40);--mk:calc(var(--h) * .6);pointer-events:auto;display:flex;align-items:center;flex:none;white-space:nowrap;height:var(--h);min-width:var(--h);padding-left:calc(4 * var(--u));padding-right:calc(4 * var(--u));border-radius:999px;background:rgba(18,18,20,.9);color:#fff;--rec:#FF4A1C;--warn:#F5B82E;--ask:#5C8DFF;box-shadow:0 10px 26px -8px rgba(0,0,0,.45),inset 0 0 0 .5px rgba(255,255,255,.14);backdrop-filter:blur(20px) saturate(1.6);-webkit-backdrop-filter:blur(20px) saturate(1.6);overflow:hidden;transition:height .45s var(--e-spring),min-width .45s var(--e-spring),opacity .3s,padding .45s var(--e-spring)}
 .drop[data-s=idle]{height:calc(var(--h) / 5);opacity:.55}
-/* at rest the strip breathes: its opacity rises and falls slowly; hovered or with reduced motion it holds still */
-.drop[data-s=idle]:not(.hov){animation:idle-breathe 3.2s ease-in-out infinite}
-@keyframes idle-breathe{0%,100%{opacity:.4}50%{opacity:.72}}
+/* Coming to rest the strip breathes three times, its opacity rising and falling slowly, then holds still at its resting
+   .55: an endless breath kept WebView2 drawing all day (about a tenth of a processor core). Each breath starts and ends
+   at .55, in full stride, so the last one stops without a jump. Hovered or with reduced motion it holds still. */
+.drop[data-s=idle]:not(.hov){animation:idle-breathe 3.2s 3}
+@keyframes idle-breathe{
+  0%,100%{opacity:.55;animation-timing-function:ease-out}
+  25%{opacity:.72;animation-timing-function:ease-in-out}
+  75%{opacity:.4;animation-timing-function:ease-in}
+}
 @media (prefers-reduced-motion:reduce){.drop[data-s=idle]:not(.hov){animation:none}}
 /* Idle on hover: even margins to what is painted. 0.3 h from each end of the capsule to the bar's left stroke edge and
    to the last key's right edge, 0.2 h from the lamp dot to the first key, 4u between the keys. Where the bar and the dot

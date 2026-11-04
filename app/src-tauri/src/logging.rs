@@ -10,8 +10,9 @@ const MAX_AGE_DAYS: u64 = 7;
 const MAX_TOTAL: u64 = 10 * 1024 * 1024;
 const PRUNE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// At trace level tungstenite writes the whole handshake request, including `Authorization: Bearer <key>`.
-/// The filter is hard-coded: no environment variable changes it.
-const FILTER: &str = "info,tungstenite=off,tokio_tungstenite=off";
+/// ONNX Runtime tells at info level of every memory block it reserves (hundreds a recognition, nine log lines in ten):
+/// only its warnings are kept. The filter is hard-coded: no environment variable changes it.
+const FILTER: &str = "info,tungstenite=off,tokio_tungstenite=off,ort=warn";
 
 /// Guard of the background log writer: lives until exit; `flush` writes the queue to disk.
 static GUARD: Mutex<Option<WorkerGuard>> = Mutex::new(None);

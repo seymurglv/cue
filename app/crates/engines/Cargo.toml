@@ -27,6 +27,10 @@ getrandom.workspace = true
 # The processor's cores, for the local model's threads.
 windows = { workspace = true, features = ["Win32_System_SystemInformation"] }
 
+[target.'cfg(windows)'.dev-dependencies]
+# The speech model probe's memory (examples/stt_probe.rs).
+windows = { workspace = true, features = ["Win32_System_ProcessStatus"] }
+
 [dev-dependencies]
 anyhow.workspace = true
 # A response built without the network, in tests of reading replies.

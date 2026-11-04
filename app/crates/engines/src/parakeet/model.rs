@@ -118,6 +118,16 @@ fn session(path: &Path) -> Result<Session, EngineError> {
         .map_err(model_error)
 }
 
+/// An encoder run that gives its working memory back when it ends. The arena grows to the longest piece's needs (about
+/// 1 GB for a minute of speech) and would keep that between dictations; given back, a recognition is a few percent
+/// slower and the model holds about 0.75 GB instead of 1.8 GB after it (measured on 40 recordings, examples/stt_probe.rs).
+/// Without the arena at all, a recognition was half as slow again.
+fn shrink() -> Result<ort::session::RunOptions, EngineError> {
+    let mut options = ort::session::RunOptions::new().map_err(model_error)?;
+    options.set("memory.enable_memory_arena_shrinkage", "cpu:0").map_err(model_error)?;
+    Ok(options)
+}
+
 impl Recognizer {
     /// Loads the model from `dir`. `Unsupported` on a processor ONNX Runtime cannot run on; `Model` for a missing or
     /// damaged file.
@@ -238,7 +248,11 @@ impl Sessions {
     fn encode(&mut self, mel: &Mel) -> Result<Encoded, EngineError> {
         let signal = Tensor::from_array(([1usize, N_MELS, mel.frames], mel.data.clone())).map_err(model_error)?;
         let length = Tensor::from_array(([1usize], vec![mel.frames as i64])).map_err(model_error)?;
-        let outputs = self.encoder.run(ort::inputs!["audio_signal" => signal, "length" => length]).map_err(model_error)?;
+        let options = shrink()?;
+        let outputs = self
+            .encoder
+            .run_with_options(ort::inputs!["audio_signal" => signal, "length" => length], &options)
+            .map_err(model_error)?;
         let (shape, data) = outputs["outputs"].try_extract_tensor::<f32>().map_err(model_error)?;
         let (_, lengths) = outputs["encoded_lengths"].try_extract_tensor::<i64>().map_err(model_error)?;
         let dims: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
