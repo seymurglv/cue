@@ -121,6 +121,14 @@ describe('The welcome window', () => {
     expect(primary().disabled).toBe(false);
   });
 
+  it('with the cleanup on this computer the Keys step is skipped', async () => {
+    stub(view({ refineRuns: 'local' }));
+    page = await mount();
+    expect($$('.dots i').map((d) => d.title)).toEqual(['Hello', 'Model', 'Microphone', 'First dictation', 'Done']);
+    await next();
+    expect(step()).toBe('model');
+  });
+
   it('First dictation waits in its field, not on a button', async () => {
     saved();
     page = await mount(false);

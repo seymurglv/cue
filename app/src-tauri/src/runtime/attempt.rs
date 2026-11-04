@@ -353,7 +353,8 @@ impl UsageLog {
     /// `true` if the model has no price in the settings and no warning about it has been given yet (once per model and
     /// session).
     pub fn warn_no_price(&mut self, pricing: &Pricing, model: &str) -> bool {
-        if self.warned_no_price.iter().any(|m| m == model) || pricing.claude_price(model).is_some() {
+        // A model on this computer costs nothing.
+        if model.starts_with("local:") || self.warned_no_price.iter().any(|m| m == model) || pricing.claude_price(model).is_some() {
             return false;
         }
         self.warned_no_price.push(model.to_owned());
@@ -365,6 +366,13 @@ impl UsageLog {
 mod tests {
     use super::*;
     use std::io;
+
+    #[test]
+    fn local_models_have_no_price_warning() {
+        let mut u = UsageLog::default();
+        assert!(!u.warn_no_price(&cue_core::settings::Pricing::default(), "local:llm--qwen--qwen3-4b-gguf--q4_k_m"));
+        assert!(u.warn_no_price(&cue_core::settings::Pricing::default(), "openai:unknown"), "a cloud model without a price");
+    }
 
     fn usage(input: u64, output: u64) -> claude::Usage {
         claude::Usage { input_tokens: input, output_tokens: output, cache_read_input_tokens: 7, cache_creation_input_tokens: 3 }

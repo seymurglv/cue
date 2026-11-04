@@ -70,6 +70,10 @@ fn main() {
             commands::models_search,
             commands::model_choose,
             commands::model_delete,
+            commands::llms_get,
+            commands::llms_search,
+            commands::llm_choose,
+            commands::llm_delete,
             commands::settings_set,
             commands::autostart_get,
             commands::autostart_set,
@@ -84,7 +88,6 @@ fn main() {
             commands::key_state,
             commands::key_set,
             commands::key_check,
-            commands::server_check,
             commands::mic_list,
             commands::mic_preview,
             commands::mic_access,
@@ -134,8 +137,8 @@ fn setup(
     // Interface language: decided here (settings.json first, then Windows); the Drop window and the tray menu both get
     // it, and the core decides it again when the main window changes it.
     let lang = lang::Lang::resolve(settings.ui.language, lang::Lang::detect);
-    // Which key the welcome window looks for at start.
-    let connection = settings.refine.connection().id;
+    // Which key the welcome window looks for at start: the cleanup's cloud connection's, none on this computer.
+    let refine = settings.refine.clone();
     tracing::info!(lang = lang.code(), setting = ?settings.ui.language, "interface language");
     // Counts only: the terms themselves stay out of the log.
     let terms = cue_core::refine::usable_terms(&settings.dictionary.terms).len();
@@ -181,7 +184,7 @@ fn setup(
     tray::create(app.handle(), core_tx.clone(), paths.logs.clone(), lang).context("tray icon not created")?;
     // A key missing, or `--welcome`: the welcome window. Before the hook: the core hears that it holds the hotkey ahead
     // of any chord.
-    welcome_window::open_at_start(app.handle(), connection, welcome_window::asks_welcome(std::env::args_os()));
+    welcome_window::open_at_start(app.handle(), &refine, welcome_window::asks_welcome(std::env::args_os()));
 
     let (hk_tx, hk_rx) = std::sync::mpsc::channel::<HotkeyEvent>();
     start_hook(&hk_tx);

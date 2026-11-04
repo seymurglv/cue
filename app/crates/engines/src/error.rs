@@ -24,6 +24,9 @@ pub enum EngineError {
     /// ONNX Runtime cannot run on this processor.
     #[error("processor not supported: {0}")]
     Unsupported(String),
+    /// The cleanup's language model is missing, damaged, or cannot load or run.
+    #[error("language model: {0}")]
+    Llm(String),
 }
 
 impl EngineError {
@@ -59,7 +62,11 @@ impl EngineError {
             EngineError::Service(s) => EngineError::Service(hide(&s, secret)),
             EngineError::Protocol(s) => EngineError::Protocol(hide(&s, secret)),
             // Local errors never carry a key.
-            other @ (EngineError::Timeout | EngineError::Aborted | EngineError::Model(_) | EngineError::Unsupported(_)) => other,
+            other @ (EngineError::Timeout
+            | EngineError::Aborted
+            | EngineError::Model(_)
+            | EngineError::Unsupported(_)
+            | EngineError::Llm(_)) => other,
         }
     }
 }

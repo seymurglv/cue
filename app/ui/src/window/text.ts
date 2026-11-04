@@ -148,6 +148,19 @@ export interface WinText {
     offline: string;
     none: string;
   };
+  /** Where the cleanup runs: the row's name, its hint by the half chosen, the halves. */
+  runsOn: string;
+  runsHint: { local: string; cloud: string };
+  runs: { local: string; cloud: string };
+  /** The note under the Cleanup page on this computer. */
+  cleanupNoteLocal: string;
+  /** The first page's Cleanup value on this computer while its model is not ready ({PCT} — percent). */
+  cleanupValue: { notDownloaded: string; downloading: string };
+  /** The local models' list: the recommended one's line, a size ({SIZE} — gigabytes), why a found one cannot run, an
+   *  empty search. */
+  /** The local models: "Recommended", a size, the reasons a found one cannot run, an empty search, and the heading of
+   *  the models downloaded here, shown to delete while the cleanup runs in the cloud. */
+  llms: { recommended: string; gb: string; downloaded: string; reasons: { severalFiles: string; noChatTemplate: string; tooLarge: string; architecture: string; noQuant: string }; none: string };
   /** Cleanup: its title, its value on the first page without the connection's key, the note on where text goes
    *  ({NAME} — Anthropic or OpenRouter). */
   cleanup: string;
@@ -182,22 +195,15 @@ export interface WinText {
   refineCustomHint: string;
   refineStyles: Record<RefineStyle, string>;
   refineCustomPlaceholder: string;
-  /** The connection card: its name for a screen reader, the list's groups, a connection's state under its name ({MASK}
-   *  — the key's mask), a local server's states. */
+  /** The connection card: its name for a screen reader, a connection's state under its name ({MASK} — the key's mask). */
   refineConnection: string;
-  connectionGroups: { cloud: string; local: string };
   keySavedMask: string;
-  server: { unknown: string; checking: string; running: string; down: string };
-  /** The key row's and the address row's names. */
+  /** The key row's name. */
   keyRow: string;
-  addressRow: string;
-  /** The model row, its list's chip, a model's price ({IN}, {OUT} — dollars) or size ({GB}). */
+  /** The model row, its list's chip, a model's price ({IN}, {OUT} — dollars). */
   refineModel: string;
   recommended: string;
   perMtok: string;
-  onDisk: string;
-  /** The note under the Cleanup group for a local server. */
-  cleanupNoteLocal: string;
   uiLanguage: string;
   uiLanguages: Record<UiLanguage, string>;
   /** The tray's History page: how long recordings are kept, never longer than the history. */
@@ -322,6 +328,18 @@ export const en: WinText = {
     offline: 'No connection to Hugging Face',
     none: 'No Parakeet models for this search',
   },
+  runsOn: 'Runs on',
+  runsHint: { local: 'Free, private', cloud: 'Your key, fastest' },
+  runs: { local: 'This computer', cloud: 'Cloud' },
+  cleanupNoteLocal: 'Free. The text never leaves this computer; the model runs on its processor.',
+  cleanupValue: { notDownloaded: 'Model not downloaded', downloading: 'Downloading {PCT} %' },
+  llms: {
+    recommended: 'Recommended · Russian and English',
+    gb: '{SIZE} GB',
+    downloaded: 'Models on this computer',
+    reasons: { severalFiles: 'several files', noChatTemplate: 'no chat template', tooLarge: 'too large', architecture: 'another architecture', noQuant: 'no quantization CUE takes' },
+    none: 'No GGUF models for this search',
+  },
   cleanup: 'Cleanup',
   cleanupNoKey: 'No {NAME} key',
   cleanupNote: 'Text goes to {NAME} for the cleanup; the history stays on this computer only.',
@@ -360,16 +378,11 @@ export const en: WinText = {
   refineStyles: { default: 'Default', custom: 'Custom' },
   refineCustomPlaceholder: 'For example: keep it short, no emoji, terms in English.',
   refineConnection: 'Connection',
-  connectionGroups: { cloud: 'In the cloud', local: 'On this computer' },
   keySavedMask: 'Key saved · {MASK}',
-  server: { unknown: 'Not checked', checking: 'Checking…', running: 'Running', down: 'Not running' },
   keyRow: 'Key',
-  addressRow: 'Address',
   refineModel: 'Model',
   recommended: 'Recommended',
   perMtok: '${IN} / ${OUT} per 1M tokens',
-  onDisk: '≈ {GB} GB on disk',
-  cleanupNoteLocal: 'Text never leaves this computer.',
   uiLanguage: 'Interface language',
   uiLanguages: { auto: 'Auto', en: 'English', ru: 'Русский' },
   keepAudio: 'Keep recordings',
@@ -493,6 +506,18 @@ export const ru: WinText = {
     offline: 'Нет связи с Hugging Face',
     none: 'Нет моделей Parakeet по запросу',
   },
+  runsOn: 'Где работает',
+  runsHint: { local: 'Бесплатно, приватно', cloud: 'Ваш ключ, быстрее всего' },
+  runs: { local: 'Этот компьютер', cloud: 'Облако' },
+  cleanupNoteLocal: 'Бесплатно. Текст не покидает этот компьютер; модель работает на его процессоре.',
+  cleanupValue: { notDownloaded: 'Модель не скачана', downloading: 'Качается {PCT} %' },
+  llms: {
+    recommended: 'Рекомендуем · русский и английский',
+    gb: '{SIZE} ГБ',
+    downloaded: 'Модели на этом компьютере',
+    reasons: { severalFiles: 'несколько файлов', noChatTemplate: 'нет шаблона чата', tooLarge: 'слишком большая', architecture: 'другая архитектура', noQuant: 'нет подходящего квантования' },
+    none: 'Нет GGUF-моделей по запросу',
+  },
   cleanup: 'Чистка текста',
   cleanupNoKey: 'Нет ключа {NAME}',
   cleanupNote: 'Текст уходит в {NAME} для чистки; история — только на этом компьютере.',
@@ -531,16 +556,11 @@ export const ru: WinText = {
   refineStyles: { default: 'По умолчанию', custom: 'Свой' },
   refineCustomPlaceholder: 'Например: пиши коротко, без смайликов, термины — по-английски.',
   refineConnection: 'Подключение',
-  connectionGroups: { cloud: 'В облаке', local: 'На этом компьютере' },
   keySavedMask: 'Ключ сохранён · {MASK}',
-  server: { unknown: 'Не проверен', checking: 'Проверяю…', running: 'Запущен', down: 'Не запущен' },
   keyRow: 'Ключ',
-  addressRow: 'Адрес',
   refineModel: 'Модель',
   recommended: 'Рекомендуем',
   perMtok: '${IN} / ${OUT} за 1 млн токенов',
-  onDisk: '≈ {GB} ГБ на диске',
-  cleanupNoteLocal: 'Текст не покидает этот компьютер.',
   uiLanguage: 'Язык интерфейса',
   uiLanguages: { auto: 'Авто', en: 'English', ru: 'Русский' },
   keepAudio: 'Хранить записи',

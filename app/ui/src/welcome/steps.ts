@@ -2,7 +2,7 @@
 // 6). The page (page.ts) moves between them and does what they do; Keys and Microphone show the settings tray's own
 // rows (window/keys.ts, window/mic.ts). Texts go in as text.
 import { CUE } from '../designParts';
-import type { LinkTarget, ModelState } from '../window/api';
+import type { LinkTarget, ModelState, SettingsView } from '../window/api';
 import { icon } from '../window/icons';
 import { KEYS, type KeyRows } from '../window/keys';
 import type { MicRows } from '../window/mic';
@@ -13,6 +13,11 @@ import { doneTitle, type WelcomeText } from './text';
 
 export type Step = 'hello' | 'keys' | 'model' | 'mic' | 'try' | 'done';
 export const STEPS: readonly Step[] = ['hello', 'keys', 'model', 'mic', 'try', 'done'];
+
+/** The steps for these settings: with the cleanup on this computer there is no key to ask for. */
+export function stepsFor(view: SettingsView | null): readonly Step[] {
+  return view?.refineRuns === 'local' ? STEPS.filter((s) => s !== 'keys') : STEPS;
+}
 
 /** The Windows key's logo, as on the Drop's key hint. */
 const WIN_LOGO =

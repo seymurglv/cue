@@ -5,6 +5,7 @@ pub mod corrections;
 pub mod flow;
 pub mod habits;
 pub mod history;
+pub mod llm;
 pub mod model;
 pub mod paths;
 pub mod refine;

@@ -340,6 +340,9 @@ export class WindowPage implements Ctx {
     // The Model page's list and the model in use, the same way.
     api.onModels((v) => this.tray.setModels(v)).catch((e) => logFailed('following the speech models', e));
     api.modelsGet().then((v) => this.tray.setModels(v), (e) => logFailed('reading the speech models', e));
+    // The cleanup's local list, the same way.
+    api.onLlms((v) => this.tray.setLlms(v)).catch((e) => logFailed('following the language models', e));
+    api.llmsGet().then((v) => this.tray.setLlms(v), (e) => logFailed('reading the language models', e));
     // A recording CUE starts must not take in a recording of the history playing aloud.
     api.onCoreState((s) => {
       if (s.phase === 'start' || s.phase === 'listen') this.history.recordingStarts();

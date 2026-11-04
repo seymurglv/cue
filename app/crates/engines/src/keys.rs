@@ -46,7 +46,7 @@ impl KeyName {
         }
     }
 
-    /// The key of the connection `id`; `None` for a local server, which needs none, and an unknown id.
+    /// The key of the connection `id`; `None` for an id CUE does not know.
     pub fn of_connection(id: &str) -> Option<Self> {
         KeyName::ALL.into_iter().find(|k| k.as_str() == id)
     }
@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn every_cloud_connection_has_a_key() {
         for c in &cue_core::connections::CONNECTIONS {
-            assert_eq!(KeyName::of_connection(c.id).is_some(), !c.local, "{}", c.id);
+            assert!(KeyName::of_connection(c.id).is_some(), "{}", c.id);
             if let Some(k) = KeyName::of_connection(c.id) {
                 assert_eq!(k.as_str(), c.id);
             }

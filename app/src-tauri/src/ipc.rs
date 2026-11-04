@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use cue_core::history;
 use cue_core::connections::{self, Cost};
-use cue_core::settings::{AudioKeep, DropPosition, Keep, RefineStyle, Settings, UiLanguage};
+use cue_core::settings::{AudioKeep, DropPosition, Keep, RefineStyle, Runs, Settings, UiLanguage};
 use cue_core::translate;
 use cue_core::ui::{TrayKind, UiAction, UiState};
 use tauri::ipc::Channel;
@@ -55,10 +55,12 @@ pub struct SettingsView {
     /// CUE's cleanup or the user's instructions, and those instructions.
     pub refine_style: RefineStyle,
     pub refine_custom: String,
-    /// The cleanup's connection, its model and its address (a local server's as the user set it).
+    /// Where the cleanup runs, and the local model's id (empty: the recommended one).
+    pub refine_runs: Runs,
+    pub refine_local: String,
+    /// The cleanup's cloud connection and its model.
     pub refine_connection: &'static str,
     pub refine_model: &'static str,
-    pub refine_address: String,
     /// Every connection the cleanup can go through, with its models, the recommended one first.
     pub connections: Vec<ConnectionView>,
 }
@@ -89,18 +91,16 @@ pub struct HabitView {
 pub struct ConnectionView {
     pub id: &'static str,
     pub name: &'static str,
-    pub local: bool,
     pub models: Vec<ModelView>,
 }
 
-/// A model under its connection: its price per million tokens (input, output), or for a local one its size on disk.
+/// A model under its connection: its price per million tokens (input, output).
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelView {
     pub id: &'static str,
     pub name: &'static str,
-    pub usd: Option<(f64, f64)>,
-    pub gb: Option<f32>,
+    pub usd: (f64, f64),
 }
 
 /// The connections of `cue_core::connections` for the window.
@@ -110,16 +110,12 @@ fn connection_views() -> Vec<ConnectionView> {
         .map(|c| ConnectionView {
             id: c.id,
             name: c.name,
-            local: c.local,
             models: c
                 .models
                 .iter()
                 .map(|m| {
-                    let (usd, gb) = match m.cost {
-                        Cost::Usd { input, output, .. } => (Some((input, output)), None),
-                        Cost::Disk(gb) => (None, Some(gb)),
-                    };
-                    ModelView { id: m.id, name: m.name, usd, gb }
+                    let Cost::Usd { input, output, .. } = m.cost;
+                    ModelView { id: m.id, name: m.name, usd: (input, output) }
                 })
                 .collect(),
         })
@@ -153,9 +149,10 @@ impl SettingsView {
                 .collect(),
             refine_style: s.refine.style,
             refine_custom: s.refine.custom.clone(),
+            refine_runs: s.refine.runs,
+            refine_local: s.refine.local.clone(),
             refine_connection: s.refine.connection().id,
             refine_model: s.refine.model().id,
-            refine_address: s.refine.address().to_owned(),
             connections: connection_views(),
         }
     }
@@ -180,7 +177,8 @@ impl std::fmt::Debug for SettingsView {
             .field("refine_custom_chars", &self.refine_custom.chars().count())
             .field("refine_connection", &self.refine_connection)
             .field("refine_model", &self.refine_model)
-            .field("refine_address_chars", &self.refine_address.chars().count())
+            .field("refine_runs", &self.refine_runs)
+            .field("refine_local", &self.refine_local)
             .finish()
     }
 }
@@ -398,6 +396,11 @@ impl Ui {
         self.emit("cue://models", view);
     }
 
+    /// The Cleanup page's local list, to every window (only the main one draws it).
+    pub fn llms(&self, view: &cue_core::model::ModelsView) {
+        self.emit("cue://llms", view);
+    }
+
     /// The name of the model just switched to, just before its card: to the Drop, which draws it.
     pub fn model_name(&self, name: &str) {
         if let Err(e) = self.app.emit_to(DROP_LABEL, "cue://model-name", name) {
@@ -563,7 +566,7 @@ mod tests {
         let mut names: Vec<&str> = view.as_object().unwrap().keys().map(String::as_str).collect();
         names.sort_unstable();
         let expected =
-            ["connections", "dictionary", "habits", "historyAudio", "historyKeep", "lang", "languages", "learn", "learned", "micDevice", "refineAddress", "refineConnection", "refineCustom", "refineModel", "refineStyle", "saved", "translateTarget", "uiLanguage"];
+            ["connections", "dictionary", "habits", "historyAudio", "historyKeep", "lang", "languages", "learn", "learned", "micDevice", "refineConnection", "refineCustom", "refineLocal", "refineModel", "refineRuns", "refineStyle", "saved", "translateTarget", "uiLanguage"];
         assert_eq!(names, expected);
         let defaults = [
             ("historyKeep", json!("month")),
@@ -581,7 +584,8 @@ mod tests {
             ("refineCustom", json!("")),
             ("refineConnection", json!("anthropic")),
             ("refineModel", json!("claude-haiku-5-5")),
-            ("refineAddress", json!("https://api.anthropic.com/v1")),
+            ("refineRuns", json!("cloud")),
+            ("refineLocal", json!("")),
         ];
         for (name, value) in defaults {
             assert_eq!(view[name], value, "{name}");
@@ -599,9 +603,9 @@ mod tests {
             SettingChange::UiLanguage(UiLanguage::Ru),
             SettingChange::RefineStyle(RefineStyle::Custom),
             SettingChange::RefineCustom("пиши коротко".into()),
-            SettingChange::RefineConnection("ollama".into()),
-            SettingChange::RefineModel("gemma4:e4b".into()),
-            SettingChange::RefineAddress("http://10.0.0.5:11434/v1".into()),
+            SettingChange::RefineRuns(Runs::Local),
+            SettingChange::RefineConnection("openai".into()),
+            SettingChange::RefineModel("gpt-6.1-terra".into()),
         ] {
             assert!(s.apply(change));
         }
@@ -616,9 +620,9 @@ mod tests {
             ("saved", json!(false)),
             ("refineStyle", json!("custom")),
             ("refineCustom", json!("пиши коротко")),
-            ("refineConnection", json!("ollama")),
-            ("refineModel", json!("gemma4:e4b")),
-            ("refineAddress", json!("http://10.0.0.5:11434/v1")),
+            ("refineRuns", json!("local")),
+            ("refineConnection", json!("openai")),
+            ("refineModel", json!("gpt-6.1-terra")),
         ];
         for (name, value) in set {
             assert_eq!(view[name], value, "{name}");

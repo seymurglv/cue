@@ -142,7 +142,7 @@ describe('The settings tray', () => {
     core.keyCheck.mockResolvedValue('badKey');
     page = await mount();
     await open();
-    expect(text($('.btray em[data-val="cleanup"]'))).toBe('Default');
+    expect(text($('.btray em[data-val="cleanup"]'))).toBe('Anthropic');
     await sub('cleanup');
     const anthropic = $('small[data-state="anthropic"]')!;
     expect(text(anthropic)).toBe('Saved');
@@ -243,7 +243,7 @@ describe('The settings tray', () => {
     click($('[data-check="anthropic"]'));
     await settle();
     key('Escape');
-    expect(text(em())).toBe('Default');
+    expect(text(em())).toBe('Anthropic');
     expect(em().classList.contains('warn')).toBe(false);
   });
 
@@ -815,7 +815,7 @@ describe('The settings tray', () => {
     page = await mount();
     await open();
     const value = () => text($('.btray em[data-val="cleanup"]'));
-    expect(value()).toBe('По умолчанию');
+    expect(value()).toBe('Anthropic');
     await sub('cleanup');
     expect(title()).toBe('Чистка текста');
     const seg = () => $$('[data-seg="refine"] button');
@@ -834,26 +834,25 @@ describe('The settings tray', () => {
     expect(text($('.btray .tft'))).toBe('Текст уходит в Anthropic для чистки; история — только на этом компьютере.');
   });
 
-  it('the connection card lists ten connections in two groups and switches to the one picked', async () => {
+  it('the connection card lists the eight cloud connections and switches to the one picked', async () => {
     core.keyState.mockImplementation(async (name) => (name === 'anthropic' ? { saved: true, mask: 'sk-…789' } : { saved: false, mask: '' }));
     page = await mount();
     await open();
     const em = () => $<HTMLElement>('.btray em[data-val="cleanup"]')!;
-    expect(text(em())).toBe('Default');
+    expect(text(em())).toBe('Anthropic');
     await sub('cleanup');
     const card = () => $<HTMLButtonElement>('.btray .pk[data-dd="connection"]')!;
     click(card());
     const menu = () => $<HTMLElement>('.menu')!;
     expect(menu().classList.contains('wide')).toBe(true);
-    expect($$('.menu .mg').map((g) => text(g))).toEqual(['In the cloud', 'On this computer']);
+    expect($$('.menu .mg')).toEqual([]);
     const items = () => $$('.menu [data-i]');
     expect(items().map((b) => text(b.querySelector('.mlb')))).toEqual([
-      'Anthropic', 'OpenAI', 'Google Gemini', 'OpenRouter', 'DeepSeek', 'Mistral', 'Groq', 'xAI', 'Ollama', 'LM Studio',
+      'Anthropic', 'OpenAI', 'Google Gemini', 'OpenRouter', 'DeepSeek', 'Mistral', 'Groq', 'xAI',
     ]);
     expect(text(items()[0].querySelector('.msub'))).toBe('Key saved · sk-…789');
     expect(text(items()[1].querySelector('.msub'))).toBe('No key');
-    expect(text(items()[8].querySelector('.msub'))).toBe('Not checked');
-    expect(items().map((b) => b.querySelector('.mlamp')!.classList.contains('on'))).toEqual([true, false, false, false, false, false, false, false, false, false]);
+    expect(items().map((b) => b.querySelector('.mlamp')!.classList.contains('on'))).toEqual([true, false, false, false, false, false, false, false]);
     expect(items().map((b) => b.getAttribute('aria-checked'))[0]).toBe('true');
     // A second press on the card closes the list.
     click(card());
@@ -881,7 +880,7 @@ describe('The settings tray', () => {
     expect(core.keyCheck).toHaveBeenCalledWith('openai');
     expect(text(card().querySelector('.pt small'))).toBe('Key saved · sk-…234');
     key('Escape');
-    expect(text(em())).toBe('Default');
+    expect(text(em())).toBe('OpenAI');
   });
 
   it('the model list marks the recommended one and gives each its price', async () => {
@@ -919,40 +918,7 @@ describe('The settings tray', () => {
     expect(core.settingsSet).toHaveBeenLastCalledWith({ kind: 'refineCustom', value: 'пиши коротко' });
     expect($<HTMLTextAreaElement>('.btray textarea.cta')!.value).toBe('пиши коротко');
     key('Escape');
-    expect(text($('.btray em[data-val="cleanup"]'))).toBe('Custom');
-  });
-
-  it('a local server has an address row instead of a key, and its check lights the card', async () => {
-    stub(view({ refineConnection: 'ollama', refineModel: 'gemma4:12b', refineAddress: 'http://localhost:11434/v1' }));
-    core.serverCheck.mockResolvedValue(true);
-    page = await mount();
-    await open();
-    // A local server needs no key: no amber warning.
-    expect(text($('.btray em[data-val="cleanup"]'))).toBe('Default');
-    await sub('cleanup');
-    expect($$('.btray .srow[data-key]')).toEqual([]);
-    const card = $<HTMLButtonElement>('.btray .pk')!;
-    expect(text(card.querySelector('.pt small'))).toBe('Not checked');
-    const address = $<HTMLInputElement>('.btray input[data-address]')!;
-    expect(address.value).toBe('http://localhost:11434/v1');
-    expect(text($('.btray .srow[data-server] .stx b'))).toBe('Address');
-    expect(text($('.btray [data-dd="rmodel"] .ddv'))).toBe('Gemma 4 12B');
-    expect(text($('.btray .tft'))).toBe('Text never leaves this computer.');
-    click($('[data-server-check]'));
-    await settle();
-    expect(core.serverCheck).toHaveBeenCalledWith('http://localhost:11434/v1');
-    expect(core.settingsSet).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'refineAddress' }));
-    expect(text($('.btray .pk .pt small'))).toBe('Running');
-    expect($('.btray .pk .lamp')!.classList.contains('on')).toBe(true);
-    // Another address: checked, then kept.
-    core.serverCheck.mockResolvedValue(false);
-    $<HTMLInputElement>('.btray input[data-address]')!.value = 'http://10.0.0.5:11434/v1';
-    click($('[data-server-check]'));
-    await settle();
-    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'refineAddress', value: 'http://10.0.0.5:11434/v1' });
-    expect(text($('.btray .pk .pt small'))).toBe('Not running');
-    click($('.btray [data-dd="rmodel"]'));
-    expect($$('.menu [data-i] .msub').map((b) => text(b))).toEqual(['≈ 8 GB on disk', '≈ 7 GB on disk']);
+    expect(text($('.btray em[data-val="cleanup"]'))).toBe('Anthropic');
   });
 
   it('reads the settings again when the core did not answer a change in time', async () => {

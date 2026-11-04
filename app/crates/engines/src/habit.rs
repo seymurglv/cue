@@ -86,19 +86,27 @@ fn skip(why: &str) -> Option<RuleText> {
     None
 }
 
-/// The rule from the cleanup's connection in `s` (its address, its model), within `timeout`; a local server needs no
-/// key, a cloud one without a key is not asked.
+/// The rule from the cleanup's connection in `s` (its model), within `timeout`; without a key it is not asked.
 pub async fn rule(http: &reqwest::Client, key: Option<&str>, s: &RefineSettings, ask: &RuleAsk, lang: &str, timeout: Duration) -> Option<RuleText> {
+    rule_at(http, key, s.connection().base_url, s, ask, lang, timeout).await
+}
+
+/// [`rule`] against the service at `address` (tests point it at their own).
+pub(crate) async fn rule_at(
+    http: &reqwest::Client,
+    key: Option<&str>,
+    address: &str,
+    s: &RefineSettings,
+    ask: &RuleAsk,
+    lang: &str,
+    timeout: Duration,
+) -> Option<RuleText> {
     let c = s.connection();
-    let key = match key {
-        Some(k) => k,
-        None if c.local => "",
-        None => return skip(&format!("no {} key", c.name)),
-    };
+    let Some(key) = key else { return skip(&format!("no {} key", c.name)) };
     let (system, user) = habits::rule_messages(ask, lang);
     let content = match c.kind {
         Kind::Anthropic => {
-            let url = format!("{}/messages", s.address());
+            let url = format!("{address}/messages");
             let body = anthropic_body(s.model().id, &system, &user);
             let resp = match claude::messages_post(http, &url, key).timeout(timeout).json(&body).send().await {
                 Ok(r) if r.status().is_success() => r,
@@ -112,9 +120,9 @@ pub async fn rule(http: &reqwest::Client, key: Option<&str>, s: &RefineSettings,
         }
         Kind::OpenRouter | Kind::Chat => {
             let req = if matches!(c.kind, Kind::OpenRouter) {
-                http.post(format!("{}/chat/completions", s.address())).bearer_auth(key).header("X-Title", openrouter::TITLE)
+                http.post(format!("{address}/chat/completions")).bearer_auth(key).header("X-Title", openrouter::TITLE)
             } else {
-                chat::post(http, c, s.address(), key)
+                chat::post(http, c, address, key)
             };
             match openrouter::stream(req, key, &chat_body(s, &system, &user), timeout).await {
                 Ok(done) => done.content,
@@ -138,10 +146,9 @@ mod tests {
         let forms = vec![Form::FirstLetter { lower: true }, Form::EndMark { mark: '.', removed: true }];
         Draft { forms, app: "Telegram".into(), before: "Скинь файл.".into(), after: "скинь файл".into(), n: 3 }.ask()
     }
-    fn over(id: &str, base: &str) -> RefineSettings {
-        let mut s = RefineSettings { connection: id.into(), ..RefineSettings::default() };
-        s.addresses.insert(id.into(), base.into());
-        s
+    /// The connection `id` and the address of the fake service standing in for it.
+    fn over(id: &str, base: &str) -> (RefineSettings, String) {
+        (RefineSettings { connection: id.into(), ..RefineSettings::default() }, base.to_owned())
     }
     fn http() -> reqwest::Client {
         reqwest::Client::builder().no_proxy().build().unwrap()
@@ -158,12 +165,12 @@ mod tests {
         let answer = json!({ "content": [{ "type": "text", "text": text }], "stop_reason": "end_turn", "usage": {} }).to_string();
         let api = fake_api(move |_, _, _| Reply::Send(200, answer.clone(), "")).await;
         let s = over("anthropic", &format!("{}/v1", api.base));
-        let r = rule(&http(), Some(KEY), &s, &ask(), "ru", WAIT).await.unwrap();
+        let r = rule_at(&http(), Some(KEY), &s.1, &s.0, &ask(), "ru", WAIT).await.unwrap();
         assert_eq!((r.rule.as_str(), r.short.as_str()), ("В Telegram — с маленькой буквы и без точки", "без точки"));
         assert_eq!(api.calls(), ["POST /v1/messages"]);
         let sent: Value = serde_json::from_slice(&api.body(0)).unwrap();
         let (system, user) = habits::rule_messages(&ask(), "ru");
-        assert_eq!(sent, anthropic_body(s.model().id, &system, &user));
+        assert_eq!(sent, anthropic_body(s.0.model().id, &system, &user));
         assert_eq!(sent["messages"].as_array().unwrap().len(), 1);
         only_the_ask(sent["messages"][0]["content"].as_str().unwrap());
     }
@@ -177,11 +184,11 @@ mod tests {
         let body: String = [chunk(&text, None), chunk("", Some("stop")), "[DONE]".to_owned()].iter().map(|e| format!("data: {e}\n\n")).collect();
         let api = fake_api(move |_, _, _| Reply::Send(200, body.clone(), "")).await;
         let s = over("openai", &format!("{}/v1", api.base));
-        let r = rule(&http(), Some(KEY), &s, &ask(), "en", WAIT).await.unwrap();
+        let r = rule_at(&http(), Some(KEY), &s.1, &s.0, &ask(), "en", WAIT).await.unwrap();
         assert_eq!(r.short, "no full stop");
         assert_eq!(api.calls(), ["POST /v1/chat/completions"]);
         let sent: Value = serde_json::from_slice(&api.body(0)).unwrap();
-        assert_eq!(sent, chat_body(&s, &habits::rule_messages(&ask(), "en").0, &habits::rule_messages(&ask(), "en").1));
+        assert_eq!(sent, chat_body(&s.0, &habits::rule_messages(&ask(), "en").0, &habits::rule_messages(&ask(), "en").1));
         assert_eq!(sent["messages"].as_array().unwrap().len(), 2);
         only_the_ask(sent["messages"][1]["content"].as_str().unwrap());
         assert_eq!(sent["response_format"]["json_schema"]["name"], "habit_rule");
@@ -198,7 +205,7 @@ mod tests {
         let body: String = [chunk(&text, None), chunk("", Some("stop")), "[DONE]".to_owned()].iter().map(|e| format!("data: {e}\n\n")).collect();
         let api = fake_api(move |_, _, _| Reply::Send(200, body.clone(), "")).await;
         let s = over("openrouter", &format!("{}/api/v1", api.base));
-        assert_eq!(rule(&http(), Some(KEY), &s, &ask(), "en", WAIT).await.unwrap().short, "no full stop");
+        assert_eq!(rule_at(&http(), Some(KEY), &s.1, &s.0, &ask(), "en", WAIT).await.unwrap().short, "no full stop");
         assert_eq!(api.calls(), ["POST /api/v1/chat/completions"]);
         let sent: Value = serde_json::from_slice(&api.body(0)).unwrap();
         assert_eq!(sent["provider"], json!({ "sort": "latency", "data_collection": "deny", "require_parameters": true }));
@@ -208,7 +215,7 @@ mod tests {
         let refusal = json!({ "error": { "code": 404, "message": "No endpoints found matching your data policy" } }).to_string();
         let api = fake_api(move |_, _, _| Reply::Send(404, refusal.clone(), "")).await;
         let s = over("openrouter", &format!("{}/api/v1", api.base));
-        assert!(rule(&http(), Some(KEY), &s, &ask(), "en", WAIT).await.is_none());
+        assert!(rule_at(&http(), Some(KEY), &s.1, &s.0, &ask(), "en", WAIT).await.is_none());
         assert_eq!(api.calls().len(), 1, "not asked again without the routing");
     }
 
@@ -219,11 +226,12 @@ mod tests {
         let api = fake_api(|_, _, _| Reply::Hang).await;
         let s = over("anthropic", &format!("{}/v1", api.base));
         let t0 = std::time::Instant::now();
-        assert!(rule(&http(), Some(KEY), &s, &ask(), "en", Duration::from_millis(200)).await.is_none());
+        assert!(rule_at(&http(), Some(KEY), &s.1, &s.0, &ask(), "en", Duration::from_millis(200)).await.is_none());
         assert!(t0.elapsed() < Duration::from_secs(2), "the wait ends the request");
         let bad = json!({ "content": [{ "type": "text", "text": "{\"rule\":\"\",\"short\":\"\"}" }], "stop_reason": "end_turn" }).to_string();
         let api = fake_api(move |_, _, _| Reply::Send(200, bad.clone(), "")).await;
-        assert!(rule(&http(), Some(KEY), &over("anthropic", &format!("{}/v1", api.base)), &ask(), "en", WAIT).await.is_none());
+        let s = over("anthropic", &format!("{}/v1", api.base));
+        assert!(rule_at(&http(), Some(KEY), &s.1, &s.0, &ask(), "en", WAIT).await.is_none());
         for line in logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::habit")) {
             assert!(!line.contains("Скинь") && !line.contains("скинь") && !line.contains(KEY), "{line}");
         }

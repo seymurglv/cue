@@ -18,7 +18,7 @@ import { MicRows } from '../window/mic';
 import { modelRow, stepModelRow } from '../window/model';
 import { Menus, codeOf, h, logFailed, relRect, type MenuItem } from '../window/page';
 import { TEXTS, pickLang, type Lang, type WinText } from '../window/text';
-import { STEPS, keysReady, stepPage, wordCount, type Step } from './steps';
+import { STEPS, keysReady, stepPage, stepsFor, wordCount, type Step } from './steps';
 import { WELCOME_TEXTS, type WelcomeText } from './text';
 
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
@@ -69,7 +69,9 @@ export class WelcomePage {
   readonly keys: KeyRows;
   readonly mic: MicRows;
   readonly reduced: () => boolean;
-  /** The step shown, by its place in STEPS. */
+  /** The steps for the settings (`stepsFor`). */
+  private steps: readonly Step[] = STEPS;
+  /** The step shown, by its place in `steps`. */
   at = 0;
   /** The words of the first dictation. */
   words = 0;
@@ -140,7 +142,7 @@ export class WelcomePage {
   }
 
   get step(): Step {
-    return STEPS[this.at];
+    return this.steps[this.at];
   }
 
   /** The hotkey held and no microphone open, as at the window's creation; then the settings, then the first step. */
@@ -152,6 +154,7 @@ export class WelcomePage {
       return null;
     });
     this.settings = view;
+    this.steps = stepsFor(view);
     this.lang = pickLang(view?.lang);
     this.t = TEXTS[this.lang];
     this.text = WELCOME_TEXTS[this.lang];
@@ -208,7 +211,7 @@ export class WelcomePage {
     this.body = h('div', 'ob');
     const foot = h('div', 'ofoot');
     this.dots = h('span', 'dots');
-    for (const s of STEPS) {
+    for (const s of this.steps) {
       const dot = h('i');
       dot.title = this.text.steps[s];
       this.dots.append(dot);
@@ -231,7 +234,7 @@ export class WelcomePage {
   }
 
   private go(to: number): void {
-    if (to < 0 || to >= STEPS.length || to === this.at) return;
+    if (to < 0 || to >= this.steps.length || to === this.at) return;
     const dir = to > this.at ? 1 : -1;
     this.leave();
     this.at = to;

@@ -221,6 +221,52 @@ pub fn user_message(ctx: &RefineContext, raw: &str) -> String {
     m
 }
 
+/// A long dictation in pieces of at most `max_words` words, each ending where a sentence does when one ends in it
+/// (else after `max_words` words), for a model that cleans it a piece at a time. The pieces are `raw` itself, in
+/// order, each with the spaces after it: put together they are `raw`. A dictation of `max_words` or fewer is one piece.
+pub fn pieces(raw: &str, max_words: usize) -> Vec<&str> {
+    let max_words = max_words.max(1);
+    // Each word with the spaces after it: (start, end, whether a sentence ends with it).
+    let mut words: Vec<(usize, usize, bool)> = Vec::new();
+    let mut start = None;
+    for (i, c) in raw.char_indices() {
+        match (c.is_whitespace(), start) {
+            (false, None) => start = Some(i),
+            (true, Some(b)) => {
+                let word = &raw[b..i];
+                words.push((b, i, word.ends_with(['.', '!', '?', '…'])));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(b) = start {
+        words.push((b, raw.len(), true));
+    }
+    // The spaces after a word belong to it.
+    for k in 0..words.len() {
+        let end = words.get(k + 1).map_or(raw.len(), |w| w.0);
+        words[k].1 = end;
+    }
+    let mut out = Vec::new();
+    let mut first = 0;
+    while first < words.len() {
+        let from = if first == 0 { 0 } else { words[first].0 };
+        if words.len() - first <= max_words {
+            out.push(&raw[from..]);
+            break;
+        }
+        let window = &words[first..first + max_words];
+        let cut = window.iter().rposition(|w| w.2).map_or(first + max_words, |i| first + i + 1);
+        out.push(&raw[from..words[cut - 1].1]);
+        first = cut;
+    }
+    if out.is_empty() {
+        out.push(raw);
+    }
+    out
+}
+
 /// 3 s + 1 s for every full 100 words.
 pub fn timeout_ms(raw: &str) -> u64 {
     3_000 + 1_000 * (raw.split_whitespace().count() as u64 / 100)
@@ -239,6 +285,31 @@ fn has_digit(token: &str) -> bool {
 /// Lowercase, and "ё" = "е": the recognizer and the model spell it differently.
 fn norm(word: &str) -> String {
     word.to_lowercase().replace('ё', "е")
+}
+
+/// The answer without a copy of the text before the cursor at its start — all of it, or its last sentence — unless
+/// the person said those words again. A small model takes the context for part of the transcript; pasted, the copy
+/// would stand twice in the field. An answer that is nothing but the copy stays as it is, for the sanity check.
+pub fn drop_copied_context<'a>(refined: &'a str, before_cursor: Option<&str>, raw: &str) -> &'a str {
+    let Some(before) = before_cursor.map(str::trim).filter(|b| !b.is_empty()) else { return refined };
+    let answer = refined.trim_start();
+    // The last sentence: after the last ". ", "! ", "? " or line break inside the text.
+    let last = before
+        .char_indices()
+        .rfind(|&(i, c)| matches!(c, '.' | '!' | '?' | '…' | '\n') && before[i + c.len_utf8()..].starts_with(char::is_whitespace))
+        .map_or(before, |(i, c)| before[i + c.len_utf8()..].trim_start());
+    let said = words(raw);
+    for copy in [before, last] {
+        let copied = words(copy);
+        if copied.is_empty() || !answer.starts_with(copy) || said.starts_with(&copied) {
+            continue;
+        }
+        let rest = answer[copy.len()..].trim_start();
+        if !rest.is_empty() {
+            return rest;
+        }
+    }
+    refined
 }
 
 /// Words to compare: numbers excluded, normalized with `norm`.
@@ -653,6 +724,38 @@ mod tests {
 
     fn s() -> RefineSettings {
         RefineSettings::default()
+    }
+
+    /// A small model copies the text before the cursor into its answer: pasted, it would stand twice in the field.
+    #[test]
+    fn a_long_dictation_is_cut_where_sentences_end() {
+        let raw = "Один два три. Четыре пять! Шесть семь восемь девять? Десять";
+        assert_eq!(pieces(raw, 20), [raw], "a short one is whole");
+        assert_eq!(pieces(raw, 6), ["Один два три. Четыре пять! ", "Шесть семь восемь девять? Десять"]);
+        assert_eq!(pieces(raw, 3), ["Один два три. ", "Четыре пять! ", "Шесть семь восемь ", "девять? Десять"], "a long sentence is cut by words");
+        for n in 1..12 {
+            assert_eq!(pieces(raw, n).concat(), raw, "the pieces are the dictation ({n})");
+        }
+        assert_eq!(pieces("", 5), [""]);
+        assert_eq!(pieces("  а б\nв.  г ", 2).concat(), "  а б\nв.  г ");
+    }
+
+    #[test]
+    fn a_copied_text_before_the_cursor_is_dropped() {
+        let raw = "ну короче я посмотрел пулреквест там всё нормально";
+        let before = Some("Вчера договорились. ");
+        assert_eq!(drop_copied_context("Вчера договорились. Ну, я посмотрел пулреквест.", before, raw), "Ну, я посмотрел пулреквест.");
+        // Only its last sentence copied.
+        let longer = Some("Привет! Вчера договорились.");
+        assert_eq!(drop_copied_context("Вчера договорились. Ну, я посмотрел пулреквест.", longer, raw), "Ну, я посмотрел пулреквест.");
+        // Said again: it stays.
+        let said = "вчера договорились ну я посмотрел";
+        assert_eq!(drop_copied_context("Вчера договорились. Ну, я посмотрел.", before, said), "Вчера договорились. Ну, я посмотрел.");
+        // Nothing before the cursor, or nothing copied: as it was.
+        assert_eq!(drop_copied_context("Ну, я посмотрел.", None, raw), "Ну, я посмотрел.");
+        assert_eq!(drop_copied_context("Ну, я посмотрел.", before, raw), "Ну, я посмотрел.");
+        // An answer that is only the copy is left for the sanity check.
+        assert_eq!(drop_copied_context("Вчера договорились.", before, raw), "Вчера договорились.");
     }
 
     #[test]

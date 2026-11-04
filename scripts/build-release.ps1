@@ -7,7 +7,8 @@ Cargo builds into target\dist, never into target\release, where a developer's ev
 computer are cut out of the program: rustc writes the user profile as "~" and the repository as "." in every path it
 embeds (panic locations, debug strings). The flags go in CARGO_ENCODED_RUSTFLAGS, which cargo reads before RUSTFLAGS
 (an empty one left in the shell would win over RUSTFLAGS) and in which a path with a space stays whole. The shell's
-CARGO_TARGET_DIR, RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS are put back afterwards, whether the build succeeds or not.
+CARGO_TARGET_DIR, RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS are put back afterwards, whether the build succeeds or not. The
+C and C++ of llama.cpp, which CMake compiles, get /d1trimfile in CL (read by cl.exe) for the same: put back too.
 
 The first installer build downloads NSIS and its Tauri plugin into %LOCALAPPDATA%\tauri, once.
 
@@ -33,6 +34,8 @@ scripts\build-release.ps1 -ScanBuild
 param([switch]$ScanBuild)
 
 $ErrorActionPreference = 'Stop'
+# CMake, Ninja and libclang for llama.cpp's build.
+. (Join-Path $PSScriptRoot 'dev-env.ps1')
 
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $dist = Join-Path $repo 'target\dist'
@@ -43,7 +46,7 @@ $installer = Join-Path $dist "release\bundle\nsis\CUE_${version}_x64-setup.exe"
 $aside = $null
 
 $saved = @{}
-foreach ($name in 'CARGO_TARGET_DIR', 'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS') {
+foreach ($name in 'CARGO_TARGET_DIR', 'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'CL') {
     $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
 Push-Location $app
@@ -52,6 +55,10 @@ try {
     # rustc applies the last prefix that matches, so the repository (inside the profile) comes after the profile.
     $remap = @("--remap-path-prefix=$profileDir=~", "--remap-path-prefix=$repo=.")
     $env:CARGO_ENCODED_RUSTFLAGS = $remap -join [char]0x1f
+    # llama.cpp's C and C++ (built by CMake, not rustc) write their source paths into asserts: MSVC trims the profile
+    # off them, in both spellings CMake may pass. cl.exe reads CL itself; CMake drops CFLAGS on the way.
+    $trim = "/d1trimfile:$profileDir\ /d1trimfile:$($profileDir.Replace('\', '/'))/"
+    $env:CL = $trim
 
     $tauriArgs = @('run', 'tauri', '--', 'build')
     New-Item -ItemType Directory -Force -Path $dist | Out-Null

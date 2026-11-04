@@ -1,4 +1,5 @@
-//! CUE helper command: API keys, the usage summary and the leak scan of a build. Not part of the product.
+//! CUE helper command: API keys, the usage summary, the leak scan of a build, and pinning a language model for the
+//! short list (`llm::catalog`). Not part of the product.
 //!
 //! A key's value is never printed — only its mask.
 use std::io::Write;
@@ -11,7 +12,29 @@ use cue_engines::EngineError;
 use cue_engines::keys::{self, KeyName};
 
 const USAGE: &str = "cue-cli keys set <anthropic|openrouter|openai|gemini|deepseek|mistral|groq|xai>\ncue-cli keys show\ncue-cli keys check\n\
-                     cue-cli usage [YYYY-MM]\ncue-cli leak-scan <file or folder>...";
+                     cue-cli usage [YYYY-MM]\ncue-cli leak-scan <file or folder>...\ncue-cli pin-llm <owner/repository>";
+
+/// A Hugging Face repository as `pin-llm` takes it: `owner/repository`, nothing else.
+fn repository(arg: &str) -> Option<&str> {
+    let arg = arg.trim();
+    let (owner, name) = arg.split_once('/')?;
+    let plain = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
+    (plain(owner) && plain(name)).then_some(arg)
+}
+
+/// `repo` pinned into a temporary folder; its manifest printed for `llm::catalog`.
+async fn pin_llm(repo: &str) -> Result<()> {
+    let dir = std::env::temp_dir().join(format!("cue-pin-llm-{}", std::process::id()));
+    let http = reqwest::Client::new();
+    let pinned = cue_engines::hub::pin_llm(&http, repo, &dir).await;
+    let _ = std::fs::remove_dir_all(&dir);
+    match pinned {
+        Ok(m) => println!("{}", serde_json::to_string_pretty(&m)?),
+        Err(cue_engines::hub::LlmPinError::NotRunnable(why)) => bail!("{repo} cannot run in CUE: {why:?}"),
+        Err(cue_engines::hub::LlmPinError::Failed(e)) => bail!("{repo}: {e}"),
+    }
+    Ok(())
+}
 
 fn usage() -> ! {
     eprintln!("{USAGE}");
@@ -175,6 +198,10 @@ async fn main() -> Result<()> {
         }
         ["usage", month] if valid_month(month) => show_usage(month)?,
         ["leak-scan", paths @ ..] if !paths.is_empty() => std::process::exit(leak::run(paths)),
+        ["pin-llm", repo] => match repository(repo) {
+            Some(repo) => pin_llm(repo).await?,
+            None => usage(),
+        },
         _ => usage(),
     }
     Ok(())
@@ -200,6 +227,16 @@ mod tests {
         assert_eq!(line, "openrouter  sk-or-…cdef");
         assert!(!line.contains(&key));
         assert_eq!(check_line(KeyName::OpenRouter, &Ok(None)), "openrouter  —");
+    }
+
+    #[test]
+    fn pin_llm_args_are_one_repository() {
+        assert_eq!(repository("Qwen/Qwen3-1.7B-GGUF"), Some("Qwen/Qwen3-1.7B-GGUF"));
+        assert_eq!(repository(" unsloth/gemma-4-E4B-it-GGUF "), Some("unsloth/gemma-4-E4B-it-GGUF"));
+        for bad in ["", "Qwen", "a/b/c", "https://huggingface.co/a/b", "a /b", "/b", "a/", "a/b?x=1"] {
+            assert_eq!(repository(bad), None, "{bad:?}");
+        }
+        assert!(USAGE.contains("cue-cli pin-llm <owner/repository>"));
     }
 
     #[test]

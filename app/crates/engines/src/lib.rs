@@ -7,6 +7,8 @@ pub mod error;
 pub mod habit;
 pub mod hub;
 pub mod keys;
+pub mod local;
+pub mod local_llm;
 pub mod openrouter;
 pub mod parakeet;
 pub mod stt;

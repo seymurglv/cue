@@ -54,6 +54,7 @@ mod ask;
 mod attempt;
 mod files;
 mod insert;
+pub(crate) mod llm;
 mod model;
 pub(crate) mod recordings;
 mod state;
@@ -85,6 +86,8 @@ use cue_engines::ask as engine_ask;
 use cue_engines::claude::{self, Job, RefineResult};
 use cue_engines::habit;
 use cue_engines::hub;
+use cue_engines::local;
+use cue_engines::local_llm::Generate;
 use cue_engines::{chat, openrouter};
 use cue_core::connections::Kind;
 use cue_engines::keys::{self, KeyName};
@@ -205,6 +208,16 @@ pub enum CoreEvent {
     ModelChoose(Choice),
     /// The Model page deletes a model's files; the answer — whether they went.
     ModelDelete { id: String, reply: tokio::sync::oneshot::Sender<bool> },
+    /// A step of the cleanup's language model: its download, its load, or pinning a found one.
+    Llm(llm::LlmNews),
+    /// The Cleanup page asks for the local list (`cue://llms` carries every change after).
+    LlmsGet(tokio::sync::oneshot::Sender<ModelsView>),
+    /// The Cleanup page searches Hugging Face for GGUF models; the answer comes from a task of its own.
+    LlmsSearch { query: String, reply: tokio::sync::oneshot::Sender<Result<Vec<hub::LlmFound>, EngineError>> },
+    /// The Cleanup page chose a local model: it is switched to.
+    LlmChoose(Choice),
+    /// The Cleanup page deletes a local model's file; the answer — whether it went.
+    LlmDelete { id: String, reply: tokio::sync::oneshot::Sender<bool> },
     /// A history entry's text from the main window (decision 3): "Paste again" into `target`, the window that was under
     /// the main one and is now in front, or "Copy" (`None`) — the clipboard. Neither is a new result: the last result
     /// (Ctrl+Win+V) and the history stay as they are.
@@ -277,6 +290,8 @@ pub struct Runtime {
     stream: Option<Stream>,
     /// The speech model: its state, its download and load, the slot recognition waits on.
     model: ModelKeeper,
+    /// The cleanup's language model on this computer, and the slot the cleanup takes it from.
+    llm: llm::LlmKeeper,
     /// The recognition in flight (at the second press, or "retry"): `AbortStt` cancels it too. Without a task (there
     /// was no session) it is `None`: the result was sent at once.
     stt_task: TaskSlot<Option<JoinHandle<()>>>,
@@ -375,6 +390,7 @@ impl Runtime {
         };
         let translate_home = pair_now(&settings);
         let model = ModelKeeper::new(paths.models.clone(), &settings.stt.model);
+        let llm = llm::LlmKeeper::new(paths.models.clone(), &settings.refine.local, settings.refine.runs == settings::Runs::Local);
         let history = HistoryLog::new(paths.history.clone(), Recordings::new(paths.history_audio.clone()));
         // Alt picks "Ask" only when it is on (spec 2 §9); the hook reads the switch on every key.
         hook::ASK_ENABLED.store(settings.ask.enabled(), Ordering::Relaxed);
@@ -406,6 +422,7 @@ impl Runtime {
             heard: false,
             stream: None,
             model,
+            llm,
             stt_task: TaskSlot::default(),
             refine_task: TaskSlot::default(),
             refine_focus: None,
@@ -470,6 +487,8 @@ impl Runtime {
         self.model.start(&self.tx, &self.http);
         self.ui.model(self.model.state());
         self.ui.models(&self.model.view());
+        self.llm.start(&self.tx, &self.http);
+        self.ui.llms(&self.llm.view());
         forget_soniox_key();
         self.key_habits();
         while let Some(ev) = rx.recv().await {
@@ -751,6 +770,36 @@ impl Runtime {
                 let _ = reply.send(self.model.delete(&id));
                 self.ui.models(&self.model.view());
             }
+            CoreEvent::Llm(news) => {
+                // The new local model is written only now that it has loaded.
+                if let Told::Switched { id, .. } = self.llm.on_event(news, &self.tx, &self.http) {
+                    self.settings.refine.local = id;
+                    self.save_settings();
+                    self.send_settings();
+                    // The first dictation after a load would otherwise evaluate CUE's whole system part.
+                    if let Some(g) = self.llm.slot().get() {
+                        local::warm(g, &self.settings.dictionary, &[], &self.settings.refine);
+                    }
+                }
+                self.ui.llms(&self.llm.view());
+            }
+            CoreEvent::LlmsGet(reply) => {
+                let _ = reply.send(self.llm.view());
+            }
+            CoreEvent::LlmsSearch { query, reply } => {
+                let http = self.http.clone();
+                tokio::spawn(async move {
+                    let _ = reply.send(hub::search_llms(&http, &query).await);
+                });
+            }
+            CoreEvent::LlmChoose(choice) => {
+                self.llm.choose(choice, &self.tx, &self.http);
+                self.ui.llms(&self.llm.view());
+            }
+            CoreEvent::LlmDelete { id, reply } => {
+                let _ = reply.send(self.llm.delete(&id, &self.tx));
+                self.ui.llms(&self.llm.view());
+            }
             CoreEvent::Settings { cmd, reply } => {
                 if let SettingsCmd::Set(change) = cmd {
                     self.change_setting(change);
@@ -774,6 +823,7 @@ impl Runtime {
         let s = &self.settings;
         let (target, language, periods) = (s.translate.target(), s.ui.language, s.history.clone());
         let device = s.audio.device.clone();
+        let runs = s.refine.runs;
         // "Forget all": habits still waiting for their rule or their card do not come back after it.
         if change == SettingChange::HabitsForget {
             self.drafts.clear();
@@ -800,6 +850,14 @@ impl Runtime {
             tracing::info!(keep, audio, "history: period changed");
             self.history.prune(&s.history, &local_today());
         }
+        if s.refine.runs != runs {
+            tracing::info!(runs = ?s.refine.runs, "cleanup: where it runs changed");
+            // On this computer: the chosen model loads when its file is here. Back to the cloud: the next cleanup goes
+            // there at once, the local model is let go (its memory freed), and a local download goes on.
+            self.llm.set_active(s.refine.runs == settings::Runs::Local, &self.tx, &self.http);
+            self.ui.llms(&self.llm.view());
+        }
+        let s = &self.settings;
         if s.audio.device != device {
             tracing::info!(pinned = s.audio.device.is_some(), "microphone setting changed");
             // Another choice: a microphone missing from now on is told about again.
@@ -932,9 +990,18 @@ impl Runtime {
         let ask = draft.ask();
         self.drafts.push((n, draft));
         let (http, s, tx, lang, key) = (self.http.clone(), self.settings.refine.clone(), self.tx.clone(), self.lang.code(), self.cleanup_key());
+        let to = route(s.runs, &self.llm.slot());
         tokio::spawn(async move {
             let wait = Duration::from_millis(habits::RULE_WAIT_MS);
-            let rule = tokio::time::timeout(wait, habit::rule(&http, key.as_deref(), &s, &ask, lang, wait)).await.ok().flatten();
+            // On this computer the rule never asks the cloud: the local model, or the template.
+            let asked = async {
+                match to {
+                    Route::Local(g) => local::rule(g, &s, &ask, lang, wait).await,
+                    Route::NotReady => None,
+                    Route::Cloud => habit::rule(&http, key.as_deref(), &s, &ask, lang, wait).await,
+                }
+            };
+            let rule = tokio::time::timeout(wait, asked).await.ok().flatten();
             let _ = tx.send(CoreEvent::HabitRule { draft: n, rule });
         });
     }
@@ -1350,6 +1417,7 @@ impl Runtime {
         }
         self.warm_up();
         self.warm_cache();
+        self.warm_local();
         if let Some(old) = self.stream.take() {
             old.session.abort();
         }
@@ -1431,7 +1499,7 @@ impl Runtime {
     /// transcription), at most once every 20 s (right away after sleep) and only if there is a key: refine does not pay
     /// for the TLS handshake inside its 1.5 s budget.
     fn warm_up(&mut self) {
-        let anthropic = self.settings.refine.connection().kind == Kind::Anthropic;
+        let anthropic = self.settings.refine.runs == settings::Runs::Cloud && self.settings.refine.connection().kind == Kind::Anthropic;
         if !anthropic || !self.warm.due(self.now()) || !matches!(keys::lookup(KeyName::Anthropic), Ok(Some(_))) {
             return;
         }
@@ -1447,7 +1515,7 @@ impl Runtime {
     fn warm_cache(&mut self) {
         // Over another connection there is no warm-up: its first cleanup writes the cache, where it has one.
         let model = self.settings.refine.model().id.to_owned();
-        let anthropic = self.settings.refine.connection().kind == Kind::Anthropic;
+        let anthropic = self.settings.refine.runs == settings::Runs::Cloud && self.settings.refine.connection().kind == Kind::Anthropic;
         if !anthropic || self.flow.mode() == Mode::Ask || !claude::can_warm(&model) || !self.cache_warm.due(self.now()) {
             return;
         }
@@ -1458,6 +1526,21 @@ impl Runtime {
                 let _ = tx.send(CoreEvent::Warmed { usage, model });
             }
         });
+    }
+
+    /// Warms the local model for a dictation just started on this computer: the cleanup's system part, with this app's
+    /// habits, is evaluated while the person speaks. A translation and "Ask" have other prompts.
+    fn warm_local(&self) {
+        if self.settings.refine.runs != settings::Runs::Local || self.flow.mode() != Mode::Dictate {
+            return;
+        }
+        let Some(g) = self.llm.slot().get() else { return };
+        let habits: Vec<String> = if self.settings.learn.enabled() {
+            self.settings.habits.for_app(&stored_app(&self.attempt.app)).map(|h| h.rule.clone()).collect()
+        } else {
+            Vec::new()
+        };
+        local::warm(g, &self.settings.dictionary, &habits, &self.settings.refine);
     }
 
     /// Warms the "Ask" prompt cache at its chord when it may have expired (spec 2 §6.3): its own prefix — the tools and
@@ -1523,6 +1606,7 @@ impl Runtime {
         // text.
         let kind = self.settings.refine.connection().kind;
         let key = self.cleanup_key();
+        let to = route(self.settings.refine.runs, &self.llm.slot());
         let now = self.now();
         // "Ask" has a prefix of its own (`ask_warm`).
         if mode != Mode::Ask {
@@ -1555,7 +1639,18 @@ impl Runtime {
                 // One future for both jobs, so `guarded` covers a translation too.
                 let body = async {
                     let key = key.as_deref();
-                    // The connection picks the client; the settings give it the model and the style.
+                    // On this computer the local model; in the cloud the connection picks the client; the settings give
+                    // it the model and the style.
+                    match to {
+                        Route::Local(g) => {
+                            return match job {
+                                Job::Clean | Job::Rewrite => local::refine(g, &raw, &ctx, &dict, &s).await,
+                                Job::Translate(to) => local::translate(g, &raw, &ctx, &dict, &s, to).await,
+                            };
+                        }
+                        Route::NotReady => return local::not_ready(&raw),
+                        Route::Cloud => {}
+                    }
                     match (kind, job) {
                         (Kind::Anthropic, Job::Clean | Job::Rewrite) => claude::refine(&http, key, s.model().id, &raw, &ctx, &dict, &s).await,
                         (Kind::Anthropic, Job::Translate(to)) => {
@@ -2555,6 +2650,24 @@ fn job_for(
     }
 }
 
+/// Where a dictation's cleanup, a translation and a habit's rule go.
+enum Route {
+    /// The local model in the slot.
+    Local(Arc<dyn Generate>),
+    /// On this computer, no model ready yet: the raw text at once.
+    NotReady,
+    /// The cloud connection.
+    Cloud,
+}
+
+fn route(runs: settings::Runs, slot: &llm::LlmSlot) -> Route {
+    match (runs, slot.get()) {
+        (settings::Runs::Cloud, _) => Route::Cloud,
+        (settings::Runs::Local, Some(g)) => Route::Local(g),
+        (settings::Runs::Local, None) => Route::NotReady,
+    }
+}
+
 /// A recognition failure as the flow tells it: the model missing or damaged (Retry downloads it), a processor it cannot
 /// run on (no Retry), anything else (Retry recognizes the saved recording again).
 fn stt_error(e: &EngineError) -> SttError {
@@ -2809,6 +2922,42 @@ fn forget_soniox_key() {
 
 #[cfg(test)]
 mod tests {
+    /// Where a dictation's cleanup, a translation and a habit's rule go (docs/specs/2026-11-04-local-cleanup.md).
+    mod route_of_the_cleanup {
+        use super::super::*;
+        use std::time::Instant;
+
+        struct Here;
+        impl cue_engines::local_llm::Generate for Here {
+            fn generate(&self, _: &str, _: &str, _: &str, _: Instant, _: &std::sync::atomic::AtomicBool) -> Result<String, EngineError> {
+                Ok(String::new())
+            }
+            fn id(&self) -> &str {
+                "llm--here--model--q4_k_m"
+            }
+        }
+
+        #[test]
+        fn local_with_nothing_ready_pastes_raw_at_once() {
+            let slot = llm::LlmSlot::default();
+            assert!(matches!(route(settings::Runs::Local, &slot), Route::NotReady));
+        }
+
+        #[test]
+        fn local_refine_uses_the_local_engine() {
+            let slot = llm::LlmSlot::default();
+            slot.ready(std::sync::Arc::new(Here));
+            assert!(matches!(route(settings::Runs::Local, &slot), Route::Local(g) if g.id() == "llm--here--model--q4_k_m"));
+        }
+
+        #[test]
+        fn back_to_cloud_goes_to_the_cloud_at_once() {
+            let slot = llm::LlmSlot::default();
+            slot.ready(std::sync::Arc::new(Here));
+            assert!(matches!(route(settings::Runs::Cloud, &slot), Route::Cloud), "a loaded local model is not used");
+        }
+    }
+
     use super::*;
     use cue_core::settings::Cutoff;
     use cue_engines::ask::{AskEnd, AskFailure, AskResult, AskUsage, Step};

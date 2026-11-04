@@ -26,8 +26,8 @@ import { CUE } from '../designParts';
 import { icon, type IconName } from './icons';
 import { KEY_TITLE, KeyRows } from './keys';
 import { MicRows } from './mic';
-import { bar, modelRow, modelValue, stepModelRow } from './model';
-import { ModelsPage } from './models';
+import { bar, modelRow, modelValue, percent, stepModelRow } from './model';
+import { ModelsPage, llmSource, speechSource } from './models';
 import { dropDown, h, iconButton, logFailed, relRect, srow, wrap, type Ctx } from './page';
 import { languageName } from './text';
 
@@ -115,11 +115,15 @@ export class SettingsTray {
   private readonly keys: KeyRows;
   private readonly mic: MicRows;
   private readonly models: ModelsPage;
+  /** The cleanup's local models, on the Cleanup page while it runs on this computer. */
+  private readonly llms: ModelsPage;
+  /** The local models downloaded here, to delete, on the Cleanup page while it runs in the cloud. */
+  private readonly llmsHere: ModelsPage;
+  /** The local list as the core last said (null — not heard yet). */
+  private llmView: api.ModelsView | null = null;
   private autostart: boolean | null = null;
   /** The speech model's state, as `cue://model` last said (null — not heard yet). */
   private model: api.ModelState | null = null;
-  /** The last check of each local server: it answered, it did not, or it is being asked. */
-  private readonly servers: Record<string, boolean | 'checking'> = {};
   /** "Clear history" was pressed once and waits for the second press. */
   private clearTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -138,7 +142,17 @@ export class SettingsTray {
     this.mic = new MicRows(ctx, () => this.current, () => {
       if (this.sub === 'mic') this.redraw();
     });
-    this.models = new ModelsPage(ctx, () => this.fit());
+    this.models = new ModelsPage(ctx, () => this.fit(), speechSource(ctx));
+    this.llms = new ModelsPage(ctx, () => this.fit(), llmSource(ctx));
+    this.llmsHere = new ModelsPage(ctx, () => this.fit(), llmSource(ctx), true);
+  }
+
+  /** The cleanup's local list: drawn where it is shown, and the first page's Cleanup value follows it. */
+  setLlms(view: api.ModelsView): void {
+    this.llmView = view;
+    this.llms.set(view);
+    this.llmsHere.set(view);
+    this.paintCleanupValue();
   }
 
   /** The Model page's list and the model in use: the page shown follows it, and Speech recognition names the model. */
@@ -187,10 +201,17 @@ export class SettingsTray {
     else row.append(bar('tline', v.progress));
   }
 
-  /** The first page's Cleanup value: the style, or amber "No Anthropic key" once the keys are read and it is not saved. */
+  /** The first page's Cleanup value: where it runs; amber while the local model is not ready, or the cloud connection's
+   *  key is read and not saved. */
   private paintCleanupValue(page: ParentNode | null = this.current): void {
     const em = page?.querySelector<HTMLElement>('em[data-val="cleanup"]');
     if (!em) return;
+    if (this.ctx.settings?.refineRuns === 'local') {
+      const { text, warn } = this.localValue();
+      em.textContent = text;
+      em.classList.toggle('warn', warn);
+      return;
+    }
     const key = this.cleanupKey();
     const noKey = !!key && this.keys.read && !this.keys.keys[key].saved;
     em.textContent = noKey && key ? this.ctx.t.cleanupNoKey.replace('{NAME}', KEY_TITLE[key]) : this.value('cleanup');
@@ -256,6 +277,7 @@ export class SettingsTray {
     this.isOpen = false;
     if (this.sub === 'mic') this.stopPreview();
     if (this.sub === 'models') this.models.stop();
+    if (this.sub === 'cleanup') this.llms.stop();
     this.sub = null;
     this.ctx.closeMenu();
     this.swapped();
@@ -421,6 +443,7 @@ export class SettingsTray {
 
   private go(sub: Sub): void {
     if (this.sub === 'models') this.models.stop();
+    if (this.sub === 'cleanup') this.llms.stop();
     this.sub = sub;
     this.show(sub, 1);
     if (sub === 'mic') {
@@ -434,6 +457,7 @@ export class SettingsTray {
   private back(): void {
     if (this.sub === 'mic') this.stopPreview();
     if (this.sub === 'models') this.models.stop();
+    if (this.sub === 'cleanup') this.llms.stop();
     this.ctx.closeMenu();
     const parent = this.sub ? PARENT[this.sub] ?? null : null;
     this.sub = parent;
@@ -451,7 +475,6 @@ export class SettingsTray {
     else if ((b = t.closest<HTMLElement>('[data-dd="mic"]'))) this.mic.menu(b);
     else if ((b = t.closest<HTMLElement>('[data-dd="connection"]'))) this.connectionMenu(b);
     else if ((b = t.closest<HTMLElement>('[data-dd="rmodel"]'))) this.modelMenu(b);
-    else if (t.closest('[data-server-check]')) void this.serverCheck();
     else if ((b = t.closest<HTMLElement>('[data-dd="target"]'))) this.targetMenu(b);
     else if ((b = t.closest<HTMLElement>('[data-dd="hkeep"]'))) this.keepMenu(b);
     else if ((b = t.closest<HTMLElement>('[data-dd="haudio"]'))) this.audioMenu(b);
@@ -461,6 +484,7 @@ export class SettingsTray {
       const v = b.dataset.v!;
       const seg = b.closest<HTMLElement>('.segc')!.dataset.seg;
       if (seg === 'refine') void this.ctx.change({ kind: 'refineStyle', value: v as RefineStyle });
+      else if (seg === 'runs') void this.ctx.change({ kind: 'refineRuns', value: v as api.Runs });
       else void this.ctx.change({ kind: 'uiLanguage', value: v as UiLanguage });
     }
   }
@@ -505,8 +529,11 @@ export class SettingsTray {
       pg.append(h('div', 'tft', t.modelNote));
     } else if (sub === 'cleanup') {
       g.append(...this.cleanupRows());
+      const local = this.ctx.settings?.refineRuns === 'local';
+      if (local) pg.append(...this.llms.rows());
       const c = this.connection();
-      pg.append(h('div', 'tft', c?.local ? t.cleanupNoteLocal : t.cleanupNote.replace('{NAME}', c?.name ?? '')));
+      pg.append(h('div', 'tft', local ? t.cleanupNoteLocal : t.cleanupNote.replace('{NAME}', c?.name ?? '')));
+      if (!local) pg.append(...this.llmsHere.rows());
     } else if (sub === 'mic') g.append(...this.mic.rows());
     else if (sub === 'languages') g.append(...this.languageRows());
     else if (sub === 'history') g.append(...this.historyRows());
@@ -528,8 +555,9 @@ export class SettingsTray {
         // Drawn with its look by `paintModelValue`.
         return '';
       case 'cleanup':
-        // The key's warning over it is `paintCleanupValue`'s.
-        return s ? t.refineStyles[s.refineStyle] ?? '' : '';
+        // Where it runs; the warnings over it are `paintCleanupValue`'s.
+        if (!s) return '';
+        return s.refineRuns === 'local' ? t.runs.local : (this.connection()?.name ?? '');
       case 'mic':
         return this.mic.label();
       case 'languages':
@@ -657,11 +685,15 @@ export class SettingsTray {
     const style = segment('refine', REFINE_STYLES, t.refineStyles, s?.refineStyle);
     const rows = [srow(t.refineStyle, custom ? t.refineCustomHint : t.refineStyleHint, style).row];
     if (custom) rows.push(this.customRow());
+    const runs = s?.refineRuns ?? 'cloud';
+    rows.push(srow(t.runsOn, t.runsHint[runs], segment('runs', ['local', 'cloud'] as const, t.runs, runs)).row);
+    // On this computer the local list follows the group (`page`); the cloud's connection, key and model are in it.
+    if (runs === 'local') return rows;
     const c = this.connection();
     if (!c) return rows;
     const card = h('div', 'srow wide');
     card.append(this.card(c));
-    rows.push(card, c.local ? this.addressRow(c) : this.keys.row(c.id as KeyName, t.keyRow));
+    rows.push(card, this.keys.row(c.id as KeyName, t.keyRow));
     const model = c.models.find((m) => m.id === s?.refineModel) ?? c.models[0];
     rows.push(srow(t.refineModel, null, dropDown('rmodel', model?.name ?? '')).row);
     return rows;
@@ -694,7 +726,7 @@ export class SettingsTray {
     return b;
   }
 
-  /** The card's lamp and state, as they are now (a key saved or checked, a server answered). */
+  /** The card's lamp and state, as they are now (a key saved or checked). */
   private paintCard(b: HTMLElement | null | undefined = this.current?.querySelector<HTMLElement>('.pk'), c = this.connection()): void {
     if (!b || !c) return;
     const { text, on } = this.readiness(c);
@@ -702,67 +734,26 @@ export class SettingsTray {
     b.querySelector('.lamp')!.classList.toggle('on', on);
   }
 
-  /** A connection's state in words, and whether it is ready: a key saved, or a local server that answered. */
+  /** A connection's state in words, and whether it is ready: its key saved. */
   private readiness(c: api.ConnectionView): { text: string; on: boolean } {
     const t = this.ctx.t;
-    if (c.local) {
-      const server = this.servers[c.id];
-      const text = server === 'checking' ? t.server.checking : server === true ? t.server.running : server === false ? t.server.down : t.server.unknown;
-      return { text, on: server === true };
-    }
     const key = this.keys.keys[c.id as KeyName];
     return key?.saved ? { text: t.keySavedMask.replace('{MASK}', key.mask), on: true } : { text: t.keyStates.missing, on: false };
   }
 
-  /** A local server's address and "Check". */
-  private addressRow(c: api.ConnectionView): HTMLElement {
-    const t = this.ctx.t;
-    const input = h('input', 'kin');
-    input.type = 'text';
-    input.spellcheck = false;
-    input.dataset.address = c.id;
-    input.value = this.ctx.settings?.refineAddress ?? '';
-    input.setAttribute('aria-label', t.addressRow);
-    const btn = h('button', 'btn2 ck', t.check);
-    btn.type = 'button';
-    btn.dataset.serverCheck = c.id;
-    const { row } = srow(t.addressRow, null, input, btn);
-    row.dataset.server = c.id;
-    return row;
-  }
-
-  /** Asks the local server at the address typed whether it answers; a new address is kept once checked. */
-  private async serverCheck(): Promise<void> {
-    const c = this.connection();
-    const address = this.current?.querySelector<HTMLInputElement>('input[data-address]')?.value.trim() ?? '';
-    if (!c?.local || !address || this.servers[c.id] === 'checking') return;
-    this.servers[c.id] = 'checking';
-    this.paintCard();
-    let running = false;
-    try {
-      running = await api.serverCheck(address);
-    } catch (e) {
-      logFailed('checking the local server', e);
-    }
-    this.servers[c.id] = running;
-    if (address !== this.ctx.settings?.refineAddress) await this.ctx.change({ kind: 'refineAddress', value: address });
-    this.paintCard();
-  }
-
-  /** Every connection, cloud first, each with its lamp and state; the one chosen is checked. */
+  /** Every cloud connection, each with its lamp and state; the one chosen is checked. */
   private connectionMenu(b: HTMLElement): void {
     const t = this.ctx.t;
     const s = this.ctx.settings;
     if (!s) return;
     const items = s.connections.map((c) => {
       const { text, on } = this.readiness(c);
-      const group = c.local ? t.connectionGroups.local : t.connectionGroups.cloud;
-      return { value: c.id, label: c.name, sub: text, lamp: on, group, on: c.id === s.refineConnection };
+      return { value: c.id, label: c.name, sub: text, lamp: on, on: c.id === s.refineConnection };
     });
     this.ctx.menu(b, items, (v) => void this.ctx.change({ kind: 'refineConnection', value: v }), undefined, 'start', true);
   }
 
-  /** The connection's models, each with its price or size, the recommended one marked. */
+  /** The connection's models, each with its price, the recommended one marked. */
   private modelMenu(b: HTMLElement): void {
     const t = this.ctx.t;
     const c = this.connection();
@@ -771,13 +762,34 @@ export class SettingsTray {
     const items = c.models.map((m, i) => ({
       value: m.id,
       label: m.name,
-      sub: m.usd
-        ? t.perMtok.replace('{IN}', usd(m.usd[0])).replace('{OUT}', usd(m.usd[1]))
-        : t.onDisk.replace('{GB}', (m.gb ?? 0).toLocaleString(this.ctx.lang)),
+      sub: t.perMtok.replace('{IN}', usd(m.usd[0])).replace('{OUT}', usd(m.usd[1])),
       badge: i === 0 ? t.recommended : undefined,
       on: m === cur,
     }));
     this.ctx.menu(b, items, (v) => void this.ctx.change({ kind: 'refineModel', value: v }));
+  }
+
+  /** The local model's state in words for the first page, from the local list: in use, a switch's step, or nothing. */
+  private localValue(): { text: string; warn: boolean } {
+    const t = this.ctx.t;
+    const v = this.llmView;
+    if (!v) return { text: t.runs.local, warn: false };
+    if (v.current) return { text: t.runs.local, warn: false };
+    const busy: api.EntryState['state'][] = ['preparing', 'downloading', 'loading', 'failed', 'noSpace', 'notRunnable'];
+    const e = v.entries.find((x) => busy.includes(x.state));
+    if (!e) return { text: t.cleanupValue.notDownloaded, warn: true };
+    switch (e.state) {
+      case 'downloading':
+        return { text: t.cleanupValue.downloading.replace('{PCT}', String(percent(e.done, e.total))), warn: true };
+      case 'preparing':
+        return { text: t.cleanupValue.downloading.replace('{PCT}', '0'), warn: true };
+      case 'loading':
+        return { text: t.models.loading, warn: false };
+      case 'notRunnable':
+        return { text: t.models.notRunnable, warn: true };
+      default:
+        return { text: t.modelValue.failed, warn: true };
+    }
   }
 
   /** The cleanup's connection as the core lists it. */
@@ -786,10 +798,10 @@ export class SettingsTray {
     return s?.connections.find((c) => c.id === s.refineConnection);
   }
 
-  /** The key the cleanup needs: the chosen cloud connection's; none for a local server. */
+  /** The key the cleanup needs: the chosen cloud connection's. */
   private cleanupKey(): KeyName | null {
     const c = this.connection();
-    return c && !c.local ? (c.id as KeyName) : null;
+    return c ? (c.id as KeyName) : null;
   }
 
   /* ---------- general ---------- */

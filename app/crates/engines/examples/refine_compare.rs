@@ -286,7 +286,7 @@ fn error_kind(f: &Failure) -> String {
         EngineError::Service(_) => "stream_error",
         EngineError::Protocol(_) => "stream_protocol",
         EngineError::Aborted => "aborted",
-        EngineError::Model(_) | EngineError::Unsupported(_) => "local",
+        EngineError::Model(_) | EngineError::Unsupported(_) | EngineError::Llm(_) => "local",
     }
     .to_owned()
 }

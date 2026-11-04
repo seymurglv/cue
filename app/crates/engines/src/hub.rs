@@ -2,10 +2,12 @@
 //! whether CUE can run its model (`cue_core::model::runnable`), and pinning a found model when it is chosen: the
 //! repository at its current commit, the large files' SHA-256 from its LFS data, `vocab.txt` downloaded at once and
 //! checked against its git blob hash, and the manifest written into the model's folder. The download that follows is
-//! the short list's own (`download`).
+//! the short list's own (`download`). The cleanup's language models (docs/specs/2026-11-04-local-cleanup.md) are
+//! searched and pinned the same way: GGUF repositories, one file each (`cue_core::llm::runnable`).
 use std::path::Path;
 use std::time::Duration;
 
+use cue_core::llm::{self, GgufMeta, LlmNotRunnable};
 use cue_core::model::{self, DECODER, ENCODER, Manifest, ModelFile, NotRunnable, RepoFile, VOCAB};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
@@ -52,6 +54,15 @@ struct Listed {
     pipeline_tag: Option<String>,
     #[serde(rename = "cardData", default)]
     card: Option<Card>,
+    /// What Hugging Face read from a GGUF repository's file: its architecture and chat template.
+    #[serde(default)]
+    gguf: Option<GgufListed>,
+}
+
+#[derive(Deserialize)]
+struct GgufListed {
+    architecture: Option<String>,
+    chat_template: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -81,6 +92,34 @@ impl Listed {
 
     fn speech(&self) -> bool {
         self.pipeline_tag.as_deref().is_none_or(|p| p == "automatic-speech-recognition")
+    }
+
+    /// A text model (a chat model), or one that names no pipeline.
+    fn text(&self) -> bool {
+        self.pipeline_tag.as_deref().is_none_or(|p| p == "text-generation")
+    }
+
+    fn gguf_meta(&self) -> GgufMeta {
+        let g = self.gguf.as_ref();
+        GgufMeta {
+            architecture: g.and_then(|g| g.architecture.clone()),
+            chat_template: g.and_then(|g| g.chat_template.as_deref()).is_some_and(|t| !t.trim().is_empty()),
+        }
+    }
+
+    fn llm_found(&self) -> LlmFound {
+        let pick = llm::runnable(&self.files(), &self.gguf_meta());
+        LlmFound {
+            repo: self.id.clone(),
+            downloads: self.downloads,
+            size: None,
+            quant: pick.as_ref().ok().map(|p| p.quant.to_owned()),
+            reason: pick.err(),
+        }
+    }
+
+    fn license(&self) -> String {
+        self.card.as_ref().and_then(|c| c.license.as_ref()).and_then(|v| v.as_str()).unwrap_or_default().to_owned()
     }
 
     fn files(&self) -> Vec<RepoFile> {
@@ -224,7 +263,7 @@ async fn pin_at(http: &reqwest::Client, base: &str, repo: &str, models: &Path) -
         return Err(protocol("vocab.txt is not the one listed"));
     }
     let id = model::id_for_repo(&l.id);
-    let license = l.card.as_ref().and_then(|c| c.license.as_ref()).and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+    let license = l.license();
     let m = Manifest {
         id: id.clone(),
         name: l.id.clone(),
@@ -238,6 +277,103 @@ async fn pin_at(http: &reqwest::Client, base: &str, repo: &str, models: &Path) -
     let write = |e: std::io::Error| PinError::Failed(EngineError::Model(format!("model folder: {e}")));
     model::write_manifest(&dir, &m).map_err(write)?;
     std::fs::write(dir.join(VOCAB), &vocab).map_err(write)?;
+    Ok(m)
+}
+
+/// A GGUF repository the search found, for the cleanup on this computer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmFound {
+    pub repo: String,
+    pub downloads: u64,
+    /// Bytes of the file CUE would download, once its details were read.
+    pub size: Option<u64>,
+    /// The quantization CUE would take (`Q4_K_M`…); `None` when it cannot run.
+    pub quant: Option<String>,
+    /// Why CUE cannot run it; `None` — it can.
+    pub reason: Option<LlmNotRunnable>,
+}
+
+/// The search's answer: the text models that can be downloaded without signing in, the first `SHOWN`.
+pub fn parse_llm_search(json: &str) -> Result<Vec<LlmFound>, EngineError> {
+    let listed: Vec<Listed> = serde_json::from_str(json).map_err(|e| EngineError::Protocol(format!("search: {e}")))?;
+    Ok(listed.iter().filter(|l| l.open() && l.text()).take(SHOWN).map(Listed::llm_found).collect())
+}
+
+/// GGUF repositories matching `query`, by downloads; a runnable one with the size of the file CUE would take.
+pub async fn search_llms(http: &reqwest::Client, query: &str) -> Result<Vec<LlmFound>, EngineError> {
+    search_llms_at(http, HUB, query).await
+}
+
+async fn search_llms_at(http: &reqwest::Client, base: &str, query: &str) -> Result<Vec<LlmFound>, EngineError> {
+    let url = format!(
+        "{base}/api/models?search={}&filter=gguf&sort=downloads&limit={ASKED}&expand%5B%5D=siblings&expand%5B%5D=downloads&expand%5B%5D=tags&expand%5B%5D=gated&expand%5B%5D=pipeline_tag&expand%5B%5D=gguf",
+        encode(query.trim())
+    );
+    let mut found = parse_llm_search(&get_text(http, &url).await?)?;
+    // The search lists files without sizes: a runnable one's are asked for, all at once, and checked again with them.
+    let checked = futures_util::future::join_all(found.iter().map(|f| async {
+        if f.reason.is_some() {
+            return None;
+        }
+        let l = details(http, base, &f.repo).await.ok()?;
+        Some(llm::runnable(&l.files(), &l.gguf_meta()))
+    }))
+    .await;
+    for (f, pick) in found.iter_mut().zip(checked) {
+        match pick {
+            Some(Ok(p)) => (f.size, f.quant) = (Some(p.file.size), Some(p.quant.to_owned())),
+            Some(Err(reason)) => (f.reason, f.quant) = (Some(reason), None),
+            None => {}
+        }
+    }
+    Ok(found)
+}
+
+/// Why a language model could not be pinned.
+#[derive(Debug)]
+pub enum LlmPinError {
+    NotRunnable(LlmNotRunnable),
+    Failed(EngineError),
+}
+
+impl From<EngineError> for LlmPinError {
+    fn from(e: EngineError) -> Self {
+        Self::Failed(e)
+    }
+}
+
+/// `repo`'s GGUF pinned at its current commit: its manifest (the one file, its size and LFS SHA-256), written into its
+/// folder under `models`. Nothing is downloaded here.
+pub async fn pin_llm(http: &reqwest::Client, repo: &str, models: &Path) -> Result<Manifest, LlmPinError> {
+    pin_llm_at(http, HUB, repo, models).await
+}
+
+async fn pin_llm_at(http: &reqwest::Client, base: &str, repo: &str, models: &Path) -> Result<Manifest, LlmPinError> {
+    let l = details(http, base, repo).await?;
+    let protocol = |what: &str| LlmPinError::Failed(EngineError::Protocol(format!("{}: {what}", l.id)));
+    if !l.open() {
+        return Err(protocol("needs signing in"));
+    }
+    let commit = l.sha.clone().filter(|s| s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())).ok_or_else(|| protocol("no commit"))?;
+    let pick = llm::runnable(&l.files(), &l.gguf_meta()).map_err(LlmPinError::NotRunnable)?;
+    let sha = l
+        .sibling(&pick.file.path)
+        .and_then(|s| s.lfs.as_ref())
+        .map(|lfs| lfs.sha256.to_lowercase())
+        .ok_or_else(|| protocol("a model file without its hash"))?;
+    let name = pick.file.path.rsplit('/').next().unwrap_or(&pick.file.path).to_owned();
+    let id = llm::id_for(&l.id, pick.quant);
+    let m = Manifest {
+        id: id.clone(),
+        name: l.id.clone(),
+        repo: l.id.clone(),
+        commit,
+        files: vec![ModelFile { path: pick.file.path.clone(), name, size: pick.file.size, sha256: sha }],
+        languages: l.languages(),
+        license: l.license(),
+    };
+    model::write_manifest(&models.join(&id), &m).map_err(|e| LlmPinError::Failed(EngineError::Model(format!("model folder: {e}"))))?;
     Ok(m)
 }
 
@@ -381,5 +517,139 @@ mod tests {
         let r = pin_at(&reqwest::Client::new(), &api.base, "someone/parakeet-tdt-0.6b-v3-greek", &models).await;
         assert!(matches!(r, Err(PinError::Failed(EngineError::Protocol(_)))), "{r:?}");
         assert!(!models.exists());
+    }
+
+    // ---- the cleanup's language models (GGUF) ----
+
+    /// A GGUF search answer: two runnable, a split one, a gated one, one about speech, one about images.
+    fn llm_listing() -> String {
+        let gguf = |arch: &str| serde_json::json!({"architecture": arch, "chat_template": "{% for m in messages %}{% endfor %}"});
+        serde_json::json!([
+            {"id": "Qwen/Qwen3-4B-GGUF", "downloads": 900, "pipeline_tag": "text-generation", "gguf": gguf("qwen3"),
+             "siblings": [{"rfilename": "Qwen3-4B-Q4_K_M.gguf"}, {"rfilename": "Qwen3-4B-Q8_0.gguf"}, {"rfilename": "README.md"}]},
+            {"id": "someone/tiny-GGUF", "downloads": 40, "gguf": gguf("llama"), "siblings": [{"rfilename": "tiny-Q4_0.gguf"}]},
+            {"id": "big/split-GGUF", "downloads": 30, "pipeline_tag": "text-generation", "gguf": gguf("qwen3"),
+             "siblings": [{"rfilename": "m-Q4_K_M-00001-of-00002.gguf"}, {"rfilename": "m-Q4_K_M-00002-of-00002.gguf"}]},
+            {"id": "corp/private-GGUF", "downloads": 20, "gated": "auto", "gguf": gguf("llama"), "siblings": [{"rfilename": "p-Q4_K_M.gguf"}]},
+            {"id": "someone/whisper-GGUF", "downloads": 10, "pipeline_tag": "automatic-speech-recognition", "siblings": [{"rfilename": "w-Q4_K_M.gguf"}]},
+            {"id": "someone/vision-GGUF", "downloads": 5, "pipeline_tag": "image-text-to-text", "gguf": gguf("gemma3"),
+             "siblings": [{"rfilename": "v-Q4_K_M.gguf"}, {"rfilename": "mmproj-v-f16.gguf"}]}
+        ])
+        .to_string()
+    }
+
+    /// Qwen3 4B at a commit, with the sizes and LFS hashes of its files.
+    fn llm_details() -> String {
+        serde_json::json!({
+            "id": "Qwen/Qwen3-4B-GGUF", "sha": "0123456789abcdef0123456789abcdef01234567",
+            "pipeline_tag": "text-generation", "cardData": {"license": "apache-2.0"},
+            "gguf": {"architecture": "qwen3", "chat_template": "{% for m in messages %}{% endfor %}"},
+            "siblings": [
+                {"rfilename": "Qwen3-4B-Q4_K_M.gguf", "size": 2_500_000_000u64, "lfs": {"sha256": "C".repeat(64), "size": 2_500_000_000u64}},
+                {"rfilename": "Qwen3-4B-Q8_0.gguf", "size": 4_300_000_000u64, "lfs": {"sha256": "d".repeat(64), "size": 4_300_000_000u64}},
+                {"rfilename": "README.md", "size": 900, "blobId": "aa"}
+            ]
+        })
+        .to_string()
+    }
+
+    const LLM_SEARCH: &str = "/api/models?search=qwen&filter=gguf&sort=downloads&limit=30&expand%5B%5D=siblings&expand%5B%5D=downloads&expand%5B%5D=tags&expand%5B%5D=gated&expand%5B%5D=pipeline_tag&expand%5B%5D=gguf";
+
+    #[test]
+    fn llm_search_keeps_open_text_models() {
+        let found = parse_llm_search(&llm_listing()).unwrap();
+        let shown: Vec<_> = found.iter().map(|f| (f.repo.as_str(), f.reason, f.quant.as_deref())).collect();
+        assert_eq!(
+            shown,
+            [
+                ("Qwen/Qwen3-4B-GGUF", None, Some("Q4_K_M")),
+                ("someone/tiny-GGUF", None, Some("Q4_0")),
+                ("big/split-GGUF", Some(LlmNotRunnable::SeveralFiles), None),
+            ],
+            "gated, speech and image models are left out"
+        );
+        assert!(found.iter().all(|f| f.size.is_none()), "the search lists no sizes");
+    }
+
+    #[tokio::test]
+    async fn llm_search_asks_for_gguf() {
+        let api = fake_api(|_, path, _| {
+            if path == LLM_SEARCH {
+                reply(200, &llm_listing())
+            } else if path == "/api/models/Qwen/Qwen3-4B-GGUF?blobs=true" {
+                reply(200, &llm_details())
+            } else {
+                reply(404, "{}")
+            }
+        })
+        .await;
+        let found = search_llms_at(&reqwest::Client::new(), &api.base, " qwen ").await.unwrap();
+        assert_eq!(found[0].size, Some(2_500_000_000), "the picked file's size");
+        assert_eq!(found[1].size, None, "its details did not come");
+        assert_eq!(found[2].size, None);
+        assert!(api.calls().contains(&format!("GET {LLM_SEARCH}")));
+    }
+
+    #[tokio::test]
+    async fn llm_search_says_why_not() {
+        let mut too_big: serde_json::Value = serde_json::from_str(&llm_details()).unwrap();
+        for s in too_big["siblings"].as_array_mut().unwrap() {
+            s["size"] = serde_json::json!(7_000_000_000u64);
+        }
+        let too_big = too_big.to_string();
+        let api = fake_api(move |_, path, _| {
+            if path == LLM_SEARCH {
+                reply(200, &llm_listing())
+            } else if path == "/api/models/Qwen/Qwen3-4B-GGUF?blobs=true" {
+                reply(200, &too_big)
+            } else {
+                reply(404, "{}")
+            }
+        })
+        .await;
+        let found = search_llms_at(&reqwest::Client::new(), &api.base, "qwen").await.unwrap();
+        assert_eq!((found[0].reason, found[0].size, found[0].quant.as_deref()), (Some(LlmNotRunnable::TooLarge), None, None));
+    }
+
+    #[tokio::test]
+    async fn pin_llm_writes_a_sound_manifest() {
+        let api = fake_api(|_, path, _| {
+            if path == "/api/models/Qwen/Qwen3-4B-GGUF?blobs=true" { reply(200, &llm_details()) } else { reply(404, "{}") }
+        })
+        .await;
+        let models = folder("pin-llm");
+        let m = pin_llm_at(&reqwest::Client::new(), &api.base, "Qwen/Qwen3-4B-GGUF", &models).await.unwrap();
+        assert_eq!(m.id, "llm--qwen--qwen3-4b-gguf--q4_k_m");
+        assert_eq!((m.repo.as_str(), m.commit.as_str(), m.license.as_str()), ("Qwen/Qwen3-4B-GGUF", "0123456789abcdef0123456789abcdef01234567", "apache-2.0"));
+        assert_eq!(m.files.len(), 1);
+        let f = &m.files[0];
+        assert_eq!((f.path.as_str(), f.name.as_str(), f.size, f.sha256.as_str()), ("Qwen3-4B-Q4_K_M.gguf", "Qwen3-4B-Q4_K_M.gguf", 2_500_000_000, "c".repeat(64).as_str()));
+        assert_eq!(cue_core::llm::resolve(&models, &m.id), Some(m.clone()), "the manifest is written and sound");
+        let names: Vec<_> = std::fs::read_dir(models.join(&m.id)).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).collect();
+        assert_eq!(names, ["manifest.json"], "nothing else is downloaded");
+        assert_eq!(api.calls(), ["GET /api/models/Qwen/Qwen3-4B-GGUF?blobs=true"]);
+        let _ = std::fs::remove_dir_all(&models);
+    }
+
+    #[tokio::test]
+    async fn pin_llm_refuses_gated_and_unrunnable() {
+        let gated = serde_json::json!({"id": "corp/private-GGUF", "sha": "0123456789abcdef0123456789abcdef01234567", "gated": "manual",
+            "gguf": {"architecture": "llama", "chat_template": "x"}, "siblings": [{"rfilename": "p-Q4_K_M.gguf", "size": 1, "lfs": {"sha256": "a".repeat(64)}}]})
+        .to_string();
+        let split = serde_json::json!({"id": "big/split-GGUF", "sha": "0123456789abcdef0123456789abcdef01234567",
+            "gguf": {"architecture": "qwen3", "chat_template": "x"},
+            "siblings": [{"rfilename": "m-Q4_K_M-00001-of-00002.gguf", "size": 1}, {"rfilename": "m-Q4_K_M-00002-of-00002.gguf", "size": 1}]})
+        .to_string();
+        let api = fake_api(move |_, path, _| match path {
+            "/api/models/corp/private-GGUF?blobs=true" => reply(200, &gated),
+            "/api/models/big/split-GGUF?blobs=true" => reply(200, &split),
+            _ => reply(404, "{}"),
+        })
+        .await;
+        let models = folder("pin-llm-refused");
+        let http = reqwest::Client::new();
+        assert!(matches!(pin_llm_at(&http, &api.base, "corp/private-GGUF", &models).await, Err(LlmPinError::Failed(_))));
+        assert!(matches!(pin_llm_at(&http, &api.base, "big/split-GGUF", &models).await, Err(LlmPinError::NotRunnable(LlmNotRunnable::SeveralFiles))));
+        assert!(!models.exists(), "nothing is written");
     }
 }

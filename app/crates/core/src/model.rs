@@ -134,7 +134,7 @@ impl Manifest {
 
     /// A manifest CUE can trust to name files in its folder: an id that is a folder name, a commit that is not a
     /// branch, plain file names, SHA-256 in hex.
-    fn sound(&self) -> bool {
+    pub(crate) fn sound(&self) -> bool {
         let plain = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) && !s.starts_with('.');
         let hex = |s: &str, n: usize| s.len() == n && s.chars().all(|c| c.is_ascii_hexdigit());
         plain(&self.id)
@@ -322,6 +322,9 @@ pub struct ModelEntry {
 pub struct ModelsView {
     pub current: String,
     pub entries: Vec<ModelEntry>,
+    /// The short list's recommended model, where a list marks one (the local cleanup's).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended: Option<String>,
 }
 
 impl ModelEntry {
@@ -442,6 +445,27 @@ mod tests {
         write_manifest(&models.join("hf--branch"), &branch).unwrap();
         assert_eq!(found_models(&models), vec![m]);
         assert_eq!(resolve(&models, "hf--bad"), None);
+        let _ = std::fs::remove_dir_all(&models);
+    }
+
+    /// The local cleanup's list names its recommended model; the speech list says nothing of one.
+    #[test]
+    fn models_view_names_the_recommended_only_when_there_is_one() {
+        let v = ModelsView { current: "a".into(), entries: vec![], recommended: None };
+        assert!(serde_json::to_value(&v).unwrap().get("recommended").is_none());
+        let v = ModelsView { recommended: Some("llm--a--b--q4_k_m".into()), ..v };
+        assert_eq!(serde_json::to_value(&v).unwrap()["recommended"], "llm--a--b--q4_k_m");
+    }
+
+    /// The cleanup's language models share the `models` folder; the speech list never shows them.
+    #[test]
+    fn found_models_skips_language_models() {
+        let models = temp("found-llm");
+        let mut m = catalog()[1].clone();
+        m.id = "llm--qwen--qwen3-4b-gguf--q4_k_m".into();
+        write_manifest(&models.join(&m.id), &m).unwrap();
+        assert!(found_models(&models).is_empty());
+        assert_eq!(resolve(&models, &m.id), None);
         let _ = std::fs::remove_dir_all(&models);
     }
 

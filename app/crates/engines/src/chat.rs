@@ -1,9 +1,9 @@
 //! The cleanup over an OpenAI-compatible Chat Completions service (docs/specs/2026-11-02-refine-connections.md): OpenAI,
-//! Google Gemini, DeepSeek, Mistral, Groq, xAI and the local Ollama and LM Studio. What each needs in a request is in
+//! Google Gemini, DeepSeek, Mistral, Groq and xAI. What each needs in a request is in
 //! `cue_core::connections`; the stream is read the way OpenRouter's is ([`openrouter::stream`]), and the answer goes
 //! through the checks Claude's does ([`claude::settle`]). Never "fails": on any problem the raw text comes back.
 //!
-//! The key goes only in the `Authorization` header (a local server gets none) and never into a log or an error.
+//! The key goes only in the `Authorization` header and never into a log or an error.
 use std::time::Duration;
 
 use cue_core::connections::{Answer, CacheHint, Connection};
@@ -24,8 +24,13 @@ pub const OBJECT_NOTE: &str = "Answer with a JSON object that has exactly one fi
 /// What CUE names its prompt by where a service caches by a name (Mistral's key, xAI's conversation header).
 const CACHE_NAME: &str = "cue-cleanup";
 
-/// A local server may still be loading the model into memory: it gets this much more time.
-const LOCAL_TIME_HEADROOM_MS: u64 = 10_000;
+
+/// The system blocks Claude gets, joined into one system message: what a chat service and the local model read.
+pub(crate) fn system_text(dict: &DictionarySettings, habits: &[String], job: Job, custom: Option<&str>) -> String {
+    let blocks = claude::system_blocks(dict, habits, job, custom);
+    let texts: Vec<&str> = blocks.as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect();
+    texts.join("\n\n")
+}
 
 /// The request body for the connection `c` and its model `model`: the system blocks Claude gets, joined into one system
 /// message (`custom` — the custom style's instructions), the transcript, a streamed answer in the `{"text": …}` object.
@@ -43,10 +48,9 @@ pub fn request_body(
     if let Job::Translate(_) = job {
         budget = claude::translation_budget(budget);
     }
-    let blocks = claude::system_blocks(dict, &ctx.habits, job, custom);
-    let mut texts: Vec<&str> = blocks.as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect();
+    let mut system = system_text(dict, &ctx.habits, job, custom);
     if c.answer == Answer::Object {
-        texts.push(OBJECT_NOTE);
+        system = format!("{system}\n\n{OBJECT_NOTE}");
     }
     let response_format = match c.answer {
         Answer::Schema { strict } => json!({
@@ -67,7 +71,7 @@ pub fn request_body(
     let mut v = json!({
         "model": model,
         "messages": [
-            { "role": "system", "content": texts.join("\n\n") },
+            { "role": "system", "content": system },
             { "role": "user", "content": user_message(ctx, raw) }
         ],
         "stream": true,
@@ -86,14 +90,13 @@ pub fn request_body(
     v
 }
 
-/// Request timeout: the cleanup's or the translation's by text length, plus headroom where the model must reason first
-/// and where the server is on this computer.
+/// Request timeout: the cleanup's or the translation's by text length, plus headroom where the model must reason first.
 fn request_timeout_ms(c: &Connection, raw: &str, job: Job) -> u64 {
     let base = match job {
         Job::Clean | Job::Rewrite => timeout_ms(raw),
         Job::Translate(_) => translate::timeout_ms(raw),
     };
-    base + if c.reasons { claude::THINKING_TIME_HEADROOM_MS } else { 0 } + if c.local { LOCAL_TIME_HEADROOM_MS } else { 0 }
+    base + if c.reasons { claude::THINKING_TIME_HEADROOM_MS } else { 0 }
 }
 
 /// A POST to the service's chat completions with the key (if there is one) and the connection's own headers.
@@ -110,7 +113,21 @@ pub(crate) fn post(http: &reqwest::Client, c: &Connection, address: &str, key: &
 
 /// One cleanup over the connection and model of `s`, in its style.
 pub async fn refine(http: &reqwest::Client, key: Option<&str>, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, s: &RefineSettings) -> RefineResult {
-    refine_job(http, key, raw, ctx, dict, s, Job::Rewrite).await
+    refine_job(http, key, s.connection().base_url, raw, ctx, dict, s, Job::Rewrite).await
+}
+
+/// [`refine`] against the service at `address` (tests point it at their own).
+#[cfg(test)]
+pub(crate) async fn refine_at(
+    http: &reqwest::Client,
+    key: Option<&str>,
+    address: &str,
+    raw: &str,
+    ctx: &RefineContext,
+    dict: &DictionarySettings,
+    s: &RefineSettings,
+) -> RefineResult {
+    refine_job(http, key, address, raw, ctx, dict, s, Job::Rewrite).await
 }
 
 /// One translation over the connection and model of `s` (see [`claude::translate`]).
@@ -123,13 +140,15 @@ pub async fn translate(
     s: &RefineSettings,
     to: &'static str,
 ) -> RefineResult {
-    refine_job(http, key, raw, ctx, dict, s, Job::Translate(to)).await
+    refine_job(http, key, s.connection().base_url, raw, ctx, dict, s, Job::Translate(to)).await
 }
 
-/// [`refine`] or [`translate`]; the address is the connection's in `s` (tests point it at their own service).
+/// [`refine`] or [`translate`] against the service at `address`.
+#[allow(clippy::too_many_arguments)]
 async fn refine_job(
     http: &reqwest::Client,
     key: Option<&str>,
+    address: &str,
     raw: &str,
     ctx: &RefineContext,
     dict: &DictionarySettings,
@@ -139,8 +158,6 @@ async fn refine_job(
     let c = s.connection();
     let key = match key {
         Some(k) => k,
-        // A local server needs no key.
-        None if c.local => "",
         None => {
             return claude::raw_fallback(raw, RefineOutcome::RawKeyProblem, claude::Usage::default(), &format!("no {} key", c.name));
         }
@@ -154,7 +171,7 @@ async fn refine_job(
         if !why.is_empty() {
             tracing::info!("refine: {why}, asking again");
         }
-        match openrouter::stream(post(http, c, s.address(), key), key, &body, Duration::from_millis(ms)).await {
+        match openrouter::stream(post(http, c, address, key), key, &body, Duration::from_millis(ms)).await {
             Err(f) if openrouter::worth_asking_again(&f) => why = openrouter::reason(&f),
             done => {
                 last = Some(done);
@@ -239,9 +256,6 @@ mod tests {
         // Groq: a JSON object (a strict schema cannot be streamed), the lowest reasoning gpt-oss takes.
         let v = body("groq", Job::Rewrite);
         assert_eq!((v["response_format"]["type"].as_str(), v["reasoning_effort"].as_str()), (Some("json_object"), Some("low")));
-        // LM Studio does not document `reasoning_effort`: it is not sent.
-        assert!(body("lmstudio", Job::Rewrite).get("reasoning_effort").is_none());
-        assert_eq!(body("ollama", Job::Rewrite)["model"], "gemma4:12b");
     }
 
     #[test]
@@ -268,7 +282,6 @@ mod tests {
         let t = |id| request_timeout_ms(find(id).unwrap(), RAW, Job::Rewrite);
         assert_eq!(t("openai"), timeout_ms(RAW));
         assert_eq!(t("groq"), timeout_ms(RAW) + 5_000);
-        assert_eq!(t("ollama"), timeout_ms(RAW) + 10_000);
         assert_eq!(request_timeout_ms(find("openai").unwrap(), RAW, Job::Translate("en")), translate::timeout_ms(RAW));
     }
 
@@ -294,11 +307,9 @@ mod tests {
         events.iter().map(|e| format!("data: {e}\n\n")).collect()
     }
 
-    /// The cleanup over the connection `id`, pointed at `base`.
-    fn over(id: &str, base: &str) -> RefineSettings {
-        let mut s = RefineSettings { connection: id.into(), ..RefineSettings::default() };
-        s.addresses.insert(id.into(), base.into());
-        s
+    /// The cleanup over the connection `id`.
+    fn over(id: &str) -> RefineSettings {
+        RefineSettings { connection: id.into(), ..RefineSettings::default() }
     }
 
     async fn run<F>(id: &str, key: Option<&str>, s: impl FnOnce(RefineSettings) -> RefineSettings, route: F) -> (RefineResult, Vec<String>, crate::testing::FakeApi)
@@ -307,7 +318,7 @@ mod tests {
     {
         let api = fake_api(route).await;
         let (logs, _guard) = capture_logs();
-        let r = refine(&http(), key, RAW, &ctx(), &Default::default(), &s(over(id, &format!("{}/v1", api.base)))).await;
+        let r = refine_at(&http(), key, &format!("{}/v1", api.base), RAW, &ctx(), &Default::default(), &s(over(id))).await;
         let lines = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::")).cloned().collect();
         (r, lines, api)
     }
@@ -347,14 +358,6 @@ mod tests {
         assert_eq!(req.header("x-grok-conv-id"), [CACHE_NAME]);
         let sent: Value = serde_json::from_slice(&req.body).unwrap();
         assert_eq!(sent, request_body(find("xai").unwrap(), "grok-4.3", RAW, &ctx(), &Default::default(), Job::Rewrite, Some("пиши коротко")));
-    }
-
-    #[tokio::test]
-    async fn a_local_server_needs_no_key() {
-        let (r, lines, api) = run("ollama", None, |s| s, |_, _, _| Reply::Send(200, answer("Ну, привет. Как дела?"), "")).await;
-        assert_eq!(r.outcome, RefineOutcome::Refined);
-        assert!(lines.is_empty(), "{lines:?}");
-        assert!(api.seen()[0].header("authorization").is_empty());
     }
 
     #[tokio::test]

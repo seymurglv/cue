@@ -4,7 +4,8 @@ CUE is a voice-dictation app for Windows 11. Press `Ctrl + Win`, speak, press th
 speak), and the text appears at the caret in whatever app you are typing in: fillers and false starts removed,
 punctuation added, your own words kept, in Russian or English. Speech is recognized on your computer by a speech model
 CUE downloads once (Parakeet Ultra), and the text is tidied up by a language model: by default Claude, from Anthropic,
-with your own key, or one of nine other connections, two of them (Ollama and LM Studio) on your computer. Add
+with your own key or one of seven other cloud connections, or, free, by a small model CUE downloads and runs on
+your computer. Add
 `Shift` and the text comes out translated; add `Alt` instead and ask a question out loud, and the answer appears next
 to your work. CUE runs quietly in the background: a small indicator at the bottom of the screen (the Drop) shows what
 it is doing, and an icon next to the clock opens the main window, with the history of everything CUE wrote and the
@@ -31,8 +32,8 @@ Download the installer, `CUE_<version>_x64-setup.exe`, from the latest release:
 On its first start, and on every start while the key of the cleanup's connection is missing (Anthropic's, unless you
 chose another in the settings), CUE opens a welcome window: Hello, Key, Model, Microphone, First dictation and Done.
 Its Key step asks for the Anthropic key, which "Ask" always uses; the key of another connection goes into the main
-window's **Cleanup** settings, and Ollama or LM Studio on this computer need no key, so with one of them chosen the
-window does not open by itself. While it is open, `Ctrl + Win` works only at the First dictation step; at the others
+window's **Cleanup** settings. With the cleanup on this computer no key is needed: the welcome window has no Key step
+and does not open by itself. While it is open, `Ctrl + Win` works only at the First dictation step; at the others
 it brings the window forward. If you close it before the key is saved, it comes back at the next start. To open it
 again at any time, even while CUE is running, press `Win + R` and run `"%LOCALAPPDATA%\Programs\CUE\cue.exe" --welcome`.
 
@@ -54,22 +55,32 @@ CUE uses your own account at the services it talks to, which bill you directly f
 - Instead of Anthropic, the main window's **Cleanup** settings can send the cleanup and translation through another
   connection, each with a recommended model, chosen until you pick another. In the cloud, each with a key of its own:
   OpenRouter, OpenAI, Google Gemini, DeepSeek, Mistral, Groq and xAI (their models are listed in
-  [API keys](#api-keys)). On this computer, with no key: Ollama and LM Studio, with Gemma 4 12B or Gemma 4 E4B, which
-  has to be in that app already; the text then stays on this computer.
+  [API keys](#api-keys)).
+- Or, with no key and no account, **Runs on: This computer** in the Cleanup settings: CUE downloads a small language
+  model from Hugging Face and runs it on the processor, free, the text never leaving this computer. Three are on its
+  list: **Qwen3 4B Instruct** (recommended, 2.5 GB), **Gemma 4 E2B** (3.1 GB) and **Qwen3 1.7B** (1.1 GB, the fastest);
+  others can be found with **Search Hugging Face** (one GGUF file of up to 6 GB). A processor is slower than the cloud:
+  on the computer CUE is built on (8 performance cores), Qwen3 4B takes 3–8 seconds for a short dictation and about
+  half a minute for each minute of speech; a laptop takes two or three times longer. The model reads CUE's
+  instructions while you speak and runs on the processor's performance cores, leaving the rest to other programs. A
+  long dictation is cleaned in pieces of about 80 words, ending where sentences end, each with the text before it as
+  context, so there is no limit on its length; Esc while it is cleaned cancels it. Qwen3 1.7B often leaves the text as
+  recognized, and only Qwen3 4B translates. Until the model has downloaded and loaded, dictations are pasted as
+  recognized. The model is in memory only while the cleanup runs on this computer: with **Cloud** none is loaded.
+  Downloaded models are listed on the Cleanup page either way and can be deleted there, the one in use too (until
+  another is chosen, dictations are then pasted as recognized). Ollama and LM Studio are no longer used.
 
 Speech recognition runs on your computer and costs nothing. Earlier versions of CUE also used Soniox, with a key of
 its own: this version does not, and deletes that key from Windows Credential Manager at its first start.
 
 Paste the Anthropic key into the welcome window, or any cloud connection's key into the main window's **Cleanup**
 settings, and press **Check**: it saves the key and sends a free test request. Keys are kept in Windows Credential
-Manager, each under its connection's id; CUE's windows show only a mask of them. For Ollama or LM Studio, the Cleanup
-settings show the server's address instead (`http://localhost:11434/v1` and `http://localhost:1234/v1` by default):
-**Check** asks the server for its models, and a new address is kept once it has been checked.
+Manager, each under its connection's id; CUE's windows show only a mask of them.
 
 Dictation and translation cost about $0.0001 a dictation with the default cleanup model, Claude Haiku 5.5: under $1 a
 month for an hour of speech a day in dictations of about 13 seconds, cache warm-ups included. Claude Sonnet 5.5 costs
 about 15 to 20 times as much. All of it is the cleanup. Other services bill at their own prices, which the Cleanup
-settings' list of models shows per million tokens; Ollama and LM Studio cost nothing. Questions asked with
+settings' list of models shows per million tokens; a model on this computer costs nothing. Questions asked with
 `Ctrl + Win + Alt` cost more, and each web search one of them runs adds $0.01. CUE writes down what every dictation and
 question cost, on your computer only (`usage.csv`, see [Costs](#costs)).
 
@@ -78,8 +89,8 @@ question cost, on your computer only (`usage.csv`, see [Costs](#costs)).
 - **Sound stays on this computer.** Each dictation, translation and question is recognized here, by the speech model;
   no recording is sent anywhere, **Retry** included.
 - **The cleanup's connection** receives the text: what the model recognized, the app name and up to 500 characters
-  before the caret. That is Anthropic by default, or the service you chose in the Cleanup settings; with Ollama or
-  LM Studio on this computer the text stays here.
+  before the caret. That is Anthropic by default, or the service you chose in the Cleanup settings; with the cleanup
+  on this computer the text stays here, and so do translations and habits' rules.
 - **Anthropic** receives your questions to "Ask", with the text you selected, whatever the cleanup goes through.
   Nothing is read from password fields.
 - **Your corrections stay on this computer.** With **Learn from me** on (it is by default), CUE reads the field it
@@ -97,8 +108,8 @@ question cost, on your computer only (`usage.csv`, see [Costs](#costs)).
 - The microphone is open only while CUE records, and while a window shows its level for you to check it.
 - Your history, with the recordings of what you said for the period you choose, settings, logs and the copy of your
   last dictation stay on this computer. CUE has no telemetry: it connects only to the cleanup's connection, to
-  Anthropic for "Ask", and to Hugging Face to download speech models (a plain download of fixed files: nothing of
-  yours goes with it) and to search them when you type in the Model settings' search. The installer sends nothing.
+  Anthropic for "Ask", and to Hugging Face to download speech models and the cleanup's local models (a plain download
+  of fixed files: nothing of yours goes with it) and to search them when you type in a model list's search. The installer sends nothing.
 
 Each service has its own policy on how long it keeps what it receives. Every detail is in
 [Privacy in detail](#privacy-in-detail).
@@ -250,12 +261,13 @@ from source.
   - **Settings** (the gear): a tray whose first page lists six pages, each with its value. **Speech recognition**
     (the model in use and its state: Ready, Downloading with its percent, its megabytes and a bar, or Did not download
     with **Retry**, which goes on from where the download stopped; the model's row opens the Model page, see "A choice
-    of speech models"), **Cleanup** (the style, Default or Custom with a field for your instructions; the connection,
-    a card that opens the list of ten, In the cloud and On this computer, each with a lamp that is green once its key
-    is saved or its server has answered; the connection's key with **Check**, which saves it and sends a free test
-    request, the window showing only its mask, or a local server's address with **Check**; and the model, each with
-    its price per million tokens or its size on disk, the recommended one marked; its value on the first page is the
-    style, or "No *name* key" when the chosen cloud connection has none), **Microphone** (As in Windows, or a device of
+    of speech models"), **Cleanup** (the style, Default or Custom with a field for your instructions; **Runs on**, This
+    computer or Cloud; on this computer, the list of local models as the Model page lists speech models, the
+    recommended one marked, with **Search Hugging Face**; in the cloud, the connection, a card that opens the list of
+    eight, each with a lamp that is green once its key is saved, its key with **Check**, which saves it and sends a
+    free test request, the window showing only its mask, and the model, each with its price per million tokens, the
+    recommended one marked; its value on the first page is This computer or the connection's name, in amber "Model not
+    downloaded", the download's percent, or "No *name* key" when the chosen cloud connection has none), **Microphone** (As in Windows, or a device of
     your own, with a live level), **Languages** (the interface language, and the target language of
     `Ctrl + Win + Shift`, any of the 60), **History** (**Keep history**: Forever, A year, A month (the default), A week
     or Don't keep, older days deleted on their own; **Keep recordings**: A day, A week (the default), A month or Don't
@@ -360,8 +372,6 @@ until another is picked; prices in USD per million input / output tokens, as CUE
 | `mistral` | Mistral | Mistral Small 4 `mistral-small-2603` $0.15 / $0.60; Ministral 8B `ministral-8b-2512` $0.15 / $0.15 |
 | `groq` | Groq | gpt-oss 120B `openai/gpt-oss-120b` $0.15 / $0.60; gpt-oss 20B `openai/gpt-oss-20b` $0.075 / $0.30 |
 | `xai` | xAI | Grok 4.3 `grok-4.3` $1.25 / $2.50 |
-| `ollama` | Ollama, on this computer (`http://localhost:11434/v1`) | Gemma 4 12B `gemma4:12b`, about 8 GB; Gemma 4 E4B `gemma4:e4b`, about 7 GB |
-| `lmstudio` | LM Studio, on this computer (`http://localhost:1234/v1`) | Gemma 4 12B `google/gemma-4-12b`, 7.4 GB; Gemma 4 E4B `google/gemma-4-e4b`, 5.9 GB |
 
 Anthropic gets the Messages API request it always had: Claude Haiku 5.5 at effort `medium` with thinking off, Claude
 Sonnet 5.5 at effort `low`. Every other connection gets one OpenAI-compatible Chat Completions request, with the key as
@@ -489,8 +499,11 @@ history is neither written nor cleaned up until a period is chosen in the window
   - `models`: the model picked for a connection, by connection id, kept only where it is not the recommended one.
     Example: `"models": { "anthropic": "claude-sonnet-5-5" }`. A model CUE does not list for that connection reads as
     the recommended one.
-  - `addresses`: the address of Ollama's or LM Studio's server (`ollama`, `lmstudio`), kept only where it is not the
-    default. Example: `"addresses": { "ollama": "http://127.0.0.1:11500/v1" }`.
+  - `runs` (default `cloud`): `"cloud"`, through `connection`, or `"local"`, a model on this computer. A `connection`
+    of `ollama` or `lmstudio` (earlier versions) reads as `local`; their `addresses` are read past and not written
+    again.
+  - `local`: the local model's id (`llm--<owner>--<repository>--<quantization>`), written once it has loaded; absent,
+    the recommended one, Qwen3 4B Instruct.
   - `style`: `"default"`, CUE's own cleanup, or `"custom"`, your instructions in `custom`. Case and surrounding spaces
     do not matter; any other value, the `"careful"` and `"bold"` of earlier versions included, reads as `"default"`.
   - `custom`: the instructions of the Custom style, kept only when not empty; the main window takes up to 2,000
@@ -590,7 +603,7 @@ history is neither written nor cleaned up until a period is chosen in the window
   $0.10 / $0.50, Sonnet 5.5 $2 / $10, Opus 5.5 $4 / $20 per million input / output tokens, and every model of the
   cleanup's connections at the price in [API keys](#api-keys), under the id `usage.csv` gives it (OpenRouter's as it
   is, `anthropic/claude-haiku-5.5`; another service's after its connection, `openai:gpt-6-luna`), its cache reads at a
-  tenth of its input price; Ollama's and LM Studio's at 0. A cache write costs 1.25 × the input price.
+  tenth of its input price. A cache write costs 1.25 × the input price. A model on this computer has no price.
   `web_search_usd` ($0.01) prices one web search of "Ask". Recognition on this computer has no price.
 
 Start at sign-in is not a setting: it is the Windows `Run` registry entry, toggled from the tray menu or the main
@@ -632,8 +645,8 @@ failed translation translates the saved text again, so its row has no audio.
 
 New rows have `stt_engine` `parakeet`, `stt_path` `local` and `stt_usd` 0; the columns stay as they were.
 `refine_model` names the cleanup's model as the price list does: Anthropic's and OpenRouter's ids as they are
-(`claude-haiku-5-5`, `anthropic/claude-haiku-5.5`), another service's after its connection (`openai:gpt-6-luna`,
-`ollama:gemma4:12b`, at $0). The
+(`claude-haiku-5-5`, `anthropic/claude-haiku-5.5`), another service's after its connection (`openai:gpt-6-luna`), and
+a model on this computer after `local:` (`local:llm--unsloth--qwen3-4b-instruct-2507-gguf--q4_k_m`, at $0). The
 columns `mode`, `web_searches` and `search_usd` came with the modes, and `words` and `day` with Today. `mode` is
 `dictate`, `translate`, `ask` or `warmup`; `words` is how many words a dictation or translation wrote (0 for anything
 else) and `day` the local date.
@@ -729,9 +742,8 @@ whether the model wrote such words (`text_before_search`) and the error codes of
   habits that are on for the dictation's app (see Habits below) and, with the Custom style, your instructions. Nothing
   is read from password fields, and the window title is never sent. A translation goes in the same kind of request to
   the same connection, with the target language added. Through OpenRouter, CUE first asks for providers that do not
-  store requests for training, and only when none of them can take the request, for any provider. Ollama and LM Studio
-  get the request at the address in the Cleanup settings, on this computer unless you change it, so the text then stays
-  here.
+  store requests for training, and only when none of them can take the request, for any provider. With the cleanup on
+  this computer none of this is sent: the local model gets the same request, and the text stays here.
 - **Anthropic, when the cleanup goes through it**: while you record, CUE also sends an empty `HEAD` request without a
   key to open the connection early, so cleanup starts faster. When a dictation starts four minutes or more after the
   last cleanup, CUE sends a cache warm-up: the cleanup request with your dictionary (as the cleanup gets it) and a

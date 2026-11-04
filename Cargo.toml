@@ -37,6 +37,8 @@ realfft = "3"
 # ONNX Runtime for the speech model, CPU only. Pinned: a release candidate. On Windows its prebuilt runtime links
 # statically (no DLL beside CUE) and needs an AVX2 processor.
 ort = "=2.0.0-rc.15"
+# llama.cpp for the cleanup on this computer: processor only, no OpenMP (it would add vcomp140.dll beside cue.exe).
+llama-cpp-2 = { version = "=0.1.161", default-features = false }
 # Checking the downloaded model's files.
 sha1 = "0.10"
 sha2 = "0.10"

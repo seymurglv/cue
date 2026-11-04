@@ -41,20 +41,22 @@ impl Default for SttSettings {
 /// The longest custom instructions the cleanup takes, in characters.
 pub const MAX_CUSTOM_CHARS: usize = 2_000;
 
-/// The cleanup: its style, the connection it goes through and that connection's model
-/// (docs/specs/2026-11-02-refine-connections.md). `model` and `level` of earlier versions are read past.
+/// The cleanup: where it runs, its style, the cloud connection and that connection's model
+/// (docs/specs/2026-11-02-refine-connections.md, docs/specs/2026-11-04-local-cleanup.md). `model`, `level` and
+/// `addresses` of earlier versions are read past; a connection of `ollama` or `lmstudio` reads as this computer.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "StoredRefine")]
 pub struct RefineSettings {
-    /// The id of a connection in `connections::CONNECTIONS`; one CUE does not know reads as the default.
-    #[serde(deserialize_with = "connection_id")]
+    /// On this computer or in the cloud.
+    pub runs: Runs,
+    /// The local model's id; empty: the recommended one.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub local: String,
+    /// The id of a cloud connection in `connections::CONNECTIONS`; one CUE does not know reads as the default.
     pub connection: String,
     /// The model the user picked per connection, only where it is not the recommended one.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, String>,
-    /// A local server's address, only where it is not the default.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub addresses: BTreeMap<String, String>,
     /// CUE's cleanup or the user's instructions ([`RefineStyle`]).
     pub style: RefineStyle,
     /// The user's instructions for the custom style.
@@ -87,11 +89,80 @@ impl<'de> Deserialize<'de> for RefineStyle {
     }
 }
 
-/// A connection id CUE lists (case and spaces do not matter), otherwise the default one.
-fn connection_id<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    let id = value.as_str().map(|s| s.trim().to_ascii_lowercase());
-    Ok(id.and_then(|id| connections::find(&id)).unwrap_or_else(connections::default).id.to_owned())
+/// Where the cleanup runs: a model on this computer, or a cloud connection with the user's key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Runs {
+    Local,
+    #[default]
+    Cloud,
+}
+
+/// Only `"local"` is local (case and surrounding spaces do not matter); anything else is the cloud.
+impl<'de> Deserialize<'de> for Runs {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let local = value.as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("local"));
+        Ok(if local { Self::Local } else { Self::Cloud })
+    }
+}
+
+/// The local servers of earlier versions; choosing one now means the cleanup runs on this computer.
+const OLD_LOCAL_SERVERS: [&str; 2] = ["ollama", "lmstudio"];
+
+/// `refine` as settings.json holds it, of this version or an earlier one.
+#[derive(Deserialize)]
+#[serde(default)]
+struct StoredRefine {
+    runs: Option<Runs>,
+    local: String,
+    connection: serde_json::Value,
+    models: BTreeMap<String, String>,
+    style: RefineStyle,
+    custom: String,
+    context_chars: usize,
+    min_ratio: f32,
+    max_ratio: f32,
+    min_overlap: f32,
+}
+
+impl Default for StoredRefine {
+    fn default() -> Self {
+        let d = RefineSettings::default();
+        Self {
+            runs: None,
+            local: d.local,
+            connection: serde_json::Value::Null,
+            models: d.models,
+            style: d.style,
+            custom: d.custom,
+            context_chars: d.context_chars,
+            min_ratio: d.min_ratio,
+            max_ratio: d.max_ratio,
+            min_overlap: d.min_overlap,
+        }
+    }
+}
+
+impl From<StoredRefine> for RefineSettings {
+    fn from(s: StoredRefine) -> Self {
+        // A connection id CUE lists (case and spaces do not matter), otherwise the default one.
+        let id = s.connection.as_str().map(|id| id.trim().to_ascii_lowercase());
+        let old_server = id.as_deref().is_some_and(|id| OLD_LOCAL_SERVERS.contains(&id));
+        let connection = id.as_deref().and_then(connections::find).unwrap_or_else(connections::default).id.to_owned();
+        Self {
+            runs: s.runs.unwrap_or(if old_server { Runs::Local } else { Runs::Cloud }),
+            local: s.local.trim().to_owned(),
+            connection,
+            models: s.models,
+            style: s.style,
+            custom: s.custom,
+            context_chars: s.context_chars,
+            min_ratio: s.min_ratio,
+            max_ratio: s.max_ratio,
+            min_overlap: s.min_overlap,
+        }
+    }
 }
 
 impl RefineSettings {
@@ -112,15 +183,17 @@ impl RefineSettings {
         self.models.get(c.id).and_then(|m| c.model(m)).unwrap_or_else(|| c.recommended())
     }
 
-    /// The model's id in usage.csv and the price table.
+    /// The model's id in usage.csv and the price table; a local model's is `local:<id>` and costs nothing.
     pub fn usage_model(&self) -> String {
-        self.connection().usage_id(self.model())
+        match self.runs {
+            Runs::Local => format!("local:{}", self.local_id()),
+            Runs::Cloud => self.connection().usage_id(self.model()),
+        }
     }
 
-    /// The address of the connection's API: a local server's as the user set it, otherwise the listed one.
-    pub fn address(&self) -> &str {
-        let c = self.connection();
-        self.addresses.get(c.id).map(String::as_str).unwrap_or(c.base_url)
+    /// The local model's id: the chosen one, or the recommended one (empty while the short list is).
+    pub fn local_id(&self) -> String {
+        if self.local.is_empty() { crate::llm::default_id().unwrap_or_default() } else { self.local.clone() }
     }
 
     /// The user's instructions, when the style is custom and they are not blank.
@@ -690,12 +763,12 @@ pub enum SettingChange {
     RefineStyle(RefineStyle),
     /// The user's instructions for the custom style; see [`Settings::apply`] for what is refused.
     RefineCustom(String),
+    /// On this computer or in the cloud.
+    RefineRuns(Runs),
     /// A connection id CUE lists.
     RefineConnection(String),
     /// A model of the connection chosen now.
     RefineModel(String),
-    /// The address of the local server chosen now.
-    RefineAddress(String),
     /// A word for the dictionary, put first; see [`Settings::apply`] for what is refused.
     DictAdd(String),
     /// A word out of the dictionary, as it is written there.
@@ -732,9 +805,9 @@ impl std::fmt::Debug for SettingChange {
             Self::RefineStyle(style) => f.debug_tuple("RefineStyle").field(style).finish(),
             // The instructions and an address may hold what the user wrote: only their length.
             Self::RefineCustom(text) => f.debug_struct("RefineCustom").field("chars", &text.chars().count()).finish(),
+            Self::RefineRuns(runs) => f.debug_tuple("RefineRuns").field(runs).finish(),
             Self::RefineConnection(id) => f.debug_tuple("RefineConnection").field(&connections::find(id).map(|c| c.id)).finish(),
             Self::RefineModel(id) => f.debug_tuple("RefineModel").field(id).finish(),
-            Self::RefineAddress(url) => f.debug_struct("RefineAddress").field("chars", &url.chars().count()).finish(),
             // A word of the dictionary may be a name: only its length.
             Self::DictAdd(word) => f.debug_struct("DictAdd").field("chars", &word.chars().count()).finish(),
             Self::DictRemove(word) => f.debug_struct("DictRemove").field("chars", &word.chars().count()).finish(),
@@ -788,6 +861,7 @@ impl Settings {
                 }
                 set_if_changed(&mut self.refine.custom, text.to_owned())
             }
+            SettingChange::RefineRuns(runs) => set_if_changed(&mut self.refine.runs, runs),
             SettingChange::RefineConnection(id) => {
                 let Some(c) = connections::find(&id) else { return false };
                 set_if_changed(&mut self.refine.connection, c.id.to_owned())
@@ -797,15 +871,6 @@ impl Settings {
                 let Some(m) = c.model(&id) else { return false };
                 let chosen = (m != c.recommended()).then(|| m.id.to_owned());
                 set_entry(&mut self.refine.models, c.id, chosen)
-            }
-            SettingChange::RefineAddress(url) => {
-                let c = self.refine.connection();
-                let url = url.trim().trim_end_matches('/');
-                if !c.local || !(url.starts_with("http://") || url.starts_with("https://")) {
-                    return false;
-                }
-                let chosen = (url != c.base_url).then(|| url.to_owned());
-                set_entry(&mut self.refine.addresses, c.id, chosen)
             }
             SettingChange::DictAdd(word) => self.dictionary.put_first(word.trim()),
             SettingChange::DictLearn(l) => {
@@ -921,9 +986,10 @@ pub enum SettingsError {
 impl Default for RefineSettings {
     fn default() -> Self {
         Self {
+            runs: Runs::Cloud,
+            local: String::new(),
             connection: connections::DEFAULT_ID.to_owned(),
             models: BTreeMap::new(),
-            addresses: BTreeMap::new(),
             style: RefineStyle::Default,
             custom: String::new(),
             context_chars: 500,
@@ -1339,7 +1405,7 @@ mod tests {
         for (value, expected) in [
             (r#""openai""#, "openai"),
             (r#"" OpenRouter ""#, "openrouter"),
-            (r#""lmstudio""#, "lmstudio"),
+            (r#""lmstudio""#, "anthropic"),
             (r#""bard""#, "anthropic"),
             ("1", "anthropic"),
             ("null", "anthropic"),
@@ -1379,14 +1445,47 @@ mod tests {
         assert_eq!(RefineSettings { custom: "пиши коротко".into(), ..RefineSettings::default() }.custom_text(), None);
     }
 
+    /// Ollama and LM Studio are gone: a settings.json that chose one runs the cleanup on this computer, and the
+    /// addresses of earlier versions are read past and never written again.
     #[test]
-    fn refine_address_is_the_local_server_s() {
-        let read = |json: &str| serde_json::from_str::<Settings>(json).unwrap().refine;
-        let s = read(r#"{"refine":{"connection":"ollama"}}"#);
-        assert_eq!(s.address(), "http://localhost:11434/v1");
-        let s = read(r#"{"refine":{"connection":"ollama","addresses":{"ollama":"http://10.0.0.5:11434/v1"}}}"#);
-        assert_eq!(s.address(), "http://10.0.0.5:11434/v1");
-        assert_eq!(read(r#"{"refine":{"connection":"openai"}}"#).address(), "https://api.openai.com/v1");
+    fn old_local_servers_read_as_this_computer() {
+        for id in ["ollama", "lmstudio", " LMStudio "] {
+            let text = format!(r#"{{"refine":{{"connection":"{id}","addresses":{{"ollama":"http://x"}}}}}}"#);
+            let s: Settings = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{id}: {e}"));
+            assert_eq!((s.refine.runs, s.refine.connection.as_str()), (Runs::Local, "anthropic"), "{id}");
+            let written = serde_json::to_value(&s.refine).unwrap();
+            assert!(written.get("addresses").is_none(), "{id}: {written}");
+            assert_eq!(written["runs"], "local", "{id}");
+        }
+    }
+
+    #[test]
+    fn runs_is_cloud_unless_local() {
+        assert_eq!(Settings::default().refine.runs, Runs::Cloud);
+        for (value, expected) in [(r#""cloud""#, Runs::Cloud), (r#""LOCAL ""#, Runs::Local), (r#""other""#, Runs::Cloud), ("1", Runs::Cloud)] {
+            let text = format!(r#"{{"refine":{{"runs":{value}}}}}"#);
+            let s: Settings = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{value}: {e}"));
+            assert_eq!(s.refine.runs, expected, "{value}");
+        }
+        assert_eq!(serde_json::to_value(RefineSettings::default()).unwrap()["runs"], "cloud");
+    }
+
+    #[test]
+    fn local_usage_model_names_the_local_model() {
+        let s = RefineSettings { runs: Runs::Local, local: "llm--qwen--qwen3-4b-gguf--q4_k_m".into(), ..RefineSettings::default() };
+        assert_eq!(s.usage_model(), "local:llm--qwen--qwen3-4b-gguf--q4_k_m");
+        let s = RefineSettings { runs: Runs::Local, ..RefineSettings::default() };
+        assert!(s.usage_model().starts_with("local:"), "the recommended one");
+        assert_eq!(RefineSettings::default().usage_model(), "claude-haiku-5-5");
+    }
+
+    #[test]
+    fn apply_switches_runs() {
+        let mut s = Settings::default();
+        assert!(s.apply(SettingChange::RefineRuns(Runs::Local)));
+        assert_eq!(s.refine.runs, Runs::Local);
+        assert!(!s.apply(SettingChange::RefineRuns(Runs::Local)), "the same value is no change");
+        assert!(s.apply(SettingChange::RefineRuns(Runs::Cloud)));
     }
 
     /// `model` and `level` of earlier versions are read past and never written again; empty choices are not written.
@@ -2026,9 +2125,9 @@ mod tests {
             SettingChange::UiLanguage(UiLanguage::Ru),
             SettingChange::RefineStyle(RefineStyle::Custom),
             SettingChange::RefineCustom("пиши коротко".into()),
-            SettingChange::RefineConnection("ollama".into()),
-            SettingChange::RefineModel("gemma4:e4b".into()),
-            SettingChange::RefineAddress("http://10.0.0.5:11434/v1".into()),
+            SettingChange::RefineRuns(Runs::Local),
+            SettingChange::RefineConnection("openai".into()),
+            SettingChange::RefineModel("gpt-6.1-terra".into()),
         ] {
             assert!(s.apply(change.clone()), "{change:?}");
             assert!(!s.apply(change.clone()), "the same change twice: {change:?}");
@@ -2039,8 +2138,7 @@ mod tests {
         assert_eq!(s.history.audio.known(), Some(AudioKeep::Day));
         assert_eq!((s.translate.target(), s.ui.language), ("fr", UiLanguage::Ru));
         assert_eq!((s.refine.style, s.refine.custom_text()), (RefineStyle::Custom, Some("пиши коротко")));
-        assert_eq!((s.refine.connection().id, s.refine.model().id), ("ollama", "gemma4:e4b"));
-        assert_eq!(s.refine.address(), "http://10.0.0.5:11434/v1");
+        assert_eq!((s.refine.runs, s.refine.connection().id, s.refine.model().id), (Runs::Local, "openai", "gpt-6.1-terra"));
     }
 
     #[test]
@@ -2049,7 +2147,7 @@ mod tests {
         assert!(!s.apply(SettingChange::RefineConnection("bard".into())), "an unknown connection");
         assert!(!s.apply(SettingChange::RefineModel("claude-opus-5-5".into())), "a model the connection does not list");
         assert!(!s.apply(SettingChange::RefineCustom("я".repeat(MAX_CUSTOM_CHARS + 1))), "too long");
-        assert!(!s.apply(SettingChange::RefineAddress("http://localhost:1/v1".into())), "a cloud connection has no address");
+        assert!(!s.apply(SettingChange::RefineConnection("ollama".into())), "a local server CUE no longer lists");
         assert_eq!(s, Settings::default());
         // A model chosen and then the recommended one again: nothing is kept.
         assert!(s.apply(SettingChange::RefineModel("claude-sonnet-5-5".into())));
@@ -2058,13 +2156,6 @@ mod tests {
         // The custom text is kept trimmed.
         assert!(s.apply(SettingChange::RefineCustom("  кратко \n".into())));
         assert_eq!(s.refine.custom, "кратко");
-        // An address: trimmed, the default one kept as none, and only http(s).
-        assert!(s.apply(SettingChange::RefineConnection("lmstudio".into())));
-        assert!(!s.apply(SettingChange::RefineAddress("localhost:1234".into())));
-        assert!(s.apply(SettingChange::RefineAddress(" http://10.0.0.5:1234/v1 ".into())));
-        assert_eq!(s.refine.address(), "http://10.0.0.5:1234/v1");
-        assert!(s.apply(SettingChange::RefineAddress("http://localhost:1234/v1".into())));
-        assert!(s.refine.addresses.is_empty());
     }
 
     /// The window sends `{"kind": …, "value": …}`. An unknown retention is refused rather than read as a month, and an
@@ -2087,8 +2178,8 @@ mod tests {
         assert_eq!(read(r#"{"kind":"dictLearn","value":{"word":"GitHub","heard":"гитхаб"}}"#).unwrap(), SettingChange::DictLearn(word));
         assert_eq!(read(r#"{"kind":"refineConnection","value":"openai"}"#).unwrap(), SettingChange::RefineConnection("openai".into()));
         assert_eq!(read(r#"{"kind":"refineModel","value":"gpt-6.1-terra"}"#).unwrap(), SettingChange::RefineModel("gpt-6.1-terra".into()));
-        let address = SettingChange::RefineAddress("http://localhost:1/v1".into());
-        assert_eq!(read(r#"{"kind":"refineAddress","value":"http://localhost:1/v1"}"#).unwrap(), address);
+        assert_eq!(read(r#"{"kind":"refineRuns","value":"local"}"#).unwrap(), SettingChange::RefineRuns(Runs::Local));
+        assert!(read(r#"{"kind":"refineAddress","value":"http://localhost:1/v1"}"#).is_err(), "local servers are gone");
         for json in [
             r#"{"kind":"historyKeep","value":"always"}"#,
             r#"{"kind":"historyKeep","value":7}"#,

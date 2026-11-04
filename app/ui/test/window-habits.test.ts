@@ -204,19 +204,19 @@ describe('Habits', () => {
     expect($<HTMLElement>('.hnocl')!.hidden).toBe(true);
   });
 
-  it('a cloud check still pending when the cleanup turns to a local server: no line', async () => {
+  it('a cloud check still pending when the cleanup turns to this computer: no line', async () => {
     const replies: ((v: KeyView) => void)[] = [];
     core.keyState.mockImplementation(() => new Promise<KeyView>((r) => replies.push(r)));
     page = await mount();
-    feeds.settings(view({ habits: [habit('h1'), DIGITS], refineConnection: 'ollama', refineModel: 'gemma4:12b', refineAddress: 'http://localhost:11434/v1' }));
+    feeds.settings(view({ habits: [habit('h1'), DIGITS], refineRuns: 'local' }));
     expect($<HTMLElement>('.hnocl')!.hidden).toBe(true);
     replies[0]({ saved: false, mask: '' });
     await settle();
     expect($<HTMLElement>('.hnocl')!.hidden).toBe(true);
   });
 
-  it('a local server needs no key: no such line', async () => {
-    stub(view({ refineConnection: 'ollama', refineModel: 'gemma4:12b', refineAddress: 'http://localhost:11434/v1' }));
+  it('the cleanup on this computer needs no key: no such line', async () => {
+    stub(view({ refineRuns: 'local' }));
     page = await mount();
     expect($<HTMLElement>('.hnocl')!.hidden).toBe(true);
   });

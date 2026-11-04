@@ -33,13 +33,10 @@ pub enum CacheHint {
     GrokHeader,
 }
 
-/// What a model is shown with under its name: its price per million tokens (input, output, a cache read), or for a
-/// local model its size on disk.
+/// What a model is shown with under its name: its price per million tokens (input, output, a cache read).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Cost {
     Usd { input: f64, output: f64, cache_read: f64 },
-    /// Gigabytes on disk; running it costs nothing.
-    Disk(f32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -57,9 +54,7 @@ pub struct Connection {
     pub id: &'static str,
     pub name: &'static str,
     pub kind: Kind,
-    /// A server on this computer: an address instead of a key.
-    pub local: bool,
-    /// The base address of the API (for a local server, its default).
+    /// The base address of the API.
     pub base_url: &'static str,
     /// The first is the recommended one.
     pub models: &'static [Model],
@@ -83,7 +78,6 @@ const CHAT: Connection = Connection {
     id: "",
     name: "",
     kind: Kind::Chat,
-    local: false,
     base_url: "",
     models: &[],
     answer: Answer::Schema { strict: false },
@@ -94,7 +88,7 @@ const CHAT: Connection = Connection {
     cache_hint: None,
 };
 
-pub const CONNECTIONS: [Connection; 10] = [
+pub const CONNECTIONS: [Connection; 8] = [
     Connection {
         id: "anthropic",
         name: "Anthropic",
@@ -191,29 +185,6 @@ pub const CONNECTIONS: [Connection; 10] = [
         cache_hint: Some(CacheHint::GrokHeader),
         ..CHAT
     },
-    Connection {
-        id: "ollama",
-        name: "Ollama",
-        local: true,
-        base_url: "http://localhost:11434/v1",
-        models: &[
-            Model { id: "gemma4:12b", name: "Gemma 4 12B", cost: Cost::Disk(8.0) },
-            Model { id: "gemma4:e4b", name: "Gemma 4 E4B", cost: Cost::Disk(7.0) },
-        ],
-        ..CHAT
-    },
-    Connection {
-        id: "lmstudio",
-        name: "LM Studio",
-        local: true,
-        base_url: "http://localhost:1234/v1",
-        models: &[
-            Model { id: "google/gemma-4-12b", name: "Gemma 4 12B", cost: Cost::Disk(7.4) },
-            Model { id: "google/gemma-4-e4b", name: "Gemma 4 E4B", cost: Cost::Disk(5.9) },
-        ],
-        reasoning: None,
-        ..CHAT
-    },
 ];
 
 /// The connection a settings file names by default, and in place of one CUE does not know.
@@ -248,14 +219,11 @@ impl Connection {
 }
 
 /// Every listed model as the price table counts it: usage id, input, output, cache read (dollars per million
-/// tokens); a local model costs nothing.
+/// tokens).
 pub fn prices() -> impl Iterator<Item = (String, f64, f64, f64)> {
     CONNECTIONS.iter().flat_map(|c| {
         c.models.iter().map(move |m| {
-            let (input, output, cache_read) = match m.cost {
-                Cost::Usd { input, output, cache_read } => (input, output, cache_read),
-                Cost::Disk(_) => (0.0, 0.0, 0.0),
-            };
+            let Cost::Usd { input, output, cache_read } = m.cost;
             (c.usage_id(m), input, output, cache_read)
         })
     })
@@ -266,11 +234,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ten_connections_two_of_them_local() {
+    fn eight_cloud_connections() {
         let ids: Vec<_> = CONNECTIONS.iter().map(|c| c.id).collect();
-        assert_eq!(ids, ["anthropic", "openai", "gemini", "openrouter", "deepseek", "mistral", "groq", "xai", "ollama", "lmstudio"]);
-        let local: Vec<_> = CONNECTIONS.iter().filter(|c| c.local).map(|c| c.id).collect();
-        assert_eq!(local, ["ollama", "lmstudio"]);
+        assert_eq!(ids, ["anthropic", "openai", "gemini", "openrouter", "deepseek", "mistral", "groq", "xai"]);
+        assert!(find("ollama").is_none() && find("lmstudio").is_none(), "local servers are gone");
         assert_eq!(default().id, "anthropic");
         assert_eq!(find("openai").unwrap().name, "OpenAI");
         assert!(find("bard").is_none());
@@ -284,12 +251,8 @@ mod tests {
             let mut ids: Vec<_> = c.models.iter().map(|m| m.id).collect();
             ids.dedup();
             assert_eq!(ids.len(), c.models.len(), "{}", c.id);
-            assert!(c.base_url.starts_with(if c.local { "http://localhost:" } else { "https://" }), "{}", c.id);
+            assert!(c.base_url.starts_with("https://"), "{}", c.id);
             assert!(!c.base_url.ends_with('/'), "{}", c.id);
-            // A cloud model has a price, a local one a size.
-            for m in c.models {
-                assert_eq!(matches!(m.cost, Cost::Disk(_)), c.local, "{} {}", c.id, m.id);
-            }
         }
         assert_eq!(default().recommended().id, "claude-haiku-5-5");
         assert_eq!(find("openrouter").unwrap().recommended().id, "anthropic/claude-haiku-5.5");
@@ -305,7 +268,6 @@ mod tests {
         assert_eq!((c("gemini").reasoning, c("gemini").reasons), (Some("minimal"), true));
         assert_eq!((c("groq").reasoning, c("groq").reasons), (Some("low"), true));
         assert_eq!((c("deepseek").reasoning, c("deepseek").reasons), (Some("none"), false));
-        assert_eq!(c("lmstudio").reasoning, None);
         assert_eq!(c("mistral").cache_hint, Some(CacheHint::BodyKey));
         assert_eq!(c("xai").cache_hint, Some(CacheHint::GrokHeader));
         assert_eq!(c("anthropic").kind, Kind::Anthropic);
@@ -321,7 +283,6 @@ mod tests {
         assert_eq!(c("groq").usage_id(c("groq").recommended()), "groq:openai/gpt-oss-120b");
         let prices: Vec<_> = prices().collect();
         assert!(prices.contains(&("openai:gpt-6-luna".to_owned(), 0.10, 0.50, 0.01)));
-        assert!(prices.contains(&("ollama:gemma4:12b".to_owned(), 0.0, 0.0, 0.0)));
         let mut ids: Vec<_> = prices.iter().map(|p| p.0.as_str()).collect();
         ids.sort_unstable();
         ids.dedup();

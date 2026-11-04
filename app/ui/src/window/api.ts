@@ -45,20 +45,20 @@ export type UiLanguage = 'auto' | 'en' | 'ru';
 /** CUE's own cleanup, or the user's instructions in its place. */
 export type RefineStyle = 'default' | 'custom';
 export const REFINE_STYLES: readonly RefineStyle[] = ['default', 'custom'];
-/** A model of a connection: its price per million tokens (input, output), or for a local one its size on disk. */
+/** A model of a connection: its price per million tokens (input, output). */
 export interface ModelView {
   id: string;
   name: string;
-  usd: [number, number] | null;
-  gb: number | null;
+  usd: [number, number];
 }
-/** A connection the cleanup can go through; its first model is the recommended one. */
+/** A cloud connection the cleanup can go through; its first model is the recommended one. */
 export interface ConnectionView {
   id: string;
   name: string;
-  local: boolean;
   models: ModelView[];
 }
+/** Where the cleanup runs: a model on this computer, or a cloud connection with the user's key. */
+export type Runs = 'local' | 'cloud';
 /** A habit as the Habits section draws it: its rule, its example, the app it holds in (null — everywhere), how many
  *  times it was corrected, and whether it is on. */
 export interface HabitView {
@@ -89,10 +89,12 @@ export interface SettingsView {
   refineStyle: RefineStyle;
   /** The custom style's instructions. */
   refineCustom: string;
-  /** The cleanup's connection, its model, and its address (a local server's as the user set it). */
+  /** Where the cleanup runs, and the local model's id (empty: the recommended one). */
+  refineRuns: Runs;
+  refineLocal: string;
+  /** The cleanup's cloud connection and its model. */
   refineConnection: string;
   refineModel: string;
-  refineAddress: string;
   connections: ConnectionView[];
   /** Words added from a correction, with how they were heard. */
   learned: { word: string; heard: string }[];
@@ -111,7 +113,7 @@ export type SettingChange =
   | { kind: 'refineCustom'; value: string }
   | { kind: 'refineConnection'; value: string }
   | { kind: 'refineModel'; value: string }
-  | { kind: 'refineAddress'; value: string }
+  | { kind: 'refineRuns'; value: Runs }
   | { kind: 'dictAdd'; value: string }
   | { kind: 'dictRemove'; value: string }
   | { kind: 'learn'; value: boolean }
@@ -187,8 +189,6 @@ export const keyState = (name: KeyName) => invoke<KeyView>('key_state', { name }
 /** The value goes to Windows Credential Manager; the answer is its mask. */
 export const keySet = (name: KeyName, value: string) => invoke<KeyView>('key_set', { name, value });
 export const keyCheck = (name: KeyName) => invoke<KeyCheck>('key_check', { name });
-/** Whether a local server answers at `address`. */
-export const serverCheck = (address: string) => invoke<boolean>('server_check', { address });
 
 export const micList = () => invoke<MicList>('mic_list');
 /** `device` null — the Windows microphone. The preview is this window's: its level comes here, and only this window's
@@ -245,6 +245,8 @@ export type ModelEntry = { id: string; name: string; repo: string; languages: st
 export interface ModelsView {
   current: string;
   entries: ModelEntry[];
+  /** The short list's recommended model, where a list marks one (the local cleanup's). */
+  recommended?: string | null;
 }
 /** Why CUE cannot run a repository's model. */
 export type NotRunnable = 'architecture' | 'noInt8' | 'layout';
@@ -265,6 +267,28 @@ export const modelChoose = (choice: { id: string } | { repo: string }) => invoke
 export const modelDelete = (id: string) => invoke<boolean>('model_delete', { id });
 export async function onModels(cb: (v: ModelsView) => void): Promise<void> {
   await getCurrentWebviewWindow().listen<ModelsView>('cue://models', (e) => cb(e.payload));
+}
+
+/** Why CUE cannot run a GGUF repository's model (docs/specs/2026-11-04-local-cleanup.md). */
+export type LlmNotRunnable = 'severalFiles' | 'noChatTemplate' | 'tooLarge' | 'architecture' | 'noQuant';
+/** A GGUF repository the search found: the size and quantization of the file CUE would take. */
+export interface LlmFound {
+  repo: string;
+  downloads: number;
+  size: number | null;
+  quant: string | null;
+  reason: LlmNotRunnable | null;
+}
+/** The cleanup's local list and the model in use (`cue://llms`). */
+export const llmsGet = () => invoke<ModelsView>('llms_get');
+/** GGUF repositories on Hugging Face matching `query`, by downloads; fails without a connection. */
+export const llmsSearch = (query: string) => invoke<LlmFound[]>('llms_search', { query });
+/** Switch the cleanup to a local model of the list or a repository the search found. */
+export const llmChoose = (choice: { id: string } | { repo: string }) => invoke<void>('llm_choose', choice);
+/** A local model's file deleted; false — the one in use or one being switched to. */
+export const llmDelete = (id: string) => invoke<boolean>('llm_delete', { id });
+export async function onLlms(cb: (v: ModelsView) => void): Promise<void> {
+  await getCurrentWebviewWindow().listen<ModelsView>('cue://llms', (e) => cb(e.payload));
 }
 
 /** What the core is doing, as every window hears it: `start` and `listen` — a recording is on. */

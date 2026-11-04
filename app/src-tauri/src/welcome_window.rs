@@ -9,6 +9,7 @@
 //! from before the window is created and let go when the window is destroyed or could not be created (`Hold`); in
 //! between its page moves it with its steps (`commands::welcome_step`). A chord it holds brings it forward
 //! (`bring_forward`). Its microphone preview goes with it; the main window's stays.
+use cue_core::settings::{RefineSettings, Runs};
 use std::ffi::OsStr;
 use std::sync::{Mutex, PoisonError};
 
@@ -50,16 +51,19 @@ pub fn asks_welcome<S: AsRef<OsStr>>(args: impl IntoIterator<Item = S>) -> bool 
     args.into_iter().any(|a| a.as_ref() == WELCOME_ARG)
 }
 
-/// The key a start looks at: the one the cleanup's `connection` needs.
-fn start_key(connection: &str) -> Option<KeyName> {
-    KeyName::of_connection(connection)
+/// The key a start looks at: the one the cleanup's cloud connection needs; none on this computer.
+fn start_key(refine: &RefineSettings) -> Option<KeyName> {
+    match refine.runs {
+        Runs::Local => None,
+        Runs::Cloud => KeyName::of_connection(refine.connection().id),
+    }
 }
 
-/// At startup: the window opens if the key of the cleanup's `connection` is missing, or when `forced` (`--welcome`). The
-/// log gets whether the key is there, never a key.
-pub fn open_at_start(app: &AppHandle, connection: &str, forced: bool) {
-    // A local server needs no key: the window opens only when asked for.
-    let name = start_key(connection);
+/// At startup: the window opens if the key of the cleanup's cloud connection is missing, or when `forced`
+/// (`--welcome`). The log gets whether the key is there, never a key.
+pub fn open_at_start(app: &AppHandle, refine: &RefineSettings, forced: bool) {
+    // On this computer the cleanup needs no key: the window opens only when asked for.
+    let name = start_key(refine);
     let key = name.map_or(KeyPresence::Saved, presence);
     let opens = should_welcome(key, forced);
     tracing::info!(key = name.map(KeyName::as_str), presence = ?key, forced, opens, "welcome window at startup");
@@ -212,9 +216,16 @@ mod tests {
     /// key the user does not use.
     #[test]
     fn the_key_looked_at_is_the_connection_s() {
-        assert_eq!(start_key("anthropic"), Some(KeyName::Anthropic));
-        assert_eq!(start_key("openai"), Some(KeyName::OpenAi));
-        assert_eq!(start_key("ollama"), None, "a local server needs no key: no window for it");
+        let over = |id: &str| RefineSettings { connection: id.into(), ..RefineSettings::default() };
+        assert_eq!(start_key(&over("anthropic")), Some(KeyName::Anthropic));
+        assert_eq!(start_key(&over("openai")), Some(KeyName::OpenAi));
+    }
+
+    /// On this computer the cleanup needs no key: no window at a start for one.
+    #[test]
+    fn the_key_is_not_looked_at_on_this_computer() {
+        let local = RefineSettings { runs: Runs::Local, ..RefineSettings::default() };
+        assert_eq!(start_key(&local), None);
     }
 
     #[test]

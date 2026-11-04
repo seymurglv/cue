@@ -28,7 +28,7 @@ export class HabitsView {
   private more!: HTMLElement;
   private forgetAll!: HTMLButtonElement;
   private armed: ReturnType<typeof setTimeout> | null = null;
-  /** The connection the no-cleanup line was checked for. */
+  /** Where the cleanup ran and its connection when the no-cleanup line was last checked (`runs:connection`). */
   private checked: string | null = null;
   /** The latest check of the cleanup's key: an earlier one's answer, coming later, is dropped. */
   private keyAsk = 0;
@@ -128,21 +128,24 @@ export class HabitsView {
     for (const w of fresh) this.grow(w);
     this.empty.hidden = list.length > 0;
     this.more.hidden = list.length === 0;
-    const conn = this.ctx.settings?.refineConnection ?? null;
+    // Where the cleanup runs and its connection: a change of either asks the key again.
+    const s = this.ctx.settings;
+    const conn = s ? `${s.refineRuns}:${s.refineConnection}` : null;
     if (conn !== this.checked) {
       this.checked = conn;
       void this.recheck();
     }
   }
 
-  /** The line "Habits work when the cleanup is on": shown while the cleanup's connection is a cloud one with no key
-   *  saved (a local server needs none). Asked again when the window gets the focus back and when a key changes. */
+  /** The line "Habits work when the cleanup is on": shown while the cleanup runs in the cloud with no key saved for
+   *  its connection (on this computer it needs none). Asked again when the window gets the focus back and when a key
+   *  changes. */
   async recheck(): Promise<void> {
     if (!this.sec) return;
     const ask = ++this.keyAsk;
     const s = this.ctx.settings;
     const c = s?.connections.find((x) => x.id === s.refineConnection);
-    if (!c || c.local) {
+    if (!c || s?.refineRuns === 'local') {
       this.noCleanup.hidden = true;
       return;
     }

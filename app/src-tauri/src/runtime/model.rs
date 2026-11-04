@@ -25,7 +25,7 @@ pub const WAIT_FOR_MODEL: Duration = Duration::from_secs(30 * 60);
 pub const RECOGNIZE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The room a download needs on the drive: its bytes and a tenth more.
-fn room_for(bytes: u64) -> u64 {
+pub(crate) fn room_for(bytes: u64) -> u64 {
     bytes + bytes / 10
 }
 
@@ -182,7 +182,7 @@ impl Switch {
 /// Loads a model from its folder.
 type Loader = fn(&Path) -> Result<Arc<dyn Recognize>, EngineError>;
 /// Free bytes on the drive of a folder; `None` — not known.
-type FreeSpace = fn(&Path) -> Option<u64>;
+pub(crate) type FreeSpace = fn(&Path) -> Option<u64>;
 
 fn load_recognizer(dir: &Path) -> Result<Arc<dyn Recognize>, EngineError> {
     Recognizer::load(dir).map(|r| Arc::new(r) as Arc<dyn Recognize>)
@@ -190,7 +190,7 @@ fn load_recognizer(dir: &Path) -> Result<Arc<dyn Recognize>, EngineError> {
 
 /// Free bytes on the drive of `dir`, or of its nearest folder that exists.
 #[cfg(windows)]
-fn free_space(dir: &Path) -> Option<u64> {
+pub(crate) fn free_space(dir: &Path) -> Option<u64> {
     use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
     use windows::core::HSTRING;
     let existing = dir.ancestors().find(|p| p.exists())?;
@@ -201,7 +201,7 @@ fn free_space(dir: &Path) -> Option<u64> {
 }
 
 #[cfg(not(windows))]
-fn free_space(_: &Path) -> Option<u64> {
+pub(crate) fn free_space(_: &Path) -> Option<u64> {
     None
 }
 
@@ -574,7 +574,7 @@ impl ModelKeeper {
 
     /// The list with the model in use, for the windows.
     pub fn view(&self) -> ModelsView {
-        ModelsView { current: self.current.id.clone(), entries: self.entries() }
+        ModelsView { current: self.current.id.clone(), entries: self.entries(), recommended: None }
     }
 
     fn entry_state(&self, m: &Manifest) -> EntryState {
