@@ -77,8 +77,9 @@ describe('Dictionaries and language', () => {
     expect(en.tray.lastMinute.title).toBe('One minute left');
     expect(en.error).toEqual({
       model: 'Model did not download', cpu: 'Processor not supported', stt: "Couldn't recognize",
-      claudeKey: 'Claude key problem', translate: "Couldn't translate",
+      claudeKey: 'Claude key problem', cleanupKey: '{NAME}: key or balance', translate: "Couldn't translate",
     });
+    expect(en.cleanupUnnamed).toBe('Cleanup');
     expect(en.close).toBe('Close');
     expect(en.drop).toEqual({
       cancel: 'Cancel · Esc', cancelName: 'Cancel', restore: 'Restore', retry: 'Retry', done: 'Done', cancelled: 'Cancelled', ask: 'Ask',
@@ -125,6 +126,18 @@ describe('The Drop follows the core', () => {
     ctl.apply({ ...base, phase: 'error', error: 'claudeKey', retry: false });
     const visible = on().join(' ');
     expect(visible).not.toContain('why');
+    expect(document.querySelector('.drop .ib.solid[title="Retry"]')!.classList.contains('on')).toBe(false);
+  });
+
+  it('cleanup key error names the connection, not Claude; none heard — "Cleanup"', () => {
+    const label = () => document.querySelector('.drop .lab')!.textContent!.replace(/ /g, ' ');
+    ctl.apply({ ...base, phase: 'error', error: 'cleanupKey', retry: false });
+    expect(label()).toBe('Cleanup: key or balance');
+    ctl.apply({ ...base, phase: 'idle' });
+    ctl.cleanupName('DeepSeek');
+    ctl.apply({ ...base, phase: 'error', error: 'cleanupKey', retry: false });
+    expect(label()).toBe('DeepSeek: key or balance');
+    expect(on().join(' ')).not.toContain('why');
     expect(document.querySelector('.drop .ib.solid[title="Retry"]')!.classList.contains('on')).toBe(false);
   });
 

@@ -1222,8 +1222,11 @@ impl Runtime {
             let now = self.now();
             self.attempt.refine_done(result.usage, result.outcome, now);
         }
-        // A Claude key problem (`RawKeyProblem`) is already in the log: `claude::refine` itself writes one line
-        // for each failed refine, whatever the insert outcome.
+        // A key problem (`RawKeyProblem`) is already in the log: the connection's refine writes one line for each failed
+        // refine, whatever the insert outcome. The Drop names the connection in its error.
+        if result.outcome == RefineOutcome::RawKeyProblem {
+            self.ui.cleanup_name(self.settings.refine.connection().name);
+        }
         self.feed(Input::Refined { id, text: result.text, outcome: result.outcome });
     }
 

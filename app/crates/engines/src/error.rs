@@ -10,6 +10,9 @@ pub enum EngineError {
     Network(String),
     #[error("key, balance or limit: {0}")]
     KeyProblem(String),
+    /// The key works, but the account cannot pay for requests (a key check that read the balance).
+    #[error("no balance: {0}")]
+    NoBalance(String),
     #[error("service unavailable: {0}")]
     Service(String),
     #[error("protocol: {0}")]
@@ -44,6 +47,10 @@ impl EngineError {
         matches!(self, EngineError::KeyProblem(_))
     }
 
+    pub fn is_no_balance(&self) -> bool {
+        matches!(self, EngineError::NoBalance(_))
+    }
+
     /// HTTP refusal from a service (a REST response) → error by status `code`.
     /// The text holds the start of the body without `secret` (cut out **before** truncation to [`MAX_BODY_CHARS`]);
     /// an empty body gives the standard status reason `reason`. The status is a number: tungstenite and reqwest
@@ -59,6 +66,7 @@ impl EngineError {
         match self {
             EngineError::Network(s) => EngineError::Network(hide(&s, secret)),
             EngineError::KeyProblem(s) => EngineError::KeyProblem(hide(&s, secret)),
+            EngineError::NoBalance(s) => EngineError::NoBalance(hide(&s, secret)),
             EngineError::Service(s) => EngineError::Service(hide(&s, secret)),
             EngineError::Protocol(s) => EngineError::Protocol(hide(&s, secret)),
             // Local errors never carry a key.
@@ -166,6 +174,7 @@ mod tests {
         for e in [
             EngineError::Network(format!("a {key} b")),
             EngineError::KeyProblem(format!("401: invalid key {key}")),
+            EngineError::NoBalance(format!("account of {key}")),
             EngineError::Service(key.into()),
             EngineError::Protocol(format!("{key}{key}")),
         ] {

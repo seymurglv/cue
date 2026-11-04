@@ -387,7 +387,7 @@ impl Flow {
                 // A failed translation is never replaced with the untranslated text (spec 2 §5): an error with "retry",
                 // which refines the saved text again.
                 if self.mode == Mode::Translate && (outcome != RefineOutcome::Refined || text.trim().is_empty()) {
-                    let cause = if outcome == RefineOutcome::RawKeyProblem { ErrorCause::ClaudeKey } else { ErrorCause::Translate };
+                    let cause = if outcome == RefineOutcome::RawKeyProblem { ErrorCause::CleanupKey } else { ErrorCause::Translate };
                     fx.push(Effect::Finished { id, outcome: Outcome::Failed });
                     self.retry_text = true;
                     self.phase = Phase::Error { cause, retry: true };
@@ -1005,7 +1005,7 @@ impl Flow {
                     fx.push(Effect::Finished { id, outcome: Outcome::Inserted });
                 }
                 if self.refine_outcome == Some(RefineOutcome::RawKeyProblem) {
-                    self.phase = Phase::Error { cause: ErrorCause::ClaudeKey, retry: false };
+                    self.phase = Phase::Error { cause: ErrorCause::CleanupKey, retry: false };
                     self.push_ui(fx);
                     return;
                 }
@@ -1397,14 +1397,15 @@ mod tests {
     }
 
     #[test]
-    fn claude_key_problem_inserts_raw_then_shows_error() {
+    fn a_cleanup_key_problem_inserts_raw_then_shows_the_cleanup_key_error() {
         let mut f = Flow::new(2, false);
         let id = thinking_with_raw(&mut f, 0, "сырой текст");
         let fx = f.handle(I::Refined { id, text: "сырой текст".into(), outcome: RefineOutcome::RawKeyProblem }, 5_600);
         assert!(has(&fx, &E::Insert { id, text: "сырой текст".into() }));
         let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 5_700);
         let ui = last_ui(&fx).unwrap();
-        assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::ClaudeKey), false));
+        // The cleanup's connection, whichever it is: not "Claude", which is "Ask"'s.
+        assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::CleanupKey), false));
         assert!(f.esc_active(), "Esc closes the error");
         assert_eq!(phase(&f.handle(I::Esc, 8_000)), Some(UiPhase::Idle));
     }
@@ -1948,13 +1949,13 @@ mod tests {
         let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 5_500);
         assert!(has(&fx, &E::Finished { id, outcome: Outcome::Inserted }));
         assert_eq!(phase(&fx), Some(UiPhase::Done), "as with RawFallback: a normal \"done\"");
-        // A Claude key problem is not lost.
+        // A key problem of the cleanup's connection is not lost.
         let mut f = Flow::new(2, false);
         let id = thinking_with_raw(&mut f, 0, "сырой текст");
         let fx = f.handle(I::Refined { id, text: String::new(), outcome: RefineOutcome::RawKeyProblem }, 5_400);
         assert!(has(&fx, &E::Insert { id, text: "сырой текст".into() }));
         let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 5_500);
-        assert_eq!(last_ui(&fx).unwrap().error, Some(ErrorCause::ClaudeKey));
+        assert_eq!(last_ui(&fx).unwrap().error, Some(ErrorCause::CleanupKey));
     }
 
     #[test]
@@ -2315,7 +2316,7 @@ mod tests {
         f.handle(I::SttFinal { id, text: "привет".into() }, 5_200);
         let fx = f.handle(I::Refined { id, text: "привет".into(), outcome: RefineOutcome::RawKeyProblem }, 6_000);
         let ui = last_ui(&fx).unwrap();
-        assert_eq!((ui.error, ui.retry), (Some(ErrorCause::ClaudeKey), true));
+        assert_eq!((ui.error, ui.retry), (Some(ErrorCause::CleanupKey), true));
         assert!(!fx.iter().any(|e| matches!(e, E::Insert { .. })));
     }
 

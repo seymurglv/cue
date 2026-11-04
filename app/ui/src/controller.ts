@@ -75,6 +75,8 @@ export class DropController {
   private mic: MicNames | null = null;
   private model: string | null = null;
   private rule: string | null = null;
+  /** The cleanup's connection whose key or balance was refused, for the error that follows. */
+  private cleanup: string | null = null;
   /** Quiet mode: false — the frame loop is asleep. calmSince — the frame since which nothing on screen can change. */
   private awake = true;
   private calmSince: number | null = null;
@@ -96,7 +98,7 @@ export class DropController {
       // The cause icon: a failed translation shows the network one; the key problems show none.
       // The network icon where the network is the cause: the model's download, a translation.
       err: () => (this.state.error === 'model' || this.state.error === 'translate' ? 'net' : 'key'),
-      errLabel: () => this.t.error[this.state.error ?? 'stt'],
+      errLabel: () => this.t.error[this.state.error ?? 'stt'].replace('{NAME}', this.cleanup || this.t.cleanupUnnamed),
       text: this.t.drop,
       retry: () => this.state.retry,
       lbl: () => 'icons',
@@ -278,6 +280,11 @@ export class DropController {
   /** The name of the speech model just switched to, for the card that follows. */
   modelName(name: string) {
     this.model = String(name ?? '');
+  }
+
+  /** The name of the cleanup's connection whose key or balance was refused, for the error that follows. */
+  cleanupName(name: string) {
+    this.cleanup = String(name ?? '');
   }
 
   /** The rule of the habit just learned, for the card that follows. */

@@ -128,7 +128,7 @@ export interface KeyView {
   saved: boolean;
   mask: string;
 }
-export type KeyCheck = 'works' | 'badKey' | 'unchecked' | 'missing' | 'store';
+export type KeyCheck = 'works' | 'badKey' | 'noBalance' | 'unchecked' | 'missing' | 'store';
 /** The microphones as Windows names them, and the one it records from by default. */
 export interface MicList {
   names: string[];

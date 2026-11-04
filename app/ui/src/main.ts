@@ -64,6 +64,7 @@ async function start() {
     listen<MicNames>('cue://mic-names', (e) => ctl.micNames(e.payload)),
     listen<string>('cue://model-name', (e) => ctl.modelName(e.payload)),
     listen<string>('cue://habit-rule', (e) => ctl.habitRule(e.payload)),
+    listen<string>('cue://cleanup-name', (e) => ctl.cleanupName(e.payload)),
     listen<TrayKind | null>('cue://tray', (e) => ctl.tray(e.payload)),
     listen<Suggest | null>('cue://suggest', (e) => ctl.suggest(e.payload)),
     listen('cue://shake', () => ctl.shake()),

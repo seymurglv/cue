@@ -120,7 +120,7 @@ export class KeyRows {
     small.textContent = state ? t.keyStates[state] : '';
     small.hidden = !state;
     small.classList.toggle('ok', state === 'works');
-    small.classList.toggle('warn', state === 'badKey');
+    small.classList.toggle('warn', state === 'badKey' || state === 'noBalance');
   }
 
   /** Sends the typed key to be saved and clears the field; false — it was refused. Nothing typed: true. */

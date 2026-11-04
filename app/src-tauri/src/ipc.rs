@@ -408,6 +408,14 @@ impl Ui {
         }
     }
 
+    /// The name of the cleanup's connection whose key, limit or balance was refused, just before the Drop's error: the
+    /// Drop names it.
+    pub fn cleanup_name(&self, name: &str) {
+        if let Err(e) = self.app.emit_to(DROP_LABEL, "cue://cleanup-name", name) {
+            tracing::debug!("Drop window: event cue://cleanup-name not sent: {e}");
+        }
+    }
+
     /// The rule of the habit just learned, just before its card (docs/specs/2026-11-04-habits.md): to the Drop, which
     /// draws it.
     pub fn habit_rule(&self, rule: &str) {

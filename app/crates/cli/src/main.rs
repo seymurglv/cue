@@ -176,6 +176,7 @@ async fn main() -> Result<()> {
                     Ok(Some(key)) => Ok(Some(match k {
                         KeyName::Anthropic => cue_engines::check::anthropic(&http, &key).await,
                         KeyName::OpenRouter => cue_engines::check::openrouter(&http, &key).await,
+                        KeyName::DeepSeek => cue_engines::check::deepseek(&http, &key).await,
                         // An OpenAI-compatible service: its model list at the connection's address.
                         other => {
                             let c = cue_core::connections::find(other.as_str()).context("a key without a connection")?;

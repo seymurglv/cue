@@ -355,6 +355,7 @@ export const en: WinText = {
   keyStates: {
     works: 'Works',
     badKey: 'Key error',
+    noBalance: 'No money on the account',
     unchecked: "Couldn't check",
     missing: 'No key',
     store: "Couldn't check",
@@ -533,6 +534,7 @@ export const ru: WinText = {
   keyStates: {
     works: 'Работает',
     badKey: 'Ошибка ключа',
+    noBalance: 'На счёте нет денег',
     unchecked: 'Не удалось проверить',
     missing: 'Нет ключа',
     store: 'Не удалось проверить',

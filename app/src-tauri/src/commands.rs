@@ -125,6 +125,8 @@ impl KeyView {
 pub enum KeyCheck {
     Works,
     BadKey,
+    /// The key works, but the account cannot pay (DeepSeek, OpenRouter tell).
+    NoBalance,
     Unchecked,
     Missing,
     Store,
@@ -682,6 +684,7 @@ async fn probe(name: KeyName, key: &str) -> Result<(), EngineError> {
     match name {
         KeyName::Anthropic => cue_engines::check::anthropic(&http, key).await,
         KeyName::OpenRouter => cue_engines::check::openrouter(&http, key).await,
+        KeyName::DeepSeek => cue_engines::check::deepseek(&http, key).await,
         // Any other is an OpenAI-compatible service: its model list.
         other => match cue_core::connections::find(other.as_str()) {
             Some(c) => cue_engines::chat::check(&http, c.base_url, Some(key)).await,
@@ -694,6 +697,7 @@ async fn probe(name: KeyName, key: &str) -> Result<(), EngineError> {
 fn key_check_of(probed: &Result<Option<Result<(), EngineError>>, EngineError>) -> KeyCheck {
     match probed {
         Ok(Some(Ok(()))) => KeyCheck::Works,
+        Ok(Some(Err(e))) if e.is_no_balance() => KeyCheck::NoBalance,
         Ok(Some(Err(e))) if e.is_key_problem() => KeyCheck::BadKey,
         Ok(Some(Err(_))) => KeyCheck::Unchecked,
         Ok(None) => KeyCheck::Missing,
@@ -932,14 +936,19 @@ mod tests {
         assert_eq!(probed(Ok(())), KeyCheck::Works);
         assert_eq!(probed(Err(EngineError::KeyProblem("401: invalid x-api-key".into()))), KeyCheck::BadKey);
         assert_eq!(probed(Err(EngineError::from_status(402, "balance"))), KeyCheck::BadKey);
+        // The key works, the account cannot pay: told apart from a wrong key.
+        assert_eq!(probed(Err(EngineError::NoBalance("DeepSeek".into()))), KeyCheck::NoBalance);
         assert_eq!(probed(Err(EngineError::Timeout)), KeyCheck::Unchecked);
         assert_eq!(probed(Err(EngineError::Network("dns".into()))), KeyCheck::Unchecked);
         assert_eq!(probed(Err(EngineError::from_status(503, "overloaded"))), KeyCheck::Unchecked);
         assert_eq!(probed(Err(EngineError::Protocol("404: not found".into()))), KeyCheck::Unchecked);
         assert_eq!(key_check_of(&Ok(None)), KeyCheck::Missing);
         assert_eq!(key_check_of(&Err(EngineError::Service("could not read the soniox key".into()))), KeyCheck::Store);
-        let codes = [KeyCheck::Works, KeyCheck::BadKey, KeyCheck::Unchecked, KeyCheck::Missing, KeyCheck::Store];
-        assert_eq!(serde_json::to_value(codes).unwrap(), json!(["works", "badKey", "unchecked", "missing", "store"]));
+        let codes = [KeyCheck::Works, KeyCheck::BadKey, KeyCheck::NoBalance, KeyCheck::Unchecked, KeyCheck::Missing, KeyCheck::Store];
+        assert_eq!(
+            serde_json::to_value(codes).unwrap(),
+            json!(["works", "badKey", "noBalance", "unchecked", "missing", "store"])
+        );
     }
 
     /// Only the mask leaves: in the reply, in `Debug`.

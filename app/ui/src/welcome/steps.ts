@@ -28,7 +28,7 @@ const WIN_LOGO =
 export function keysReady(rows: KeyRows): boolean {
   return !rows.typed() && KEYS.every((k) => {
     const state = rows.state(k);
-    return rows.keys[k].saved && state !== 'badKey' && state !== 'checking' && state !== 'missing';
+    return rows.keys[k].saved && state !== 'badKey' && state !== 'noBalance' && state !== 'checking' && state !== 'missing';
   });
 }
 

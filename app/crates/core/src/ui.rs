@@ -36,7 +36,11 @@ pub enum ErrorCause {
     Cpu,
     /// Recognition failed.
     Stt,
+    /// "Ask"'s Anthropic key is missing or refused: "Ask" always goes to Claude.
     ClaudeKey,
+    /// The cleanup's cloud connection refused its key, a limit or the balance (or there is no key): the Drop names the
+    /// connection (`cue://cleanup-name`).
+    CleanupKey,
     /// The translation failed (network, timeout, the check): nothing was pasted.
     Translate,
 }
@@ -142,6 +146,7 @@ mod tests {
             (ErrorCause::Cpu, "cpu"),
             (ErrorCause::Stt, "stt"),
             (ErrorCause::ClaudeKey, "claudeKey"),
+            (ErrorCause::CleanupKey, "cleanupKey"),
             (ErrorCause::Translate, "translate"),
         ];
         for (v, name) in causes {

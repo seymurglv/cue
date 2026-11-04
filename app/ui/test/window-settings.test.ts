@@ -158,12 +158,22 @@ describe('The settings tray', () => {
     expect(anthropic.classList.contains('warn')).toBe(true);
     expect(anthropic.classList.contains('ok')).toBe(false);
     // The other states.
-    core.keyCheck.mockResolvedValueOnce('works').mockResolvedValueOnce('unchecked').mockResolvedValueOnce('missing');
+    core.keyCheck
+      .mockResolvedValueOnce('works')
+      .mockResolvedValueOnce('noBalance')
+      .mockResolvedValueOnce('unchecked')
+      .mockResolvedValueOnce('missing');
     click($('[data-check="anthropic"]'));
     await settle();
     expect(text(anthropic)).toBe('Works');
     expect(anthropic.classList.contains('ok')).toBe(true);
     expect(anthropic.classList.contains('warn')).toBe(false);
+    // The key works, the account cannot pay: in amber, not "Works".
+    click($('[data-check="anthropic"]'));
+    await settle();
+    expect(text(anthropic)).toBe('No money on the account');
+    expect(anthropic.classList.contains('warn')).toBe(true);
+    expect(anthropic.classList.contains('ok')).toBe(false);
     click($('[data-check="anthropic"]'));
     await settle();
     expect(text(anthropic)).toBe("Couldn't check");

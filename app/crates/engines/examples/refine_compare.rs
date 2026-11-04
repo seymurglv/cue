@@ -282,7 +282,7 @@ fn error_kind(f: &Failure) -> String {
     match f.error {
         EngineError::Timeout => "timeout",
         EngineError::Network(_) => "network",
-        EngineError::KeyProblem(_) => "stream_limit",
+        EngineError::KeyProblem(_) | EngineError::NoBalance(_) => "stream_limit",
         EngineError::Service(_) => "stream_error",
         EngineError::Protocol(_) => "stream_protocol",
         EngineError::Aborted => "aborted",

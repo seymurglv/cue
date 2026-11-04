@@ -2,7 +2,7 @@
 // and sets it in the Drop window before any script runs (window.__CUE_LANG__); the tray menu uses the same value.
 export type Lang = 'en' | 'ru';
 export type TrayKind = 'noField' | 'micSilent' | 'holdHint' | 'lastMinute' | 'micMissing' | 'modelReady' | 'modelSwitched' | 'newHabit' | 'habitChanged';
-export type ErrorCause = 'model' | 'cpu' | 'stt' | 'claudeKey' | 'translate';
+export type ErrorCause = 'model' | 'cpu' | 'stt' | 'claudeKey' | 'cleanupKey' | 'translate';
 
 export const KEY_NAME = 'Ctrl + Win';
 
@@ -80,7 +80,9 @@ export interface AnswerText {
 
 export interface Dict {
   tray: Record<TrayKind, TrayText>;
+  /** The Drop's errors; `cleanupKey` holds {NAME}, the cleanup's connection (`cleanupUnnamed` when none was heard). */
   error: Record<ErrorCause, string>;
+  cleanupUnnamed: string;
   /** Close button of a tray card: tooltip and accessible name. */
   close: string;
   drop: DropText;
@@ -140,8 +142,10 @@ export const en: Dict = {
     cpu: 'Processor not supported',
     stt: "Couldn't recognize",
     claudeKey: 'Claude key problem',
+    cleanupKey: '{NAME}: key or balance',
     translate: "Couldn't translate",
   },
+  cleanupUnnamed: 'Cleanup',
   close: 'Close',
   drop: {
     cancel: 'Cancel · Esc',
@@ -226,8 +230,10 @@ export const ru: Dict = {
     cpu: 'Процессор не подходит',
     stt: 'Не распознал',
     claudeKey: 'Проблема с ключом Claude',
+    cleanupKey: '{NAME}: ключ или баланс',
     translate: 'Не удалось перевести',
   },
+  cleanupUnnamed: 'Чистка',
   close: 'Закрыть',
   drop: {
     cancel: 'Отменить · Esc',
