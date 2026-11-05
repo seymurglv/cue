@@ -576,9 +576,10 @@ impl Runtime {
             }
             CoreEvent::Input(Input::SessionLocked) => {
                 self.feed(Input::SessionLocked);
-                // Locked or asleep, nobody dictates for a while: the speech model is let go, once the dictation the
-                // lock ended is recognized.
+                // Locked or asleep, nobody dictates for a while: the models are let go, once the dictation the lock
+                // ended is worked on.
                 self.model.rest_soon();
+                self.llm.rest_soon();
             }
             CoreEvent::Input(i) => self.feed(i),
             CoreEvent::UiAction(UiAction::TrayAction) => self.on_tray_action(),
@@ -1006,7 +1007,7 @@ impl Runtime {
             let asked = async {
                 match to {
                     Route::Local(g) => local::rule(g, &s, &ask, lang, wait).await,
-                    Route::NotReady => None,
+                    Route::NotReady | Route::Waking(_) => None,
                     Route::Cloud => habit::rule(&http, key.as_deref(), &s, &ask, lang, wait).await,
                 }
             };
@@ -1331,8 +1332,9 @@ impl Runtime {
             if !power::full_speed(busy) {
                 tracing::debug!(busy, "Windows did not take the processor speed asked for");
             }
-            // A speech model let go at rest loads as the dictation starts; one ending starts the wait before it rests.
+            // The models let go at rest load as the dictation starts; one ending starts the wait before they rest.
             self.model.busy(busy, &self.tx);
+            self.llm.busy(busy, &self.tx);
         }
         self.level.phase(s.phase);
         self.ui.state(s);
@@ -1627,7 +1629,10 @@ impl Runtime {
         // text.
         let kind = self.settings.refine.connection().kind;
         let key = self.cleanup_key();
-        let to = route(self.settings.refine.runs, &self.llm.slot());
+        let to = match route(self.settings.refine.runs, &self.llm.slot()) {
+            Route::NotReady if self.llm.waking() => Route::Waking(self.llm.slot()),
+            to => to,
+        };
         let now = self.now();
         // "Ask" has a prefix of its own (`ask_warm`).
         if mode != Mode::Ask {
@@ -1662,15 +1667,18 @@ impl Runtime {
                     let key = key.as_deref();
                     // On this computer the local model; in the cloud the connection picks the client; the settings give
                     // it the model and the style.
-                    match to {
-                        Route::Local(g) => {
-                            return match job {
-                                Job::Clean | Job::Rewrite => local::refine(g, &raw, &ctx, &dict, &s).await,
-                                Job::Translate(to) => local::translate(g, &raw, &ctx, &dict, &s, to).await,
-                            };
-                        }
-                        Route::NotReady => return local::not_ready(&raw),
-                        Route::Cloud => {}
+                    let here = match to {
+                        Route::Local(g) => Some(Some(g)),
+                        Route::Waking(slot) => Some(slot.wait(llm::LOAD_WAIT).await),
+                        Route::NotReady => Some(None),
+                        Route::Cloud => None,
+                    };
+                    if let Some(g) = here {
+                        return match (g, job) {
+                            (Some(g), Job::Clean | Job::Rewrite) => local::refine(g, &raw, &ctx, &dict, &s).await,
+                            (Some(g), Job::Translate(to)) => local::translate(g, &raw, &ctx, &dict, &s, to).await,
+                            (None, _) => local::not_ready(&raw),
+                        };
                     }
                     match (kind, job) {
                         (Kind::Anthropic, Job::Clean | Job::Rewrite) => claude::refine(&http, key, s.model().id, &raw, &ctx, &dict, &s).await,
@@ -2677,6 +2685,9 @@ enum Route {
     Local(Arc<dyn Generate>),
     /// On this computer, no model ready yet: the raw text at once.
     NotReady,
+    /// On this computer, the model in use loading again after a rest: a dictation's cleanup waits for it
+    /// (`llm::LOAD_WAIT` at most); a habit's rule does not.
+    Waking(Arc<llm::LlmSlot>),
     /// The cloud connection.
     Cloud,
 }

@@ -4,10 +4,14 @@
 //! chosen one loads at start when its file is here. The cleanup never waits for it: an empty slot pastes the raw text.
 //! A model is in memory only while the cleanup runs on this computer: on the cloud none is loaded, and the one in use
 //! is let go; a download goes on and its model becomes the chosen one, loaded once the cleanup comes back here.
+//!
+//! At rest the model in use is let go too, as the speech model is (`model::REST_AFTER` without a dictation, a lock,
+//! sleep): it stays in use for the windows, and the next dictation loads it again as it starts; that dictation's
+//! cleanup waits for the load ([`LOAD_WAIT`] at most) instead of pasting the text as said.
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cue_core::llm;
 use cue_core::model::{EntryState, Manifest, ModelEntry, ModelsView};
@@ -19,7 +23,10 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::AbortHandle;
 
 use super::CoreEvent;
-use super::model::{Choice, FreeSpace, Told, free_space, room_for};
+use super::model::{Choice, FreeSpace, REST_AFTER, Told, free_space, room_for};
+
+/// The longest a cleanup waits for its model loading again after a rest; past it the text is pasted as said.
+pub const LOAD_WAIT: Duration = Duration::from_secs(15);
 
 /// What happened to a language model in the background.
 #[derive(Debug)]
@@ -32,6 +39,8 @@ pub enum LlmEvent {
     Pinned(Result<Manifest, LlmPinError>),
     /// A model's folder deleted after its file was let go, or not (`ok`).
     Deleted { id: String, ok: bool },
+    /// The model in use has rested long enough without a dictation: it is let go.
+    Rest,
 }
 
 /// A step of the job `job`: events of a switch that was stopped are left alone.
@@ -57,6 +66,20 @@ impl LlmSlot {
 
     pub fn get(&self) -> Option<Arc<dyn Generate>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// The model once it is here, waiting at most `longest` for one loading again after a rest.
+    pub async fn wait(&self, longest: Duration) -> Option<Arc<dyn Generate>> {
+        let deadline = Instant::now() + longest;
+        loop {
+            if let Some(g) = self.get() {
+                return Some(g);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }
 
@@ -110,6 +133,17 @@ pub struct LlmKeeper {
     active: bool,
     load: Loader,
     free: FreeSpace,
+    /// The model in use was let go at rest: the next dictation loads it again.
+    resting: bool,
+    /// The job of the model in use loading again after a rest.
+    waking: Option<u64>,
+    /// A dictation records or is worked on: the model is not let go meanwhile.
+    busy: bool,
+    /// The session locked or the computer went to sleep during a dictation: the model is let go once it ends.
+    rest_when_done: bool,
+    /// The wait before the model is let go, started when a dictation ends.
+    rest_timer: Option<AbortHandle>,
+    rest_after: Duration,
 }
 
 impl LlmKeeper {
@@ -121,7 +155,112 @@ impl LlmKeeper {
 
     fn with(models: PathBuf, chosen: &str, active: bool, load: Loader, free: FreeSpace) -> Self {
         let chosen = if chosen.is_empty() { llm::default_id().unwrap_or_default() } else { chosen.to_owned() };
-        Self { models, chosen, in_use: None, slot: Arc::new(LlmSlot::default()), switch: None, switching: None, jobs: 0, deleting: Vec::new(), active, load, free }
+        Self {
+            models,
+            chosen,
+            in_use: None,
+            slot: Arc::new(LlmSlot::default()),
+            switch: None,
+            switching: None,
+            jobs: 0,
+            deleting: Vec::new(),
+            active,
+            load,
+            free,
+            resting: false,
+            waking: None,
+            busy: false,
+            rest_when_done: false,
+            rest_timer: None,
+            rest_after: REST_AFTER,
+        }
+    }
+
+    /// A dictation started (`true`) or ended (`false`). One starting loads a model let go at rest; one ending starts
+    /// the wait after which the model is let go, or lets it go now after a lock or sleep came during it.
+    pub fn busy(&mut self, busy: bool, tx: &UnboundedSender<CoreEvent>) {
+        self.busy = busy;
+        if busy {
+            self.stop_rest_timer();
+            self.wake(tx);
+        } else if std::mem::take(&mut self.rest_when_done) {
+            self.stop_rest_timer();
+            self.rest();
+        } else {
+            self.arm_rest(tx);
+        }
+    }
+
+    /// The session locked or the computer goes to sleep: the model is let go now, or once the dictation ends.
+    pub fn rest_soon(&mut self) {
+        if self.busy {
+            self.rest_when_done = true;
+        } else {
+            self.rest();
+        }
+    }
+
+    /// The model in use is loading again after a rest: a cleanup waits for it.
+    pub fn waking(&self) -> bool {
+        self.waking.is_some()
+    }
+
+    fn stop_rest_timer(&mut self) {
+        if let Some(timer) = self.rest_timer.take() {
+            timer.abort();
+        }
+    }
+
+    /// The wait before the model in use is let go starts again.
+    fn arm_rest(&mut self, tx: &UnboundedSender<CoreEvent>) {
+        self.stop_rest_timer();
+        let (tx, after) = (tx.clone(), self.rest_after);
+        self.rest_timer = Some(
+            tokio::spawn(async move {
+                tokio::time::sleep(after).await;
+                let _ = tx.send(CoreEvent::Llm(LlmNews { job: 0, event: LlmEvent::Rest }));
+            })
+            .abort_handle(),
+        );
+    }
+
+    /// The model in use, loaded and not cleaning up, is let go: its memory is freed once a cleanup or a warm-up still
+    /// holding it ends. The windows still show it in use.
+    fn rest(&mut self) {
+        if self.busy || self.resting || !self.active || self.in_use.is_none() || self.slot.get().is_none() {
+            return;
+        }
+        tracing::info!(model = self.in_use().unwrap_or(""), "language model: let go at rest");
+        self.resting = true;
+        self.slot.clear();
+    }
+
+    /// A model let go at rest loads again.
+    fn wake(&mut self, tx: &UnboundedSender<CoreEvent>) {
+        if !std::mem::take(&mut self.resting) || !self.active {
+            return;
+        }
+        let Some(m) = self.in_use.clone() else { return };
+        tracing::info!(model = m.id, "language model: loads again for a dictation");
+        let job = self.new_job();
+        self.waking = Some(job);
+        self.spawn_load(job, &m, tx);
+    }
+
+    /// The model in use loaded again after a rest, or not: in the slot, or let go when the cleanup left this computer or
+    /// another model took over meanwhile. One that did not load is tried again by the next dictation.
+    fn on_woken(&mut self, loaded: Result<Arc<dyn Generate>, EngineError>, tx: &UnboundedSender<CoreEvent>) {
+        self.waking = None;
+        match loaded {
+            Ok(model) if self.active && self.in_use() == Some(model.id()) && self.slot.get().is_none() => {
+                self.slot.ready(model);
+                if !self.busy {
+                    self.arm_rest(tx);
+                }
+            }
+            Ok(_) => {}
+            Err(_) => self.resting = self.active && self.in_use.is_some(),
+        }
     }
 
     pub fn slot(&self) -> Arc<LlmSlot> {
@@ -214,6 +353,16 @@ impl LlmKeeper {
             }
             return Told::Nothing;
         }
+        if let LlmEvent::Rest = news.event {
+            self.rest();
+            return Told::Nothing;
+        }
+        if self.waking == Some(news.job) {
+            if let LlmEvent::Loaded(loaded) = news.event {
+                self.on_woken(loaded, tx);
+            }
+            return Told::Nothing;
+        }
         let Some(s) = self.switch.as_mut().filter(|s| s.job == news.job) else { return Told::Nothing };
         let job = s.job;
         let present = |m: &Option<Manifest>, models: &Path| m.as_ref().map_or((0, 0), |m| (download::present(m, &models.join(&m.id)), m.total()));
@@ -255,6 +404,12 @@ impl LlmKeeper {
                 }
                 let Some(m) = self.switch.take().and_then(|s| s.manifest) else { return Told::Nothing };
                 self.slot.ready(model);
+                // The new model is in the slot: whatever rested or was loading again was the old one. It rests from now on.
+                self.resting = false;
+                self.waking = None;
+                if !self.busy {
+                    self.arm_rest(tx);
+                }
                 tracing::info!(from = self.in_use().unwrap_or("none"), to = m.id, "language model: switched");
                 let told = Told::Switched { id: m.id.clone(), name: m.name.clone() };
                 self.chosen = m.id.clone();
@@ -271,7 +426,7 @@ impl LlmKeeper {
                 s.state = if removed > 0 { EntryState::Failed { done, total } } else { EntryState::NotRunnable };
             }
             // Taken above, before a switch's job is looked at.
-            LlmEvent::Deleted { .. } => {}
+            LlmEvent::Deleted { .. } | LlmEvent::Rest => {}
         }
         Told::Nothing
     }
@@ -298,6 +453,9 @@ impl LlmKeeper {
             self.chosen = m.id;
         }
         self.slot.clear();
+        self.resting = false;
+        self.waking = None;
+        self.stop_rest_timer();
     }
 
     /// A switch to `m`: loaded when its file is here, else downloaded first, when the drive has room for it.
@@ -387,6 +545,8 @@ impl LlmKeeper {
             tracing::info!("language model {id}: let go to be deleted");
             self.in_use = None;
             self.slot.clear();
+            self.resting = false;
+            self.waking = None;
         }
         let dir = self.dir(id);
         if std::fs::remove_dir_all(&dir).is_ok() {
@@ -548,6 +708,47 @@ mod tests {
         fn state_of(&self, id: &str) -> EntryState {
             self.keeper.view().entries.into_iter().find(|e| e.id == id).unwrap().state
         }
+    }
+
+    #[tokio::test]
+    async fn a_model_at_rest_is_let_go_and_the_next_cleanup_waits_for_it_to_load_again() {
+        let models = folder("rest");
+        let m = fake(&models, "here", true);
+        let mut b = Bench::new(&models, &m.id, roomy).await;
+        b.keeper.rest_after = Duration::from_millis(50);
+        b.keeper.busy(false, &b.tx);
+        b.settle().await;
+        assert_eq!(b.in_slot(), None, "let go after the wait");
+        assert_eq!(b.keeper.view().current, m.id, "still the model in use for the windows");
+        assert!(b.keeper.slot().wait(Duration::from_millis(20)).await.is_none(), "nothing loads by itself");
+        b.keeper.busy(true, &b.tx);
+        assert!(b.keeper.waking());
+        let slot = b.keeper.slot();
+        let cleanup = tokio::spawn(async move { slot.wait(Duration::from_secs(5)).await.map(|g| g.id().to_owned()) });
+        b.settle().await;
+        assert_eq!(cleanup.await.unwrap(), Some(m.id.clone()), "the cleanup got the model loaded again");
+        assert!(!b.keeper.waking());
+        std::fs::remove_dir_all(models).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_local_model_is_never_let_go_during_a_dictation_and_a_lock_waits_for_its_end() {
+        let models = folder("busy");
+        let m = fake(&models, "here", true);
+        let mut b = Bench::new(&models, &m.id, roomy).await;
+        b.keeper.rest_after = Duration::from_millis(50);
+        b.keeper.busy(false, &b.tx);
+        b.keeper.busy(true, &b.tx);
+        b.settle().await;
+        assert_eq!(b.in_slot(), Some(m.id.clone()), "a dictation stops the wait");
+        b.keeper.rest_soon();
+        assert_eq!(b.in_slot(), Some(m.id.clone()), "a lock during a dictation waits for its end");
+        b.keeper.busy(false, &b.tx);
+        assert_eq!(b.in_slot(), None, "and lets the model go as it ends");
+        b.keeper.set_active(false, &b.tx, &b.http);
+        b.keeper.busy(true, &b.tx);
+        assert!(!b.keeper.waking(), "on the cloud nothing loads again");
+        std::fs::remove_dir_all(models).unwrap();
     }
 
     #[tokio::test]
