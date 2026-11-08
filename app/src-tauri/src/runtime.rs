@@ -403,6 +403,11 @@ impl Runtime {
         let llm = llm::LlmKeeper::new(paths.models.clone(), &settings.refine.local, settings.refine.where_ == settings::Where::Local);
         let opencode = opencode::OpenCodeSlot::new(agent::cwd(&paths.agent_dir(), cue_core::agents::AgentId::OpenCode));
         let instructions = Instructions::load_or_create(&paths, lang.code(), settings.refine.legacy_custom());
+        // The old custom text leaves settings.json once the instructions file exists.
+        let mut settings = settings;
+        if Instructions::settle_legacy(&mut settings, &paths) {
+            write_settings(&settings, &paths.settings, can_save_settings);
+        }
         let history = HistoryLog::new(paths.history.clone(), Recordings::new(paths.history_audio.clone()));
         // Alt picks "Ask" only when it is on (spec 2 §9); the hook reads the switch on every key.
         hook::ASK_ENABLED.store(settings.ask.enabled(), Ordering::Relaxed);
@@ -3031,6 +3036,13 @@ mod tests {
             fn id(&self) -> &str {
                 "llm--here--model--q4_k_m"
             }
+        }
+
+        #[test]
+        fn no_ai_pastes_raw_even_with_a_ready_local_model() {
+            let slot = llm::LlmSlot::default();
+            slot.ready(std::sync::Arc::new(Here));
+            assert!(matches!(route(settings::Where::Off, &slot), Route::NotReady));
         }
 
         #[test]

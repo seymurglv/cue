@@ -74,6 +74,17 @@ impl Instructions {
         me
     }
 
+    /// Once `instructions.md` exists the old custom text in the settings is no longer needed: clears it and says
+    /// whether it did, so the caller writes the settings without it. While the file could not be written the text
+    /// stays in settings.json for the next start.
+    pub fn settle_legacy(settings: &mut cue_core::settings::Settings, paths: &Paths) -> bool {
+        if settings.refine.legacy_custom.is_none() || !paths.instructions().is_file() {
+            return false;
+        }
+        settings.refine.legacy_custom = None;
+        true
+    }
+
     /// The instructions for the next request: the file's text, or the standard one while the file is unusable. A file
     /// saved since the last look is read again first (and the version CUE used until now is kept as the previous copy).
     pub fn text(&mut self) -> Cow<'_, str> {
@@ -246,6 +257,32 @@ mod tests {
         let d2 = Dir::new("migrate-blank");
         let mut blank = Instructions::load_or_create(&d2.paths(), "en", Some("  "));
         assert_eq!(blank.text(), BOLD_PROMPT);
+    }
+
+    /// The first write of the file fails and settings are saved: the old text is still in settings.json, and the next
+    /// start writes the file from it.
+    #[test]
+    fn a_failed_first_write_keeps_the_old_text_in_settings() {
+        use cue_core::settings::{self, Settings};
+        let d = Dir::new("legacy-kept");
+        let p = d.paths();
+        let old = r#"{"refine":{"runs":"local","style":"custom","custom":"пиши коротко"}}"#;
+        let sp = p.instructions().with_file_name("settings-test.json");
+        std::fs::create_dir_all(p.instructions().parent().unwrap()).unwrap();
+        std::fs::write(&sp, old).unwrap();
+        let mut s: Settings = settings::load(&sp).unwrap();
+        // A folder where the file should be: the write fails.
+        std::fs::create_dir_all(p.instructions()).unwrap();
+        let _ = Instructions::load_or_create(&p, "en", s.refine.legacy_custom());
+        assert!(!Instructions::settle_legacy(&mut s, &p), "no file: the text is kept");
+        settings::save(&s, &sp).unwrap();
+        let mut next: Settings = settings::load(&sp).unwrap();
+        assert_eq!(next.refine.legacy_custom(), Some("пиши коротко"));
+        std::fs::remove_dir(p.instructions()).unwrap();
+        let _ = Instructions::load_or_create(&p, "en", next.refine.legacy_custom());
+        assert_eq!(read(&p.instructions()), "пиши коротко");
+        assert!(Instructions::settle_legacy(&mut next, &p));
+        assert_eq!(next.refine.legacy_custom(), None);
     }
 
     #[test]

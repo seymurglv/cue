@@ -72,9 +72,25 @@ pub struct RefineSettings {
     // Task 7: goes with the cloud path.
     #[serde(skip, default = "default_connection")]
     pub connection: String,
-    /// The text of the old custom style, read for the move into the instructions file; never written.
-    #[serde(skip)]
-    pub legacy_custom: Option<String>,
+    /// The text of the old custom style, read for the move into the instructions file. It is written back as the old
+    /// `style: "custom"` and `custom` until the runtime has seen `instructions.md` exist and clears it, so a failed
+    /// first write of that file never loses the user's text.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub legacy_custom: Option<LegacyCustom>,
+}
+
+/// The old custom style as settings.json held it: `{"style": "custom", "custom": text}`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LegacyCustom(pub String);
+
+impl Serialize for LegacyCustom {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut o = s.serialize_struct("LegacyCustom", 2)?;
+        o.serialize_field("style", "custom")?;
+        o.serialize_field("custom", &self.0)?;
+        o.end()
+    }
 }
 
 fn default_connection() -> String {
@@ -200,9 +216,21 @@ impl From<StoredRefine> for RefineSettings {
         });
         let agent = named(&s.agent).and_then(|id| AgentId::find(&id));
         // The models of earlier versions were per cloud connection; only an agent's entry stays.
-        let models = s.models.into_iter().filter(|(id, m)| AgentId::find(id).is_some() && !m.trim().is_empty()).collect();
+        // Validated as `apply` does: Codex and Grok keep only listed models other than their default, OpenCode any name
+        // of at most `MAX_MODEL_CHARS` characters.
+        let models = s
+            .models
+            .into_iter()
+            .filter_map(|(id, m)| {
+                let agent = AgentId::find(&id)?;
+                let m = m.trim();
+                let known = agent.models();
+                let ok = if known.is_empty() { m.chars().count() <= MAX_MODEL_CHARS } else { known.iter().skip(1).any(|(k, _)| *k == m) };
+                (!m.is_empty() && ok).then(|| (id, m.to_owned()))
+            })
+            .collect();
         let custom = s.custom.trim();
-        let legacy_custom = (named(&s.style).as_deref() == Some("custom") && !custom.is_empty()).then(|| custom.to_owned());
+        let legacy_custom = (named(&s.style).as_deref() == Some("custom") && !custom.is_empty()).then(|| LegacyCustom(custom.to_owned()));
         Self {
             where_,
             local,
@@ -256,7 +284,7 @@ impl RefineSettings {
 
     /// The text of the old custom style, when the file had one: read once to fill the instructions file, never written.
     pub fn legacy_custom(&self) -> Option<&str> {
-        self.legacy_custom.as_deref()
+        self.legacy_custom.as_ref().map(|l| l.0.as_str())
     }
 }
 
@@ -1495,7 +1523,9 @@ mod tests {
             "model":"claude-sonnet-5-5","level":"low","addresses":{"ollama":"http://x"},"models":{"openai":"gpt-6.1-terra"},
             "context_chars":300},"ask":{"model":"claude-opus-5-5"}}"#;
         std::fs::write(&p, old).unwrap();
-        let s = load(&p).unwrap();
+        let mut s = load(&p).unwrap();
+        // Until the instructions file exists the old text stays in the file; the runtime clears it afterwards.
+        s.refine.legacy_custom = None;
         save(&s, &p).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
         for absent in ["runs", "style", "custom", "connection", "model", "level", "addresses", "models", "legacy_custom"] {
@@ -1508,10 +1538,52 @@ mod tests {
         // Written once, read again: the same (the old text was for the instructions file, not for the next start).
         let again = load(&p).unwrap();
         assert_eq!((again.refine.where_, again.refine.context_chars, again.refine.legacy_custom()), (Where::Agent, 300, None));
-        let mut s = s;
         s.refine.legacy_custom = None;
         assert_eq!(again, s);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// One realistic file of an earlier version: what matters survives, and once the instructions file has the text
+    /// the saved file holds no old field.
+    #[test]
+    fn a_realistic_old_file_moves_over() {
+        let dir = tmp("realistic-old");
+        let p = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = r#"{"refine":{"runs":"local","local":"llm--qwen--qwen3-4b-gguf--q4_k_m","style":"custom","custom":" пиши коротко ",
+            "connection":"openai","models":{"openai":"gpt-6.1-terra"},"model":"x","context_chars":300},
+            "ask":{"model":"claude-opus-5-5","max_searches":4}}"#;
+        std::fs::write(&p, old).unwrap();
+        let mut s = load(&p).unwrap();
+        assert_eq!((s.refine.where_, s.refine.local.as_str()), (Where::Local, "llm--qwen--qwen3-4b-gguf--q4_k_m"));
+        assert_eq!((s.refine.legacy_custom(), s.refine.context_chars, s.ask.max_searches()), (Some("пиши коротко"), 300, 4));
+        // Saved before the instructions file exists: the text is still in the file and is found on the next start.
+        save(&s, &p).unwrap();
+        assert_eq!(load(&p).unwrap().refine.legacy_custom(), Some("пиши коротко"));
+        s.refine.legacy_custom = None;
+        save(&s, &p).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        for gone in ["runs", "style", "custom", "connection", "model", "models"] {
+            assert!(json["refine"].get(gone).is_none(), "refine.{gone}: {json}");
+        }
+        assert_eq!(json["ask"], serde_json::json!({ "max_searches": 4 }));
+        assert_eq!(json["refine"]["where"], "local");
+        let again = load(&p).unwrap();
+        assert_eq!((again.refine.where_, again.refine.local.as_str(), again.refine.legacy_custom()), (Where::Local, "llm--qwen--qwen3-4b-gguf--q4_k_m", None));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrated_agent_models_are_validated_like_apply() {
+        let s = read_refine(r#"{"refine":{"models":{"codex":"garbage","opencode":"x/y","grok":"grok-4.6"}}}"#);
+        assert_eq!(s.models.get("opencode").map(String::as_str), Some("x/y"));
+        assert_eq!(s.models.len(), 1, "an unlisted model and a default are dropped: {:?}", s.models);
+        let s = read_refine(r#"{"refine":{"models":{"codex":"gpt-6-sol","grok":"grok-4.5","opencode":"  "}}}"#);
+        assert_eq!(s.models.get("codex").map(String::as_str), Some("gpt-6-sol"));
+        assert_eq!(s.models.get("grok").map(String::as_str), Some("grok-4.5"));
+        assert_eq!(s.models.len(), 2);
+        let long = "m".repeat(201);
+        assert!(read_refine(&format!(r#"{{"refine":{{"models":{{"opencode":"{long}"}}}}}}"#)).models.is_empty());
     }
 
     #[test]
