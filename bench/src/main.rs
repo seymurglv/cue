@@ -311,7 +311,7 @@ fn refine_input(runs: &[SttRun]) -> Option<String> {
 /// timeout). Latency is the whole call.
 async fn refine_once(http: &reqwest::Client, key: &str, model: &str, raw: &str, ctx: &RefineContext, s: &Settings) -> RefineRun {
     let t0 = Instant::now();
-    let r = claude::refine(http, Some(key), model, raw, ctx, &s.dictionary, &s.refine).await;
+    let r = claude::refine(http, Some(key), model, raw, ctx, &s.dictionary, &s.refine, cue_core::refine::BOLD_PROMPT).await;
     let latency_ms = ms(t0.elapsed());
     let u = r.usage;
     RefineRun {

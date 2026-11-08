@@ -36,11 +36,11 @@ async fn main() -> anyhow::Result<()> {
 
     let ctx = RefineContext::new("Telegram Desktop", None, s.context_chars);
     let t0 = Instant::now();
-    let r = claude::refine(&http, Some(&key), MODEL, PHRASE, &ctx, &Default::default(), &s).await;
+    let r = claude::refine(&http, Some(&key), MODEL, PHRASE, &ctx, &Default::default(), &s, cue_core::refine::BOLD_PROMPT).await;
     println!("refine {:?} in {} ms: {}", r.outcome, t0.elapsed().as_millis(), tokens(&r.usage));
 
     let t0 = Instant::now();
-    let r = claude::translate(&http, Some(&key), MODEL, PHRASE, &ctx, &Default::default(), &s, "en").await;
+    let r = claude::translate(&http, Some(&key), MODEL, PHRASE, &ctx, &Default::default(), &s, cue_core::refine::BOLD_PROMPT, "en").await;
     println!("translate to en {:?} in {} ms: {}", r.outcome, t0.elapsed().as_millis(), tokens(&r.usage));
     Ok(())
 }

@@ -386,6 +386,14 @@ At its first start this version deletes the Soniox key of earlier versions from 
   prompt and the list together; editing the list costs one cache write. Entries are trimmed, and empty, multi-line,
   overlong (over 60 characters) and repeated ones are dropped, at most 200 kept. With no usable term the request is
   byte for byte the one without a dictionary. Recognition never gets the terms: the model takes no vocabulary.
+- The cleanup's style block is the text of `%APPDATA%\CUE\instructions.md` as it stands (`claude::system_blocks`,
+  `Job::Rewrite`), kept by `instructions::Instructions`. CUE writes the file when missing: the standard text in the
+  interface language (`cue_core::instructions::standard`: `refine::BOLD_PROMPT` in English, `BOLD_PROMPT_RU` in Russian),
+  or the old custom style's text once. The runtime asks for the text at every cleanup and warm-up; the file is looked at
+  most every 300 ms, read again when its modified time or length changed (the version used until then is kept as
+  `instructions.prev.md`), cut at 2 000 characters, and an empty, deleted or non-text file means the standard text. The
+  protocol (output format, the dictionary and habits blocks, the translation) stays in code. `AGENTS.md` beside the
+  file is CUE's own, rewritten when its first line `<!-- CUE <version> -->` is older than the app.
 - When the app is unknown (neither the query at the start of recording nor the one after the second press named it),
   the request carries `<app>unknown app</app>`.
 - The answer is used only when it is a complete `{"text": …}` object: a refusal, `max_tokens`, a timeout, a network

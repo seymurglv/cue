@@ -2,7 +2,7 @@
 use cue_core::flow::RefineOutcome;
 use cue_core::refine::{
     max_tokens, sanity_ok_with, strip_markup, habits_prompt, terms_prompt, tidy_list_items, timeout_ms, user_message, RefineContext, BOLD_PROMPT,
-    CUSTOM_PREAMBLE, SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
 };
 use cue_core::settings::{DictionarySettings, RefineSettings};
 use cue_core::translate::{self, translation_ok};
@@ -41,8 +41,8 @@ pub(crate) fn effort_for(model: &str) -> &'static str {
 pub enum Job {
     /// Clean up in the spoken language (dictation).
     Clean,
-    /// Clean up and turn spoken phrasing into written: CUE's own cleanup of a dictation ([`BOLD_PROMPT`]), or the user's
-    /// instructions in its place (the custom style).
+    /// Clean up and turn spoken phrasing into written: CUE's own cleanup of a dictation ([`BOLD_PROMPT`]) or the user's
+    /// instructions file in its place.
     Rewrite,
     /// Clean up and write in this language (a code of `cue_core::translate::LANGUAGES`).
     Translate(&'static str),
@@ -62,17 +62,17 @@ pub fn request_body(model: &str, raw: &str, ctx: &RefineContext, dict: &Dictiona
 /// plain dictation uses, so translating never writes a second cache. The answer may be longer in tokens than the speech
 /// (another alphabet), so the budget doubles.
 pub fn request_body_for(model: &str, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, job: Job) -> Value {
-    request_body_styled(model, raw, ctx, dict, job, None)
+    request_body_styled(model, raw, ctx, dict, job, BOLD_PROMPT)
 }
 
-/// [`request_body_for`] with the user's instructions (`custom`, the custom style) in place of CUE's own block.
-pub fn request_body_styled(model: &str, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, job: Job, custom: Option<&str>) -> Value {
+/// [`request_body_for`] with the cleanup's `instructions` (the instructions file) as the job's block.
+pub fn request_body_styled(model: &str, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, job: Job, instructions: &str) -> Value {
     let thinking = thinking_for(model);
     let budget = max_tokens(raw) + if thinking.is_none() { THINKING_HEADROOM } else { 0 };
     let mut v = json!({
         "model": model,
         "max_tokens": budget,
-        "system": system_blocks(dict, &ctx.habits, job, custom),
+        "system": system_blocks(dict, &ctx.habits, job, instructions),
         "messages": [{ "role": "user", "content": user_message(ctx, raw) }],
         "output_config": {
             "effort": effort_for(model),
@@ -98,9 +98,9 @@ pub fn request_body_styled(model: &str, raw: &str, ctx: &RefineContext, dict: &D
 
 /// The system blocks of a refine request: the prompt, the dictionary block ([`terms_prompt`]) with the cache mark on the
 /// last of them; then, for a cleanup, the habits block ([`habits_prompt`]); then the job's own block: CUE's cleanup
-/// ([`BOLD_PROMPT`]) or the user's instructions (`custom`), or the translation's. Everything after the mark changes
+/// (the `instructions`, the instructions file's text as given), or the translation's. Everything after the mark changes
 /// with the app or the job, so the cached prefix is always the same.
-pub(crate) fn system_blocks(dict: &DictionarySettings, habits: &[String], job: Job, custom: Option<&str>) -> Value {
+pub(crate) fn system_blocks(dict: &DictionarySettings, habits: &[String], job: Job, instructions: &str) -> Value {
     let mut system = match terms_prompt(&dict.terms, &dict.learned) {
         None => vec![json!({ "type": "text", "text": SYSTEM_PROMPT, "cache_control": { "type": "ephemeral" } })],
         Some(block) => vec![
@@ -116,8 +116,7 @@ pub(crate) fn system_blocks(dict: &DictionarySettings, habits: &[String], job: J
     match job {
         Job::Clean => {}
         Job::Rewrite => {
-            let block = custom.map_or_else(|| BOLD_PROMPT.to_owned(), |text| format!("{CUSTOM_PREAMBLE}{text}"));
-            system.push(json!({ "type": "text", "text": block }))
+            system.push(json!({ "type": "text", "text": instructions }))
         }
         Job::Translate(to) => system.push(json!({ "type": "text", "text": translate::instruction(to) })),
     }
@@ -256,6 +255,7 @@ pub struct RefineResult {
 /// One refine request. With no key, on a network failure, timeout, refusal or unusable response — the raw text.
 /// A failure writes one log line — the reason and the outcome: no raw text, no refined text, no response body.
 /// `dict` is the user's dictionary (`settings.dictionary`), see [`request_body`].
+#[allow(clippy::too_many_arguments)]
 pub async fn refine(
     http: &reqwest::Client,
     key: Option<&str>,
@@ -264,8 +264,9 @@ pub async fn refine(
     ctx: &RefineContext,
     dict: &DictionarySettings,
     s: &RefineSettings,
+    instructions: &str,
 ) -> RefineResult {
-    refine_at(API_URL, http, key, model, raw, ctx, dict, s, Job::Rewrite).await
+    refine_at(API_URL, http, key, model, raw, ctx, dict, s, instructions, Job::Rewrite).await
 }
 
 /// One translation request (spec 2 §5): the refine request with the translation block. Never "fails": on any problem
@@ -280,9 +281,10 @@ pub async fn translate(
     ctx: &RefineContext,
     dict: &DictionarySettings,
     s: &RefineSettings,
+    instructions: &str,
     to: &'static str,
 ) -> RefineResult {
-    refine_at(API_URL, http, key, model, raw, ctx, dict, s, Job::Translate(to)).await
+    refine_at(API_URL, http, key, model, raw, ctx, dict, s, instructions, Job::Translate(to)).await
 }
 
 /// Timeout headroom for a model whose thinking cannot be turned off (Opus 5.5): thinking runs before the response,
@@ -319,12 +321,13 @@ async fn refine_at(
     ctx: &RefineContext,
     dict: &DictionarySettings,
     s: &RefineSettings,
+    instructions: &str,
     job: Job,
 ) -> RefineResult {
     let Some(key) = key else {
         return raw_fallback(raw, RefineOutcome::RawKeyProblem, Usage::default(), "no Anthropic key");
     };
-    let body = request_body_styled(model, raw, ctx, dict, job, s.custom_text());
+    let body = request_body_styled(model, raw, ctx, dict, job, instructions);
     let timeout = request_timeout_ms(model, raw, job);
     // A timeout, a network failure or an overloaded service is asked once more, with twice the time: the raw text is
     // pasted only when the second request fails too.
@@ -738,22 +741,22 @@ mod tests {
         assert_eq!(request_timeout_ms("claude-sonnet-5-5", "ну привет", Job::Rewrite), timeout_ms("ну привет"));
     }
 
-    /// The custom style puts the user's instructions where CUE's own block goes, after the cache mark; a translation
-    /// is the same in either style.
+    /// The instructions file's text is the job's block as given, after the cache mark; a translation is the same
+    /// whatever the instructions say.
     #[test]
-    fn custom_instructions_take_the_bold_block_s_place() {
+    fn the_instructions_are_the_cleanup_block_as_given() {
         for t in [&dict(&[]), &dict(&["Soniox"])] {
             let bold = request_body_for("claude-haiku-5-5", "ну привет", &ctx(), t, Job::Rewrite);
-            let custom = request_body_styled("claude-haiku-5-5", "ну привет", &ctx(), t, Job::Rewrite, Some("пиши коротко"));
+            let custom = request_body_styled("claude-haiku-5-5", "ну привет", &ctx(), t, Job::Rewrite, "пиши коротко");
             let mut system = bold["system"].as_array().unwrap().clone();
-            *system.last_mut().unwrap() = json!({ "type": "text", "text": format!("{CUSTOM_PREAMBLE}пиши коротко") });
+            *system.last_mut().unwrap() = json!({ "type": "text", "text": "пиши коротко" });
             assert_eq!(custom["system"], json!(system));
             let mut rest = custom.clone();
             rest["system"] = bold["system"].clone();
             assert_eq!(rest, bold, "nothing else changes");
             let to_en = Job::Translate("en");
             let translation = request_body_for("claude-haiku-5-5", "ну привет", &ctx(), t, to_en);
-            assert_eq!(request_body_styled("claude-haiku-5-5", "ну привет", &ctx(), t, to_en, Some("пиши коротко")), translation);
+            assert_eq!(request_body_styled("claude-haiku-5-5", "ну привет", &ctx(), t, to_en, "пиши коротко"), translation);
         }
     }
 
@@ -808,7 +811,7 @@ mod tests {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let (logs, _guard) = capture_logs();
         let url = format!("{}/v1/messages", api.base);
-        let r = refine_at(&url, &http, key, "claude-haiku-5-5", raw, &ctx(), &Default::default(), &RefineSettings::default(), job).await;
+        let r = refine_at(&url, &http, key, "claude-haiku-5-5", raw, &ctx(), &Default::default(), &RefineSettings::default(), BOLD_PROMPT, job).await;
         let lines = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::claude")).cloned().collect();
         (r, lines, api)
     }
@@ -860,7 +863,7 @@ mod tests {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let url = format!("{}/v1/messages", api.base);
         let terms = dict(&["Soniox"]);
-        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", RAW, &ctx(), &terms, &RefineSettings::default(), Job::Clean).await;
+        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", RAW, &ctx(), &terms, &RefineSettings::default(), BOLD_PROMPT, Job::Clean).await;
         assert_eq!(r.outcome, RefineOutcome::Refined);
         assert_eq!(api.body(0), serde_json::to_vec(&request_body("claude-haiku-5-5", RAW, &ctx(), &terms)).unwrap());
     }
@@ -871,9 +874,9 @@ mod tests {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let url = format!("{}/v1/messages", api.base);
         let s = RefineSettings::default();
-        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", "открой гитхаб", &ctx(), &dict(&["GitHub"]), &s, Job::Clean).await;
+        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", "открой гитхаб", &ctx(), &dict(&["GitHub"]), &s, BOLD_PROMPT, Job::Clean).await;
         assert_eq!((r.text.as_str(), r.outcome), ("Открой GitHub.", RefineOutcome::Refined));
-        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", "открой гитхаб", &ctx(), &Default::default(), &s, Job::Clean).await;
+        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", "открой гитхаб", &ctx(), &Default::default(), &s, BOLD_PROMPT, Job::Clean).await;
         assert_eq!((r.text.as_str(), r.outcome), ("открой гитхаб", RefineOutcome::RawFallback));
     }
 
@@ -993,7 +996,7 @@ mod tests {
         let url = format!("{}/v1/messages", api.base);
         let (s, raw, job) = (RefineSettings::default(), "кубернетес и докер", Job::Translate("en"));
         let terms = dict(&["Kubernetes", "Docker"]);
-        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", raw, &ctx(), &terms, &s, job).await;
+        let r = refine_at(&url, &http, Some(KEY), "claude-haiku-5-5", raw, &ctx(), &terms, &s, BOLD_PROMPT, job).await;
         assert_eq!((r.text.as_str(), r.outcome), (raw, RefineOutcome::RawFallback));
     }
 

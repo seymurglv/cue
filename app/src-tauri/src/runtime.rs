@@ -108,6 +108,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
 use crate::card_window::Card;
+use crate::instructions::Instructions;
 use crate::ipc::{CardPlaceView, EntryView, SettingsView, Ui};
 use crate::lang::{self, Lang};
 use crate::paths::Paths;
@@ -267,6 +268,8 @@ pub struct Runtime {
     /// window).
     lang: Lang,
     paths: Paths,
+    /// The cleanup's instructions file (`instructions.md`): what every cleanup request gets as its style block.
+    instructions: Instructions,
     history: HistoryLog,
     /// One client for the whole app (refine, batch transcription, warm-up): a shared connection pool.
     http: reqwest::Client,
@@ -394,6 +397,7 @@ impl Runtime {
         let translate_home = pair_now(&settings);
         let model = ModelKeeper::new(paths.models.clone(), &settings.stt.model);
         let llm = llm::LlmKeeper::new(paths.models.clone(), &settings.refine.local, settings.refine.runs == settings::Runs::Local);
+        let instructions = Instructions::load_or_create(&paths, lang.code(), settings.refine.custom_text());
         let history = HistoryLog::new(paths.history.clone(), Recordings::new(paths.history_audio.clone()));
         // Alt picks "Ask" only when it is on (spec 2 §9); the hook reads the switch on every key.
         hook::ASK_ENABLED.store(settings.ask.enabled(), Ordering::Relaxed);
@@ -409,6 +413,7 @@ impl Runtime {
             translate_home,
             lang,
             paths,
+            instructions,
             history,
             http: reqwest::Client::new(),
             focus: Arc::new(FocusWorker::spawn()),
@@ -789,7 +794,8 @@ impl Runtime {
                     self.send_settings();
                     // The first dictation after a load would otherwise evaluate CUE's whole system part.
                     if let Some(g) = self.llm.slot().get() {
-                        local::warm(g, &self.settings.dictionary, &[], &self.settings.refine);
+                        let text = self.instructions.text();
+                        local::warm(g, &self.settings.dictionary, &[], &text);
                     }
                 }
                 self.ui.llms(&self.llm.view());
@@ -852,6 +858,7 @@ impl Runtime {
             tracing::info!(lang = lang.code(), setting = ?s.ui.language, "interface language");
             if lang != self.lang {
                 self.lang = lang;
+                self.instructions.set_lang(lang.code());
                 self.ui.relang(lang);
             }
         }
@@ -1554,7 +1561,7 @@ impl Runtime {
 
     /// Warms the local model for a dictation just started on this computer: the cleanup's system part, with this app's
     /// habits, is evaluated while the person speaks. A translation and "Ask" have other prompts.
-    fn warm_local(&self) {
+    fn warm_local(&mut self) {
         if self.settings.refine.runs != settings::Runs::Local || self.flow.mode() != Mode::Dictate {
             return;
         }
@@ -1564,7 +1571,7 @@ impl Runtime {
         } else {
             Vec::new()
         };
-        local::warm(g, &self.settings.dictionary, &habits, &self.settings.refine);
+        local::warm(g, &self.settings.dictionary, &habits, &self.instructions.text());
     }
 
     /// Warms the "Ask" prompt cache at its chord when it may have expired (spec 2 §6.3): its own prefix — the tools and
@@ -1658,6 +1665,8 @@ impl Runtime {
         };
         let ctx = ctx.with_habits(&sent);
         let dict = self.settings.dictionary.clone();
+        // A change saved in the instructions file is taken here, at the dictation after it.
+        let instructions = self.instructions.text().into_owned();
         // What the engines get, and what is pasted when none works: the text with the basics done (`raw_text` keeps the
         // text as heard).
         let raw = basics::tidy(&raw, &dict);
@@ -1679,20 +1688,20 @@ impl Runtime {
                     };
                     if let Some(g) = here {
                         return match (g, job) {
-                            (Some(g), Job::Clean | Job::Rewrite) => local::refine(g, &raw, &ctx, &dict, &s).await,
-                            (Some(g), Job::Translate(to)) => local::translate(g, &raw, &ctx, &dict, &s, to).await,
+                            (Some(g), Job::Clean | Job::Rewrite) => local::refine(g, &raw, &ctx, &dict, &s, &instructions).await,
+                            (Some(g), Job::Translate(to)) => local::translate(g, &raw, &ctx, &dict, &s, &instructions, to).await,
                             (None, _) => local::not_ready(&raw),
                         };
                     }
                     match (kind, job) {
-                        (Kind::Anthropic, Job::Clean | Job::Rewrite) => claude::refine(&http, key, s.model().id, &raw, &ctx, &dict, &s).await,
+                        (Kind::Anthropic, Job::Clean | Job::Rewrite) => claude::refine(&http, key, s.model().id, &raw, &ctx, &dict, &s, &instructions).await,
                         (Kind::Anthropic, Job::Translate(to)) => {
-                            claude::translate(&http, key, s.model().id, &raw, &ctx, &dict, &s, to).await
+                            claude::translate(&http, key, s.model().id, &raw, &ctx, &dict, &s, &instructions, to).await
                         }
-                        (Kind::OpenRouter, Job::Clean | Job::Rewrite) => openrouter::refine(&http, key, &raw, &ctx, &dict, &s).await,
-                        (Kind::OpenRouter, Job::Translate(to)) => openrouter::translate(&http, key, &raw, &ctx, &dict, &s, to).await,
-                        (Kind::Chat, Job::Clean | Job::Rewrite) => chat::refine(&http, key, &raw, &ctx, &dict, &s).await,
-                        (Kind::Chat, Job::Translate(to)) => chat::translate(&http, key, &raw, &ctx, &dict, &s, to).await,
+                        (Kind::OpenRouter, Job::Clean | Job::Rewrite) => openrouter::refine(&http, key, &raw, &ctx, &dict, &s, &instructions).await,
+                        (Kind::OpenRouter, Job::Translate(to)) => openrouter::translate(&http, key, &raw, &ctx, &dict, &s, &instructions, to).await,
+                        (Kind::Chat, Job::Clean | Job::Rewrite) => chat::refine(&http, key, &raw, &ctx, &dict, &s, &instructions).await,
+                        (Kind::Chat, Job::Translate(to)) => chat::translate(&http, key, &raw, &ctx, &dict, &s, &instructions, to).await,
                     }
                 };
                 let result = guarded("refine", body, move || refine_panicked(fallback_raw)).await;

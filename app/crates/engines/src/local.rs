@@ -57,8 +57,8 @@ async fn answer(llm: Arc<dyn Generate>, system: String, user: String, grammar: &
 /// Evaluates the cleanup's system part for a dictation just started, with the habits it will send, while the person
 /// speaks: its cleanup then pays only for its own words. In the background; a cleanup waits for it and goes on from
 /// what it evaluated.
-pub fn warm(llm: Arc<dyn Generate>, dict: &DictionarySettings, habits: &[String], s: &RefineSettings) {
-    let system = chat::system_text(dict, habits, Job::Rewrite, s.custom_text());
+pub fn warm(llm: Arc<dyn Generate>, dict: &DictionarySettings, habits: &[String], instructions: &str) {
+    let system = chat::system_text(dict, habits, Job::Rewrite, instructions);
     let deadline = Instant::now() + WARM_FOR;
     tokio::task::spawn_blocking(move || llm.warm(&system, deadline, &AtomicBool::new(false)));
 }
@@ -68,9 +68,9 @@ pub fn not_ready(raw: &str) -> RefineResult {
     claude::raw_fallback(raw, RefineOutcome::RawFallback, Usage::default(), "local model not ready")
 }
 
-/// One cleanup on this computer, in the style of `s`.
-pub async fn refine(llm: Arc<dyn Generate>, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, s: &RefineSettings) -> RefineResult {
-    run(llm, raw, ctx, dict, s, Job::Rewrite).await
+/// One cleanup on this computer, with the instructions file's text.
+pub async fn refine(llm: Arc<dyn Generate>, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, s: &RefineSettings, instructions: &str) -> RefineResult {
+    run(llm, raw, ctx, dict, s, instructions, Job::Rewrite).await
 }
 
 /// One translation into `to` on this computer.
@@ -80,16 +80,17 @@ pub async fn translate(
     ctx: &RefineContext,
     dict: &DictionarySettings,
     s: &RefineSettings,
+    instructions: &str,
     to: &'static str,
 ) -> RefineResult {
-    run(llm, raw, ctx, dict, s, Job::Translate(to)).await
+    run(llm, raw, ctx, dict, s, instructions, Job::Translate(to)).await
 }
 
 /// A dictation, a piece at a time ([`refine::pieces`]). A piece the model could not clean stays as said; once one runs
 /// out of time, the rest stays as said too, since the next would take as long. A translation is whole or not at all:
 /// a piece left in the language spoken fails it. A translation gets no text before the caret: a model on a processor
 /// writes it, translated, into its answer, where it cannot be found and cut.
-async fn run(llm: Arc<dyn Generate>, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, s: &RefineSettings, job: Job) -> RefineResult {
+async fn run(llm: Arc<dyn Generate>, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, s: &RefineSettings, instructions: &str, job: Job) -> RefineResult {
     let translating = matches!(job, Job::Translate(_));
     let plain;
     let ctx = if translating {
@@ -100,7 +101,7 @@ async fn run(llm: Arc<dyn Generate>, raw: &str, ctx: &RefineContext, dict: &Dict
     };
     let parts = refine::pieces(raw, PIECE_WORDS);
     if parts.len() < 2 {
-        return one(llm, raw, ctx, dict, s, job).await.0;
+        return one(llm, raw, ctx, dict, s, instructions, job).await.0;
     }
     let before = ctx.before_cursor.clone().unwrap_or_default();
     let (mut text, mut cleaned, mut late) = (String::new(), 0usize, false);
@@ -111,7 +112,7 @@ async fn run(llm: Arc<dyn Generate>, raw: &str, ctx: &RefineContext, dict: &Dict
         let r = if late || piece.is_empty() {
             RefineResult { text: piece.to_owned(), outcome: RefineOutcome::RawFallback, usage: Usage::default() }
         } else {
-            let (r, timed_out) = one(llm.clone(), piece, &pctx, dict, s, job).await;
+            let (r, timed_out) = one(llm.clone(), piece, &pctx, dict, s, instructions, job).await;
             late = timed_out;
             r
         };
@@ -135,13 +136,13 @@ async fn run(llm: Arc<dyn Generate>, raw: &str, ctx: &RefineContext, dict: &Dict
 const CONTEXT_CHARS: usize = 500;
 
 /// One request to the local model; `true` with it when it ran out of time.
-async fn one(llm: Arc<dyn Generate>, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, s: &RefineSettings, job: Job) -> (RefineResult, bool) {
+async fn one(llm: Arc<dyn Generate>, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, s: &RefineSettings, instructions: &str, job: Job) -> (RefineResult, bool) {
     let extra = match job {
         Job::Clean | Job::Rewrite => 0,
         Job::Translate(_) => translate::timeout_ms(raw) - refine::timeout_ms(raw),
     };
     let deadline = Instant::now() + Duration::from_millis(local_timeout_ms(raw) + extra);
-    let system = chat::system_text(dict, &ctx.habits, job, s.custom_text());
+    let system = chat::system_text(dict, &ctx.habits, job, instructions);
     let user = user_message(ctx, raw);
     match answer(llm, system, user, TEXT_GRAMMAR, deadline).await {
         Some(Ok(content)) => {
@@ -190,8 +191,7 @@ mod tests {
 
     use cue_core::connections::find;
     use cue_core::habits::{Draft, Form};
-    use cue_core::refine::user_message;
-    use cue_core::settings::RefineStyle;
+    use cue_core::refine::{user_message, BOLD_PROMPT};
 
     /// Stands for the model: records what it was asked and answers as it was told.
     struct Fake {
@@ -226,14 +226,14 @@ mod tests {
 
     #[tokio::test]
     async fn local_refine_sends_the_cloud_prompt() {
-        let s = RefineSettings { style: RefineStyle::Custom, custom: "пиши коротко".into(), ..RefineSettings::default() };
+        let s = RefineSettings::default();
         let dict = DictionarySettings { terms: vec!["GitHub".into()], ..Default::default() };
         let with = RefineContext { habits: vec!["No full stop".into()], ..ctx() };
         let fake = Fake::new(Ok(r#"{"text":"Ну, привет. Как дела?"}"#));
-        let r = refine(fake.clone(), RAW, &with, &dict, &s).await;
+        let r = refine(fake.clone(), RAW, &with, &dict, &s, "пиши коротко").await;
         assert_eq!(r.outcome, RefineOutcome::Refined);
         let (system, user, grammar, _) = fake.asked();
-        let cloud = crate::chat::request_body(find("openai").unwrap(), "gpt-6-luna", RAW, &with, &dict, Job::Rewrite, Some("пиши коротко"));
+        let cloud = crate::chat::request_body(find("openai").unwrap(), "gpt-6-luna", RAW, &with, &dict, Job::Rewrite, "пиши коротко");
         assert_eq!(system, cloud["messages"][0]["content"].as_str().unwrap(), "the same rules, dictionary, habits and style");
         assert_eq!(user, user_message(&with, RAW));
         assert_eq!(grammar, TEXT_GRAMMAR);
@@ -242,23 +242,23 @@ mod tests {
     #[tokio::test]
     async fn local_refine_checks_the_answer() {
         let s = RefineSettings::default();
-        let r = refine(Fake::new(Ok(r#"{"text":"Ну, привет. Как дела?"}"#)), RAW, &ctx(), &Default::default(), &s).await;
+        let r = refine(Fake::new(Ok(r#"{"text":"Ну, привет. Как дела?"}"#)), RAW, &ctx(), &Default::default(), &s, BOLD_PROMPT).await;
         assert_eq!((r.text.as_str(), r.outcome), ("Ну, привет. Как дела?", RefineOutcome::Refined));
         // A reply instead of the text: the raw text.
-        let r = refine(Fake::new(Ok(r#"{"text":"Конечно! Ну, привет. Как дела?"}"#)), RAW, &ctx(), &Default::default(), &s).await;
+        let r = refine(Fake::new(Ok(r#"{"text":"Конечно! Ну, привет. Как дела?"}"#)), RAW, &ctx(), &Default::default(), &s, BOLD_PROMPT).await;
         assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawFallback));
         // Broken JSON: the raw text.
-        let r = refine(Fake::new(Ok(r#"{"text":"Ну, при"#)), RAW, &ctx(), &Default::default(), &s).await;
+        let r = refine(Fake::new(Ok(r#"{"text":"Ну, при"#)), RAW, &ctx(), &Default::default(), &s, BOLD_PROMPT).await;
         assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawFallback));
         // The model failed: the raw text.
-        let r = refine(Fake::new(Err(EngineError::Llm("does not load".into()))), RAW, &ctx(), &Default::default(), &s).await;
+        let r = refine(Fake::new(Err(EngineError::Llm("does not load".into()))), RAW, &ctx(), &Default::default(), &s, BOLD_PROMPT).await;
         assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawFallback));
     }
 
     /// A small model's copy of the text before the cursor is not pasted twice.
     #[tokio::test]
     async fn local_refine_drops_a_copied_context() {
-        let r = refine(Fake::new(Ok(r#"{"text":"Вчера договорились. Ну, привет. Как дела?"}"#)), RAW, &ctx(), &Default::default(), &RefineSettings::default()).await;
+        let r = refine(Fake::new(Ok(r#"{"text":"Вчера договорились. Ну, привет. Как дела?"}"#)), RAW, &ctx(), &Default::default(), &RefineSettings::default(), BOLD_PROMPT).await;
         assert_eq!((r.text.as_str(), r.outcome), ("Ну, привет. Как дела?", RefineOutcome::Refined));
     }
 
@@ -304,7 +304,7 @@ mod tests {
     async fn a_long_dictation_is_cleaned_a_piece_at_a_time() {
         let raw = long_dictation();
         let echo = Arc::new(Echo { late: None, asked: Mutex::new(Vec::new()) });
-        let r = refine(echo.clone(), &raw, &ctx(), &Default::default(), &RefineSettings::default()).await;
+        let r = refine(echo.clone(), &raw, &ctx(), &Default::default(), &RefineSettings::default(), BOLD_PROMPT).await;
         assert_eq!(r.outcome, RefineOutcome::Refined);
         assert_eq!(r.text, raw, "the pieces are put back as they were parted");
         let asked = echo.asked.lock().unwrap();
@@ -317,7 +317,7 @@ mod tests {
     async fn after_a_piece_runs_out_of_time_the_rest_stays_as_said() {
         let raw = long_dictation();
         let echo = Arc::new(Echo { late: Some(1), asked: Mutex::new(Vec::new()) });
-        let r = refine(echo.clone(), &raw, &ctx(), &Default::default(), &RefineSettings::default()).await;
+        let r = refine(echo.clone(), &raw, &ctx(), &Default::default(), &RefineSettings::default(), BOLD_PROMPT).await;
         assert_eq!(r.outcome, RefineOutcome::Refined, "the first piece was cleaned");
         assert_eq!(r.text, raw);
         assert_eq!(echo.asked.lock().unwrap().len(), 2, "the third piece was not asked");
@@ -327,7 +327,7 @@ mod tests {
     async fn a_translation_with_a_piece_left_is_not_pasted() {
         let raw = long_dictation();
         let echo = Arc::new(Echo { late: Some(2), asked: Mutex::new(Vec::new()) });
-        let r = translate(echo, &raw, &ctx(), &Default::default(), &RefineSettings::default(), "en").await;
+        let r = translate(echo, &raw, &ctx(), &Default::default(), &RefineSettings::default(), BOLD_PROMPT, "en").await;
         assert_eq!((r.text.as_str(), r.outcome), (raw.as_str(), RefineOutcome::RawFallback));
     }
 
@@ -335,7 +335,7 @@ mod tests {
     async fn local_refine_stops_at_the_deadline() {
         let fake = Fake::new(Err(EngineError::Timeout));
         let before = Instant::now();
-        let r = refine(fake.clone(), RAW, &ctx(), &Default::default(), &RefineSettings::default()).await;
+        let r = refine(fake.clone(), RAW, &ctx(), &Default::default(), &RefineSettings::default(), BOLD_PROMPT).await;
         assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawFallback));
         let (.., deadline) = fake.asked();
         let expected = before + Duration::from_millis(local_timeout_ms(RAW));
@@ -351,20 +351,20 @@ mod tests {
 
     #[tokio::test]
     async fn local_refine_costs_nothing() {
-        let r = refine(Fake::new(Ok(r#"{"text":"Ну, привет. Как дела?"}"#)), RAW, &ctx(), &Default::default(), &RefineSettings::default()).await;
+        let r = refine(Fake::new(Ok(r#"{"text":"Ну, привет. Как дела?"}"#)), RAW, &ctx(), &Default::default(), &RefineSettings::default(), BOLD_PROMPT).await;
         assert_eq!(r.usage, Usage::default());
     }
 
     #[tokio::test]
     async fn local_translate_uses_the_translation_check() {
         let fake = Fake::new(Ok(r#"{"text":"Well, hi. How are you?"}"#));
-        let r = translate(fake.clone(), RAW, &ctx(), &Default::default(), &RefineSettings::default(), "en").await;
+        let r = translate(fake.clone(), RAW, &ctx(), &Default::default(), &RefineSettings::default(), BOLD_PROMPT, "en").await;
         assert_eq!((r.text.as_str(), r.outcome), ("Well, hi. How are you?", RefineOutcome::Refined));
         let (system, user, ..) = fake.asked();
         assert!(system.contains(&cue_core::translate::instruction("en")));
         assert!(!user.contains("<before_cursor>"), "a small model would write it, translated, into its answer");
         // A "translation" still in the speaker's alphabet fails the check.
-        let r = translate(Fake::new(Ok(r#"{"text":"Ну, привет. Как дела?"}"#)), RAW, &ctx(), &Default::default(), &RefineSettings::default(), "en").await;
+        let r = translate(Fake::new(Ok(r#"{"text":"Ну, привет. Как дела?"}"#)), RAW, &ctx(), &Default::default(), &RefineSettings::default(), BOLD_PROMPT, "en").await;
         assert_eq!(r.outcome, RefineOutcome::RawFallback);
     }
 
@@ -397,7 +397,7 @@ mod tests {
             ("so um I think we should move the meeting to thursday because uh friday is a holiday", english),
         ] {
             let started = Instant::now();
-            let r = refine(llm.clone(), raw, &ctx, &dict, &s).await;
+            let r = refine(llm.clone(), raw, &ctx, &dict, &s, BOLD_PROMPT).await;
             eprintln!("refine {:?} -> {:?} ({:?}, {} ms)", raw, r.text, r.outcome, started.elapsed().as_millis());
             if r.outcome != RefineOutcome::Refined {
                 fell_back.push(raw);
@@ -405,7 +405,7 @@ mod tests {
         }
         let raw = "привет давай созвонимся завтра в три";
         let started = Instant::now();
-        let r = translate(llm.clone(), raw, &ctx(), &dict, &s, "en").await;
+        let r = translate(llm.clone(), raw, &ctx(), &dict, &s, BOLD_PROMPT, "en").await;
         eprintln!("translate {:?} -> {:?} ({:?}, {} ms)", raw, r.text, r.outcome, started.elapsed().as_millis());
         if r.outcome != RefineOutcome::Refined {
             fell_back.push(raw);

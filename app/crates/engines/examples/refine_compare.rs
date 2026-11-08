@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
 use cue_core::flow::RefineOutcome;
-use cue_core::refine::{timeout_ms, RefineContext};
+use cue_core::refine::{timeout_ms, RefineContext, BOLD_PROMPT};
 use cue_core::settings::{DictionarySettings, Pricing, RefineSettings, RefineStyle};
 use cue_core::translate;
 use cue_engines::claude::{self, Job, Parsed};
@@ -306,8 +306,8 @@ fn ms(d: Duration) -> u64 {
 async fn direct_call(http: &reqwest::Client, key: &str, p: &Phrase, ctx: &RefineContext, dict: &DictionarySettings, s: &RefineSettings) -> Call {
     let t0 = Instant::now();
     let (r, timeout) = match p.to {
-        None => (claude::refine(http, Some(key), DIRECT, &p.raw, ctx, dict, s).await, timeout_ms(&p.raw)),
-        Some(to) => (claude::translate(http, Some(key), DIRECT, &p.raw, ctx, dict, s, to).await, translate::timeout_ms(&p.raw)),
+        None => (claude::refine(http, Some(key), DIRECT, &p.raw, ctx, dict, s, BOLD_PROMPT).await, timeout_ms(&p.raw)),
+        Some(to) => (claude::translate(http, Some(key), DIRECT, &p.raw, ctx, dict, s, BOLD_PROMPT, to).await, translate::timeout_ms(&p.raw)),
     };
     let total_ms = ms(t0.elapsed());
     let u = r.usage;
@@ -353,7 +353,7 @@ async fn router_call(
     dict: &DictionarySettings,
     s: &RefineSettings,
 ) -> Call {
-    let body = |r: Routing| openrouter::request_body_styled(id, profile, r, &p.raw, ctx, dict, Job::Rewrite, s.custom_text());
+    let body = |r: Routing| openrouter::request_body_styled(id, profile, r, &p.raw, ctx, dict, Job::Rewrite, BOLD_PROMPT);
     let routed = openrouter::complete_routed(http, key, *routing, ROUTER_TIMEOUT, body).await;
     let (result, used, elapsed) = (routed.result, routed.routing, ms(routed.elapsed));
     if result.is_ok() {

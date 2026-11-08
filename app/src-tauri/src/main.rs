@@ -3,6 +3,7 @@
 mod card_window;
 mod commands;
 mod drop_window;
+mod instructions;
 mod ipc;
 mod lang;
 mod logging;

@@ -42,6 +42,32 @@ impl Paths {
         Ok(Self::new(&appdata, &local))
     }
 
+    /// `%APPDATA%\CUE`, the folder of settings.json.
+    fn config_dir(&self) -> &Path {
+        self.settings.parent().unwrap_or_else(|| Path::new("."))
+    }
+
+    /// The cleanup's instructions, which the user or an AI edits (`cue_core::instructions`).
+    pub fn instructions(&self) -> PathBuf {
+        self.config_dir().join("instructions.md")
+    }
+
+    /// The version of the instructions CUE used before the last change.
+    pub fn instructions_prev(&self) -> PathBuf {
+        self.config_dir().join("instructions.prev.md")
+    }
+
+    /// CUE's note to an AI that edits the instructions; CUE owns it.
+    pub fn agents_md(&self) -> PathBuf {
+        self.config_dir().join("AGENTS.md")
+    }
+
+    /// The working folder of the agents CUE asks (`%LOCALAPPDATA%\CUE\agent`); created empty by whoever runs one.
+    #[allow(dead_code)] // used when an agent is asked
+    pub fn agent_dir(&self) -> PathBuf {
+        self.logs.parent().unwrap_or_else(|| Path::new(".")).join("agent")
+    }
+
     /// Audio of the attempt in progress. A successful dictation moves it to `last_wav`; after a failure it waits
     /// for "retry".
     pub fn current_wav(&self) -> PathBuf {
@@ -71,6 +97,15 @@ mod tests {
         assert_eq!(p.history, Path::new(r"C:\U\AppData\Local\CUE\history"));
         assert_eq!(p.history_audio, Path::new(r"C:\U\AppData\Local\CUE\history\audio"));
         assert_eq!(p.bench_recordings, Path::new(r"C:\U\AppData\Local\CUE\bench\recordings"));
+    }
+
+    #[test]
+    fn instructions_files_live_beside_settings() {
+        let p = Paths::new(Path::new(r"C:\U\AppData\Roaming"), Path::new(r"C:\U\AppData\Local"));
+        assert_eq!(p.instructions(), Path::new(r"C:\U\AppData\Roaming\CUE\instructions.md"));
+        assert_eq!(p.instructions_prev(), Path::new(r"C:\U\AppData\Roaming\CUE\instructions.prev.md"));
+        assert_eq!(p.agents_md(), Path::new(r"C:\U\AppData\Roaming\CUE\AGENTS.md"));
+        assert_eq!(p.agent_dir(), Path::new(r"C:\U\AppData\Local\CUE\agent"));
     }
 
     #[test]

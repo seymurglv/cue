@@ -5,6 +5,7 @@ pub mod connections;
 pub mod corrections;
 pub mod flow;
 pub mod habits;
+pub mod instructions;
 pub mod history;
 pub mod llm;
 pub mod model;

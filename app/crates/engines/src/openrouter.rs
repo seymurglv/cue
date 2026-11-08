@@ -204,10 +204,10 @@ pub fn request_body(model: &str, p: &Profile, routing: Routing, raw: &str, ctx: 
 /// [`request_body`] for a job: the system blocks of the Claude request for that job ([`claude::system_blocks`]), as they
 /// are with a cache mark, joined into one text without one; a translation doubles the budget, as for Claude.
 pub fn request_body_for(model: &str, p: &Profile, routing: Routing, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, job: Job) -> Value {
-    request_body_styled(model, p, routing, raw, ctx, dict, job, None)
+    request_body_styled(model, p, routing, raw, ctx, dict, job, cue_core::refine::BOLD_PROMPT)
 }
 
-/// [`request_body_for`] with the user's instructions (`custom`, the custom style) in place of CUE's own block.
+/// [`request_body_for`] with the cleanup's `instructions` (the instructions file) as the job's block.
 #[allow(clippy::too_many_arguments)]
 pub fn request_body_styled(
     model: &str,
@@ -217,13 +217,13 @@ pub fn request_body_styled(
     ctx: &RefineContext,
     dict: &DictionarySettings,
     job: Job,
-    custom: Option<&str>,
+    instructions: &str,
 ) -> Value {
     let mut budget = max_tokens(raw) + if p.reasoning.mandatory() { REASONING_HEADROOM } else { 0 };
     if let Job::Translate(_) = job {
         budget = claude::translation_budget(budget);
     }
-    let blocks = claude::system_blocks(dict, &ctx.habits, job, custom);
+    let blocks = claude::system_blocks(dict, &ctx.habits, job, instructions);
     let system = if p.cache_mark {
         blocks
     } else {
@@ -281,11 +281,12 @@ fn request_timeout_ms(p: &Profile, raw: &str, job: Job) -> u64 {
 
 /// One cleanup over OpenRouter, with the model picked for it and in the style of `s`. Like [`claude::refine`], it never "fails": with no
 /// key, on a failure, a refusal or an unusable answer the raw text comes back, with one log line of the reason.
-pub async fn refine(http: &reqwest::Client, key: Option<&str>, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, s: &RefineSettings) -> RefineResult {
-    refine_at(API_URL, http, key, raw, ctx, dict, s, Job::Rewrite).await
+pub async fn refine(http: &reqwest::Client, key: Option<&str>, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, s: &RefineSettings, instructions: &str) -> RefineResult {
+    refine_at(API_URL, http, key, raw, ctx, dict, s, instructions, Job::Rewrite).await
 }
 
 /// One translation over OpenRouter (see [`claude::translate`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn translate(
     http: &reqwest::Client,
     key: Option<&str>,
@@ -293,9 +294,10 @@ pub async fn translate(
     ctx: &RefineContext,
     dict: &DictionarySettings,
     s: &RefineSettings,
+    instructions: &str,
     to: &'static str,
 ) -> RefineResult {
-    refine_at(API_URL, http, key, raw, ctx, dict, s, Job::Translate(to)).await
+    refine_at(API_URL, http, key, raw, ctx, dict, s, instructions, Job::Translate(to)).await
 }
 
 /// A failure worth a second request: no answer (network, timeout, a stream cut or failed midway) or the service failed
@@ -325,6 +327,7 @@ async fn refine_at(
     ctx: &RefineContext,
     dict: &DictionarySettings,
     s: &RefineSettings,
+    instructions: &str,
     job: Job,
 ) -> RefineResult {
     let Some(key) = key else {
@@ -333,7 +336,7 @@ async fn refine_at(
     let model = s.model_for("openrouter").id;
     let p = model_profile(model);
     let timeout = request_timeout_ms(&p, raw, job);
-    let body = |routing| request_body_styled(model, &p, routing, raw, ctx, dict, job, s.custom_text());
+    let body = |routing| request_body_styled(model, &p, routing, raw, ctx, dict, job, instructions);
     // As for Claude: a failure worth it is asked once more, with twice the time.
     let mut why = String::new();
     let mut last = None;
@@ -766,7 +769,6 @@ mod tests {
     use super::*;
     use crate::testing::{capture_logs, fake_api, reply, Reply};
     use cue_core::refine::{terms_prompt, BOLD_PROMPT, SYSTEM_PROMPT};
-    use cue_core::settings::RefineStyle;
 
     fn dict(terms: &[&str]) -> DictionarySettings {
         DictionarySettings { terms: terms.iter().map(|t| t.to_string()).collect(), ..Default::default() }
@@ -1405,7 +1407,7 @@ mod tests {
         let api = fake_api(route).await;
         let (logs, _guard) = capture_logs();
         let url = format!("{}/api/v1/chat/completions", api.base);
-        let r = refine_at(&url, &http(), key, RAW, &ctx(), &Default::default(), &s, job).await;
+        let r = refine_at(&url, &http(), key, RAW, &ctx(), &Default::default(), &s, BOLD_PROMPT, job).await;
         let lines = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::")).cloned().collect();
         (r, lines, api)
     }
@@ -1440,18 +1442,15 @@ mod tests {
     #[tokio::test]
     async fn refine_sends_the_picked_model_and_the_style_s_block() {
         for model in ["anthropic/claude-haiku-5.5", "anthropic/claude-sonnet-5.5", "openai/gpt-6-luna"] {
-            for custom in [None, Some("пиши коротко")] {
+            for instructions in [BOLD_PROMPT, "пиши коротко"] {
                 let api = fake_api(|_, _, _| Reply::Send(200, answer("Ну, привет. Как дела?"), "")).await;
                 let url = format!("{}/api/v1/chat/completions", api.base);
-                let mut s = picked(model);
-                if let Some(text) = custom {
-                    (s.style, s.custom) = (RefineStyle::Custom, text.into());
-                }
-                let r = refine_at(&url, &http(), Some(KEY), RAW, &ctx(), &Default::default(), &s, Job::Rewrite).await;
+                let s = picked(model);
+                let r = refine_at(&url, &http(), Some(KEY), RAW, &ctx(), &Default::default(), &s, instructions, Job::Rewrite).await;
                 assert_eq!(r.outcome, RefineOutcome::Refined, "{model}");
                 let sent: Value = serde_json::from_slice(&api.body(0)).unwrap();
                 assert_eq!(sent["model"], model);
-                let expected = request_body_styled(model, &model_profile(model), Routing::STRICT, RAW, &ctx(), &Default::default(), Job::Rewrite, custom);
+                let expected = request_body_styled(model, &model_profile(model), Routing::STRICT, RAW, &ctx(), &Default::default(), Job::Rewrite, instructions);
                 assert_eq!(sent, expected);
             }
         }

@@ -26,14 +26,14 @@ const CACHE_NAME: &str = "cue-cleanup";
 
 
 /// The system blocks Claude gets, joined into one system message: what a chat service and the local model read.
-pub(crate) fn system_text(dict: &DictionarySettings, habits: &[String], job: Job, custom: Option<&str>) -> String {
-    let blocks = claude::system_blocks(dict, habits, job, custom);
+pub(crate) fn system_text(dict: &DictionarySettings, habits: &[String], job: Job, instructions: &str) -> String {
+    let blocks = claude::system_blocks(dict, habits, job, instructions);
     let texts: Vec<&str> = blocks.as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect();
     texts.join("\n\n")
 }
 
 /// The request body for the connection `c` and its model `model`: the system blocks Claude gets, joined into one system
-/// message (`custom` — the custom style's instructions), the transcript, a streamed answer in the `{"text": …}` object.
+/// message (`instructions`, the instructions file's text), the transcript, a streamed answer in the `{"text": …}` object.
 #[allow(clippy::too_many_arguments)]
 pub fn request_body(
     c: &Connection,
@@ -42,13 +42,13 @@ pub fn request_body(
     ctx: &RefineContext,
     dict: &DictionarySettings,
     job: Job,
-    custom: Option<&str>,
+    instructions: &str,
 ) -> Value {
     let mut budget = max_tokens(raw) + if c.reasons { REASONING_HEADROOM } else { 0 };
     if let Job::Translate(_) = job {
         budget = claude::translation_budget(budget);
     }
-    let mut system = system_text(dict, &ctx.habits, job, custom);
+    let mut system = system_text(dict, &ctx.habits, job, instructions);
     if c.answer == Answer::Object {
         system = format!("{system}\n\n{OBJECT_NOTE}");
     }
@@ -112,12 +112,13 @@ pub(crate) fn post(http: &reqwest::Client, c: &Connection, address: &str, key: &
 }
 
 /// One cleanup over the connection and model of `s`, in its style.
-pub async fn refine(http: &reqwest::Client, key: Option<&str>, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, s: &RefineSettings) -> RefineResult {
-    refine_job(http, key, s.connection().base_url, raw, ctx, dict, s, Job::Rewrite).await
+pub async fn refine(http: &reqwest::Client, key: Option<&str>, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, s: &RefineSettings, instructions: &str) -> RefineResult {
+    refine_job(http, key, s.connection().base_url, raw, ctx, dict, s, instructions, Job::Rewrite).await
 }
 
 /// [`refine`] against the service at `address` (tests point it at their own).
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn refine_at(
     http: &reqwest::Client,
     key: Option<&str>,
@@ -126,11 +127,13 @@ pub(crate) async fn refine_at(
     ctx: &RefineContext,
     dict: &DictionarySettings,
     s: &RefineSettings,
+    instructions: &str,
 ) -> RefineResult {
-    refine_job(http, key, address, raw, ctx, dict, s, Job::Rewrite).await
+    refine_job(http, key, address, raw, ctx, dict, s, instructions, Job::Rewrite).await
 }
 
 /// One translation over the connection and model of `s` (see [`claude::translate`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn translate(
     http: &reqwest::Client,
     key: Option<&str>,
@@ -138,9 +141,10 @@ pub async fn translate(
     ctx: &RefineContext,
     dict: &DictionarySettings,
     s: &RefineSettings,
+    instructions: &str,
     to: &'static str,
 ) -> RefineResult {
-    refine_job(http, key, s.connection().base_url, raw, ctx, dict, s, Job::Translate(to)).await
+    refine_job(http, key, s.connection().base_url, raw, ctx, dict, s, instructions, Job::Translate(to)).await
 }
 
 /// [`refine`] or [`translate`] against the service at `address`.
@@ -153,6 +157,7 @@ async fn refine_job(
     ctx: &RefineContext,
     dict: &DictionarySettings,
     s: &RefineSettings,
+    instructions: &str,
     job: Job,
 ) -> RefineResult {
     let c = s.connection();
@@ -163,7 +168,7 @@ async fn refine_job(
         }
     };
     let timeout = request_timeout_ms(c, raw, job);
-    let body = request_body(c, s.model().id, raw, ctx, dict, job, s.custom_text());
+    let body = request_body(c, s.model().id, raw, ctx, dict, job, instructions);
     // As for Claude: a failure worth it is asked once more, with twice the time.
     let mut why = String::new();
     let mut last = None;
@@ -203,8 +208,7 @@ mod tests {
     use super::*;
     use crate::testing::{capture_logs, fake_api, reply, Reply};
     use cue_core::connections::find;
-    use cue_core::refine::{BOLD_PROMPT, CUSTOM_PREAMBLE, SYSTEM_PROMPT};
-    use cue_core::settings::RefineStyle;
+    use cue_core::refine::{BOLD_PROMPT, SYSTEM_PROMPT};
 
     const KEY: &str = "sk-CHAT-TEST-0123456789";
     const RAW: &str = "ну привет как дела";
@@ -215,7 +219,7 @@ mod tests {
 
     fn body(id: &str, job: Job) -> Value {
         let c = find(id).unwrap();
-        request_body(c, c.recommended().id, RAW, &ctx(), &Default::default(), job, None)
+        request_body(c, c.recommended().id, RAW, &ctx(), &Default::default(), job, BOLD_PROMPT)
     }
 
     #[test]
@@ -261,8 +265,8 @@ mod tests {
     #[test]
     fn the_style_and_the_translation_blocks_are_claude_s() {
         let c = find("openai").unwrap();
-        let custom = request_body(c, "gpt-6-luna", RAW, &ctx(), &Default::default(), Job::Rewrite, Some("пиши коротко"));
-        assert_eq!(custom["messages"][0]["content"], format!("{SYSTEM_PROMPT}\n\n{CUSTOM_PREAMBLE}пиши коротко"));
+        let custom = request_body(c, "gpt-6-luna", RAW, &ctx(), &Default::default(), Job::Rewrite, "пиши коротко");
+        assert_eq!(custom["messages"][0]["content"], format!("{SYSTEM_PROMPT}\n\nпиши коротко"), "the instructions as given");
         let to_en = body("openai", Job::Translate("en"));
         assert_eq!(to_en["messages"][0]["content"], format!("{SYSTEM_PROMPT}\n\n{}", translate::instruction("en")));
         assert_eq!(to_en["max_completion_tokens"], u64::from(max_tokens(RAW)) * 2);
@@ -272,7 +276,7 @@ mod tests {
     fn habits_ride_in_the_system_message() {
         let c = find("openai").unwrap();
         let with = RefineContext { habits: vec!["No full stop".into()], ..ctx() };
-        let v = request_body(c, "gpt-6-luna", RAW, &with, &Default::default(), Job::Rewrite, None);
+        let v = request_body(c, "gpt-6-luna", RAW, &with, &Default::default(), Job::Rewrite, BOLD_PROMPT);
         let block = cue_core::refine::habits_prompt(&with.habits).unwrap();
         assert_eq!(v["messages"][0]["content"], format!("{SYSTEM_PROMPT}\n\n{block}\n\n{BOLD_PROMPT}"));
     }
@@ -316,9 +320,22 @@ mod tests {
     where
         F: Fn(&str, &str, usize) -> Reply + Send + Sync + 'static,
     {
+        run_as(id, key, s, BOLD_PROMPT, route).await
+    }
+
+    async fn run_as<F>(
+        id: &str,
+        key: Option<&str>,
+        s: impl FnOnce(RefineSettings) -> RefineSettings,
+        instructions: &str,
+        route: F,
+    ) -> (RefineResult, Vec<String>, crate::testing::FakeApi)
+    where
+        F: Fn(&str, &str, usize) -> Reply + Send + Sync + 'static,
+    {
         let api = fake_api(route).await;
         let (logs, _guard) = capture_logs();
-        let r = refine_at(&http(), key, &format!("{}/v1", api.base), RAW, &ctx(), &Default::default(), &s(over(id))).await;
+        let r = refine_at(&http(), key, &format!("{}/v1", api.base), RAW, &ctx(), &Default::default(), &s(over(id)), instructions).await;
         let lines = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::")).cloned().collect();
         (r, lines, api)
     }
@@ -346,18 +363,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refine_sends_the_picked_model_the_custom_style_and_the_service_s_header() {
+    async fn refine_sends_the_picked_model_the_instructions_and_the_service_s_header() {
         let pick = |mut s: RefineSettings| {
             s.models.insert("xai".into(), "grok-4.3".into());
-            (s.style, s.custom) = (RefineStyle::Custom, "пиши коротко".into());
             s
         };
-        let (r, _, api) = run("xai", Some(KEY), pick, |_, _, _| Reply::Send(200, answer("Ну, привет. Как дела?"), "")).await;
+        let (r, _, api) = run_as("xai", Some(KEY), pick, "пиши коротко", |_, _, _| Reply::Send(200, answer("Ну, привет. Как дела?"), "")).await;
         assert_eq!(r.outcome, RefineOutcome::Refined);
         let req = &api.seen()[0];
         assert_eq!(req.header("x-grok-conv-id"), [CACHE_NAME]);
         let sent: Value = serde_json::from_slice(&req.body).unwrap();
-        assert_eq!(sent, request_body(find("xai").unwrap(), "grok-4.3", RAW, &ctx(), &Default::default(), Job::Rewrite, Some("пиши коротко")));
+        assert_eq!(sent, request_body(find("xai").unwrap(), "grok-4.3", RAW, &ctx(), &Default::default(), Job::Rewrite, "пиши коротко"));
     }
 
     #[tokio::test]
