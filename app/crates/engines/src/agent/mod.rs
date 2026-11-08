@@ -14,12 +14,15 @@ pub mod opencode;
 pub mod process;
 pub mod refine;
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use cue_core::agents::AgentId;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 pub use discover::discover;
 
@@ -67,13 +70,25 @@ pub fn cwd(home: &Path, id: AgentId) -> PathBuf {
     home.join(id.id())
 }
 
-/// The file Codex reads CUE's fixed instructions from, in CUE's agent folder.
-pub const CODEX_INSTRUCTIONS: &str = "codex-instructions.md";
+/// The files Codex reads CUE's fixed instructions from are `codex-instructions-<hash>.md` in CUE's agent folder
+/// ([`codex_instructions`]): one per text, so a cleanup and a translation (or Ask) never share one, and no file
+/// changes under a running Codex.
+pub const CODEX_INSTRUCTIONS: &str = "codex-instructions";
 /// The file that holds Codex's answer to `{"text": …}`, in CUE's agent folder.
 pub const CODEX_SCHEMA: &str = "codex-schema.json";
 /// The answer CUE asks Codex for, as the cloud path asks for it.
 const ANSWER_SCHEMA: &str =
     r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}"#;
+
+/// `<home>\codex-instructions-<the first 16 hex digits of the text's SHA-256>.md`: the file for `text`.
+pub fn codex_instructions(home: &Path, text: &str) -> PathBuf {
+    let digest = Sha256::digest(text.as_bytes());
+    let hash = digest.iter().take(8).fold(String::with_capacity(16), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    });
+    home.join(format!("{CODEX_INSTRUCTIONS}-{hash}.md"))
+}
 
 /// How CUE asks the user's agent: OpenCode's server, or a CLI run once per request.
 #[derive(Clone, Debug)]
@@ -121,12 +136,18 @@ impl AgentClient {
 }
 
 /// One `codex exec`: CUE's fixed instructions and the answer's schema in files beside its working folder, the rest of
-/// the request on stdin, run off the async threads.
+/// the request on stdin, run off the async threads. A run that failed is never read for an answer: a half-written last
+/// message is not a cleanup.
 async fn codex(found: &Found, home: &Path, model: &str, p: &Prompt, timeout: Duration) -> Result<String, AgentFailure> {
-    let instructions = home.join(CODEX_INSTRUCTIONS);
+    let instructions = codex_instructions(home, &p.system);
     let schema = home.join(CODEX_SCHEMA);
-    write_if_changed(&instructions, &p.system)?;
-    write_if_changed(&schema, ANSWER_SCHEMA)?;
+    // Named after its text: a file that is there holds it.
+    if !instructions.is_file() {
+        write_whole(&instructions, &p.system)?;
+    }
+    if !std::fs::read(&schema).is_ok_and(|held| held == ANSWER_SCHEMA.as_bytes()) {
+        write_whole(&schema, ANSWER_SCHEMA)?;
+    }
     let args = cli::codex_args(model, &instructions, &schema);
     let (exe, stdin, cwd) = (found.exe.clone(), p.user.clone(), cwd(home, AgentId::Codex));
     let out = tokio::task::spawn_blocking(move || process::run(&exe, &args, &stdin, &cwd, timeout))
@@ -135,18 +156,27 @@ async fn codex(found: &Found, home: &Path, model: &str, p: &Prompt, timeout: Dur
     if cli::signed_out(AgentId::Codex, &out) {
         return Err(AgentFailure::SignedOut);
     }
+    if out.status != Some(0) {
+        return Err(AgentFailure::Failed("exit"));
+    }
     cli::codex_text(&out.stdout).filter(|t| !t.trim().is_empty()).ok_or(AgentFailure::Failed("no answer"))
 }
 
-/// Writes `text` to `path` unless it holds it already (Codex reads it at every run).
-fn write_if_changed(path: &Path, text: &str) -> Result<(), AgentFailure> {
-    if std::fs::read(path).is_ok_and(|held| held == text.as_bytes()) {
-        return Ok(());
+/// Writes `text` to `path` whole: under a temporary name in the same folder, then renamed into place, so a reader never
+/// sees half of it. A rename that fails while `path` holds `text` (another request wrote it meanwhile) is fine.
+fn write_whole(path: &Path, text: &str) -> Result<(), AgentFailure> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = path.parent().ok_or(AgentFailure::Failed("files"))?;
+    std::fs::create_dir_all(dir).map_err(|_| AgentFailure::Failed("files"))?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let temp = dir.join(format!(".{name}.{}-{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    if std::fs::write(&temp, text).and_then(|()| std::fs::rename(&temp, path)).is_err() {
+        let _ = std::fs::remove_file(&temp);
+        if !std::fs::read(path).is_ok_and(|held| held == text.as_bytes()) {
+            return Err(AgentFailure::Failed("files"));
+        }
     }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|_| AgentFailure::Failed("files"))?;
-    }
-    std::fs::write(path, text).map_err(|_| AgentFailure::Failed("files"))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -179,17 +209,37 @@ mod tests {
     }
 
     #[test]
-    fn a_file_is_written_only_when_it_changes() {
+    fn each_text_has_its_own_instructions_file() {
+        let home = Path::new(r"C:\U\AppData\Local\CUE\agent");
+        let clean = codex_instructions(home, "Clean.\n\nBold.");
+        let translate = codex_instructions(home, "Clean.");
+        assert_ne!(clean, translate, "a cleanup and a translation never share a file");
+        assert_eq!(clean, codex_instructions(home, "Clean.\n\nBold."));
+        assert_eq!(clean.parent(), Some(home));
+        let name = clean.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("codex-instructions-") && name.ends_with(".md") && name.len() == 19 + 16 + 3, "{name}");
+    }
+
+    #[tokio::test]
+    async fn an_instructions_file_that_is_there_is_not_rewritten() {
         let home = temp_dir("files");
-        let file = home.join(CODEX_INSTRUCTIONS);
-        write_if_changed(&file, "one").unwrap();
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "one");
-        let written = std::fs::metadata(&file).unwrap().modified().unwrap();
-        std::thread::sleep(Duration::from_millis(30));
-        write_if_changed(&file, "one").unwrap();
-        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), written, "the same text is not written again");
-        write_if_changed(&file, "two").unwrap();
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "two");
+        let p = Prompt { system: "Clean.".into(), user: "<transcript>hi</transcript>".into(), web_search: false };
+        let file = codex_instructions(&home, &p.system);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(&file, "already here").unwrap();
+        // Codex itself is missing: the run fails once the files are ready.
+        let found = Found { id: AgentId::Codex, exe: home.join("codex.exe"), version: None };
+        let c = AgentClient::Cli { found, home: home.clone() };
+        assert_eq!(c.complete("", &p, Duration::from_secs(5), None).await, Err(AgentFailure::NotInstalled));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "already here");
+        assert_eq!(std::fs::read_to_string(home.join(CODEX_SCHEMA)).unwrap(), ANSWER_SCHEMA);
+        // Another text gets a file of its own, written whole; no temporary file stays behind.
+        let other = Prompt { system: "Translate.".into(), ..p.clone() };
+        assert_eq!(c.complete("", &other, Duration::from_secs(5), None).await, Err(AgentFailure::NotInstalled));
+        assert_eq!(std::fs::read_to_string(codex_instructions(&home, "Translate.")).unwrap(), "Translate.");
+        let left: Vec<String> =
+            std::fs::read_dir(&home).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert!(!left.iter().any(|n| n.ends_with(".tmp")), "{left:?}");
         let _ = std::fs::remove_dir_all(&home);
     }
 }

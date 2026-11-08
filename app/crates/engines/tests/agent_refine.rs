@@ -8,7 +8,7 @@ use cue_core::flow::{AgentProblem, RefineOutcome};
 use cue_core::refine::{BOLD_PROMPT, RefineContext, SYSTEM_PROMPT, user_message};
 use cue_core::settings::{DictionarySettings, RefineSettings};
 use cue_engines::agent::refine::{self, KEEP_EVERY_SENTENCE};
-use cue_engines::agent::{AgentClient, Found};
+use cue_engines::agent::{AgentClient, Found, codex_instructions};
 use cue_engines::claude::Job;
 use serde_json::{Value, json};
 
@@ -51,10 +51,15 @@ fn says(text: &str) -> String {
 }
 
 fn codex(name: &str, a: Answer) -> Codex {
+    codex_at(name, "agent", a)
+}
+
+/// [`codex`] with CUE's agent folder at `<test folder>\<home>` (`home` may hold spaces and any letters).
+fn codex_at(name: &str, home: &str, a: Answer) -> Codex {
     let dir = std::env::temp_dir().join(format!("cue-agent-refine-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let home = dir.join("agent");
+    let home = dir.join(home);
     let (stdout, stderr, record) = (dir.join("stdout.txt"), dir.join("stderr.txt"), dir.join("record.json"));
     std::fs::write(&stdout, a.stdout).unwrap();
     std::fs::write(&stderr, a.stderr).unwrap();
@@ -84,6 +89,15 @@ impl Codex {
     /// What the fake got: its arguments, stdin and the files Codex reads.
     fn got(&self) -> Value {
         serde_json::from_str(&std::fs::read_to_string(&self.record).expect("the fake ran")).unwrap()
+    }
+
+    /// The instructions file the fake was pointed at, as the argument named it, and what the file holds now.
+    fn instructions(&self) -> (PathBuf, String) {
+        let args: Vec<String> = serde_json::from_value(self.got()["args"].clone()).unwrap();
+        let path = args.iter().find_map(|a| a.strip_prefix("model_instructions_file=")).expect("the -c argument");
+        let path = PathBuf::from(path);
+        let text = std::fs::read_to_string(&path).expect("the file is there");
+        (path, text)
     }
 }
 
@@ -135,7 +149,8 @@ async fn transcript_goes_in_user_message_on_stdin() {
     }
     // None of it in an argument, or in the instructions file Codex reads.
     let args: Vec<String> = serde_json::from_value(got["args"].clone()).unwrap();
-    let file = std::fs::read_to_string(c.home.join("codex-instructions.md")).unwrap();
+    let (path, file) = c.instructions();
+    assert_eq!(path, codex_instructions(&c.home, &file), "the file is named after its text, in CUE's agent folder");
     assert_eq!(got["instructions"], file.as_str(), "the file's path reached Codex through cmd.exe");
     for never in ["удали", "Zephyrine", "Без точки", "Привет, коллеги", "Obsidian-Q7"] {
         assert!(!args.iter().any(|a| a.contains(never)), "{never} in {args:?}");
@@ -189,6 +204,31 @@ async fn signed_out_is_raw_agent_signed_out() {
     assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawAgent(AgentProblem::SignedOut)));
 }
 
+/// A run that failed is never read for an answer, even when its last message looks like one.
+#[tokio::test]
+async fn a_failed_run_is_not_pasted() {
+    let c = codex("exit-1", Answer { stdout: &says(CLEAN), stderr: "panicked at codex.rs", exit: 1, sleep_ms: 0 });
+    let r = clean(&c, RAW, &ctx(), &Default::default()).await;
+    assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawFallback));
+}
+
+/// CUE's agent folder under a user name with a space and Cyrillic letters: the paths still reach Codex, through its
+/// `.cmd` shim, whole.
+#[tokio::test]
+async fn paths_with_spaces_and_cyrillic_reach_codex() {
+    let c = codex_at("unicode", r"Пользователь Тест\agent", Answer { stdout: &says(CLEAN), stderr: "", exit: 0, sleep_ms: 0 });
+    let r = clean(&c, RAW, &ctx(), &Default::default()).await;
+    assert_eq!((r.text.as_str(), r.outcome), (CLEAN, RefineOutcome::Refined));
+    let got = c.got();
+    let (path, file) = c.instructions();
+    assert!(path.to_string_lossy().contains("Пользователь Тест/agent/codex-instructions-"), "{path:?}");
+    assert_eq!(got["instructions"], file.as_str(), "the fake read the file the argument names");
+    assert!(file.starts_with(SYSTEM_PROMPT) && file.contains(BOLD_PROMPT));
+    let schema: Value = serde_json::from_str(got["schema"].as_str().expect("the schema file was read")).unwrap();
+    assert_eq!(schema["required"], json!(["text"]));
+    assert!(c.home.join("codex").is_dir(), "Codex ran in its folder under that name");
+}
+
 #[tokio::test]
 async fn missing_agent_is_raw_agent_missing() {
     let c = answering("missing", &says(CLEAN));
@@ -210,9 +250,15 @@ async fn translation_never_returns_untranslated_as_refined() {
     // The translation's instruction went on stdin, not into the instructions file.
     let stdin = c.got()["stdin"].as_str().unwrap().to_string();
     assert!(stdin.contains(&cue_core::translate::instruction("en")));
-    let file = std::fs::read_to_string(c.home.join("codex-instructions.md")).unwrap();
+    let (translating, file) = c.instructions();
     assert!(!file.contains("Translation is on"));
     assert!(!file.contains(BOLD_PROMPT), "a translation does not take the cleanup's instructions");
+    // A cleanup reads another file: the two never share one.
+    clean(&c, RAW, &ctx(), &Default::default()).await;
+    let (cleaning, file) = c.instructions();
+    assert_ne!(cleaning, translating);
+    assert!(file.contains(BOLD_PROMPT));
+    assert!(translating.is_file(), "the translation's file is left as it was");
 
     // A real translation is.
     let c = answering("translated", &says("Hi, how are you today?"));

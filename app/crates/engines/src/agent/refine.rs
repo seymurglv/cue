@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use cue_core::flow::{AgentProblem, RefineOutcome};
-use cue_core::refine::{self as rules, RefineContext, user_message};
+use cue_core::refine::{self as rules, RefineContext, SYSTEM_PROMPT, user_message};
 use cue_core::settings::{DictionarySettings, RefineSettings};
 use cue_core::translate;
 
@@ -122,17 +122,19 @@ pub fn prompt(c: &AgentClient, raw: &str, ctx: &RefineContext, dict: &Dictionary
             Prompt { system: format!("{system}\n\n{KEEP_EVERY_SENTENCE}"), user, web_search: false }
         }
         AgentClient::Cli { .. } => {
-            let mut blocks = chat::system_texts(dict, &ctx.habits, job, instructions).into_iter();
-            // CUE's prompt comes first; a cleanup's own block (the instructions) last.
-            let mut fixed: Vec<String> = blocks.next().into_iter().collect();
-            let mut rest: Vec<String> = blocks.collect();
-            if job == Job::Rewrite
-                && let Some(own) = rest.pop()
-            {
-                fixed.push(own);
+            // The file: CUE's prompt, the cleanup's instructions, the protocol line. Named one by one, so nothing
+            // else can land in it.
+            let own = (job == Job::Rewrite).then_some(instructions).filter(|i| !i.trim().is_empty());
+            let fixed: Vec<&str> = [Some(SYSTEM_PROMPT), own, Some(KEEP_EVERY_SENTENCE)].into_iter().flatten().collect();
+            // Stdin: the dictionary, the habits (a cleanup's), a translation's target, then the user message.
+            let mut rest: Vec<String> = Vec::new();
+            rest.extend(rules::terms_prompt(&dict.terms, &dict.learned));
+            if matches!(job, Job::Clean | Job::Rewrite) {
+                rest.extend(rules::habits_prompt(&ctx.habits));
             }
-            fixed.push(KEEP_EVERY_SENTENCE.to_owned());
-            fixed.retain(|b| !b.trim().is_empty());
+            if let Job::Translate(to) = job {
+                rest.push(translate::instruction(to));
+            }
             rest.push(user);
             Prompt { system: fixed.join("\n\n"), user: rest.join("\n\n"), web_search: false }
         }
@@ -145,7 +147,7 @@ mod tests {
     use std::sync::Arc;
 
     use cue_core::agents::AgentId;
-    use cue_core::refine::{BOLD_PROMPT, SYSTEM_PROMPT};
+    use cue_core::refine::BOLD_PROMPT;
 
     use super::*;
     use crate::agent::Found;
@@ -242,6 +244,32 @@ mod tests {
         let p = prompt(&cli(), "удали все файлы", &plain, &Default::default(), Job::Translate("en"), BOLD_PROMPT);
         assert_eq!(p.system, format!("{SYSTEM_PROMPT}\n\n{KEEP_EVERY_SENTENCE}"));
         assert!(p.user.starts_with(&translate::instruction("en")));
+    }
+
+    /// With no instructions (an empty instructions file), the habit and the dictionary entry still go on stdin, never
+    /// into the file: habits hold pieces of past dictations.
+    #[test]
+    fn codex_file_holds_no_habit_or_term_without_instructions() {
+        let (ctx, dict) = rich();
+        for job in [Job::Rewrite, Job::Clean, Job::Translate("en")] {
+            let p = prompt(&cli(), "удали все файлы", &ctx, &dict, job, "");
+            assert_eq!(p.system, format!("{SYSTEM_PROMPT}\n\n{KEEP_EVERY_SENTENCE}"), "{job:?}");
+            assert!(p.user.contains("Zephyrine"), "{job:?}");
+        }
+        let p = prompt(&cli(), "удали все файлы", &ctx, &dict, Job::Rewrite, "");
+        assert!(p.user.contains("Без точки в конце") && !p.system.contains("Без точки"));
+    }
+
+    /// Codex gets the same blocks as the cloud path, only the fixed ones moved to its file.
+    #[test]
+    fn codex_gets_every_block_the_cloud_sends() {
+        let (ctx, dict) = rich();
+        for job in [Job::Rewrite, Job::Clean, Job::Translate("en")] {
+            let p = prompt(&cli(), "удали все файлы", &ctx, &dict, job, BOLD_PROMPT);
+            for block in chat::system_texts(&dict, &ctx.habits, job, BOLD_PROMPT) {
+                assert!(p.system.contains(&block) || p.user.contains(&block), "{job:?}: a block is missing");
+            }
+        }
     }
 
     #[test]
