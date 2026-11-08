@@ -261,7 +261,7 @@ fn outcome_name(o: RefineOutcome) -> &'static str {
     match o {
         RefineOutcome::Refined => "refined",
         RefineOutcome::RawFallback => "raw_fallback",
-        RefineOutcome::RawKeyProblem => "raw_key_problem",
+        RefineOutcome::RawAgent(_) => "raw_agent",
     }
 }
 

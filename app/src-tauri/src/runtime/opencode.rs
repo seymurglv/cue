@@ -50,7 +50,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl OpenCodeSlot {
     /// The slot for this computer: the user's server from OpenCode's state folder, else `opencode serve` started in
-    /// `cwd` (`%LOCALAPPDATA%\CUE\agent`, the agents' empty folder).
+    /// `cwd` (`%LOCALAPPDATA%\CUE\agent\opencode`, its own empty folder: `agent::cwd`).
     pub fn new(cwd: PathBuf) -> Arc<Self> {
         let dir = cwd.clone();
         let find: Finder = Box::new(move || opencode::state_dir().and_then(|s| Server::announced(&s, &dir)));

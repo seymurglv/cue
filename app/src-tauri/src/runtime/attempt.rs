@@ -447,7 +447,7 @@ mod tests {
         a.stt_done(SttPath::Local, 1_200);
         a.speech_language = Some("ru".into());
         a.refine_started(1_200);
-        a.refine_done(usage(80, 8), RefineOutcome::RawKeyProblem, 1_300);
+        a.refine_done(usage(80, 8), RefineOutcome::RawAgent(cue_core::flow::AgentProblem::SignedOut), 1_300);
         a.retry(5_000);
         let r = a.record(Outcome::Failed, "t".into(), &s);
         assert_eq!((r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens), (0, 0, 0, 0));
@@ -712,9 +712,9 @@ mod tests {
         assert!(!line.contains("Secret"), "the app is never written to the log: {line}");
 
         a.refine_started(1_287);
-        a.refine_done(usage(1, 1), RefineOutcome::RawKeyProblem, 1_900);
+        a.refine_done(usage(1, 1), RefineOutcome::RawAgent(cue_core::flow::AgentProblem::SignedOut), 1_900);
         let line = logged(Outcome::Failed, &a);
-        assert!(line.contains("refine_ms=613") && line.contains("refine=RawKeyProblem"), "{line}");
+        assert!(line.contains("refine_ms=613") && line.contains("refine=RawAgent(SignedOut)"), "{line}");
         assert!(!line.contains("web_searches"), "a dictation searches nothing: {line}");
     }
 

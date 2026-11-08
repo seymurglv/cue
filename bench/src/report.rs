@@ -13,7 +13,7 @@ pub struct SttRun {
     pub error: Option<String>,
 }
 
-/// `outcome` is the `RefineOutcome` name (`Refined`, `RawFallback`, `RawKeyProblem`); if it is not `Refined`, `text`
+/// `outcome` is the `RefineOutcome` name (`Refined`, `RawFallback`, `RawAgent(SignedOut)`, …); if it is not `Refined`, `text`
 /// holds the raw text, exactly what the app would have pasted. Tokens relate latency to the length of the answer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RefineRun {

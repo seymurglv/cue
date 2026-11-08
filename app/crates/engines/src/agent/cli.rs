@@ -1,19 +1,41 @@
 //! Codex's and Grok's command lines and answers, as checked on codex-cli 0.166.0 and grok 1.0.34 (the evidence is in
 //! `tests/fixtures/agents/README.md`). The text never appears here: it goes on stdin (`process::run`).
+use std::path::Path;
+
 use cue_core::agents::AgentId;
 use serde_json::Value;
 
 use super::process::Output;
 
-/// Codex features that hand the model a tool: the shell (`exec_command`, `write_stdin`), images, apps and plugins
-/// (connectors), the browser and computer use. With them off the model sees no tool that runs, reads or fetches.
-const CODEX_TOOLS_OFF: [&str; 8] =
-    ["shell_tool", "unified_exec", "view_image", "apps", "plugins", "browser_use", "computer_use", "image_generation"];
+/// Codex features that hand the model a tool or more turns: the shell (`exec_command`, `write_stdin`), images, apps and
+/// plugins (connectors), the browser and computer use; subagents, goals, the sleep tool, hooks, skill search, tool
+/// suggestions, the code-mode host and workspace dependencies. With them off the model sees no tool that runs, reads or
+/// fetches, and a short cleanup costs about 6,500 input tokens instead of 10,600 (measured 09.11.2026).
+const CODEX_TOOLS_OFF: [&str; 16] = [
+    "shell_tool",
+    "unified_exec",
+    "view_image",
+    "apps",
+    "plugins",
+    "browser_use",
+    "computer_use",
+    "image_generation",
+    "multi_agent",
+    "goals",
+    "sleep_tool",
+    "hooks",
+    "skill_search",
+    "tool_suggest",
+    "code_mode_host",
+    "workspace_dependencies",
+];
 
 /// `codex exec` reading the prompt from stdin (`-`): no session files (`--ephemeral`), events as JSON lines, the
 /// read-only sandbox, none of the user's `config.toml` (so none of their MCP servers) or `.rules`, the shell and every
-/// other tool off, web search off. The answer is the last message in the events; no file is written for it.
-pub fn codex_args(model: &str) -> Vec<String> {
+/// other tool off, web search off, low reasoning. `instructions` replaces Codex's own long base instructions with CUE's
+/// fixed text (never anything of a dictation: that goes on stdin), and `schema` holds the answer to `{"text": …}`, the
+/// last message in the events; no file is written for the answer.
+pub fn codex_args(model: &str, instructions: &Path, schema: &Path) -> Vec<String> {
     let mut args: Vec<String> = [
         "exec",
         "--ephemeral",
@@ -31,10 +53,23 @@ pub fn codex_args(model: &str) -> Vec<String> {
     for feature in CODEX_TOOLS_OFF {
         args.extend(["--disable".to_string(), feature.to_string()]);
     }
-    // A bare word: Codex takes a value that is not TOML as the literal string (no quotes to survive cmd.exe).
-    args.extend(["-c".to_string(), "web_search=disabled".to_string()]);
+    // Bare words: Codex takes a value that is not TOML as the literal string (no quotes to survive cmd.exe), and a
+    // Windows path with forward slashes is not TOML.
+    for setting in [
+        "web_search=disabled".to_string(),
+        "model_reasoning_effort=low".to_string(),
+        format!("model_instructions_file={}", slashed(instructions)),
+    ] {
+        args.extend(["-c".to_string(), setting]);
+    }
+    args.extend(["--output-schema".to_string(), slashed(schema)]);
     args.push("-".to_string());
     args
+}
+
+/// `path` with forward slashes, which Windows takes as well and neither TOML nor `cmd.exe` reads anything into.
+fn slashed(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 /// `grok` headless with its tools stripped: an allowlist of built-in tools that only keeps the to-do list (and web
@@ -179,20 +214,46 @@ mod tests {
         }
     }
 
+    const INSTRUCTIONS: &str = r"C:\Users\Ann\AppData\Local\CUE\agent\codex-instructions.md";
+    const SCHEMA: &str = r"C:\Users\Ann\AppData\Local\CUE\agent\codex-schema.json";
+
+    fn codex(model: &str) -> Vec<String> {
+        codex_args(model, Path::new(INSTRUCTIONS), Path::new(SCHEMA))
+    }
+
     #[test]
     fn codex_args_are_ephemeral_readonly_json_no_user_config() {
-        let args = codex_args("gpt-6-luna");
+        let args = codex("gpt-6-luna");
         assert_eq!(args[0], "exec");
         for flag in ["--ephemeral", "--json", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules"] {
             assert!(args.iter().any(|a| a == flag), "{flag} missing from {args:?}");
         }
         assert!(has_pair(&args, "-s", "read-only"));
         assert!(has_pair(&args, "-m", "gpt-6-luna"));
-        // The tools off: no shell, no web search, no images or apps.
-        for feature in ["shell_tool", "unified_exec", "view_image", "apps", "plugins", "browser_use", "computer_use"] {
+        // The tools off: no shell, no web search, no images or apps; nothing that hands the model more tools or turns
+        // (subagents, goals, hooks, skills, tool suggestions, the code-mode host, workspace dependencies).
+        for feature in [
+            "shell_tool",
+            "unified_exec",
+            "view_image",
+            "apps",
+            "plugins",
+            "browser_use",
+            "computer_use",
+            "image_generation",
+            "multi_agent",
+            "goals",
+            "sleep_tool",
+            "hooks",
+            "skill_search",
+            "tool_suggest",
+            "code_mode_host",
+            "workspace_dependencies",
+        ] {
             assert!(has_pair(&args, "--disable", feature), "{feature} not disabled");
         }
         assert!(has_pair(&args, "-c", "web_search=disabled"));
+        assert!(has_pair(&args, "-c", "model_reasoning_effort=low"));
         // The prompt is read from stdin; no file is written for the answer.
         assert_eq!(args.last().map(String::as_str), Some("-"));
         for never in ["-o", "--output-last-message", "--search", "--full-auto", "--approve-for-me"] {
@@ -202,12 +263,28 @@ mod tests {
         no_text_in(&args);
     }
 
+    /// CUE's fixed instructions replace Codex's own (a file), and the answer is held to `{"text": …}` (a schema file).
+    /// Both paths go with forward slashes and no quotes: the value of `-c` is read as TOML, and an npm shim passes the
+    /// arguments through `cmd.exe`.
+    #[test]
+    fn codex_args_name_the_instructions_and_schema_files() {
+        let args = codex("gpt-6-luna");
+        assert!(
+            has_pair(&args, "-c", "model_instructions_file=C:/Users/Ann/AppData/Local/CUE/agent/codex-instructions.md"),
+            "{args:?}"
+        );
+        assert!(has_pair(&args, "--output-schema", "C:/Users/Ann/AppData/Local/CUE/agent/codex-schema.json"), "{args:?}");
+        for a in &args {
+            assert!(!a.contains(['\\', '"', '%', '^', '&', '|', '<', '>', '!']), "{a:?} may not survive cmd.exe");
+        }
+    }
+
     #[test]
     fn codex_args_take_the_default_model_for_an_unsafe_one() {
         for bad in ["", "gpt\" & calc", "a b", "x%PATH%", "m\n-c"] {
-            assert!(has_pair(&codex_args(bad), "-m", "gpt-6-luna"), "{bad:?}");
+            assert!(has_pair(&codex(bad), "-m", "gpt-6-luna"), "{bad:?}");
         }
-        assert!(has_pair(&codex_args("gpt-6.1-sol"), "-m", "gpt-6.1-sol"));
+        assert!(has_pair(&codex("gpt-6.1-sol"), "-m", "gpt-6.1-sol"));
     }
 
     #[test]

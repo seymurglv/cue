@@ -84,6 +84,7 @@ use cue_core::translate;
 use cue_core::ui::{Mode, TrayKind, UiAction, UiPhase, UiState};
 use cue_core::usage::{self, SttPath, UsageRecord};
 use cue_engines::EngineError;
+use cue_engines::agent::{self, AgentClient};
 use cue_engines::ask as engine_ask;
 use cue_engines::claude::{self, Job, RefineResult};
 use cue_engines::habit;
@@ -400,7 +401,7 @@ impl Runtime {
         let translate_home = pair_now(&settings);
         let model = ModelKeeper::new(paths.models.clone(), &settings.stt.model);
         let llm = llm::LlmKeeper::new(paths.models.clone(), &settings.refine.local, settings.refine.runs == settings::Runs::Local);
-        let opencode = opencode::OpenCodeSlot::new(paths.agent_dir());
+        let opencode = opencode::OpenCodeSlot::new(agent::cwd(&paths.agent_dir(), cue_core::agents::AgentId::OpenCode));
         let instructions = Instructions::load_or_create(&paths, lang.code(), settings.refine.custom_text());
         let history = HistoryLog::new(paths.history.clone(), Recordings::new(paths.history_audio.clone()));
         // Alt picks "Ask" only when it is on (spec 2 §9); the hook reads the switch on every key.
@@ -1022,14 +1023,7 @@ impl Runtime {
         let to = route(s.runs, &self.llm.slot());
         tokio::spawn(async move {
             let wait = Duration::from_millis(habits::RULE_WAIT_MS);
-            // On this computer the rule never asks the cloud: the local model, or the template.
-            let asked = async {
-                match to {
-                    Route::Local(g) => local::rule(g, &s, &ask, lang, wait).await,
-                    Route::NotReady | Route::Waking(_) => None,
-                    Route::Cloud => habit::rule(&http, key.as_deref(), &s, &ask, lang, wait).await,
-                }
-            };
+            let asked = habit_rule(to, &http, key.as_deref(), &s, &ask, lang, wait);
             let rule = tokio::time::timeout(wait, asked).await.ok().flatten();
             let _ = tx.send(CoreEvent::HabitRule { draft: n, rule });
         });
@@ -1251,9 +1245,9 @@ impl Runtime {
             let now = self.now();
             self.attempt.refine_done(result.usage, result.outcome, now);
         }
-        // A key problem (`RawKeyProblem`) is already in the log: the connection's refine writes one line for each failed
+        // A key problem (`RawAgent`) is already in the log: the connection's refine writes one line for each failed
         // refine, whatever the insert outcome. The Drop names the connection in its error.
-        if result.outcome == RefineOutcome::RawKeyProblem {
+        if matches!(result.outcome, RefineOutcome::RawAgent(_)) {
             self.ui.cleanup_name(self.settings.refine.connection().name);
         }
         self.feed(Input::Refined { id, text: result.text, outcome: result.outcome });
@@ -1696,6 +1690,18 @@ impl Runtime {
                         Route::Local(g) => Some(Some(g)),
                         Route::Waking(slot) => Some(slot.wait(llm::LOAD_WAIT).await),
                         Route::NotReady => Some(None),
+                        // The agent's default model; which one, and whether this is its first request, come with the
+                        // settings.
+                        Route::Agent(c) => {
+                            return match job {
+                                Job::Clean | Job::Rewrite => {
+                                    agent::refine::refine(&c, "", &raw, &ctx, &dict, &s, &instructions, false).await
+                                }
+                                Job::Translate(to) => {
+                                    agent::refine::translate(&c, "", &raw, &ctx, &dict, &s, &instructions, false, to).await
+                                }
+                            };
+                        }
                         Route::Cloud => None,
                     };
                     if let Some(g) = here {
@@ -2720,6 +2726,27 @@ enum Route {
     Waking(Arc<llm::LlmSlot>),
     /// The cloud connection.
     Cloud,
+    /// The user's own agent (OpenCode, Codex).
+    #[allow(dead_code)] // chosen once the settings say where the cleanup runs
+    Agent(AgentClient),
+}
+
+/// A habit's rule along `to`, within `wait`; none: CUE's template writes it. On this computer the rule never asks the
+/// cloud: the local model, or the template. On an agent route it is always the template: no agent is run for a rule.
+async fn habit_rule(
+    to: Route,
+    http: &reqwest::Client,
+    key: Option<&str>,
+    s: &settings::RefineSettings,
+    ask: &habits::RuleAsk,
+    lang: &str,
+    wait: Duration,
+) -> Option<habits::RuleText> {
+    match to {
+        Route::Local(g) => local::rule(g, s, ask, lang, wait).await,
+        Route::NotReady | Route::Waking(_) | Route::Agent(_) => None,
+        Route::Cloud => habit::rule(http, key, s, ask, lang, wait).await,
+    }
 }
 
 fn route(runs: settings::Runs, slot: &llm::LlmSlot) -> Route {
@@ -3015,6 +3042,36 @@ mod tests {
             let slot = llm::LlmSlot::default();
             slot.ready(std::sync::Arc::new(Here));
             assert!(matches!(route(settings::Runs::Local, &slot), Route::Local(g) if g.id() == "llm--here--model--q4_k_m"));
+        }
+
+        /// No agent is run for a habit's rule: CUE's template writes it.
+        #[tokio::test]
+        async fn habit_rule_on_agent_route_uses_template() {
+            let dir = std::env::temp_dir().join(format!("cue-habit-rule-agent-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            // A Codex that leaves a mark when it runs.
+            let ran = dir.join("ran.txt");
+            let shim = dir.join("codex.cmd");
+            std::fs::write(&shim, format!("@ECHO off
+echo ran> \"{}\"
+", ran.display())).unwrap();
+            let found = cue_engines::agent::Found { id: cue_core::agents::AgentId::Codex, exe: shim, version: None };
+            let to = Route::Agent(AgentClient::Cli { found, home: dir.join("agent") });
+            let draft = habits::Draft {
+                forms: vec![habits::Form::EndMark { mark: '.', removed: true }],
+                app: "Telegram".into(),
+                before: "Привет.".into(),
+                after: "Привет".into(),
+                n: 3,
+            };
+            let s = settings::RefineSettings::default();
+            let http = reqwest::Client::new();
+            let rule = habit_rule(to, &http, Some("sk-test"), &s, &draft.ask(), "ru", Duration::from_secs(5)).await;
+            assert!(rule.is_none(), "the template writes it");
+            assert!(!ran.exists(), "the agent was run");
+            assert!(!dir.join("agent").exists(), "nothing was written for the agent");
+            let _ = std::fs::remove_dir_all(&dir);
         }
 
         #[test]

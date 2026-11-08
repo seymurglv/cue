@@ -27,9 +27,13 @@ const CACHE_NAME: &str = "cue-cleanup";
 
 /// The system blocks Claude gets, joined into one system message: what a chat service and the local model read.
 pub(crate) fn system_text(dict: &DictionarySettings, habits: &[String], job: Job, instructions: &str) -> String {
+    system_texts(dict, habits, job, instructions).join("\n\n")
+}
+
+/// The texts of the system blocks Claude gets, in order: CUE's prompt first, the job's own block last.
+pub(crate) fn system_texts(dict: &DictionarySettings, habits: &[String], job: Job, instructions: &str) -> Vec<String> {
     let blocks = claude::system_blocks(dict, habits, job, instructions);
-    let texts: Vec<&str> = blocks.as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect();
-    texts.join("\n\n")
+    blocks.as_array().into_iter().flatten().filter_map(|b| b["text"].as_str().map(str::to_owned)).collect()
 }
 
 /// The request body for the connection `c` and its model `model`: the system blocks Claude gets, joined into one system
@@ -164,7 +168,7 @@ async fn refine_job(
     let key = match key {
         Some(k) => k,
         None => {
-            return claude::raw_fallback(raw, RefineOutcome::RawKeyProblem, claude::Usage::default(), &format!("no {} key", c.name));
+            return claude::raw_fallback(raw, claude::KEY_PROBLEM, claude::Usage::default(), &format!("no {} key", c.name));
         }
     };
     let timeout = request_timeout_ms(c, raw, job);
@@ -379,7 +383,7 @@ mod tests {
     #[tokio::test]
     async fn no_key_sends_nothing() {
         let (r, lines, api) = run("deepseek", None, |s| s, |_, _, _| Reply::Send(200, answer("Привет"), "")).await;
-        assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawKeyProblem));
+        assert_eq!((r.text.as_str(), r.outcome), (RAW, claude::KEY_PROBLEM));
         assert!(api.calls().is_empty());
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("no DeepSeek key"), "{lines:?}");
@@ -390,7 +394,7 @@ mod tests {
         for code in [401, 402, 403, 429] {
             let body = json!({ "error": { "message": format!("refused {KEY}") } }).to_string();
             let (r, lines, api) = run("mistral", Some(KEY), |s| s, move |_, _, _| reply(code, &body)).await;
-            assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawKeyProblem), "HTTP {code}");
+            assert_eq!((r.text.as_str(), r.outcome), (RAW, claude::KEY_PROBLEM), "HTTP {code}");
             assert_eq!(api.calls().len(), 1, "HTTP {code} is not asked again");
             assert!(lines.last().unwrap().contains(&format!("HTTP {code}")), "{lines:?}");
             assert_no_leak(&lines);

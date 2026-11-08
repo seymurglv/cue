@@ -331,7 +331,7 @@ async fn refine_at(
     job: Job,
 ) -> RefineResult {
     let Some(key) = key else {
-        return claude::raw_fallback(raw, RefineOutcome::RawKeyProblem, claude::Usage::default(), "no OpenRouter key");
+        return claude::raw_fallback(raw, claude::KEY_PROBLEM, claude::Usage::default(), "no OpenRouter key");
     };
     let model = s.model_for("openrouter").id;
     let p = model_profile(model);
@@ -1459,7 +1459,7 @@ mod tests {
     #[tokio::test]
     async fn refine_without_key_sends_nothing() {
         let (r, lines, api) = clean_with(None, picked("anthropic/claude-sonnet-5.5"), Job::Clean, |_, _, _| Reply::Send(200, answer("Привет"), "")).await;
-        assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawKeyProblem));
+        assert_eq!((r.text.as_str(), r.outcome), (RAW, claude::KEY_PROBLEM));
         assert!(api.calls().is_empty());
         assert_logged(&lines, 0, "no OpenRouter key");
     }
@@ -1469,7 +1469,7 @@ mod tests {
         for code in [401, 402, 403, 429] {
             let body = json!({ "error": { "code": code, "message": format!("refused {KEY}") } }).to_string();
             let (r, lines, api) = clean_with(Some(KEY), picked("anthropic/claude-sonnet-5.5"), Job::Clean, move |_, _, _| reply(code, &body)).await;
-            assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawKeyProblem), "HTTP {code}");
+            assert_eq!((r.text.as_str(), r.outcome), (RAW, claude::KEY_PROBLEM), "HTTP {code}");
             assert_eq!(api.calls().len(), 1, "HTTP {code} is not asked again");
             assert_logged(&lines, 0, &format!("HTTP {code}"));
         }

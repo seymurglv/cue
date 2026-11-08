@@ -2,6 +2,12 @@
 //! is its first argument:
 //!
 //! - `echo-codex`: prints stdin as Codex's last message, in `codex exec --json` lines.
+//! - `exec …` (Codex's own first argument): Codex's stand-in for `agent::refine`, told what to do by its environment
+//!   (a test's `.cmd` shim sets it, as `codex.cmd` starts the real one): `FAKE_AGENT_RECORD` names a file it writes
+//!   what it got to, as JSON (its arguments, stdin, and the contents of the files named by
+//!   `-c model_instructions_file=<path>` and `--output-schema <path>`, as Codex reads them); it sleeps
+//!   `FAKE_AGENT_SLEEP` ms, prints the files `FAKE_AGENT_STDOUT` and `FAKE_AGENT_STDERR` (a canned answer) and exits
+//!   with `FAKE_AGENT_EXIT`.
 //! - `echo-grok`: prints stdin as Grok's answer, in `grok -p --output-format json`'s object.
 //! - `report`: prints what it was given as JSON: its arguments, stdin, working folder, the folder's entry count and
 //!   whether it has a console window.
@@ -44,9 +50,10 @@ fn main() {
             println!("{item}");
             println!("{}", serde_json::json!({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}));
         }
+        "exec" => codex(&args),
         "echo-grok" => {
             let text = stdin();
-            println!("{}", serde_json::json!({"text": text, "stopReason": "EndTurn", "sessionId": "0", "requestId": "0"}));
+            println!("{}", serde_json::json!({"text": text, "stopReason": "end_turn", "sessionId": "0", "requestId": "0"}));
         }
         "report" => {
             let input = stdin();
@@ -100,6 +107,34 @@ fn main() {
             std::process::exit(2);
         }
     }
+}
+
+/// `codex exec` as a test sets it up (see the module's comment).
+fn codex(args: &[String]) {
+    let input = stdin();
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let read = |path: Option<&str>| path.and_then(|p| std::fs::read_to_string(p).ok());
+    if let Some(record) = env("FAKE_AGENT_RECORD") {
+        let instructions = args.iter().find_map(|a| a.strip_prefix("model_instructions_file="));
+        let schema = args.iter().position(|a| a == "--output-schema").and_then(|i| args.get(i + 1));
+        let got = serde_json::json!({
+            "args": args,
+            "stdin": input,
+            "instructions": read(instructions),
+            "schema": read(schema.map(String::as_str)),
+        });
+        std::fs::write(record, got.to_string()).expect("record");
+    }
+    if let Some(ms) = env("FAKE_AGENT_SLEEP").and_then(|v| v.parse().ok()) {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+    if let Some(out) = read(env("FAKE_AGENT_STDOUT").as_deref()) {
+        print!("{out}");
+    }
+    if let Some(err) = read(env("FAKE_AGENT_STDERR").as_deref()) {
+        eprint!("{err}");
+    }
+    std::process::exit(env("FAKE_AGENT_EXIT").and_then(|v| v.parse().ok()).unwrap_or(0));
 }
 
 /// Reads one request's head and answers it with `body`.

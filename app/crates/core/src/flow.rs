@@ -44,7 +44,19 @@ pub enum SttError {
 pub enum RefineOutcome {
     Refined,
     RawFallback,
-    RawKeyProblem,
+    /// The raw text, because the AI that cleans it needs the user: it was not found, is signed out, or did not answer.
+    RawAgent(AgentProblem),
+}
+
+/// Why the user's AI gave no cleanup, in the words the Drop says it with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentProblem {
+    /// Not installed on this computer.
+    Missing,
+    /// Not signed in, the sign-in expired, or no access.
+    SignedOut,
+    /// No answer in time.
+    Silent,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -387,7 +399,7 @@ impl Flow {
                 // A failed translation is never replaced with the untranslated text (spec 2 §5): an error with "retry",
                 // which refines the saved text again.
                 if self.mode == Mode::Translate && (outcome != RefineOutcome::Refined || text.trim().is_empty()) {
-                    let cause = if outcome == RefineOutcome::RawKeyProblem { ErrorCause::CleanupKey } else { ErrorCause::Translate };
+                    let cause = if matches!(outcome, RefineOutcome::RawAgent(_)) { ErrorCause::CleanupKey } else { ErrorCause::Translate };
                     fx.push(Effect::Finished { id, outcome: Outcome::Failed });
                     self.retry_text = true;
                     self.phase = Phase::Error { cause, retry: true };
@@ -398,7 +410,7 @@ impl Flow {
                 let (text, outcome) = match self.raw.clone() {
                     Some(raw) if text.trim().is_empty() => {
                         let outcome = match outcome {
-                            RefineOutcome::RawKeyProblem => RefineOutcome::RawKeyProblem,
+                            RefineOutcome::RawAgent(p) => RefineOutcome::RawAgent(p),
                             RefineOutcome::Refined | RefineOutcome::RawFallback => RefineOutcome::RawFallback,
                         };
                         (raw, outcome)
@@ -1004,7 +1016,7 @@ impl Flow {
                 if !counted {
                     fx.push(Effect::Finished { id, outcome: Outcome::Inserted });
                 }
-                if self.refine_outcome == Some(RefineOutcome::RawKeyProblem) {
+                if matches!(self.refine_outcome, Some(RefineOutcome::RawAgent(_))) {
                     self.phase = Phase::Error { cause: ErrorCause::CleanupKey, retry: false };
                     self.push_ui(fx);
                     return;
@@ -1400,7 +1412,7 @@ mod tests {
     fn a_cleanup_key_problem_inserts_raw_then_shows_the_cleanup_key_error() {
         let mut f = Flow::new(2, false);
         let id = thinking_with_raw(&mut f, 0, "сырой текст");
-        let fx = f.handle(I::Refined { id, text: "сырой текст".into(), outcome: RefineOutcome::RawKeyProblem }, 5_600);
+        let fx = f.handle(I::Refined { id, text: "сырой текст".into(), outcome: RefineOutcome::RawAgent(AgentProblem::SignedOut) }, 5_600);
         assert!(has(&fx, &E::Insert { id, text: "сырой текст".into() }));
         let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 5_700);
         let ui = last_ui(&fx).unwrap();
@@ -1952,7 +1964,7 @@ mod tests {
         // A key problem of the cleanup's connection is not lost.
         let mut f = Flow::new(2, false);
         let id = thinking_with_raw(&mut f, 0, "сырой текст");
-        let fx = f.handle(I::Refined { id, text: String::new(), outcome: RefineOutcome::RawKeyProblem }, 5_400);
+        let fx = f.handle(I::Refined { id, text: String::new(), outcome: RefineOutcome::RawAgent(AgentProblem::SignedOut) }, 5_400);
         assert!(has(&fx, &E::Insert { id, text: "сырой текст".into() }));
         let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 5_500);
         assert_eq!(last_ui(&fx).unwrap().error, Some(ErrorCause::CleanupKey));
@@ -2314,7 +2326,7 @@ mod tests {
         let id = recording_in(&mut f, 0, Mode::Translate);
         f.handle(I::ChordDown(Mode::Dictate), 5_000);
         f.handle(I::SttFinal { id, text: "привет".into() }, 5_200);
-        let fx = f.handle(I::Refined { id, text: "привет".into(), outcome: RefineOutcome::RawKeyProblem }, 6_000);
+        let fx = f.handle(I::Refined { id, text: "привет".into(), outcome: RefineOutcome::RawAgent(AgentProblem::SignedOut) }, 6_000);
         let ui = last_ui(&fx).unwrap();
         assert_eq!((ui.error, ui.retry), (Some(ErrorCause::CleanupKey), true));
         assert!(!fx.iter().any(|e| matches!(e, E::Insert { .. })));
@@ -3106,7 +3118,7 @@ mod tests {
                     14 => I::Refined {
                         id,
                         text,
-                        outcome: [RefineOutcome::Refined, RefineOutcome::RawFallback, RefineOutcome::RawKeyProblem]
+                        outcome: [RefineOutcome::Refined, RefineOutcome::RawFallback, RefineOutcome::RawAgent(AgentProblem::SignedOut)]
                             [next(3) as usize],
                     },
                     15 => I::Inserted { id, outcome: if next(2) == 0 { InsertOutcome::Pasted } else { InsertOutcome::NoField } },

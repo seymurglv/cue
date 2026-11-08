@@ -1,5 +1,5 @@
 //! Refine through Claude. Never "fails": on any problem it returns the raw text and the reason.
-use cue_core::flow::RefineOutcome;
+use cue_core::flow::{AgentProblem, RefineOutcome};
 use cue_core::refine::{
     max_tokens, sanity_ok_with, strip_markup, habits_prompt, terms_prompt, tidy_list_items, timeout_ms, user_message, RefineContext, BOLD_PROMPT,
     SYSTEM_PROMPT,
@@ -197,11 +197,14 @@ pub fn parse_response(r: &MessageResp) -> Parsed {
         .unwrap_or(Parsed::Malformed)
 }
 
-/// API refusal → outcome: key, limit or balance is `RawKeyProblem` (the user has to act), everything else is `RawFallback`.
+/// A key the cloud refused, or none: for now the user's AI "signed out", with the same Drop as a key problem had.
+pub const KEY_PROBLEM: RefineOutcome = RefineOutcome::RawAgent(AgentProblem::SignedOut);
+
+/// API refusal → outcome: key, limit or balance is [`KEY_PROBLEM`] (the user has to act), everything else is `RawFallback`.
 pub fn classify_http(status: u16, body: &str) -> RefineOutcome {
     match status {
-        401 | 402 | 403 | 429 => RefineOutcome::RawKeyProblem,
-        400 if body.to_lowercase().contains("credit balance") => RefineOutcome::RawKeyProblem,
+        401 | 402 | 403 | 429 => KEY_PROBLEM,
+        400 if body.to_lowercase().contains("credit balance") => KEY_PROBLEM,
         _ => RefineOutcome::RawFallback,
     }
 }
@@ -270,7 +273,7 @@ pub async fn refine(
 }
 
 /// One translation request (spec 2 §5): the refine request with the translation block. Never "fails": on any problem
-/// the raw text comes back with `RawFallback` / `RawKeyProblem`, and the flow shows "Couldn't translate" instead of
+/// the raw text comes back with `RawFallback` / [`KEY_PROBLEM`], and the flow shows "Couldn't translate" instead of
 /// pasting it.
 #[allow(clippy::too_many_arguments)]
 pub async fn translate(
@@ -325,7 +328,7 @@ async fn refine_at(
     job: Job,
 ) -> RefineResult {
     let Some(key) = key else {
-        return raw_fallback(raw, RefineOutcome::RawKeyProblem, Usage::default(), "no Anthropic key");
+        return raw_fallback(raw, KEY_PROBLEM, Usage::default(), "no Anthropic key");
     };
     let body = request_body_styled(model, raw, ctx, dict, job, instructions);
     let timeout = request_timeout_ms(model, raw, job);
@@ -579,11 +582,11 @@ mod tests {
 
     #[test]
     fn http_errors() {
-        assert_eq!(classify_http(401, ""), RefineOutcome::RawKeyProblem);
-        assert_eq!(classify_http(402, ""), RefineOutcome::RawKeyProblem);
-        assert_eq!(classify_http(403, ""), RefineOutcome::RawKeyProblem);
-        assert_eq!(classify_http(429, ""), RefineOutcome::RawKeyProblem);
-        assert_eq!(classify_http(400, r#"{"error":{"message":"Your credit balance is too low"}}"#), RefineOutcome::RawKeyProblem);
+        assert_eq!(classify_http(401, ""), KEY_PROBLEM);
+        assert_eq!(classify_http(402, ""), KEY_PROBLEM);
+        assert_eq!(classify_http(403, ""), KEY_PROBLEM);
+        assert_eq!(classify_http(429, ""), KEY_PROBLEM);
+        assert_eq!(classify_http(400, r#"{"error":{"message":"Your credit balance is too low"}}"#), KEY_PROBLEM);
         assert_eq!(classify_http(400, "bad request"), RefineOutcome::RawFallback);
         assert_eq!(classify_http(529, "overloaded"), RefineOutcome::RawFallback);
     }
@@ -829,7 +832,7 @@ mod tests {
     #[tokio::test]
     async fn refine_without_key_sends_nothing() {
         let (r, lines, api) = refine_with(None, |_, _, _| reply(200, &message("Привет, как дела?", "end_turn"))).await;
-        assert_eq!((r.text.as_str(), r.outcome, r.usage), (RAW, RefineOutcome::RawKeyProblem, Usage::default()));
+        assert_eq!((r.text.as_str(), r.outcome, r.usage), (RAW, KEY_PROBLEM, Usage::default()));
         assert!(api.calls().is_empty(), "no key, no request: {:?}", api.calls());
         assert_one_warning(&lines, "no Anthropic key");
     }
@@ -882,7 +885,7 @@ mod tests {
 
     #[tokio::test]
     async fn refine_http_refusal_returns_raw_text() {
-        for (code, outcome) in [(400, RefineOutcome::RawFallback), (401, RefineOutcome::RawKeyProblem), (402, RefineOutcome::RawKeyProblem)] {
+        for (code, outcome) in [(400, RefineOutcome::RawFallback), (401, KEY_PROBLEM), (402, KEY_PROBLEM)] {
             let body = format!(r#"{{"type":"error","error":{{"message":"BODY-MARK привет {KEY}"}}}}"#);
             let (r, lines, api) = refine_with(Some(KEY), move |_, _, _| reply(code, &body)).await;
             assert_eq!((r.text.as_str(), r.outcome, r.usage), (RAW, outcome, Usage::default()), "HTTP {code}");
@@ -1003,7 +1006,7 @@ mod tests {
     #[tokio::test]
     async fn translate_key_problem_returns_the_raw_text() {
         let (r, lines, _api) = translate_with(Some(KEY), |_, _, _| reply(401, r#"{"type":"error"}"#)).await;
-        assert_eq!((r.text.as_str(), r.outcome), (SPEECH, RefineOutcome::RawKeyProblem));
+        assert_eq!((r.text.as_str(), r.outcome), (SPEECH, KEY_PROBLEM));
         assert_one_warning(&lines, "HTTP 401");
     }
 
