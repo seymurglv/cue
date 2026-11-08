@@ -136,7 +136,8 @@ struct Endpoint {
 }
 
 impl Endpoint {
-    /// One request, within `deadline`. A 401 that is not a provider's is the server refusing CUE: `Failed("auth")`.
+    /// One request, within `deadline`. A 401 that is not a provider's is the server refusing CUE: `Failed("auth")`; a
+    /// redirect is `Failed("redirect")`.
     async fn call(
         &self,
         method: Method,
@@ -163,6 +164,10 @@ impl Endpoint {
             Ok((status, bytes.to_vec()))
         };
         let (status, bytes) = tokio::time::timeout_at(deadline, send).await.unwrap_or(Err(AgentFailure::Timeout))?;
+        // A redirect is never followed, and never taken for an answer.
+        if status.is_redirection() {
+            return Err(AgentFailure::Failed("redirect"));
+        }
         if status == StatusCode::UNAUTHORIZED && tagged(&bytes).is_none_or(|t| t.tag != "ProviderRequestError") {
             return Err(AgentFailure::Failed("auth"));
         }
@@ -279,8 +284,9 @@ fn header_path(path: &Path) -> String {
     out
 }
 
+/// No proxy, and no redirect followed: a 307 or 308 would send the body (the text) on to the address it names.
 fn loopback_client() -> Option<reqwest::Client> {
-    reqwest::Client::builder().no_proxy().build().ok()
+    reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).build().ok()
 }
 
 impl Server {
@@ -1024,6 +1030,31 @@ mod tests {
         // Nothing listens.
         let dead = Server::running_at(Url::parse("http://127.0.0.1:9/").unwrap(), None, None);
         assert_eq!(dead.complete("", &prompt(), Duration::from_secs(5), None).await, Err(AgentFailure::Failed("connect")));
+    }
+
+    #[tokio::test]
+    async fn a_redirect_is_not_followed_and_the_text_stays_here() {
+        // Where a redirect points: it must see nothing.
+        let elsewhere = fake_api(|_, _, _| reply(200, r#"{"data":{"text":"stolen"}}"#)).await;
+        let to: &'static str =
+            Box::leak(format!("location: {}/api/experimental/generate/text\r\n", elsewhere.base).into_boxed_str());
+        let api = fake_api(move |method, path, _| match (method, path) {
+            ("GET", "/global/health") => Reply::Send(404, String::new(), ""),
+            ("GET", "/api/info") => reply(200, V2_INFO),
+            ("POST", "/api/experimental/generate/text") => Reply::Send(307, String::new(), to),
+            _ => reply(500, "{}"),
+        })
+        .await;
+        let r = server(&api.base).complete("", &prompt(), Duration::from_secs(5), None).await;
+        assert_eq!(r, Err(AgentFailure::Failed("redirect")));
+        assert!(elsewhere.calls().is_empty(), "{:?}", elsewhere.calls());
+        // A redirect on a probe, the same: never followed.
+        let probe: &'static str =
+            Box::leak(format!("location: {}/global/health\r\n", elsewhere.base).into_boxed_str());
+        let api = fake_api(move |_, _, _| Reply::Send(308, String::new(), probe)).await;
+        let r = server(&api.base).complete("", &prompt(), Duration::from_secs(5), None).await;
+        assert_eq!(r, Err(AgentFailure::Failed("redirect")));
+        assert!(elsewhere.calls().is_empty(), "{:?}", elsewhere.calls());
     }
 
     #[tokio::test]

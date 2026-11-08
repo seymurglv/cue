@@ -7,6 +7,7 @@
 //! ends), and when CUE quits; the next cleanup starts it again. A server the user runs is never stopped: CUE only lets
 //! go of it.
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
@@ -29,6 +30,8 @@ pub struct OpenCodeSlot {
     start: Starter,
     rest: Mutex<Rest>,
     rest_after: Duration,
+    /// Bumped by every rest: a start that a rest came during stops the server it started.
+    rests: AtomicU64,
 }
 
 #[derive(Default)]
@@ -66,11 +69,13 @@ impl OpenCodeSlot {
             start,
             rest: Mutex::new(Rest::default()),
             rest_after,
+            rests: AtomicU64::new(0),
         })
     }
 
     /// The server to send a cleanup to: the one in use while it runs, else the user's own, else one CUE starts now
-    /// (blocking up to `opencode::START_WAIT`: call it off the core's thread).
+    /// (blocking up to `opencode::START_WAIT`: call it off the core's thread). A rest during the start stops the
+    /// server it started: `Failed("rest")`.
     #[allow(dead_code)] // used when the cleanup goes through OpenCode
     pub fn get_or_start(&self) -> Result<Arc<Server>, AgentFailure> {
         let _one = lock(&self.starting);
@@ -81,6 +86,7 @@ impl OpenCodeSlot {
             }
             self.let_go(&s);
         }
+        let rests = self.rests.load(Ordering::SeqCst);
         let server = match (self.find)().filter(Server::alive) {
             Some(s) => {
                 tracing::info!("opencode: uses the server the user runs");
@@ -89,7 +95,15 @@ impl OpenCodeSlot {
             None => (self.start)()?,
         };
         let server = Arc::new(server);
-        *lock(&self.held) = Some(server.clone());
+        // Checked under `held`, which `rest` takes after bumping the count: a rest either sees this server or is seen.
+        let mut held = lock(&self.held);
+        if self.rests.load(Ordering::SeqCst) != rests {
+            drop(held);
+            // CUE rested, the session locked or CUE quit while the server started: it does not run on.
+            server.halt();
+            return Err(AgentFailure::Failed("rest"));
+        }
+        *held = Some(server.clone());
         Ok(server)
     }
 
@@ -138,6 +152,7 @@ impl OpenCodeSlot {
 
     /// CUE rests or quits: the server CUE started is stopped (its whole process tree), the user's is let go.
     pub fn rest(&self) {
+        self.rests.fetch_add(1, Ordering::SeqCst);
         let held = lock(&self.held).take();
         if let Some(s) = held {
             s.halt();
@@ -277,6 +292,54 @@ mod tests {
         slot.rest();
         assert!(!s4.alive());
         assert_eq!(starts.load(Ordering::SeqCst), 4);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// Whether process `pid` still runs (`tasklist` lists it).
+    fn running(pid: u32) -> bool {
+        let out = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
+    }
+
+    #[test]
+    fn a_rest_during_a_start_stops_the_server_it_started() {
+        let cwd = temp_dir("slow");
+        let pid = Arc::new(Mutex::new(None));
+        let (seen, dir) = (pid.clone(), cwd.clone());
+        // A slow start: the server runs, then half a second passes before the slot gets it.
+        let slot = OpenCodeSlot::with(
+            Box::new(|| None),
+            Box::new(move || {
+                let s = owned(&dir);
+                *seen.lock().unwrap() = s.pid();
+                std::thread::sleep(Duration::from_millis(500));
+                Ok(s)
+            }),
+            Duration::from_secs(60),
+        );
+        let starting = {
+            let slot = slot.clone();
+            std::thread::spawn(move || slot.get_or_start())
+        };
+        let start = std::time::Instant::now();
+        while pid.lock().unwrap().is_none() {
+            assert!(start.elapsed() < Duration::from_secs(10), "the start did not begin");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pid = pid.lock().unwrap().unwrap();
+        assert!(running(pid));
+        // The session locks (no dictation under way) while the server starts.
+        slot.rest_soon();
+        assert_eq!(starting.join().unwrap().unwrap_err(), AgentFailure::Failed("rest"));
+        assert!(!running(pid), "the server started during a rest runs on");
+        // The next cleanup starts it again, and keeps it.
+        let s = slot.get_or_start().unwrap();
+        assert!(s.alive());
+        slot.rest();
+        assert!(!s.alive());
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
