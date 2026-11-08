@@ -144,7 +144,7 @@ line under the row, as the speech model's row does today. When the chosen agent 
 
 Common to all three:
 - Run with no window, the working folder an empty `%LOCALAPPDATA%\CUE\agent\`, the transcript and context on stdin
-  (never as an argument), tools, web access and file writes off, output as JSON; CUE parses `{"text": …}` from the
+  (Grok: a named pipe, below; never as an argument), tools, web access and file writes off, output as JSON; CUE parses `{"text": …}` from the
   answer as it does today and runs the same output checks (`settle`, `sanity_ok_with`, `drop_copied_context`,
   `decide_translation`).
 - The prompt is the same system text as the cloud path today (`claude::system` blocks joined, as `chat::system_text`
@@ -181,8 +181,15 @@ Common to all three:
 `--skip-git-repo-check`, `--ignore-user-config`, `-m <model>`. Uses the user's own Codex sign-in. (OpenAI's "Sign in with
 ChatGPT" would be faster, but CUE would then hold a login token, against decision 1.)
 
-**Grok**: `grok -p` with `--output-format json`, tools off, web search off, no subagents, no auto-update, `-m <model>`.
-Uses the user's own Grok sign-in. A long-lived `grok agent stdio` process may come later for speed.
+**Grok**: `grok` headless with `--output-format json`, tools off, web search off, no subagents, no auto-update,
+`--max-turns 1`, CUE's instructions as the system prompt, `-m grok-4.7` by default (its fast build-model acts on and
+comments on dictations). Uses the user's own Grok sign-in. **Owner's decision 09.11.2026:** grok cannot read stdin, so
+for Grok alone the transcript goes through a one-shot named pipe (`--prompt-file \\.\pipe\<random>`), which CUE
+creates for the current user, writes once and closes: never an argument, never a file on disk. Grok saves every run as
+a session it cannot be told not to keep, so CUE deletes that session (`grok sessions delete <id>`) and its prompt
+history line right after each answer, and turns Grok's telemetry, trace upload, session search, recap and memory off
+for the run through its environment. Evidence in `app/crates/engines/tests/fixtures/agents/README.md`. A long-lived
+`grok agent stdio` process may come later for speed.
 
 ### Ask and translation
 
