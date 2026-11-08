@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CUE review, 5 November</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Montserrat:wght@800&display=swap">
+<style>
+/* CUE's family tokens (merlin-skin): system type at 11/12/13, Bebas for numbers, amber for warnings, blue only for Ask.
+   Layout: summary first, then what changed, how it flows, decisions, audit, next. */
+:root{
+  --bg:#FBFBFA;--card:#FFFFFF;--surface2:#F3F3F1;--text:#111111;--muted:#62625E;--faint:#C4C4C0;--line:#ECECE9;
+  --warn:#935600;--ok:#1E7F4A;--graphite:#1C1C1F;
+  --font:"Segoe UI Variable Text","Segoe UI Variable","Segoe UI",-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
+  --num:"Bebas Neue","Montserrat",sans-serif;--head:"Montserrat",sans-serif;
+  --e-out:cubic-bezier(.22,1,.36,1);
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0E0E0F;--card:#151517;--surface2:#1C1C1F;--text:#ECECEA;--muted:#A0A0A5;--faint:#4A4A4E;--line:#26262A;
+  --warn:#F5B82E;--ok:#33C27A;--graphite:#242428;color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0E0E0F;--card:#151517;--surface2:#1C1C1F;--text:#ECECEA;--muted:#A0A0A5;--faint:#4A4A4E;--line:#26262A;
+  --warn:#F5B82E;--ok:#33C27A;--graphite:#242428;color-scheme:dark}
+*{box-sizing:border-box}
+html{background:var(--bg);color:var(--text);font:13px/1.5 var(--font);-webkit-font-smoothing:antialiased}
+body{margin:0;background:var(--bg)}
+a{color:inherit;text-underline-offset:2px}
+.wrap{max-width:1120px;margin:0 auto;padding:28px 24px 80px}
+header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding-bottom:22px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.logo{font:400 22px/1 var(--num);letter-spacing:.03em}
+.logo span{color:var(--muted)}
+header p{margin:6px 0 0;color:var(--muted);font-size:13px;max-width:640px}
+.theme{display:flex;background:var(--surface2);border-radius:999px;padding:3px}
+.theme button{all:unset;cursor:pointer;font-size:12px;padding:5px 12px;border-radius:999px;color:var(--muted)}
+.theme button[aria-pressed=true]{background:var(--card);color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.theme button:focus-visible{outline:2px solid var(--text);outline-offset:1px}
+section{padding-top:34px}
+h2{font:600 13px/1.3 var(--font);margin:0 0 4px;text-wrap:balance}
+.lede{color:var(--muted);margin:0 0 16px;max-width:720px}
+.tiles{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-top:22px}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+.tile b{display:block;font:400 38px/1 var(--num);letter-spacing:.01em;font-variant-numeric:tabular-nums}
+.tile b s{font-size:22px;color:var(--muted);text-decoration-thickness:1px;margin-right:6px}
+.tile small{display:block;color:var(--muted);font-size:12px;margin-top:6px;line-height:1.35}
+.state{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;background:var(--card);border:1px solid var(--line);border-radius:999px;padding:3px 10px 3px 8px}
+.pill i{width:7px;height:7px;border-radius:50%;background:var(--faint)}
+.pill.ok i{background:var(--ok)}
+.pill.warn i{background:var(--warn)}
+.pill.off i{background:transparent;box-shadow:inset 0 0 0 1.5px var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.chg{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:18px;align-items:center;padding:13px 18px;border-top:1px solid var(--line)}
+.chg:first-child{border-top:0}
+.chg h3{font:600 13px/1.35 var(--font);margin:0;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.chg p{margin:2px 0 0;color:var(--muted);font-size:12px;line-height:1.45}
+.tag{font-size:11px;font-weight:600;border-radius:6px;padding:0 6px;background:var(--surface2);color:var(--muted);white-space:nowrap}
+.tag.ok{color:var(--ok)}
+.tag.warn{color:var(--warn)}
+.ba{display:grid;grid-template-columns:52px minmax(0,1fr);gap:3px 8px;align-items:center;font-size:11px;color:var(--muted)}
+.ba .b{display:flex;align-items:center;gap:8px}
+.ba .b i{display:block;height:8px;border-radius:0 4px 4px 0;background:var(--faint);min-width:3px;transition:width .7s var(--e-out)}
+.ba .b.now i{background:var(--text)}
+.ba .b em{font-style:normal;font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--text)}
+.ba .b.was em{color:var(--muted)}
+.flow{display:flex;align-items:stretch;gap:0;overflow-x:auto;padding:4px 2px 6px}
+.step{flex:1 1 0;min-width:150px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:11px 13px}
+.step.new{border-style:dashed;border-color:var(--muted)}
+.step h4{margin:0 0 3px;font-size:13px;font-weight:600}
+.step p{margin:0;font-size:12px;color:var(--muted);line-height:1.4}
+.step .ms{display:block;margin-top:8px;font:400 18px/1 var(--num);letter-spacing:.02em;color:var(--text)}
+.step ul{margin:6px 0 0;padding-left:15px;font-size:12px;color:var(--muted)}
+.arrow{flex:none;width:22px;display:flex;align-items:center;justify-content:center;color:var(--faint)}
+.legend{display:flex;gap:16px;color:var(--muted);font-size:12px;margin:10px 0 0;flex-wrap:wrap}
+.legend span{display:flex;align-items:center;gap:6px}
+.legend i{display:inline-block;width:18px;height:12px;border-radius:4px;border:1px solid var(--line);background:var(--card)}
+.legend i.d{border:1px dashed var(--muted)}
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
+.box{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+.box h3{margin:0 0 8px;font-size:12px;font-weight:600;color:var(--muted)}
+.box ol,.box ul{margin:0;padding-left:18px}
+.box li{margin:4px 0;font-size:13px}
+.box li small{display:block;color:var(--muted);font-size:12px}
+.box a{font-weight:600}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;font-size:12px}
+th{text-align:left;font-weight:600;font-size:11px;color:var(--muted);padding:10px 14px;border-bottom:1px solid var(--line);background:var(--bg)}
+td{padding:9px 14px;border-top:1px solid var(--line);vertical-align:top}
+tr:first-child td{border-top:0}
+td:first-child{font-weight:600}
+.tw{overflow-x:auto}
+.road{counter-reset:r;list-style:none;margin:0;padding:0}
+.road li{counter-increment:r;display:grid;grid-template-columns:32px minmax(0,1fr) auto;gap:12px;align-items:start;padding:12px 16px;border-top:1px solid var(--line)}
+.road li:first-child{border-top:0}
+.road li::before{content:counter(r);font:400 22px/1 var(--num);color:var(--muted)}
+.road b{font-weight:600}
+.road p{margin:2px 0 0;color:var(--muted);font-size:12px}
+.q{border-left:3px solid var(--warn);border-radius:0;padding:2px 0 2px 12px;margin:10px 0}
+.q b{display:block}
+.q span{color:var(--muted);font-size:12px}
+code{font:12px/1.4 ui-monospace,"Cascadia Code",Consolas,monospace;color:var(--muted)}
+@media (max-width:900px){
+  .tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .chg{grid-template-columns:1fr;gap:8px}
+  .two{grid-template-columns:1fr}
+  .flow{flex-direction:column}
+  .arrow{width:auto;height:18px;transform:rotate(90deg)}
+}
+@media (prefers-reduced-motion:reduce){.ba .b i{transition:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div>
+    <div class="logo">CUE <span>for Windows · review · 5 Nov 2026</span></div>
+    <p>Where CUE stands after today: what got lighter and how much, how a dictation flows now, what you decided about the settings, and what comes next. Measured on your PC (i7-12700KF) and your bench recordings.</p>
+  </div>
+  <div class="theme" role="group" aria-label="Theme">
+    <button type="button" data-t="light">Light</button>
+    <button type="button" data-t="dark">Dark</button>
+  </div>
+</header>
+
+<div class="tiles" aria-label="Today in numbers">
+  <div class="tile"><b><s>11%</s>0.4%</b><small>of a processor core WebView2 uses while CUE sits idle</small></div>
+  <div class="tile"><b><s>1.8</s>0.75 GB</b><small>held by the speech model after dictations</small></div>
+  <div class="tile"><b>15 min</b><small>without a dictation, then both models are let go; a lock or sleep lets them go at once</small></div>
+  <div class="tile"><b>1,669</b><small>tests green: 1,256 in Rust, 413 in the interface</small></div>
+  <div class="tile"><b>19.0 MB</b><small>installer, from 19.1; most of it is ONNX Runtime and llama.cpp</small></div>
+</div>
+<div class="state" aria-label="Status">
+  <span class="pill ok"><i></i>Installed on your PC: 0.1.3 with today’s changes</span>
+  <span class="pill ok"><i></i>Branch <code>optimize</code>: 1 commit (87aeb32)</span>
+  <span class="pill warn"><i></i>Not committed: cleanup model let go at rest</span>
+  <span class="pill off"><i></i>Repository <code>cue</code> still private</span>
+  <span class="pill off"><i></i>Model picks plan on hold (branch <code>model-picks</code>)</span>
+</div>
+
+<section id="changes">
+  <h2>What got lighter today</h2>
+  <p class="lede">Each change with what it was and what it is now. Bars share one scale per row.</p>
+  <div class="card" id="chg"></div>
+</section>
+
+<section id="flow">
+  <h2>How a dictation flows now</h2>
+  <p class="lede">From the hotkey to the pasted text. Times are typical on your PC for a 10-second dictation.</p>
+  <div class="flow" role="list">
+    <div class="step" role="listitem"><h4>Hotkey</h4><p>Ctrl + Win dictates, + Shift translates, + Alt asks.</p><span class="ms">0 ms</span></div>
+    <div class="arrow" aria-hidden="true">›</div>
+    <div class="step" role="listitem"><h4>Microphone</h4><p>Opened for the dictation only. Windows is asked for full speed meanwhile.</p></div>
+    <div class="arrow" aria-hidden="true">›</div>
+    <div class="step" role="listitem"><h4>Parakeet Ultra</h4><p>On this computer, Russian or English from the speech itself, pieces recognized while you talk.</p><span class="ms">≈ 0.1–0.3 s</span></div>
+    <div class="arrow" aria-hidden="true">›</div>
+    <div class="step new" role="listitem"><h4>No-AI layer</h4><p>Proposed: dictionary spellings, filler words, small fixes. Works offline.</p><span class="ms">&lt; 1 ms</span></div>
+    <div class="arrow" aria-hidden="true">›</div>
+    <div class="step" role="listitem"><h4>Cleanup</h4><ul><li>AI in the cloud, your key, 8 services</li><li>On this computer, a local model</li><li>Off: pasted as recognized</li></ul><span class="ms">≈ 0.6–1.5 s</span></div>
+    <div class="arrow" aria-hidden="true">›</div>
+    <div class="step" role="listitem"><h4>Paste</h4><p>Into the field you were in; history and habits learn from your corrections.</p></div>
+  </div>
+  <div class="legend"><span><i></i>Works today</span><span><i class="d"></i>Proposed, not built</span></div>
+</section>
+
+<section id="settings">
+  <h2>The settings, as you shaped them today</h2>
+  <p class="lede">Clickable prototype in CUE’s own styles: <a href="https://claude.ai/artifact/E3FBicdijn4oEnxcpGEVj5">simple cleanup and set up with an AI agent</a>.</p>
+  <div class="two">
+    <div class="box">
+      <h3>Decided</h3>
+      <ul>
+        <li>Speech: Parakeet Ultra for both languages, language from the speech, as before<small>Keyboard-layout modes and GigaAM are off the table for now.</small></li>
+        <li>Cleanup has two choices: AI in the cloud with your key, or a model on this computer</li>
+        <li>All eight cloud services stay, shown as tiles with their key status, models and prices</li>
+        <li>Claude Haiku is the recommended cloud model, for Russian and English</li>
+        <li>Gemma is out as the local model</li>
+        <li>A “Set up with an AI agent” button copies a prompt for Claude, Codex or another agent<small>The agent edits settings; it never sees your keys.</small></li>
+      </ul>
+    </div>
+    <div class="box">
+      <h3>Open, waiting for you</h3>
+      <div class="q"><b>Add the no-AI layer?</b><span>Dictionary spellings and filler words without any model; under 1 ms.</span></div>
+      <div class="q"><b>Two cards or a switch?</b><span>The two layouts of the Cleanup page in the prototype.</span></div>
+      <div class="q"><b>Commit the cleanup model let go at rest?</b><span>Built, tested, installed; not committed.</span></div>
+      <div class="q"><b>Spend a few cents to measure local models?</b><span>Haiku’s cleanup of ~100 of your recordings becomes the yardstick.</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="local">
+  <h2>Local cleanup model: candidates to measure</h2>
+  <p class="lede">From today’s search, to replace Gemma. None measured yet; on the processor, speed is the hard part.</p>
+  <div class="tw"><table>
+    <thead><tr><th>Model</th><th>Size</th><th>Why</th><th>Watch out</th></tr></thead>
+    <tbody>
+      <tr><td>GigaChat 3.1 Lightning</td><td>6.5 GB · 1.8B active</td><td>Strong Russian, few active parameters, so it can be fast</td><td>6.5 GB of memory; CPU speed unknown</td></tr>
+      <tr><td>RuadaptQwen3 4B</td><td>2.5 GB</td><td>Qwen3 4B with a Russian tokenizer, up to 2× faster on Russian</td><td>Benchmarks unconfirmed</td></tr>
+      <tr><td>Qwen3.5 4B / 2B</td><td>2.7 GB</td><td>Newest Qwen, fewer tokens per word</td><td>Thinking on by default; slow path on CPU reported</td></tr>
+      <tr><td>T-lite 2.1</td><td>5.0 GB</td><td>Best-documented Russian quality</td><td>8B: about twice as slow</td></tr>
+      <tr><td>Spokenly cleanup-1</td><td>0.6B</td><td>Built for fillers and spoken corrections</td><td>Weaker in Russian; its own prompt format</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="audit">
+  <h2>Release audit: where each finding stands</h2>
+  <p class="lede">From this morning’s audit before the clean public release.</p>
+  <div class="tw"><table>
+    <thead><tr><th>Finding</th><th>Status</th><th>Note</th></tr></thead>
+    <tbody id="aud"></tbody>
+  </table></div>
+</section>
+
+<section id="next">
+  <h2>What comes next, in order</h2>
+  <div class="card"><ol class="road">
+    <li><div><b>Commit the cleanup model let go at rest</b><p>Then watch it once live: 16 minutes without dictating, “let go at rest” for both models in the log.</p></div><span class="tag warn">waits for you</span></li>
+    <li><div><b>Rewrite the settings spec around today’s decisions</b><p>Two cleanup choices, service tiles, the agent button, CUE picking up changes to its settings file by itself.</p></div><span class="tag">next</span></li>
+    <li><div><b>Build the new Cleanup page and the no-AI layer</b><p>If you say yes to the layer.</p></div><span class="tag">after the spec</span></li>
+    <li><div><b>Measure local models against Haiku</b><p>Quality and seconds per dictation on your recordings; you pick from a table.</p></div><span class="tag">after the spec</span></li>
+    <li><div><b>Clean release</b><p>Docs, third-party licenses, spec links, formatting; then the snapshot to <code>cue</code>.</p></div><span class="tag">before going public</span></li>
+  </ol></div>
+</section>
+</div>
+<script>
+const CHG = [
+  { t:'The speech model rests', p:'Let go after 15 minutes without a dictation, and on lock or sleep; the next dictation loads it again in about 1.3 s while you speak.', tag:['committed','ok'], was:[0.9,'0.9 GB held always'], now:[0.02,'0 after 15 min'], max:0.9 },
+  { t:'Memory given back after each recognition', p:'ONNX Runtime returns its working memory; recognition 1–6% slower. Measured on 40 of your recordings.', tag:['committed','ok'], was:[1812,'1,812 MB'], now:[753,'753 MB'], max:1812 },
+  { t:'The Drop breathes three times, then holds still', p:'The endless breathing kept WebView2 drawing all day.', tag:['committed','ok'], was:[11,'11% of a core'], now:[0.4,'0.4%'], max:11 },
+  { t:'Fewer wake-ups at rest', p:'The Drop’s hit test checks a few times a second while hidden or with the cursor far away, 60 times near it.', tag:['committed','ok'], was:[60,'60 per second'], now:[10,'10 per second'], max:60 },
+  { t:'Windows never slows a dictation down', p:'Power throttling made 40 recordings take six times longer in a test; CUE now asks for full speed only while it works.', tag:['committed','ok'], was:[80.8,'80.8 s throttled'], now:[13.9,'13.9 s'], max:80.8 },
+  { t:'Quieter log', p:'ONNX Runtime’s info lines (9 in 10) stay out of the log.', tag:['committed','ok'], was:[6.3,'6.3 MB a day'], now:[0.6,'≈ 0.6 MB'], max:6.3 },
+  { t:'The local cleanup model rests too', p:'S1 Mini and others are let go after 15 minutes; the first dictation after that waits up to 15 s for the reload instead of pasting raw text.', tag:['not committed','warn'], was:[0.8,'≈ 0.8 GB held always'], now:[0.02,'0 after 15 min'], max:0.8 },
+  { t:'Smaller, optimized program', p:'The Rust code is optimized across crates and stripped.', tag:['committed','ok'], was:[45.1,'45.1 MB cue.exe'], now:[43.6,'43.6 MB'], max:45.1 }
+];
+const AUD = [
+  ['Idle CPU, memory, log noise', 'Done', 'Today’s optimization'],
+  ['DirectML.dll shipped though unused', 'Kept', 'Prebuilt ONNX Runtime always includes it; worth ~6 MB only'],
+  ['Fewer ONNX threads, no spinning', 'Dropped', 'Measured: no gain'],
+  ['Ask card on demand (~60 MB)', 'Later', 'Needs a live Ask test'],
+  ['ARCHITECTURE.md and README stale', 'Open', '≈ 35 claims no longer match the code'],
+  ['Third-party licenses incomplete', 'Open', '≈ 595 crates; a generated notices file'],
+  ['Links to docs/specs in code comments', 'Open', '54 links dangle in the public snapshot'],
+  ['.superpowers/ not ignored', 'Open', 'One line in .gitignore'],
+  ['Rust formatting, CI', 'Open', 'rustfmt once, one workflow']
+];
+const $ = (s) => document.querySelector(s);
+$('#chg').innerHTML = CHG.map((c) => `<div class="chg"><div><h3>${c.t}<span class="tag ${c.tag[1]}">${c.tag[0]}</span></h3><p>${c.p}</p></div><div class="ba"><span>Before</span><div class="b was"><i data-w="${(c.was[0] / c.max * 100).toFixed(1)}" style="width:0"></i><em>${c.was[1]}</em></div><span>Now</span><div class="b now"><i data-w="${Math.max(1.5, c.now[0] / c.max * 100).toFixed(1)}" style="width:0"></i><em>${c.now[1]}</em></div></div></div>`).join('');
+$('#aud').innerHTML = AUD.map(([f, s, n]) => `<tr><td>${f}</td><td><span class="pill ${s === 'Done' ? 'ok' : s === 'Open' ? 'warn' : 'off'}"><i></i>${s}</span></td><td>${n}</td></tr>`).join('');
+for (const i of document.querySelectorAll('.ba i')) i.style.width = `calc(${i.dataset.w}% * .62)`;
+const root = document.documentElement;
+const setTheme = (t) => { root.dataset.theme = t; for (const b of document.querySelectorAll('.theme button')) b.setAttribute('aria-pressed', String(b.dataset.t === t)); };
+setTheme(root.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+for (const b of document.querySelectorAll('.theme button')) b.addEventListener('click', () => setTheme(b.dataset.t));
+</script>
+</body>
+</html>
