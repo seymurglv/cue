@@ -2,6 +2,10 @@
 
 Status: implemented, not yet released; bench and live check pending.
 
+08.11.2026: the owner approved Parakeet Ultra (`parakeet-ultra-int8`) as the speech model for Russian and English.
+The condition to replace it with NVIDIA's v3 after the bench is closed. Ultra is the model CUE ships; v3 stays in
+the model picker as an alternative.
+
 CUE stops sending sound to a speech service. A dictation is recognized on this computer by Parakeet Ultra (Moondream's
 post-trained NVIDIA Parakeet TDT 0.6B v3: the same architecture and tokenizer, fewer mistakes, 25 European languages
 with Russian and English among them, punctuation and capital letters in its output). Soniox goes completely: its key,

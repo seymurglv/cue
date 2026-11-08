@@ -24,7 +24,7 @@ machine, so it is tested without windows, a microphone, a model, a network or a 
   - `speech`: the rules of recognition: the alphabet of a dictation, a leak of the other alphabet, the speech language
     of a translation, and where a long recording is cut into pieces.
   - `model`: the speech model's files (`Manifest`: a Hugging Face repository at a fixed commit, each file's size and
-    SHA-256; `ULTRA`, the one CUE ships) and `ModelState`, the model's state as the windows show it.
+    SHA-256; `ultra`, the one CUE ships, first in `catalog`) and `ModelState`, the model's state as the windows show it.
   - `ask`: the "Ask" instruction and user message, the selection limit, where a written text goes, the buttons of an
     answer, its sources, the plain text for pasting, and `AnswerView`, the answer as the windows draw it.
   - `audio`: resampling to 16 kHz mono, voice level, the "microphone is silent" detector.
@@ -276,11 +276,13 @@ pinned device again, or a change of the microphone setting, forgets it. With not
 
 ### Recognition: Parakeet on this computer
 
-- **The model.** Parakeet Ultra: Moondream's post-trained NVIDIA Parakeet TDT 0.6B v3 (the same architecture and
-  tokenizer, 25 European languages with Russian and English among them, punctuation and capital letters in its
-  output), in the int8 ONNX export of `Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx`: `encoder-model.int8.onnx`,
-  `decoder_joint-model.int8.onnx` and `vocab.txt` (8,192 tokens and the blank `<blk>`). NVIDIA's own v3 export
-  (`istupakov/parakeet-tdt-0.6b-v3-onnx`) has the same file names and loads the same way; it is used only in the bench.
+- **The model.** Parakeet Ultra, the one CUE ships (`cue_core::model::ultra`, id `parakeet-ultra-int8`): Moondream's
+  post-trained NVIDIA Parakeet TDT 0.6B v3 (the same architecture and tokenizer, 25 European languages with Russian
+  and English among them, punctuation and capital letters in its output), in the int8 ONNX export of
+  `Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx`: `encoder-model.int8.onnx`, `decoder_joint-model.int8.onnx` and
+  `vocab.txt` (8,192 tokens and the blank `<blk>`). NVIDIA's own v3 export (`istupakov/parakeet-tdt-0.6b-v3-onnx`,
+  id `parakeet-v3-int8`) has the same file names and loads the same way. It is an alternative in the model picker
+  (`catalog`, Ultra first). Ultra is the model used until another is chosen.
 - **Runtime.** ONNX Runtime through the `ort` crate, CPU only, linked statically into the program. Its prebuilt
   library needs AVX2 and FMA, without which the process would die on its first instruction, so
   `parakeet::model::processor_supported` is asked before anything loads (see The speech model). Each session runs
@@ -341,12 +343,14 @@ never mixed (`cue_core::speech`). Letters are counted by alphabet (`Alphabet`: C
 ### The speech model
 
 `runtime::model` keeps the model: its state, its background download and load, and the slot recognition waits on.
-The folder is `%LOCALAPPDATA%\CUE\models\parakeet-ultra-int8\` (`paths::model_dir`, named by the manifest's id).
+The folder is `%LOCALAPPDATA%\CUE\models\<id>\` (`paths::model_dir`, named by the manifest's id;
+`parakeet-ultra-int8` for the model CUE ships).
 
 - **Download** (`cue_engines::download`, on a tokio task): every file the folder lacks comes from
-  `https://huggingface.co/<repo>/resolve/<commit>/<path>`, the commit fixed in `cue_core::model::ULTRA`, never
-  `main`; about 670 MB in all. A file is written as `<name>.part`; a part already there is resumed with an HTTP range
-  request (a server that ignores the range sends the whole file again). The finished part is checked against its size
+  `https://huggingface.co/<repo>/resolve/<commit>/<path>`, the commit fixed on that model's manifest (`ultra` for
+  the one CUE ships), never `main`; about 670 MB in all. A file is written as `<name>.part`; a part already there is
+  resumed with an HTTP range request (a server that ignores the range sends the whole file again). The finished part
+  is checked against its size
   and SHA-256 and only then renamed, so a file under its final name has always passed the check, and a folder with
   every file at its size is ready (`download::ready`). A part larger than the file, or one that fails the hash, is
   deleted and starts anew on the next try. The progress (bytes of the whole model) reaches the windows once a percent.
@@ -1169,10 +1173,12 @@ whole file and answers with the settings as they are now (see Settings). After a
 again.
 
 - **Speech recognition**: the model's block (`window/model.ts`, the welcome window shows it too), drawn anew on every
-  `cue://model`: "Parakeet Ultra", its state in a few words (Ready, Loading, Downloading N %, Didn't download, Not
-  supported, Not downloaded; also the row's value on the first page), "Speech is recognized on this computer.", and,
-  while it downloads or once it failed, a thin bar and "N of M MB" with the numbers in Bebas; Retry (`model_retry`)
-  once it failed. There is no choice of engine. The page reads the state with `model_get` when the window opens.
+  `cue://model`: the model in use (Parakeet Ultra until another is chosen), its state in a few words (Ready, Loading,
+  Downloading N %, Didn't download, Not supported, Not downloaded; also the row's value on the first page), "Speech
+  is recognized on this computer.", and, while it downloads or once it failed, a thin bar and "N of M MB" with the
+  numbers in Bebas; Retry (`model_retry`) once it failed. The row opens the Model page (`window/models.ts`); Parakeet
+  v3 is one alternative there, and Ultra is the one CUE ships. The page reads the state with `model_get` when the
+  window opens.
 - **Keys**: a password field and Check for the key of the cleanup's cloud connection (`refine.connection`, one of
   `cue_core::connections`; 2026-11-02-refine-connections.md); a local server has an address and `server_check` instead. Check saves a typed key (`key_set`: Credential Manager,
   the service `CUE`, where `cue-cli keys` keeps them; trimmed, an empty one refused) and empties the field, then checks
@@ -1447,8 +1453,8 @@ the step under way (a recognition cannot be interrupted, and a refine request un
 leaves that recording out; a second one exits at once. `results.json` and `report.html` are rewritten after each
 recording in `%LOCALAPPDATA%\CUE\bench\runs\<timestamp>`. The report is a single HTML page with blind A/B pairs for
 recognition and for refine, scores, latency and cost per dictation, and saves the answers as `choices.json`; runs from
-before the local models keep their cloud prices. The bench decides between Ultra and v3 on real recordings before a
-release: if Ultra comes out worse, the pinned files in `cue_core::model` change to v3 and nothing else does.
+before the local models keep their cloud prices. Ultra is the speech model CUE ships; a model the picker has
+downloaded, such as NVIDIA's v3, is compared here the same way.
 
 `refine_compare` (an example in `cue-engines`) works on text instead of recordings: a phrase file
 (`{id, app, raw, before_cursor?, to?}`) goes through OpenRouter models and the direct Haiku path with the app's prompt,
