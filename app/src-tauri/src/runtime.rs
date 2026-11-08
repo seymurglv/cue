@@ -56,6 +56,7 @@ mod files;
 mod insert;
 pub(crate) mod llm;
 mod model;
+pub(crate) mod opencode;
 pub(crate) mod recordings;
 mod state;
 mod tasks;
@@ -296,6 +297,8 @@ pub struct Runtime {
     model: ModelKeeper,
     /// The cleanup's language model on this computer, and the slot the cleanup takes it from.
     llm: llm::LlmKeeper,
+    /// The OpenCode server the cleanup goes to: the user's, or one CUE started and stops at rest and on quit.
+    opencode: Arc<opencode::OpenCodeSlot>,
     /// The recognition in flight (at the second press, or "retry"): `AbortStt` cancels it too. Without a task (there
     /// was no session) it is `None`: the result was sent at once.
     stt_task: TaskSlot<Option<JoinHandle<()>>>,
@@ -397,6 +400,7 @@ impl Runtime {
         let translate_home = pair_now(&settings);
         let model = ModelKeeper::new(paths.models.clone(), &settings.stt.model);
         let llm = llm::LlmKeeper::new(paths.models.clone(), &settings.refine.local, settings.refine.runs == settings::Runs::Local);
+        let opencode = opencode::OpenCodeSlot::new(paths.agent_dir());
         let instructions = Instructions::load_or_create(&paths, lang.code(), settings.refine.custom_text());
         let history = HistoryLog::new(paths.history.clone(), Recordings::new(paths.history_audio.clone()));
         // Alt picks "Ask" only when it is on (spec 2 §9); the hook reads the switch on every key.
@@ -431,6 +435,7 @@ impl Runtime {
             stream: None,
             model,
             llm,
+            opencode,
             stt_task: TaskSlot::default(),
             refine_task: TaskSlot::default(),
             refine_focus: None,
@@ -478,6 +483,11 @@ impl Runtime {
     /// The longest a recording may stay, as the core holds it: the main window's commands play none past it.
     pub fn audio_limit(&self) -> AudioLimit {
         self.history.recordings.limit()
+    }
+
+    /// The OpenCode slot: CUE's quit stops the server CUE started.
+    pub fn opencode(&self) -> Arc<opencode::OpenCodeSlot> {
+        self.opencode.clone()
     }
 
     /// The core loop. Blocking calls (UI Automation up to 150 ms, the key store) run right here,
@@ -586,6 +596,7 @@ impl Runtime {
                 // ended is worked on.
                 self.model.rest_soon();
                 self.llm.rest_soon();
+                self.opencode.rest_soon();
             }
             CoreEvent::Input(i) => self.feed(i),
             CoreEvent::UiAction(UiAction::TrayAction) => self.on_tray_action(),
@@ -1343,6 +1354,7 @@ impl Runtime {
             // The models let go at rest load as the dictation starts; one ending starts the wait before they rest.
             self.model.busy(busy, &self.tx);
             self.llm.busy(busy, &self.tx);
+            self.opencode.busy(busy);
         }
         self.level.phase(s.phase);
         self.ui.state(s);

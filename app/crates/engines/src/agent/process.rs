@@ -38,26 +38,7 @@ pub fn run(exe: &Path, args: &[String], stdin: &str, cwd: &Path, timeout: Durati
     ready_cwd(cwd)?;
     let mut cmd = Command::new(exe);
     cmd.args(args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        use windows::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
-        // Suspended until it is in the job, so not even its first child can start outside it.
-        cmd.creation_flags(CREATE_NO_WINDOW.0 | CREATE_SUSPENDED.0);
-    }
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(AgentFailure::NotInstalled),
-        Err(_) => return Err(AgentFailure::Failed("start")),
-    };
-    let tree = match Tree::adopt(&child) {
-        Ok(t) => t,
-        Err(()) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(AgentFailure::Failed("job"));
-        }
-    };
+    let (mut child, tree) = start(cmd)?;
 
     let writer = child.stdin.take().map(|mut pipe| {
         let bytes = stdin.as_bytes().to_vec();
@@ -82,6 +63,78 @@ pub fn run(exe: &Path, args: &[String], stdin: &str, cwd: &Path, timeout: Durati
         return Err(AgentFailure::Timeout);
     }
     Ok(Output { status, stdout: String::from_utf8_lossy(&stdout).into_owned(), stderr_tail: tail_text(&stderr) })
+}
+
+/// A long-lived agent process (OpenCode's server): no window, an empty working folder, no stdin and its output
+/// dropped. [`Running::stop`], or dropping it, ends its whole process tree; so does CUE's own end, even a crash (the
+/// Job object is closed with CUE's handles).
+pub struct Running {
+    child: std::process::Child,
+    tree: Tree,
+}
+
+/// Starts `exe` with `args` and the extra environment `env` in `cwd` (created when missing; refused, as in [`run`],
+/// when anything is in it) and leaves it running.
+pub fn spawn(exe: &Path, args: &[String], env: &[(&str, &str)], cwd: &Path) -> Result<Running, AgentFailure> {
+    ready_cwd(cwd)?;
+    let mut cmd = Command::new(exe);
+    cmd.args(args)
+        .envs(env.iter().copied())
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let (child, tree) = start(cmd)?;
+    Ok(Running { child, tree })
+}
+
+impl Running {
+    /// The process CUE started (for an npm shim, `cmd.exe`).
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Whether the process CUE started is still running.
+    pub fn running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Ends the whole tree and waits (up to 2 s) for it to be gone (what dropping it does).
+    pub fn stop(self) {
+        drop(self);
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.tree.kill();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Starts `cmd` with no window, in a new Job object (Windows), suspended until it is in the job.
+fn start(mut cmd: Command) -> Result<(std::process::Child, Tree), AgentFailure> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+        // Suspended until it is in the job, so not even its first child can start outside it.
+        cmd.creation_flags(CREATE_NO_WINDOW.0 | CREATE_SUSPENDED.0);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(AgentFailure::NotInstalled),
+        Err(_) => return Err(AgentFailure::Failed("start")),
+    };
+    match Tree::adopt(&child) {
+        Ok(tree) => Ok((child, tree)),
+        Err(()) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(AgentFailure::Failed("job"))
+        }
+    }
 }
 
 /// Creates `cwd` when missing; refuses it when anything is in it.

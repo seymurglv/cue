@@ -102,3 +102,27 @@ cannot be kept with `grok -p`. To offer it: the owner picks the named pipe or AC
 - Codex (`codex debug models`, visibility "list"): gpt-6-luna (GPT-6-Luna), gpt-6-sol, gpt-6-astra, gpt-6.1-sol,
   gpt-6.1-terra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5.
 - Grok (`grok models`, signed out): grok-4.6 (default), grok-4.5. No model marked fast; check again signed in.
+
+## OpenCode: endpoints (read from source; OpenCode is not installed here)
+
+`agent::opencode` was built on 08.11.2026 against OpenCode's own source (github.com/anomalyco/opencode) and Hex's
+(github.com/anomalyco/hex), and tested only against a fake server. Check it against the version the owner installs.
+
+| Line | Package (08.11.2026) | Found by | A cleanup | Models |
+| --- | --- | --- | --- | --- |
+| V1 | `opencode-ai` 1.19.5 (npm `latest`, docs.opencode.ai) | `GET /global/health` → `{healthy, version}` | `POST /session` `{title, permission: [{permission: "*", pattern: "*", action: "deny"}]}`; `POST /session/:id/message` `{model: {providerID, modelID}, system, tools: {"*": false}, parts: [{type: "text", text}]}` → `{info, parts}`; `POST /session/:id/abort` on a timeout; `DELETE /session/:id` | `GET /config/providers`, default from `GET /config` `.model` |
+| V2 | `@opencode-ai/cli` 0.0.0-beta / dev (Hex's line) | `GET /api/info` → `{version, pid, …}` | `POST /api/experimental/generate/text` (older names `/api/experimental/generate`, `/api/generate`) `{prompt, model: {providerID, id}}` → `{data: {text}}` | `GET /api/model`, `GET /api/model/default` (`{location, data}`) |
+
+- `opencode serve --hostname 127.0.0.1 --port <n>`; the password comes from `OPENCODE_SERVER_PASSWORD` (HTTP Basic,
+  user `opencode`), in both lines.
+- A running V2 service registers in `~/.local/state/opencode/service.json` (`{id, version, url, pid, password}`; other
+  channels `service-<channel>.json`). V1 registers nothing, so CUE starts its own server for a V1 install.
+- V1 sends a path it does not know to its web app, which builds without the embedded app fetch from
+  `https://app.opencode.ai` (`server/shared/ui.ts` at v1.19.5), request body and `authorization` header included. So
+  CUE learns the line with GETs of known routes first (V1's first, as V2 serves unknown non-`/api` paths locally) and
+  never posts the text to a route the server is not known to have.
+- V1 turns `tools: {"*": false}` into a deny-all permission rule (`session/prompt.ts`), and a tool whose permission is
+  denied for every pattern is not offered to the model (`permission/index.ts`, `disabled`). V2's stateless generation
+  has no tools and stores nothing (its own description).
+- A fallback probe `/api/health` was reported for Hex; neither source has that route. V1's health route is
+  `/global/health`, V2's probe is `/api/info`.

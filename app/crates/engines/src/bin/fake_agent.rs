@@ -8,6 +8,9 @@
 //! - `sleep <ms>`: sleeps.
 //! - `spawn <pid file>`: starts a child of itself that sleeps a minute, writes the child's pid to the file, sleeps.
 //! - `fail <code> <bytes>`: writes `<bytes>` characters of noise and then `END` to stderr, exits with `<code>`.
+//! - `serve --hostname <h> --port <p>`: OpenCode's server stand-in: listens there and answers every request with a JSON
+//!   report of its arguments, the length of `OPENCODE_SERVER_PASSWORD`, its working folder and whether it has a
+//!   console window.
 use std::io::{Read, Write};
 use std::time::Duration;
 
@@ -77,9 +80,41 @@ fn main() {
             err.write_all(b"END").ok();
             std::process::exit(arg(1).parse().unwrap_or(1));
         }
+        "serve" => {
+            let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+            let addr = format!("{}:{}", flag("--hostname").unwrap_or_default(), flag("--port").unwrap_or_default());
+            let listener = std::net::TcpListener::bind(addr).expect("bind");
+            let report = serde_json::json!({
+                "args": args,
+                "password_len": std::env::var("OPENCODE_SERVER_PASSWORD").map(|p| p.len()).unwrap_or(0),
+                "cwd": std::env::current_dir().expect("cwd"),
+                "console_window": has_console_window(),
+            })
+            .to_string();
+            for sock in listener.incoming().flatten() {
+                serve_one(sock, &report);
+            }
+        }
         other => {
             eprintln!("fake_agent: unknown mode {other:?}");
             std::process::exit(2);
         }
     }
+}
+
+/// Reads one request's head and answers it with `body`.
+fn serve_one(mut sock: std::net::TcpStream, body: &str) {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        match sock.read(&mut byte) {
+            Ok(1) => head.push(byte[0]),
+            _ => return,
+        }
+    }
+    let reply = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = sock.write_all(reply.as_bytes());
 }

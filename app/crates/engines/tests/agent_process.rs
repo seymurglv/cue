@@ -155,3 +155,47 @@ fn grok_answer_round_trips_through_run() {
     assert_eq!(cli::grok_text(&out.stdout).as_deref(), Some("{\"text\": \"Hi.\"}"));
     let _ = std::fs::remove_dir_all(&cwd);
 }
+
+/// One `GET /` to the fake server at `url`; its JSON report.
+fn get_report(url: &str) -> serde_json::Value {
+    use std::io::{Read, Write};
+    let addr = url.trim_start_matches("http://").trim_end_matches('/');
+    let mut sock = std::net::TcpStream::connect(addr).unwrap();
+    sock.write_all(b"GET / HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n").unwrap();
+    let mut text = String::new();
+    sock.read_to_string(&mut text).unwrap();
+    let body = text.split_once("\r\n\r\n").unwrap().1;
+    serde_json::from_str(body).unwrap_or_else(|e| panic!("{e}: {body:?}"))
+}
+
+#[test]
+fn opencode_start_serves_on_loopback_with_a_password_and_stop_ends_it() {
+    use cue_engines::agent::opencode;
+    let cwd = temp_dir("opencode-serve");
+    let server = opencode::start(Path::new(FAKE), &cwd).unwrap();
+    assert!(server.owned);
+    assert_eq!(server.url.host_str(), Some("127.0.0.1"));
+    let port = server.url.port().unwrap();
+    assert!(port > 0);
+    assert!(server.alive());
+    let r = get_report(server.url.as_str());
+    assert_eq!(r["args"], serde_json::json!(["serve", "--hostname", "127.0.0.1", "--port", port.to_string()]));
+    // A password of CUE's own for this run, in the environment (never an argument).
+    assert!(r["password_len"].as_u64().unwrap() >= 32, "{r}");
+    assert_eq!(r["console_window"], false);
+    assert_eq!(PathBuf::from(r["cwd"].as_str().unwrap()).canonicalize().unwrap(), cwd.canonicalize().unwrap());
+    let pid = server.pid().unwrap();
+    assert!(alive(pid));
+    server.stop();
+    assert!(!alive(pid), "the server CUE started outlived its stop");
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn opencode_start_of_a_missing_program_is_not_installed() {
+    use cue_engines::agent::opencode;
+    let cwd = temp_dir("opencode-missing");
+    let missing = opencode::start(&cwd.join("no-such-opencode.exe"), &cwd);
+    assert_eq!(missing.unwrap_err(), AgentFailure::NotInstalled);
+    let _ = std::fs::remove_dir_all(&cwd);
+}

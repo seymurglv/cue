@@ -6,8 +6,10 @@
 //!   timeout that ends the whole process tree.
 //! - [`cli`]: the flags that leave Codex and Grok no shell, no file reading and no network tool, and reading their
 //!   answers.
+//! - [`opencode`]: the user's own OpenCode server, or one CUE starts on 127.0.0.1, over loopback HTTP.
 pub mod cli;
 pub mod discover;
+pub mod opencode;
 pub mod process;
 
 use std::path::PathBuf;

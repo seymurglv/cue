@@ -63,7 +63,6 @@ impl Paths {
     }
 
     /// The working folder of the agents CUE asks (`%LOCALAPPDATA%\CUE\agent`); created empty by whoever runs one.
-    #[allow(dead_code)] // used when an agent is asked
     pub fn agent_dir(&self) -> PathBuf {
         self.logs.parent().unwrap_or_else(|| Path::new(".")).join("agent")
     }

@@ -105,11 +105,14 @@ fn main() {
         })
         .build(tauri::generate_context!());
     match built {
-        Ok(app) => app.run(|_app, event| match event {
+        Ok(app) => app.run(|app, event| match event {
             // Closing the main window never closes CUE: only "Quit" does (`app.exit`, with a code).
             tauri::RunEvent::ExitRequested { code: None, api, .. } => api.prevent_exit(),
             tauri::RunEvent::Exit => {
                 tracing::info!("CUE is closing");
+                if let Some(opencode) = app.try_state::<std::sync::Arc<runtime::opencode::OpenCodeSlot>>() {
+                    opencode.rest();
+                }
                 logging::flush();
             }
             _ => {}
@@ -231,6 +234,8 @@ fn setup(
     let rt = runtime::Runtime::new(ui, card, settings, can_save_settings, lang, paths, core_tx);
     // The main window's commands play no recording past the period the core holds.
     app.manage(rt.audio_limit());
+    // Quitting stops the OpenCode server CUE started.
+    app.manage(rt.opencode());
     // The core blocks its thread on short Windows calls (UI Automation, microphone), so it gets its own thread;
     // tasks (network, timers) run on the shared tokio runtime.
     std::thread::Builder::new()

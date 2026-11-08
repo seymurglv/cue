@@ -34,6 +34,15 @@ pub fn discover() -> Vec<Found> {
     discover_in(&dirs, &cwd)
 }
 
+/// Where agent `id`'s program is, by the same search as [`discover`] but without asking its version.
+pub fn program(id: AgentId) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH");
+    let var = |k: &str| std::env::var_os(k).map(PathBuf::from);
+    let mut dirs = path_dirs(path.as_deref());
+    dirs.extend(usual_dirs(id, var("USERPROFILE").as_deref(), var("APPDATA").as_deref(), var("LOCALAPPDATA").as_deref()));
+    dirs.iter().find_map(|d| program_in(d, id.id()))
+}
+
 /// [`discover`] over the folders `dirs` gives for each agent, asking versions in `cwd` (the agents' empty folder).
 pub(crate) fn discover_in(dirs: &dyn Fn(AgentId) -> Vec<PathBuf>, cwd: &Path) -> Vec<Found> {
     let programs: Vec<(AgentId, PathBuf)> =
