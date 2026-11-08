@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod ask;
 pub mod audio;
 pub mod basics;

@@ -24,8 +24,12 @@ sha2.workspace = true
 getrandom.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# The processor's cores, for the local model's threads.
-windows = { workspace = true, features = ["Win32_System_SystemInformation"] }
+# The processor's cores, for the local model's threads; a Job object that ends an agent's whole process tree
+# (`agent::process`); the fake agent's console check.
+windows = { workspace = true, features = [
+  "Win32_System_SystemInformation", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_Security",
+  "Win32_System_Console",
+] }
 
 [target.'cfg(windows)'.dev-dependencies]
 # The speech model probe's memory (examples/stt_probe.rs).
