@@ -57,10 +57,10 @@ describe('The settings tray', () => {
       'General',
     ]);
     expect($$('.btray .trw').map((r) => r.dataset.sub)).toEqual(['model', 'cleanup', 'mic', 'languages', 'history', 'general']);
-    // Each row with its value (no key saved: Cleanup says so).
+    // Each row with its value.
     expect($$('.btray .trw em').map((e) => e.textContent)).toEqual([
       'Ready',
-      'No Anthropic key',
+      'Cloud',
       'As in Windows',
       'Auto · into English',
       'A month',
@@ -95,91 +95,6 @@ describe('The settings tray', () => {
     page = await mount();
     await open();
     expect($('.btray .tft')).toBeNull();
-  });
-
-  it('key field is a password field and is cleared after check', async () => {
-    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
-    page = await mount();
-    await open();
-    await sub('cleanup');
-    expect($$('input[data-key]').map((i) => i.dataset.key)).toEqual(['anthropic']);
-    const input = $<HTMLInputElement>('input[data-key="anthropic"]')!;
-    expect(input.type).toBe('password');
-    expect(input.getAttribute('autocomplete')).toBe('off');
-    expect(input.placeholder).toBe('Paste the key');
-    input.value = 'sk-secret-123';
-    click($('[data-check="anthropic"]'));
-    // Emptied at once, before the core answers.
-    expect(input.value).toBe('');
-    await settle();
-    expect(core.keySet).toHaveBeenCalledWith('anthropic', 'sk-secret-123');
-    expect(core.keyCheck).toHaveBeenCalledWith('anthropic');
-    expect(input.value).toBe('');
-    expect(input.placeholder).toBe('sk-…123');
-    expect(text($('small[data-state="anthropic"]'))).toBe('Works');
-    // A refused save: the key never reaches the log.
-    core.keySet.mockRejectedValueOnce('store');
-    input.value = 'sk-other-456';
-    click($('[data-check="anthropic"]'));
-    await settle();
-    expect(input.value).toBe('');
-    expect(core.keyCheck).toHaveBeenCalledTimes(1);
-    expect(text($('small[data-state="anthropic"]'))).toBe("Couldn't check");
-    const logged = JSON.stringify(errors.mock.calls);
-    expect(logged).not.toContain('secret');
-    expect(logged).not.toContain('other-456');
-    // Enter in the field checks too.
-    input.value = 'sk-third-789';
-    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-    expect(input.value).toBe('');
-    await settle();
-    expect(core.keySet).toHaveBeenLastCalledWith('anthropic', 'sk-third-789');
-    errors.mockRestore();
-  });
-
-  it('key states read works and key error', async () => {
-    core.keyState.mockResolvedValue({ saved: true, mask: 'sk-…789' });
-    core.keyCheck.mockResolvedValue('badKey');
-    page = await mount();
-    await open();
-    expect(text($('.btray em[data-val="cleanup"]'))).toBe('Anthropic');
-    await sub('cleanup');
-    const anthropic = $('small[data-state="anthropic"]')!;
-    expect(text(anthropic)).toBe('Saved');
-    expect($<HTMLInputElement>('input[data-key="anthropic"]')!.placeholder).toBe('sk-…789');
-    click($('[data-check="anthropic"]'));
-    expect(text(anthropic)).toBe('Checking…');
-    expect($<HTMLButtonElement>('[data-check="anthropic"]')!.disabled).toBe(true);
-    await settle();
-    // An empty field: the saved key is checked, nothing is saved.
-    expect(core.keySet).not.toHaveBeenCalled();
-    expect(core.keyCheck).toHaveBeenCalledWith('anthropic');
-    expect(text(anthropic)).toBe('Key error');
-    expect(anthropic.classList.contains('warn')).toBe(true);
-    expect(anthropic.classList.contains('ok')).toBe(false);
-    // The other states.
-    core.keyCheck
-      .mockResolvedValueOnce('works')
-      .mockResolvedValueOnce('noBalance')
-      .mockResolvedValueOnce('unchecked')
-      .mockResolvedValueOnce('missing');
-    click($('[data-check="anthropic"]'));
-    await settle();
-    expect(text(anthropic)).toBe('Works');
-    expect(anthropic.classList.contains('ok')).toBe(true);
-    expect(anthropic.classList.contains('warn')).toBe(false);
-    // The key works, the account cannot pay: in amber, not "Works".
-    click($('[data-check="anthropic"]'));
-    await settle();
-    expect(text(anthropic)).toBe('No money on the account');
-    expect(anthropic.classList.contains('warn')).toBe(true);
-    expect(anthropic.classList.contains('ok')).toBe(false);
-    click($('[data-check="anthropic"]'));
-    await settle();
-    expect(text(anthropic)).toBe("Couldn't check");
-    click($('[data-check="anthropic"]'));
-    await settle();
-    expect(text(anthropic)).toBe('No key');
   });
 
   it('the Speech recognition row shows the model state and follows it', async () => {
@@ -238,23 +153,6 @@ describe('The settings tray', () => {
     expect(row.querySelector('.tline')).toBeNull();
     expect(em.classList.contains('num')).toBe(false);
     expect(text(em)).toBe('Ready');
-  });
-
-  it('Cleanup says the Anthropic key is missing until it is saved; Speech recognition never does', async () => {
-    page = await mount();
-    await open();
-    const em = () => $<HTMLElement>('.btray em[data-val="cleanup"]')!;
-    expect(text(em())).toBe('No Anthropic key');
-    expect(em().classList.contains('warn')).toBe(true);
-    expect(text($('.btray em[data-val="model"]'))).toBe('Ready');
-    // The key saved on its page: the first page names the style.
-    await sub('cleanup');
-    $<HTMLInputElement>('input[data-key="anthropic"]')!.value = 'sk-ant-new-1234';
-    click($('[data-check="anthropic"]'));
-    await settle();
-    key('Escape');
-    expect(text(em())).toBe('Anthropic');
-    expect(em().classList.contains('warn')).toBe(false);
   });
 
   it('the Speech recognition page: the model row and the note', async () => {
@@ -802,133 +700,32 @@ describe('The settings tray', () => {
     expect($('.btray [data-sw="autostart"]')).not.toBeNull();
   });
 
-  it('settings pushed by the core leave the tray as it is: a draft stays, the Habits switch follows', async () => {
-    stub(view({ refineStyle: 'custom' }));
+  it('settings pushed by the core leave the tray as it is: the Habits switch follows', async () => {
     saved();
     page = await mount();
     await open();
     await sub('cleanup');
-    const field = $<HTMLTextAreaElement>('.btray textarea.cta')!;
-    field.value = 'a draft not saved yet';
-    feeds.settings(view({ refineStyle: 'custom', dictionary: ['Marisol'], learned: [{ word: 'Marisol', heard: 'Марисоль' }] }));
-    expect($('.btray textarea.cta')).toBe(field);
-    expect(field.value).toBe('a draft not saved yet');
+    const group = $('.btray .sgrp');
+    feeds.settings(view({ dictionary: ['Marisol'], learned: [{ word: 'Marisol', heard: 'Марисоль' }] }));
     expect($('.dch[data-word="Marisol"]')).not.toBeNull();
-    feeds.settings(view({ refineStyle: 'custom', learn: false }));
+    feeds.settings(view({ learn: false }));
     expect($('.bsec[data-scr="habits"] [data-sw="learn"]')!.getAttribute('aria-checked')).toBe('false');
-    expect($('.btray textarea.cta')).toBe(field);
+    expect(title()).toBe('Cleanup');
+    expect(group).not.toBeNull();
   });
 
-  it('the Cleanup page: the style, the connection card, the key, the model and the note', async () => {
+  it('the Cleanup page: where it runs, and the note', async () => {
     stub(view({ lang: 'ru', uiLanguage: 'ru' }));
-    core.keyState.mockImplementation(async (name) => (name === 'anthropic' ? { saved: true, mask: 'sk-…789' } : { saved: false, mask: '' }));
     page = await mount();
     await open();
     const value = () => text($('.btray em[data-val="cleanup"]'));
-    expect(value()).toBe('Anthropic');
+    expect(value()).toBe('Облако');
     await sub('cleanup');
     expect(title()).toBe('Чистка текста');
-    const seg = () => $$('[data-seg="refine"] button');
-    expect(seg().map((b) => b.textContent)).toEqual(['По умолчанию', 'Свой']);
-    expect(seg().map((b) => b.getAttribute('aria-pressed'))).toEqual(['true', 'false']);
-    // The card: the lamp on, the name, the key's state.
-    const card = $<HTMLButtonElement>('.btray .pk[data-dd="connection"]')!;
-    expect(card.getAttribute('aria-label')).toBe('Подключение');
-    expect(text(card.querySelector('.pt b'))).toBe('Anthropic');
-    expect(text(card.querySelector('.pt small'))).toBe('Ключ сохранён · sk-…789');
-    expect(card.querySelector('.lamp')!.classList.contains('on')).toBe(true);
-    // The key row under it, then the model.
-    const keyRow = $<HTMLElement>('.btray .srow[data-key="anthropic"]')!;
-    expect(text(keyRow.querySelector('.stx b'))).toBe('Ключ');
-    expect(text($('.btray [data-dd="rmodel"] .ddv'))).toBe('Claude Haiku 5.5');
-    expect(text($('.btray .tft'))).toBe('Текст уходит в Anthropic для чистки; история — только на этом компьютере.');
-  });
-
-  it('the connection card lists the eight cloud connections and switches to the one picked', async () => {
-    core.keyState.mockImplementation(async (name) => (name === 'anthropic' ? { saved: true, mask: 'sk-…789' } : { saved: false, mask: '' }));
-    page = await mount();
-    await open();
-    const em = () => $<HTMLElement>('.btray em[data-val="cleanup"]')!;
-    expect(text(em())).toBe('Anthropic');
-    await sub('cleanup');
-    const card = () => $<HTMLButtonElement>('.btray .pk[data-dd="connection"]')!;
-    click(card());
-    const menu = () => $<HTMLElement>('.menu')!;
-    expect(menu().classList.contains('wide')).toBe(true);
-    expect($$('.menu .mg')).toEqual([]);
-    const items = () => $$('.menu [data-i]');
-    expect(items().map((b) => text(b.querySelector('.mlb')))).toEqual([
-      'Anthropic', 'OpenAI', 'Google Gemini', 'OpenRouter', 'DeepSeek', 'Mistral', 'Groq', 'xAI',
-    ]);
-    expect(text(items()[0].querySelector('.msub'))).toBe('Key saved · sk-…789');
-    expect(text(items()[1].querySelector('.msub'))).toBe('No key');
-    expect(items().map((b) => b.querySelector('.mlamp')!.classList.contains('on'))).toEqual([true, false, false, false, false, false, false, false]);
-    expect(items().map((b) => b.getAttribute('aria-checked'))[0]).toBe('true');
-    // A second press on the card closes the list.
-    click(card());
-    expect($('.menu')).toBeNull();
-    click(card());
-    click(items()[1]);
-    await settle();
-    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'refineConnection', value: 'openai' });
-    expect($('.menu')).toBeNull();
-    expect(text(card().querySelector('.pt b'))).toBe('OpenAI');
-    expect(text(card().querySelector('.pt small'))).toBe('No key');
-    expect($$('.btray .srow[data-key]').map((r) => r.dataset.key)).toEqual(['openai']);
-    expect(text($('.btray [data-dd="rmodel"] .ddv'))).toBe('GPT-6 Luna');
-    expect(text($('.btray .tft'))).toBe('Text goes to OpenAI for the cleanup; the history stays on this computer only.');
-    // The OpenAI key is not saved: the first page says so, in amber.
-    key('Escape');
-    expect(text(em())).toBe('No OpenAI key');
-    expect(em().classList.contains('warn')).toBe(true);
-    // Saved and checked on its page: the card and the first page follow.
-    await sub('cleanup');
-    $<HTMLInputElement>('input[data-key="openai"]')!.value = 'sk-proj-new-1234';
-    click($('[data-check="openai"]'));
-    await settle();
-    expect(core.keySet).toHaveBeenCalledWith('openai', 'sk-proj-new-1234');
-    expect(core.keyCheck).toHaveBeenCalledWith('openai');
-    expect(text(card().querySelector('.pt small'))).toBe('Key saved · sk-…234');
-    key('Escape');
-    expect(text(em())).toBe('OpenAI');
-  });
-
-  it('the model list marks the recommended one and gives each its price', async () => {
-    page = await mount();
-    await open();
-    await sub('cleanup');
-    click($('.btray [data-dd="rmodel"]'));
-    const items = () => $$('.menu [data-i]');
-    expect(items().map((b) => text(b.querySelector('.mlb')))).toEqual(['Claude Haiku 5.5', 'Claude Sonnet 5.5']);
-    expect(items().map((b) => text(b.querySelector('.msub')))).toEqual(['$0.10 / $0.50 per 1M tokens', '$2 / $10 per 1M tokens']);
-    expect(items().map((b) => text(b.querySelector('.mbadge')))).toEqual(['Recommended', '']);
-    expect(items().map((b) => b.getAttribute('aria-checked'))).toEqual(['true', 'false']);
-    click(items()[1]);
-    await settle();
-    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'refineModel', value: 'claude-sonnet-5-5' });
-    expect(text($('.btray [data-dd="rmodel"] .ddv'))).toBe('Claude Sonnet 5.5');
-  });
-
-  it('the custom style opens a field for the instructions, saved when it loses focus', async () => {
-    saved();
-    page = await mount();
-    await open();
-    await sub('cleanup');
-    expect($('.btray textarea')).toBeNull();
-    click($$('[data-seg="refine"] button')[1]);
-    await settle();
-    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'refineStyle', value: 'custom' });
-    const field = $<HTMLTextAreaElement>('.btray textarea.cta')!;
-    expect(field.placeholder).toBe('For example: keep it short, no emoji, terms in English.');
-    expect(field.maxLength).toBe(2000);
-    expect(text($('.btray .srow .stx small'))).toBe("Your instructions instead of CUE's cleanup");
-    field.value = 'пиши коротко';
-    field.dispatchEvent(new Event('change', { bubbles: true }));
-    await settle();
-    expect(core.settingsSet).toHaveBeenLastCalledWith({ kind: 'refineCustom', value: 'пиши коротко' });
-    expect($<HTMLTextAreaElement>('.btray textarea.cta')!.value).toBe('пиши коротко');
-    key('Escape');
-    expect(text($('.btray em[data-val="cleanup"]'))).toBe('Anthropic');
+    const seg = () => $$('[data-seg="runs"] button');
+    expect(seg().map((b) => b.textContent)).toEqual(['Этот компьютер', 'Облако']);
+    expect(seg().map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'true']);
+    expect(text($('.btray .tft'))).toBe('Текст уходит в Облако для чистки; история — только на этом компьютере.');
   });
 
   it('reads the settings again when the core did not answer a change in time', async () => {

@@ -42,23 +42,10 @@ export const KEEPS: readonly Keep[] = ['forever', 'year', 'month', 'week', 'off'
 export type AudioKeep = 'day' | 'week' | 'month' | 'off';
 export const AUDIO_KEEPS: readonly AudioKeep[] = ['day', 'week', 'month', 'off'];
 export type UiLanguage = 'auto' | 'en' | 'ru';
-/** CUE's own cleanup, or the user's instructions in its place. */
-export type RefineStyle = 'default' | 'custom';
-export const REFINE_STYLES: readonly RefineStyle[] = ['default', 'custom'];
-/** A model of a connection: its price per million tokens (input, output). */
-export interface ModelView {
-  id: string;
-  name: string;
-  usd: [number, number];
-}
-/** A cloud connection the cleanup can go through; its first model is the recommended one. */
-export interface ConnectionView {
-  id: string;
-  name: string;
-  models: ModelView[];
-}
-/** Where the cleanup runs: a model on this computer, or a cloud connection with the user's key. */
-export type Runs = 'local' | 'cloud';
+/** Where the cleanup runs: no AI, a model on this computer, or the user's own agent. */
+export type Where = 'off' | 'local' | 'agent';
+/** What is pasted when the AI does not answer. */
+export type Fallback = 'raw' | 'local';
 /** A habit as the Habits section draws it: its rule, its example, the app it holds in (null — everywhere), how many
  *  times it was corrected, and whether it is on. */
 export interface HabitView {
@@ -86,16 +73,14 @@ export interface SettingsView {
   saved: boolean;
   /** The dictionary's words, the newest first. */
   dictionary: string[];
-  refineStyle: RefineStyle;
-  /** The custom style's instructions. */
-  refineCustom: string;
-  /** Where the cleanup runs, and the local model's id (empty: the recommended one). */
-  refineRuns: Runs;
+  /** Where the cleanup runs, and the local model's id (empty: nothing chosen). */
+  refineWhere: Where;
   refineLocal: string;
-  /** The cleanup's cloud connection and its model. */
-  refineConnection: string;
-  refineModel: string;
-  connections: ConnectionView[];
+  /** The agent chosen (`null`: the first one found), and the model picked per agent id. */
+  refineAgent: string | null;
+  refineAgentModel: Record<string, string>;
+  /** What is pasted when the AI does not answer. */
+  refineFallback: Fallback;
   /** Words added from a correction, with how they were heard. */
   learned: { word: string; heard: string }[];
   /** "Learn from me". */
@@ -109,11 +94,10 @@ export type SettingChange =
   | { kind: 'micDevice'; value: string | null }
   | { kind: 'translateTarget'; value: string }
   | { kind: 'uiLanguage'; value: UiLanguage }
-  | { kind: 'refineStyle'; value: RefineStyle }
-  | { kind: 'refineCustom'; value: string }
-  | { kind: 'refineConnection'; value: string }
-  | { kind: 'refineModel'; value: string }
-  | { kind: 'refineRuns'; value: Runs }
+  | { kind: 'refineWhere'; value: Where }
+  | { kind: 'refineAgent'; value: string }
+  | { kind: 'refineAgentModel'; value: { agent: string; model: string } }
+  | { kind: 'refineFallback'; value: Fallback }
   | { kind: 'dictAdd'; value: string }
   | { kind: 'dictRemove'; value: string }
   | { kind: 'learn'; value: boolean }

@@ -122,7 +122,7 @@ describe('The welcome window', () => {
   });
 
   it('with the cleanup on this computer the Keys step is skipped', async () => {
-    stub(view({ refineRuns: 'local' }));
+    stub(view({ refineWhere: 'local' }));
     page = await mount();
     expect($$('.dots i').map((d) => d.title)).toEqual(['Hello', 'Model', 'Microphone', 'First dictation', 'Done']);
     await next();

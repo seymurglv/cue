@@ -9,7 +9,7 @@
 //! from before the window is created and let go when the window is destroyed or could not be created (`Hold`); in
 //! between its page moves it with its steps (`commands::welcome_step`). A chord it holds brings it forward
 //! (`bring_forward`). Its microphone preview goes with it; the main window's stays.
-use cue_core::settings::{RefineSettings, Runs};
+use cue_core::settings::{RefineSettings, Where};
 use std::ffi::OsStr;
 use std::sync::{Mutex, PoisonError};
 
@@ -53,9 +53,9 @@ pub fn asks_welcome<S: AsRef<OsStr>>(args: impl IntoIterator<Item = S>) -> bool 
 
 /// The key a start looks at: the one the cleanup's cloud connection needs; none on this computer.
 fn start_key(refine: &RefineSettings) -> Option<KeyName> {
-    match refine.runs {
-        Runs::Local => None,
-        Runs::Cloud => KeyName::of_connection(refine.connection().id),
+    match refine.where_ {
+        Where::Local | Where::Off => None,
+        Where::Agent => KeyName::of_connection(refine.connection().id), // Task 7: route to the agent
     }
 }
 
@@ -225,7 +225,7 @@ mod tests {
     /// On this computer the cleanup needs no key: no window at a start for one.
     #[test]
     fn the_key_is_not_looked_at_on_this_computer() {
-        let local = RefineSettings { runs: Runs::Local, ..RefineSettings::default() };
+        let local = RefineSettings { where_: Where::Local, ..RefineSettings::default() };
         assert_eq!(start_key(&local), None);
     }
 

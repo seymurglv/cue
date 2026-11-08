@@ -1,12 +1,13 @@
 //! Core events → the Drop and card windows, new history entries → the main window's channel, and window commands → the
 //! core (names as in `app/ui/src/main.ts` and `app/ui/src/card.ts`). The Drop's and the card's commands answer those
 //! windows alone (`guard`).
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use cue_core::history;
-use cue_core::connections::{self, Cost};
-use cue_core::settings::{AudioKeep, DropPosition, Keep, RefineStyle, Runs, Settings, UiLanguage};
+use cue_core::agents::AgentId;
+use cue_core::settings::{AudioKeep, DropPosition, Fallback, Keep, Settings, UiLanguage, Where};
 use cue_core::translate;
 use cue_core::ui::{TrayKind, UiAction, UiState};
 use tauri::ipc::Channel;
@@ -52,17 +53,16 @@ pub struct SettingsView {
     pub learn: bool,
     /// The habits, the newest first, as the main window's Habits section draws them (docs/specs/2026-11-04-habits.md).
     pub habits: Vec<HabitView>,
-    /// CUE's cleanup or the user's instructions, and those instructions.
-    pub refine_style: RefineStyle,
-    pub refine_custom: String,
-    /// Where the cleanup runs, and the local model's id (empty: the recommended one).
-    pub refine_runs: Runs,
+    /// Where the cleanup runs: no AI, this computer or the user's agent.
+    pub refine_where: Where,
+    /// The local model's id (empty: nothing chosen).
     pub refine_local: String,
-    /// The cleanup's cloud connection and its model.
-    pub refine_connection: &'static str,
-    pub refine_model: &'static str,
-    /// Every connection the cleanup can go through, with its models, the recommended one first.
-    pub connections: Vec<ConnectionView>,
+    /// The agent chosen (`null`: the first one found).
+    pub refine_agent: Option<AgentId>,
+    /// The model picked per agent id; an agent missing here uses its default.
+    pub refine_agent_model: BTreeMap<String, String>,
+    /// What is pasted when the AI does not answer.
+    pub refine_fallback: Fallback,
 }
 
 /// A word added from a suggestion after a correction, and what recognition heard instead.
@@ -83,43 +83,6 @@ pub struct HabitView {
     pub app: Option<String>,
     pub n: u32,
     pub on: bool,
-}
-
-/// A connection as the Cleanup page lists it.
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConnectionView {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub models: Vec<ModelView>,
-}
-
-/// A model under its connection: its price per million tokens (input, output).
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelView {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub usd: (f64, f64),
-}
-
-/// The connections of `cue_core::connections` for the window.
-fn connection_views() -> Vec<ConnectionView> {
-    connections::CONNECTIONS
-        .iter()
-        .map(|c| ConnectionView {
-            id: c.id,
-            name: c.name,
-            models: c
-                .models
-                .iter()
-                .map(|m| {
-                    let Cost::Usd { input, output, .. } = m.cost;
-                    ModelView { id: m.id, name: m.name, usd: (input, output) }
-                })
-                .collect(),
-        })
-        .collect()
 }
 
 impl SettingsView {
@@ -147,13 +110,11 @@ impl SettingsView {
                 .iter()
                 .map(|h| HabitView { id: h.id.clone(), rule: h.rule.clone(), before: h.before.clone(), after: h.after.clone(), app: h.app.clone(), n: h.n, on: h.on })
                 .collect(),
-            refine_style: s.refine.style,
-            refine_custom: s.refine.custom.clone(),
-            refine_runs: s.refine.runs,
+            refine_where: s.refine.where_,
             refine_local: s.refine.local.clone(),
-            refine_connection: s.refine.connection().id,
-            refine_model: s.refine.model().id,
-            connections: connection_views(),
+            refine_agent: s.refine.agent,
+            refine_agent_model: s.refine.models.clone(),
+            refine_fallback: s.refine.fallback,
         }
     }
 }
@@ -173,12 +134,11 @@ impl std::fmt::Debug for SettingsView {
             .field("learned", &self.learned.len())
             .field("learn", &self.learn)
             .field("habits", &self.habits.len())
-            .field("refine_style", &self.refine_style)
-            .field("refine_custom_chars", &self.refine_custom.chars().count())
-            .field("refine_connection", &self.refine_connection)
-            .field("refine_model", &self.refine_model)
-            .field("refine_runs", &self.refine_runs)
+            .field("refine_where", &self.refine_where)
             .field("refine_local", &self.refine_local)
+            .field("refine_agent", &self.refine_agent)
+            .field("refine_agent_model", &self.refine_agent_model)
+            .field("refine_fallback", &self.refine_fallback)
             .finish()
     }
 }
@@ -574,7 +534,7 @@ mod tests {
         let mut names: Vec<&str> = view.as_object().unwrap().keys().map(String::as_str).collect();
         names.sort_unstable();
         let expected =
-            ["connections", "dictionary", "habits", "historyAudio", "historyKeep", "lang", "languages", "learn", "learned", "micDevice", "refineConnection", "refineCustom", "refineLocal", "refineModel", "refineRuns", "refineStyle", "saved", "translateTarget", "uiLanguage"];
+            ["dictionary", "habits", "historyAudio", "historyKeep", "lang", "languages", "learn", "learned", "micDevice", "refineAgent", "refineAgentModel", "refineFallback", "refineLocal", "refineWhere", "saved", "translateTarget", "uiLanguage"];
         assert_eq!(names, expected);
         let defaults = [
             ("historyKeep", json!("month")),
@@ -588,11 +548,10 @@ mod tests {
             ("learned", json!([])),
             ("habits", json!([])),
             ("learn", json!(true)),
-            ("refineStyle", json!("default")),
-            ("refineCustom", json!("")),
-            ("refineConnection", json!("anthropic")),
-            ("refineModel", json!("claude-haiku-5-5")),
-            ("refineRuns", json!("cloud")),
+            ("refineWhere", json!("agent")),
+            ("refineAgent", Value::Null),
+            ("refineAgentModel", json!({})),
+            ("refineFallback", json!("raw")),
             ("refineLocal", json!("")),
         ];
         for (name, value) in defaults {
@@ -609,11 +568,10 @@ mod tests {
             SettingChange::MicDevice(Some("USB Microphone".into())),
             SettingChange::TranslateTarget("de".into()),
             SettingChange::UiLanguage(UiLanguage::Ru),
-            SettingChange::RefineStyle(RefineStyle::Custom),
-            SettingChange::RefineCustom("пиши коротко".into()),
-            SettingChange::RefineRuns(Runs::Local),
-            SettingChange::RefineConnection("openai".into()),
-            SettingChange::RefineModel("gpt-6.1-terra".into()),
+            SettingChange::RefineWhere(Where::Local),
+            SettingChange::RefineAgent(AgentId::Codex),
+            SettingChange::RefineAgentModel { agent: AgentId::Codex, model: "gpt-6.1-terra".into() },
+            SettingChange::RefineFallback(Fallback::Local),
         ] {
             assert!(s.apply(change));
         }
@@ -626,11 +584,10 @@ mod tests {
             ("uiLanguage", json!("ru")),
             ("lang", json!("ru")),
             ("saved", json!(false)),
-            ("refineStyle", json!("custom")),
-            ("refineCustom", json!("пиши коротко")),
-            ("refineRuns", json!("local")),
-            ("refineConnection", json!("openai")),
-            ("refineModel", json!("gpt-6.1-terra")),
+            ("refineWhere", json!("local")),
+            ("refineAgent", json!("codex")),
+            ("refineAgentModel", json!({ "codex": "gpt-6.1-terra" })),
+            ("refineFallback", json!("local")),
         ];
         for (name, value) in set {
             assert_eq!(view[name], value, "{name}");

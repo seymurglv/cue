@@ -1,6 +1,6 @@
 // The settings tray (spec 3 §3, regrouped in docs/specs/2026-11-02-settings-tray.md): it grows out of the gear (the gear
 // turns into its close button) and folds back into it. Its first page lists Speech recognition (the model on this
-// computer, window/model.ts), Cleanup (the style, the connection and its key or address, the model), Microphone, Languages (the
+// computer, window/model.ts), Cleanup (where it runs), Microphone, Languages (the
 // interface's and the translation's), History (how long the history and its recordings are kept, and clearing it) and
 // General with their values; one of them at a time slides in, the chevron goes back; Esc goes back, then closes. Every
 // change goes to the core at once.
@@ -9,22 +9,20 @@
 // the pages pass (a scroll bar showing for a moment would narrow the rows). A page whose values come later (the
 // microphones, new settings) is filled in where it is, even while it is still sliding in.
 // Speech recognition's model row opens the Model page (window/models.ts), one level deeper: back goes to Speech
-// recognition. Cleanup holds the key row of keys.ts, the Microphone page the microphone rows of mic.ts (the welcome window
+// recognition. The Microphone page the microphone rows of mic.ts (the welcome window
 // shows them too); the microphone's level is listened to only while that page is shown.
 import * as api from './api';
 import {
   AUDIO_KEEPS,
   KEEPS,
-  REFINE_STYLES,
   type AudioKeep,
   type Keep,
   type KeyName,
-  type RefineStyle,
   type UiLanguage,
 } from './api';
 import { CUE } from '../designParts';
 import { icon, type IconName } from './icons';
-import { KEY_TITLE, KeyRows } from './keys';
+import { KeyRows } from './keys';
 import { MicRows } from './mic';
 import { bar, modelRow, modelValue, percent, stepModelRow } from './model';
 import { ModelsPage, llmSource, speechSource } from './models';
@@ -69,17 +67,6 @@ function syncSeg(sg: HTMLElement): void {
     th.style.transition = '';
     sg.dataset.ready = '1';
   }
-}
-
-/** The longest custom instructions the core keeps (`settings::MAX_CUSTOM_CHARS`). */
-const CUSTOM_CHARS = 2000;
-
-/** Dollars per million tokens as the model list shows them: whole numbers bare, cents always two places ("0.10", "2",
- *  "0.075"). */
-function usd(n: number): string {
-  if (Number.isInteger(n)) return String(n);
-  const places = (String(n).split('.')[1] ?? '').length;
-  return n.toFixed(Math.max(2, places));
 }
 
 /** A segmented control of `values` named by `labels`, `cur` pressed; `name` tells the click which setting it is. */
@@ -132,10 +119,8 @@ export class SettingsTray {
     private readonly ctx: Ctx,
     private readonly clearHistory: () => Promise<void>,
   ) {
-    // The key's state shows in Cleanup's value ("No Anthropic key") and on its page, on the card too.
     this.keys = new KeyRows(ctx, () => this.current, () => {
       this.paintCleanupValue();
-      this.paintCard();
       this.fit();
       this.ctx.keysChanged?.();
     });
@@ -201,21 +186,18 @@ export class SettingsTray {
     else row.append(bar('tline', v.progress));
   }
 
-  /** The first page's Cleanup value: where it runs; amber while the local model is not ready, or the cloud connection's
-   *  key is read and not saved. */
+  /** The first page's Cleanup value: where it runs; amber while the local model is not ready. */
   private paintCleanupValue(page: ParentNode | null = this.current): void {
     const em = page?.querySelector<HTMLElement>('em[data-val="cleanup"]');
     if (!em) return;
-    if (this.ctx.settings?.refineRuns === 'local') {
+    if (this.ctx.settings?.refineWhere === 'local') {
       const { text, warn } = this.localValue();
       em.textContent = text;
       em.classList.toggle('warn', warn);
       return;
     }
-    const key = this.cleanupKey();
-    const noKey = !!key && this.keys.read && !this.keys.keys[key].saved;
-    em.textContent = noKey && key ? this.ctx.t.cleanupNoKey.replace('{NAME}', KEY_TITLE[key]) : this.value('cleanup');
-    em.classList.toggle('warn', noKey);
+    em.textContent = this.value('cleanup');
+    em.classList.remove('warn');
   }
 
   /** Takes the page's tray box and gear; an open tray stays open on its page (the page was built again). */
@@ -473,8 +455,6 @@ export class SettingsTray {
     else if (t.closest('[data-tclose]')) this.close();
     else if ((b = t.closest<HTMLElement>('[data-check]'))) void this.keys.check(b.dataset.check as KeyName);
     else if ((b = t.closest<HTMLElement>('[data-dd="mic"]'))) this.mic.menu(b);
-    else if ((b = t.closest<HTMLElement>('[data-dd="connection"]'))) this.connectionMenu(b);
-    else if ((b = t.closest<HTMLElement>('[data-dd="rmodel"]'))) this.modelMenu(b);
     else if ((b = t.closest<HTMLElement>('[data-dd="target"]'))) this.targetMenu(b);
     else if ((b = t.closest<HTMLElement>('[data-dd="hkeep"]'))) this.keepMenu(b);
     else if ((b = t.closest<HTMLElement>('[data-dd="haudio"]'))) this.audioMenu(b);
@@ -483,8 +463,7 @@ export class SettingsTray {
     else if ((b = t.closest<HTMLElement>('.segc button')) && b.getAttribute('aria-pressed') !== 'true') {
       const v = b.dataset.v!;
       const seg = b.closest<HTMLElement>('.segc')!.dataset.seg;
-      if (seg === 'refine') void this.ctx.change({ kind: 'refineStyle', value: v as RefineStyle });
-      else if (seg === 'runs') void this.ctx.change({ kind: 'refineRuns', value: v as api.Runs });
+      if (seg === 'runs') void this.ctx.change({ kind: 'refineWhere', value: v === 'local' ? 'local' : 'agent' });
       else void this.ctx.change({ kind: 'uiLanguage', value: v as UiLanguage });
     }
   }
@@ -529,10 +508,9 @@ export class SettingsTray {
       pg.append(h('div', 'tft', t.modelNote));
     } else if (sub === 'cleanup') {
       g.append(...this.cleanupRows());
-      const local = this.ctx.settings?.refineRuns === 'local';
+      const local = this.ctx.settings?.refineWhere === 'local';
       if (local) pg.append(...this.llms.rows());
-      const c = this.connection();
-      pg.append(h('div', 'tft', local ? t.cleanupNoteLocal : t.cleanupNote.replace('{NAME}', c?.name ?? '')));
+      pg.append(h('div', 'tft', local ? t.cleanupNoteLocal : t.cleanupNote.replace('{NAME}', t.runs.cloud)));
       if (!local) pg.append(...this.llmsHere.rows());
     } else if (sub === 'mic') g.append(...this.mic.rows());
     else if (sub === 'languages') g.append(...this.languageRows());
@@ -557,7 +535,7 @@ export class SettingsTray {
       case 'cleanup':
         // Where it runs; the warnings over it are `paintCleanupValue`'s.
         if (!s) return '';
-        return s.refineRuns === 'local' ? t.runs.local : (this.connection()?.name ?? '');
+        return s.refineWhere === 'local' ? t.runs.local : t.runs.cloud;
       case 'mic':
         return this.mic.label();
       case 'languages':
@@ -676,97 +654,11 @@ export class SettingsTray {
 
   /* ---------- cleanup ---------- */
 
-  /** The style (and the custom instructions' field), the connection card, the connection's key or address, its model
-   *  (docs/specs/2026-11-02-refine-connections.md). */
+  /** Where the cleanup runs (this page is rebuilt with the agent choice later). */
   private cleanupRows(): HTMLElement[] {
     const t = this.ctx.t;
-    const s = this.ctx.settings;
-    const custom = s?.refineStyle === 'custom';
-    const style = segment('refine', REFINE_STYLES, t.refineStyles, s?.refineStyle);
-    const rows = [srow(t.refineStyle, custom ? t.refineCustomHint : t.refineStyleHint, style).row];
-    if (custom) rows.push(this.customRow());
-    const runs = s?.refineRuns ?? 'cloud';
-    rows.push(srow(t.runsOn, t.runsHint[runs], segment('runs', ['local', 'cloud'] as const, t.runs, runs)).row);
-    // On this computer the local list follows the group (`page`); the cloud's connection, key and model are in it.
-    if (runs === 'local') return rows;
-    const c = this.connection();
-    if (!c) return rows;
-    const card = h('div', 'srow wide');
-    card.append(this.card(c));
-    rows.push(card, this.keys.row(c.id as KeyName, t.keyRow));
-    const model = c.models.find((m) => m.id === s?.refineModel) ?? c.models[0];
-    rows.push(srow(t.refineModel, null, dropDown('rmodel', model?.name ?? '')).row);
-    return rows;
-  }
-
-  /** The custom style's instructions: saved when the field loses focus. */
-  private customRow(): HTMLElement {
-    const field = h('textarea', 'cta');
-    field.placeholder = this.ctx.t.refineCustomPlaceholder;
-    field.maxLength = CUSTOM_CHARS;
-    field.value = this.ctx.settings?.refineCustom ?? '';
-    field.setAttribute('aria-label', this.ctx.t.refineStyles.custom);
-    field.addEventListener('change', () => void this.ctx.change({ kind: 'refineCustom', value: field.value }));
-    const row = h('div', 'srow wide');
-    row.append(field);
-    return row;
-  }
-
-  /** The connection card: a lamp (ready or not), the name, its state under it; it opens the list of connections. */
-  private card(c: api.ConnectionView): HTMLElement {
-    const b = h('button', 'pk');
-    b.type = 'button';
-    b.dataset.dd = 'connection';
-    b.setAttribute('aria-label', this.ctx.t.refineConnection);
-    const pt = h('span', 'pt');
-    pt.append(h('b', '', c.name), h('small'));
-    b.append(h('span', 'lamp'), pt);
-    b.insertAdjacentHTML('beforeend', icon('chev'));
-    this.paintCard(b, c);
-    return b;
-  }
-
-  /** The card's lamp and state, as they are now (a key saved or checked). */
-  private paintCard(b: HTMLElement | null | undefined = this.current?.querySelector<HTMLElement>('.pk'), c = this.connection()): void {
-    if (!b || !c) return;
-    const { text, on } = this.readiness(c);
-    b.querySelector('.pt small')!.textContent = text;
-    b.querySelector('.lamp')!.classList.toggle('on', on);
-  }
-
-  /** A connection's state in words, and whether it is ready: its key saved. */
-  private readiness(c: api.ConnectionView): { text: string; on: boolean } {
-    const t = this.ctx.t;
-    const key = this.keys.keys[c.id as KeyName];
-    return key?.saved ? { text: t.keySavedMask.replace('{MASK}', key.mask), on: true } : { text: t.keyStates.missing, on: false };
-  }
-
-  /** Every cloud connection, each with its lamp and state; the one chosen is checked. */
-  private connectionMenu(b: HTMLElement): void {
-    const t = this.ctx.t;
-    const s = this.ctx.settings;
-    if (!s) return;
-    const items = s.connections.map((c) => {
-      const { text, on } = this.readiness(c);
-      return { value: c.id, label: c.name, sub: text, lamp: on, on: c.id === s.refineConnection };
-    });
-    this.ctx.menu(b, items, (v) => void this.ctx.change({ kind: 'refineConnection', value: v }), undefined, 'start', true);
-  }
-
-  /** The connection's models, each with its price, the recommended one marked. */
-  private modelMenu(b: HTMLElement): void {
-    const t = this.ctx.t;
-    const c = this.connection();
-    if (!c) return;
-    const cur = c.models.find((m) => m.id === this.ctx.settings?.refineModel) ?? c.models[0];
-    const items = c.models.map((m, i) => ({
-      value: m.id,
-      label: m.name,
-      sub: t.perMtok.replace('{IN}', usd(m.usd[0])).replace('{OUT}', usd(m.usd[1])),
-      badge: i === 0 ? t.recommended : undefined,
-      on: m === cur,
-    }));
-    this.ctx.menu(b, items, (v) => void this.ctx.change({ kind: 'refineModel', value: v }));
+    const runs = this.ctx.settings?.refineWhere === 'local' ? 'local' : 'cloud';
+    return [srow(t.runsOn, t.runsHint[runs], segment('runs', ['local', 'cloud'] as const, t.runs, runs)).row];
   }
 
   /** The local model's state in words for the first page, from the local list: in use, a switch's step, or nothing. */
@@ -790,18 +682,6 @@ export class SettingsTray {
       default:
         return { text: t.modelValue.failed, warn: true };
     }
-  }
-
-  /** The cleanup's connection as the core lists it. */
-  private connection(): api.ConnectionView | undefined {
-    const s = this.ctx.settings;
-    return s?.connections.find((c) => c.id === s.refineConnection);
-  }
-
-  /** The key the cleanup needs: the chosen cloud connection's. */
-  private cleanupKey(): KeyName | null {
-    const c = this.connection();
-    return c ? (c.id as KeyName) : null;
   }
 
   /* ---------- general ---------- */

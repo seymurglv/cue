@@ -826,8 +826,6 @@ mod tests {
         let refined = "Текст, который я отправил, был отправлен с помощью этого инструмента.";
         assert!(sanity_ok(raw, refined, &[], &s()));
         assert!(sanity_ok("в коротких текстах как будто рефайна нету", "В коротких текстах будто нет рефайна.", &[], &s()));
-        let custom = RefineSettings { style: crate::settings::RefineStyle::Custom, custom: "кратко".into(), ..s() };
-        assert!(sanity_ok(raw, refined, &[], &custom), "the custom style is checked the same way");
     }
 
     #[test]

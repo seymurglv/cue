@@ -176,20 +176,6 @@ describe('Habits', () => {
     expect($<HTMLElement>('.hnocl')!.hidden).toBe(true);
   });
 
-  it('a key saved in the tray: the line goes', async () => {
-    page = await mount();
-    expect($<HTMLElement>('.hnocl')!.hidden).toBe(false);
-    click($('.gear'));
-    await settle();
-    click($('.btray [data-sub="cleanup"]'));
-    await settle();
-    core.keyState.mockResolvedValue({ saved: true, mask: 'sk-…123' });
-    $<HTMLInputElement>('input[data-key="anthropic"]')!.value = 'sk-secret-123';
-    click($('[data-check="anthropic"]'));
-    await settle();
-    expect($<HTMLElement>('.hnocl')!.hidden).toBe(true);
-  });
-
   it('two checks of the key answered out of order: the later one counts', async () => {
     const replies: ((v: KeyView) => void)[] = [];
     core.keyState.mockImplementation(() => new Promise<KeyView>((r) => replies.push(r)));
@@ -208,7 +194,7 @@ describe('Habits', () => {
     const replies: ((v: KeyView) => void)[] = [];
     core.keyState.mockImplementation(() => new Promise<KeyView>((r) => replies.push(r)));
     page = await mount();
-    feeds.settings(view({ habits: [habit('h1'), DIGITS], refineRuns: 'local' }));
+    feeds.settings(view({ habits: [habit('h1'), DIGITS], refineWhere: 'local' }));
     expect($<HTMLElement>('.hnocl')!.hidden).toBe(true);
     replies[0]({ saved: false, mask: '' });
     await settle();
@@ -216,7 +202,7 @@ describe('Habits', () => {
   });
 
   it('the cleanup on this computer needs no key: no such line', async () => {
-    stub(view({ refineRuns: 'local' }));
+    stub(view({ refineWhere: 'local' }));
     page = await mount();
     expect($<HTMLElement>('.hnocl')!.hidden).toBe(true);
   });

@@ -52,20 +52,19 @@ afterEach(() => {
 });
 
 describe('The Cleanup page: on this computer or in the cloud', () => {
-  it('the style first, then "Runs on"; the cloud shows the card, the key and the model', async () => {
+  it('"Runs on" is the only row; the cloud shows no card, key or model', async () => {
     page = await mount();
     await cleanup();
     const rows = $$('.btray .sgrp > .srow');
-    expect(text(rows[0].querySelector('.stx b'))).toBe('Style');
-    expect(text(rows[1].querySelector('.stx b'))).toBe('Runs on');
-    expect(text(rows[1].querySelector('.stx small'))).toBe('Your key, fastest');
+    expect(rows).toHaveLength(1);
+    expect(text(rows[0].querySelector('.stx b'))).toBe('Runs on');
+    expect(text(rows[0].querySelector('.stx small'))).toBe('Your key, fastest');
     expect(runs().map((b) => b.textContent)).toEqual(['This computer', 'Cloud']);
     expect(runs().map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'true']);
-    expect($('.btray .pk[data-dd="connection"]')).not.toBeNull();
-    expect($('.btray .srow[data-key="anthropic"]')).not.toBeNull();
-    expect($('.btray [data-dd="rmodel"]')).not.toBeNull();
+    expect($('.btray .pk')).toBeNull();
+    expect($('.btray [data-dd="rmodel"]')).toBeNull();
     expect($<HTMLElement>('.btray .mlist')?.hidden ?? true).toBe(true);
-    expect(text($('.btray .tft'))).toBe('Text goes to Anthropic for the cleanup; the history stays on this computer only.');
+    expect(text($('.btray .tft'))).toBe('Text goes to Cloud for the cleanup; the history stays on this computer only.');
   });
 
   it('the cloud lists only the models downloaded here, to delete', async () => {
@@ -84,7 +83,7 @@ describe('The Cleanup page: on this computer or in the cloud', () => {
   });
 
   it('on this computer the model in use can be deleted too', async () => {
-    stub(view({ refineRuns: 'local' }));
+    stub(view({ refineWhere: 'local' }));
     core.llmsGet.mockResolvedValue(llms());
     page = await mount();
     await cleanup();
@@ -95,12 +94,12 @@ describe('The Cleanup page: on this computer or in the cloud', () => {
   });
 
   it('this computer shows the local models, the search and the free note', async () => {
-    stub(view({ refineRuns: 'local' }));
+    stub(view({ refineWhere: 'local' }));
     core.llmsGet.mockResolvedValue(llms());
     page = await mount();
     await cleanup();
     expect(runs().map((b) => b.getAttribute('aria-pressed'))).toEqual(['true', 'false']);
-    expect(text($$('.btray .sgrp > .srow')[1].querySelector('.stx small'))).toBe('Free, private');
+    expect(text($$('.btray .sgrp > .srow')[0].querySelector('.stx small'))).toBe('Free, private');
     expect(names()).toEqual(['Gemma 4 E4B', 'Qwen3 4B']);
     expect(small(row(GEMMA))).toBe('Recommended · Russian and English · 3.1 GB');
     expect(row(GEMMA).querySelector('.mok')).not.toBeNull();
@@ -116,14 +115,14 @@ describe('The Cleanup page: on this computer or in the cloud', () => {
     await cleanup();
     click(runs()[0]);
     await settle();
-    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'refineRuns', value: 'local' });
+    expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'refineWhere', value: 'local' });
     expect(runs()[0].getAttribute('aria-pressed')).toBe('true');
     expect($('.btray .mlist')).not.toBeNull();
     expect($('.btray .pk')).toBeNull();
   });
 
   it('a local row is chosen, and a found one; one CUE cannot run is pale with its reason', async () => {
-    stub(view({ refineRuns: 'local' }));
+    stub(view({ refineWhere: 'local' }));
     core.llmsGet.mockResolvedValue(llms());
     const answer: LlmFound[] = [
       { repo: 'Qwen/Qwen3-1.7B-GGUF', downloads: 900, size: 1.8 * GB, quant: 'Q8_0', reason: null },
@@ -153,9 +152,9 @@ describe('The Cleanup page: on this computer or in the cloud', () => {
   it('the first page says where the cleanup runs and what its model is doing', async () => {
     page = await mount();
     await open();
-    expect(text(value())).toBe('Anthropic');
+    expect(text(value())).toBe('Cloud');
     expect(value().classList.contains('warn')).toBe(false);
-    feeds.settings(view({ refineRuns: 'local' }));
+    feeds.settings(view({ refineWhere: 'local' }));
     feeds.llms(llms({ [GEMMA]: { state: 'missing' } }, ''));
     await settle();
     expect(text(value())).toBe('Model not downloaded');
@@ -169,7 +168,7 @@ describe('The Cleanup page: on this computer or in the cloud', () => {
   });
 
   it('Russian words', async () => {
-    stub(view({ refineRuns: 'local', lang: 'ru', uiLanguage: 'ru' }));
+    stub(view({ refineWhere: 'local', lang: 'ru', uiLanguage: 'ru' }));
     core.llmsGet.mockResolvedValue(llms());
     page = await mount();
     await open();

@@ -16,7 +16,7 @@ export const STEPS: readonly Step[] = ['hello', 'keys', 'model', 'mic', 'try', '
 
 /** The steps for these settings: with the cleanup on this computer there is no key to ask for. */
 export function stepsFor(view: SettingsView | null): readonly Step[] {
-  return view?.refineRuns === 'local' ? STEPS.filter((s) => s !== 'keys') : STEPS;
+  return view?.refineWhere === 'local' ? STEPS.filter((s) => s !== 'keys') : STEPS;
 }
 
 /** The Windows key's logo, as on the Drop's key hint. */

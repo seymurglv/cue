@@ -1,6 +1,6 @@
 // The main window's texts in English and Russian. The language is the core's (SettingsView.lang): the window has no
 // language set before its script runs, so the page asks for the settings before it draws anything.
-import type { AudioKeep, Keep, KeyCheck, Mode, RefineStyle, UiLanguage } from './api';
+import type { AudioKeep, Keep, KeyCheck, Mode, UiLanguage } from './api';
 
 export type Lang = 'en' | 'ru';
 
@@ -161,10 +161,8 @@ export interface WinText {
   /** The local models: "Recommended", a size, the reasons a found one cannot run, an empty search, and the heading of
    *  the models downloaded here, shown to delete while the cleanup runs in the cloud. */
   llms: { recommended: string; gb: string; downloaded: string; reasons: { severalFiles: string; noChatTemplate: string; tooLarge: string; architecture: string; noQuant: string }; none: string };
-  /** Cleanup: its title, its value on the first page without the connection's key, the note on where text goes
-   *  ({NAME} — Anthropic or OpenRouter). */
+  /** Cleanup: its title and the note on where text goes ({NAME} — where it runs). */
   cleanup: string;
-  cleanupNoKey: string;
   cleanupNote: string;
   /** Languages: its title and its value ({UI} — the interface language, {TO} — the translation's). */
   languages: string;
@@ -189,21 +187,7 @@ export interface WinText {
   micTestHint: string;
   translateTo: string;
   autostart: string;
-  /** The Cleanup page's style row (its hint for each style) and the custom instructions' field. */
-  refineStyle: string;
-  refineStyleHint: string;
-  refineCustomHint: string;
-  refineStyles: Record<RefineStyle, string>;
-  refineCustomPlaceholder: string;
-  /** The connection card: its name for a screen reader, a connection's state under its name ({MASK} — the key's mask). */
-  refineConnection: string;
   keySavedMask: string;
-  /** The key row's name. */
-  keyRow: string;
-  /** The model row, its list's chip, a model's price ({IN}, {OUT} — dollars). */
-  refineModel: string;
-  recommended: string;
-  perMtok: string;
   uiLanguage: string;
   uiLanguages: Record<UiLanguage, string>;
   /** The tray's History page: how long recordings are kept, never longer than the history. */
@@ -341,7 +325,6 @@ export const en: WinText = {
     none: 'No GGUF models for this search',
   },
   cleanup: 'Cleanup',
-  cleanupNoKey: 'No {NAME} key',
   cleanupNote: 'Text goes to {NAME} for the cleanup; the history stays on this computer only.',
   languages: 'Languages',
   languagesValue: '{UI} · into {TO}',
@@ -373,17 +356,7 @@ export const en: WinText = {
   micTestHint: 'Say something',
   translateTo: 'Translate into',
   autostart: 'Start at sign-in',
-  refineStyle: 'Style',
-  refineStyleHint: "CUE's cleanup: drops slips, reads as written",
-  refineCustomHint: "Your instructions instead of CUE's cleanup",
-  refineStyles: { default: 'Default', custom: 'Custom' },
-  refineCustomPlaceholder: 'For example: keep it short, no emoji, terms in English.',
-  refineConnection: 'Connection',
   keySavedMask: 'Key saved · {MASK}',
-  keyRow: 'Key',
-  refineModel: 'Model',
-  recommended: 'Recommended',
-  perMtok: '${IN} / ${OUT} per 1M tokens',
   uiLanguage: 'Interface language',
   uiLanguages: { auto: 'Auto', en: 'English', ru: 'Русский' },
   keepAudio: 'Keep recordings',
@@ -520,7 +493,6 @@ export const ru: WinText = {
     none: 'Нет GGUF-моделей по запросу',
   },
   cleanup: 'Чистка текста',
-  cleanupNoKey: 'Нет ключа {NAME}',
   cleanupNote: 'Текст уходит в {NAME} для чистки; история — только на этом компьютере.',
   languages: 'Языки',
   languagesValue: '{UI} · на {TO}',
@@ -552,17 +524,7 @@ export const ru: WinText = {
   micTestHint: 'Скажите что-нибудь',
   translateTo: 'Переводить на',
   autostart: 'Запускать при входе',
-  refineStyle: 'Стиль',
-  refineStyleHint: 'Чистка CUE: убирает оговорки, пишет как текст',
-  refineCustomHint: 'Ваши инструкции вместо чистки CUE',
-  refineStyles: { default: 'По умолчанию', custom: 'Свой' },
-  refineCustomPlaceholder: 'Например: пиши коротко, без смайликов, термины — по-английски.',
-  refineConnection: 'Подключение',
   keySavedMask: 'Ключ сохранён · {MASK}',
-  keyRow: 'Ключ',
-  refineModel: 'Модель',
-  recommended: 'Рекомендуем',
-  perMtok: '${IN} / ${OUT} за 1 млн токенов',
   uiLanguage: 'Язык интерфейса',
   uiLanguages: { auto: 'Авто', en: 'English', ru: 'Русский' },
   keepAudio: 'Хранить записи',

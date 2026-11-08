@@ -28,7 +28,7 @@ export class HabitsView {
   private more!: HTMLElement;
   private forgetAll!: HTMLButtonElement;
   private armed: ReturnType<typeof setTimeout> | null = null;
-  /** Where the cleanup ran and its connection when the no-cleanup line was last checked (`runs:connection`). */
+  /** Where the cleanup ran when the no-cleanup line was last checked. */
   private checked: string | null = null;
   /** The latest check of the cleanup's key: an earlier one's answer, coming later, is dropped. */
   private keyAsk = 0;
@@ -128,9 +128,8 @@ export class HabitsView {
     for (const w of fresh) this.grow(w);
     this.empty.hidden = list.length > 0;
     this.more.hidden = list.length === 0;
-    // Where the cleanup runs and its connection: a change of either asks the key again.
-    const s = this.ctx.settings;
-    const conn = s ? `${s.refineRuns}:${s.refineConnection}` : null;
+    // Where the cleanup runs: a change asks the key again.
+    const conn = this.ctx.settings?.refineWhere ?? null;
     if (conn !== this.checked) {
       this.checked = conn;
       void this.recheck();
@@ -144,14 +143,14 @@ export class HabitsView {
     if (!this.sec) return;
     const ask = ++this.keyAsk;
     const s = this.ctx.settings;
-    const c = s?.connections.find((x) => x.id === s.refineConnection);
-    if (!c || s?.refineRuns === 'local') {
+    // Task 7: an agent needs no key; until then the cloud path is Anthropic's.
+    if (!s || s.refineWhere !== 'agent') {
       this.noCleanup.hidden = true;
       return;
     }
     let saved = true;
     try {
-      saved = (await api.keyState(c.id as api.KeyName)).saved;
+      saved = (await api.keyState('anthropic')).saved;
     } catch (e) {
       logFailed('reading the cleanup key', e);
     }

@@ -400,9 +400,9 @@ impl Runtime {
         };
         let translate_home = pair_now(&settings);
         let model = ModelKeeper::new(paths.models.clone(), &settings.stt.model);
-        let llm = llm::LlmKeeper::new(paths.models.clone(), &settings.refine.local, settings.refine.runs == settings::Runs::Local);
+        let llm = llm::LlmKeeper::new(paths.models.clone(), &settings.refine.local, settings.refine.where_ == settings::Where::Local);
         let opencode = opencode::OpenCodeSlot::new(agent::cwd(&paths.agent_dir(), cue_core::agents::AgentId::OpenCode));
-        let instructions = Instructions::load_or_create(&paths, lang.code(), settings.refine.custom_text());
+        let instructions = Instructions::load_or_create(&paths, lang.code(), settings.refine.legacy_custom());
         let history = HistoryLog::new(paths.history.clone(), Recordings::new(paths.history_audio.clone()));
         // Alt picks "Ask" only when it is on (spec 2 §9); the hook reads the switch on every key.
         hook::ASK_ENABLED.store(settings.ask.enabled(), Ordering::Relaxed);
@@ -852,7 +852,7 @@ impl Runtime {
         let s = &self.settings;
         let (target, language, periods) = (s.translate.target(), s.ui.language, s.history.clone());
         let device = s.audio.device.clone();
-        let runs = s.refine.runs;
+        let place = s.refine.where_;
         // "Forget all": habits still waiting for their rule or their card do not come back after it.
         if change == SettingChange::HabitsForget {
             self.drafts.clear();
@@ -880,11 +880,11 @@ impl Runtime {
             tracing::info!(keep, audio, "history: period changed");
             self.history.prune(&s.history, &local_today());
         }
-        if s.refine.runs != runs {
-            tracing::info!(runs = ?s.refine.runs, "cleanup: where it runs changed");
+        if s.refine.where_ != place {
+            tracing::info!(place = ?s.refine.where_, "cleanup: where it runs changed");
             // On this computer: the chosen model loads when its file is here. Back to the cloud: the next cleanup goes
             // there at once, the local model is let go (its memory freed), and a local download goes on.
-            self.llm.set_active(s.refine.runs == settings::Runs::Local, &self.tx, &self.http);
+            self.llm.set_active(s.refine.where_ == settings::Where::Local, &self.tx, &self.http);
             self.ui.llms(&self.llm.view());
         }
         let s = &self.settings;
@@ -1020,7 +1020,7 @@ impl Runtime {
         let ask = draft.ask();
         self.drafts.push((n, draft));
         let (http, s, tx, lang, key) = (self.http.clone(), self.settings.refine.clone(), self.tx.clone(), self.lang.code(), self.cleanup_key());
-        let to = route(s.runs, &self.llm.slot());
+        let to = route(s.where_, &self.llm.slot());
         tokio::spawn(async move {
             let wait = Duration::from_millis(habits::RULE_WAIT_MS);
             let asked = habit_rule(to, &http, key.as_deref(), &s, &ask, lang, wait);
@@ -1536,7 +1536,7 @@ impl Runtime {
     /// transcription), at most once every 20 s (right away after sleep) and only if there is a key: refine does not pay
     /// for the TLS handshake inside its 1.5 s budget.
     fn warm_up(&mut self) {
-        let anthropic = self.settings.refine.runs == settings::Runs::Cloud && self.settings.refine.connection().kind == Kind::Anthropic;
+        let anthropic = self.settings.refine.where_ == settings::Where::Agent && self.settings.refine.connection().kind == Kind::Anthropic;
         if !anthropic || !self.warm.due(self.now()) || !matches!(keys::lookup(KeyName::Anthropic), Ok(Some(_))) {
             return;
         }
@@ -1552,7 +1552,7 @@ impl Runtime {
     fn warm_cache(&mut self) {
         // Over another connection there is no warm-up: its first cleanup writes the cache, where it has one.
         let model = self.settings.refine.model().id.to_owned();
-        let anthropic = self.settings.refine.runs == settings::Runs::Cloud && self.settings.refine.connection().kind == Kind::Anthropic;
+        let anthropic = self.settings.refine.where_ == settings::Where::Agent && self.settings.refine.connection().kind == Kind::Anthropic;
         if !anthropic || self.flow.mode() == Mode::Ask || !claude::can_warm(&model) || !self.cache_warm.due(self.now()) {
             return;
         }
@@ -1568,7 +1568,7 @@ impl Runtime {
     /// Warms the local model for a dictation just started on this computer: the cleanup's system part, with this app's
     /// habits, is evaluated while the person speaks. A translation and "Ask" have other prompts.
     fn warm_local(&mut self) {
-        if self.settings.refine.runs != settings::Runs::Local || self.flow.mode() != Mode::Dictate {
+        if self.settings.refine.where_ != settings::Where::Local || self.flow.mode() != Mode::Dictate {
             return;
         }
         let Some(g) = self.llm.slot().get() else { return };
@@ -1643,7 +1643,7 @@ impl Runtime {
         // text.
         let kind = self.settings.refine.connection().kind;
         let key = self.cleanup_key();
-        let to = match route(self.settings.refine.runs, &self.llm.slot()) {
+        let to = match route(self.settings.refine.where_, &self.llm.slot()) {
             Route::NotReady if self.llm.waking() => Route::Waking(self.llm.slot()),
             to => to,
         };
@@ -2749,11 +2749,13 @@ async fn habit_rule(
     }
 }
 
-fn route(runs: settings::Runs, slot: &llm::LlmSlot) -> Route {
-    match (runs, slot.get()) {
-        (settings::Runs::Cloud, _) => Route::Cloud,
-        (settings::Runs::Local, Some(g)) => Route::Local(g),
-        (settings::Runs::Local, None) => Route::NotReady,
+fn route(place: settings::Where, slot: &llm::LlmSlot) -> Route {
+    match (place, slot.get()) {
+        // Task 7: route to the agent
+        (settings::Where::Agent, _) => Route::Cloud,
+        (settings::Where::Local, Some(g)) => Route::Local(g),
+        // No AI, or a local model not ready yet: the raw text at once.
+        (settings::Where::Local, None) | (settings::Where::Off, _) => Route::NotReady,
     }
 }
 
@@ -3034,14 +3036,14 @@ mod tests {
         #[test]
         fn local_with_nothing_ready_pastes_raw_at_once() {
             let slot = llm::LlmSlot::default();
-            assert!(matches!(route(settings::Runs::Local, &slot), Route::NotReady));
+            assert!(matches!(route(settings::Where::Local, &slot), Route::NotReady));
         }
 
         #[test]
         fn local_refine_uses_the_local_engine() {
             let slot = llm::LlmSlot::default();
             slot.ready(std::sync::Arc::new(Here));
-            assert!(matches!(route(settings::Runs::Local, &slot), Route::Local(g) if g.id() == "llm--here--model--q4_k_m"));
+            assert!(matches!(route(settings::Where::Local, &slot), Route::Local(g) if g.id() == "llm--here--model--q4_k_m"));
         }
 
         /// No agent is run for a habit's rule: CUE's template writes it.
@@ -3078,7 +3080,7 @@ echo ran> \"{}\"
         fn back_to_cloud_goes_to_the_cloud_at_once() {
             let slot = llm::LlmSlot::default();
             slot.ready(std::sync::Arc::new(Here));
-            assert!(matches!(route(settings::Runs::Cloud, &slot), Route::Cloud), "a loaded local model is not used");
+            assert!(matches!(route(settings::Where::Agent, &slot), Route::Cloud), "a loaded local model is not used");
         }
     }
 

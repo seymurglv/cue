@@ -2,6 +2,7 @@
 //! sits, the user's dictionary, the habits, the translation pair, "Ask", the pinned microphone, how long the history keeps its days
 //! and their recordings, prices for usage accounting. The main window changes a setting one at a time
 //! (`SettingChange`).
+use crate::agents::AgentId;
 use crate::connections::{self, Connection, Model};
 use crate::habits::Habits;
 use crate::refine;
@@ -41,84 +42,117 @@ impl Default for SttSettings {
 /// The longest custom instructions the cleanup takes, in characters.
 pub const MAX_CUSTOM_CHARS: usize = 2_000;
 
-/// The cleanup: where it runs, its style, the cloud connection and that connection's model
-/// (docs/specs/2026-11-02-refine-connections.md, docs/specs/2026-11-04-local-cleanup.md). `model`, `level` and
-/// `addresses` of earlier versions are read past; a connection of `ollama` or `lmstudio` reads as this computer.
+/// The cleanup: where it runs, which agent and model, and what happens when the AI does not answer
+/// (docs/specs/2026-11-08-no-keys-design.md, "Settings and migration"). The `runs`, `style`, `custom` and `connection`
+/// of earlier versions, the old `model`, `level` and `addresses` are read once for the move and never written again.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(from = "StoredRefine")]
 pub struct RefineSettings {
-    /// On this computer or in the cloud.
-    pub runs: Runs,
-    /// The local model's id; empty: the recommended one.
+    /// No AI, a model on this computer, or the user's own agent.
+    #[serde(rename = "where")]
+    pub where_: Where,
+    /// The local model's id; empty: nothing chosen.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub local: String,
-    /// The id of a cloud connection in `connections::CONNECTIONS`; one CUE does not know reads as the default.
-    pub connection: String,
-    /// The model the user picked per connection, only where it is not the recommended one.
+    /// The agent chosen; `None`: the first one found, resolved when CUE starts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentId>,
+    /// The model the user picked per agent id, only where it is not the agent's default.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, String>,
-    /// CUE's cleanup or the user's instructions ([`RefineStyle`]).
-    pub style: RefineStyle,
-    /// The user's instructions for the custom style.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub custom: String,
+    /// What to paste when the AI does not answer.
+    pub fallback: Fallback,
     /// How many characters before the caret to give the model.
     pub context_chars: usize,
     /// Sanity check thresholds.
     pub min_ratio: f32,
     pub max_ratio: f32,
     pub min_overlap: f32,
+    /// The cloud connection of the temporary cloud path; never read or written.
+    // Task 7: goes with the cloud path.
+    #[serde(skip, default = "default_connection")]
+    pub connection: String,
+    /// The text of the old custom style, read for the move into the instructions file; never written.
+    #[serde(skip)]
+    pub legacy_custom: Option<String>,
 }
 
-/// `Default` is CUE's own cleanup (`refine::BOLD_PROMPT`); `Custom` puts the user's instructions in its place.
+fn default_connection() -> String {
+    connections::DEFAULT_ID.to_owned()
+}
+
+/// Where the cleanup runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum RefineStyle {
+pub enum Where {
+    /// No AI: CUE's own tidy-up only.
+    Off,
+    /// A model on this computer.
+    Local,
+    /// The user's own agent.
     #[default]
-    Default,
-    Custom,
+    Agent,
 }
 
-/// Only `"custom"` is custom (case and surrounding spaces do not matter); anything else reads as `Default`, the bold and
-/// careful styles of earlier versions among them, so a typo here never makes the whole file unreadable.
-impl<'de> Deserialize<'de> for RefineStyle {
+/// `"off"`, `"local"` and `"agent"` (case and surrounding spaces do not matter); anything else reads as `Agent`.
+impl<'de> Deserialize<'de> for Where {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
-        let custom = value.as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("custom"));
-        Ok(if custom { Self::Custom } else { Self::Default })
+        let name = value.as_str().map(|s| s.trim().to_ascii_lowercase());
+        Ok(match name.as_deref() {
+            Some("off") => Self::Off,
+            Some("local") => Self::Local,
+            _ => Self::Agent,
+        })
     }
 }
 
-/// Where the cleanup runs: a model on this computer, or a cloud connection with the user's key.
+/// What is pasted when the AI does not answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Runs {
-    Local,
+pub enum Fallback {
+    /// The no-AI layer's text as it is.
     #[default]
-    Cloud,
+    Raw,
+    /// The local model's cleanup, when it is loaded at that moment.
+    Local,
 }
 
-/// Only `"local"` is local (case and surrounding spaces do not matter); anything else is the cloud.
-impl<'de> Deserialize<'de> for Runs {
+/// Only `"local"` is local (case and surrounding spaces do not matter); anything else is `Raw`.
+impl<'de> Deserialize<'de> for Fallback {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
         let local = value.as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("local"));
-        Ok(if local { Self::Local } else { Self::Cloud })
+        Ok(if local { Self::Local } else { Self::Raw })
     }
 }
 
-/// The local servers of earlier versions; choosing one now means the cleanup runs on this computer.
+fn present_where<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Where>, D::Error> {
+    Where::deserialize(deserializer).map(Some)
+}
+
+/// The model earlier versions recommended on this computer: a `runs: local` file with no model chosen kept it.
+const OLD_RECOMMENDED_LOCAL: (&str, &str) = ("unsloth/Qwen3-4B-Instruct-2507-GGUF", "Q4_K_M");
+
+/// The local servers of earlier versions; choosing one meant the cleanup ran on this computer.
 const OLD_LOCAL_SERVERS: [&str; 2] = ["ollama", "lmstudio"];
 
 /// `refine` as settings.json holds it, of this version or an earlier one.
 #[derive(Deserialize)]
 #[serde(default)]
 struct StoredRefine {
-    runs: Option<Runs>,
+    /// Absent: an earlier file, moved by `runs`; present, even `null` or nonsense: [`Where`] reads it.
+    #[serde(rename = "where", deserialize_with = "present_where")]
+    where_: Option<Where>,
+    /// Earlier versions: `"local"` or anything else (the cloud).
+    runs: serde_json::Value,
     local: String,
+    agent: serde_json::Value,
     connection: serde_json::Value,
     models: BTreeMap<String, String>,
-    style: RefineStyle,
+    fallback: Fallback,
+    /// Earlier versions: `"custom"` or anything else.
+    style: serde_json::Value,
     custom: String,
     context_chars: usize,
     min_ratio: f32,
@@ -130,12 +164,15 @@ impl Default for StoredRefine {
     fn default() -> Self {
         let d = RefineSettings::default();
         Self {
-            runs: None,
+            where_: None,
+            runs: serde_json::Value::Null,
             local: d.local,
+            agent: serde_json::Value::Null,
             connection: serde_json::Value::Null,
             models: d.models,
-            style: d.style,
-            custom: d.custom,
+            fallback: d.fallback,
+            style: serde_json::Value::Null,
+            custom: String::new(),
             context_chars: d.context_chars,
             min_ratio: d.min_ratio,
             max_ratio: d.max_ratio,
@@ -146,38 +183,57 @@ impl Default for StoredRefine {
 
 impl From<StoredRefine> for RefineSettings {
     fn from(s: StoredRefine) -> Self {
-        // A connection id CUE lists (case and spaces do not matter), otherwise the default one.
-        let id = s.connection.as_str().map(|id| id.trim().to_ascii_lowercase());
-        let old_server = id.as_deref().is_some_and(|id| OLD_LOCAL_SERVERS.contains(&id));
-        let connection = id.as_deref().and_then(connections::find).unwrap_or_else(connections::default).id.to_owned();
+        let named = |v: &serde_json::Value| v.as_str().map(|id| id.trim().to_ascii_lowercase());
+        let mut local = s.local.trim().to_owned();
+        let where_ = s.where_.unwrap_or_else(|| {
+            // An earlier file: `runs: local`, or a local server as the connection, ran on this computer; anything else
+            // was the cloud, now the user's agent (which one is resolved when CUE starts).
+            let old_server = named(&s.connection).is_some_and(|id| OLD_LOCAL_SERVERS.contains(&id.as_str()));
+            let runs_local = named(&s.runs).map_or(old_server, |r| r == "local");
+            if !runs_local {
+                return Where::Agent;
+            }
+            if local.is_empty() {
+                local = crate::llm::id_for(OLD_RECOMMENDED_LOCAL.0, OLD_RECOMMENDED_LOCAL.1);
+            }
+            Where::Local
+        });
+        let agent = named(&s.agent).and_then(|id| AgentId::find(&id));
+        // The models of earlier versions were per cloud connection; only an agent's entry stays.
+        let models = s.models.into_iter().filter(|(id, m)| AgentId::find(id).is_some() && !m.trim().is_empty()).collect();
+        let custom = s.custom.trim();
+        let legacy_custom = (named(&s.style).as_deref() == Some("custom") && !custom.is_empty()).then(|| custom.to_owned());
         Self {
-            runs: s.runs.unwrap_or(if old_server { Runs::Local } else { Runs::Cloud }),
-            local: s.local.trim().to_owned(),
-            connection,
-            models: s.models,
-            style: s.style,
-            custom: s.custom,
+            where_,
+            local,
+            agent,
+            models,
+            fallback: s.fallback,
             context_chars: s.context_chars,
             min_ratio: s.min_ratio,
             max_ratio: s.max_ratio,
             min_overlap: s.min_overlap,
+            connection: default_connection(),
+            legacy_custom,
         }
     }
 }
 
 impl RefineSettings {
-    /// The connection the cleanup goes through.
+    /// The cloud connection the cleanup goes through until the agent path replaces it.
+    // Task 7: goes with the cloud path.
     pub fn connection(&self) -> &'static Connection {
         connections::find(&self.connection).unwrap_or_else(connections::default)
     }
 
-    /// The model the cleanup asks for: the one picked for the connection, or its recommended one.
+    /// The model the cloud path asks for: the connection's recommended one.
+    // Task 7: goes with the cloud path.
     pub fn model(&self) -> &'static Model {
         self.model_for(self.connection().id)
     }
 
-    /// The model picked for the connection `id` (still listed), or its recommended one; the default connection's for an
-    /// id CUE does not know.
+    /// The model set for the connection `id` (still listed), or its recommended one.
+    // Task 7: goes with the cloud path.
     pub fn model_for(&self, id: &str) -> &'static Model {
         let c = connections::find(id).unwrap_or_else(connections::default);
         self.models.get(c.id).and_then(|m| c.model(m)).unwrap_or_else(|| c.recommended())
@@ -185,21 +241,22 @@ impl RefineSettings {
 
     /// The model's id in usage.csv and the price table; a local model's is `local:<id>` and costs nothing.
     pub fn usage_model(&self) -> String {
-        match self.runs {
-            Runs::Local => format!("local:{}", self.local_id()),
-            Runs::Cloud => self.connection().usage_id(self.model()),
+        match self.where_ {
+            Where::Local => format!("local:{}", self.local_id()),
+            Where::Agent => self.connection().usage_id(self.model()), // Task 7: route to the agent
+            Where::Off => "off".to_owned(),
         }
     }
 
-    /// The local model's id: the chosen one, or the recommended one (empty while the short list is).
+    /// The local model's id: the chosen one, or the recommended one while the runtime still falls back to it.
+    // Task 7: nothing chosen means no local cleanup.
     pub fn local_id(&self) -> String {
         if self.local.is_empty() { crate::llm::default_id().unwrap_or_default() } else { self.local.clone() }
     }
 
-    /// The user's instructions, when the style is custom and they are not blank.
-    pub fn custom_text(&self) -> Option<&str> {
-        let text = self.custom.trim();
-        (self.style == RefineStyle::Custom && !text.is_empty()).then_some(text)
+    /// The text of the old custom style, when the file had one: read once to fill the instructions file, never written.
+    pub fn legacy_custom(&self) -> Option<&str> {
+        self.legacy_custom.as_deref()
     }
 }
 
@@ -423,12 +480,11 @@ pub struct AskSettings {
     /// Web search in answers ($0.01 a search); on by default.
     #[serde(deserialize_with = "off_or_nothing", skip_serializing_if = "Option::is_none")]
     pub web_search: Option<bool>,
-    #[serde(deserialize_with = "ask_model_or_nothing", skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
     #[serde(deserialize_with = "searches_or_nothing", skip_serializing_if = "Option::is_none")]
     pub max_searches: Option<u32>,
 }
 
+// Task 7: goes with the cloud Ask path.
 const DEFAULT_ASK_MODEL: &str = "claude-haiku-5-5";
 const DEFAULT_MAX_SEARCHES: u32 = 2;
 /// More searches a question than this is a typo: each one costs money.
@@ -444,7 +500,7 @@ impl AskSettings {
     }
 
     pub fn model(&self) -> &str {
-        self.model.as_deref().unwrap_or(DEFAULT_ASK_MODEL)
+        DEFAULT_ASK_MODEL
     }
 
     pub fn max_searches(&self) -> u32 {
@@ -460,12 +516,6 @@ impl AskSettings {
 fn off_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok((value == serde_json::Value::Bool(false)).then_some(false))
-}
-
-/// A model name, trimmed; empty, not a string, or the default reads as nothing.
-fn ask_model_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(value.as_str().map(str::trim).filter(|m| !m.is_empty() && *m != DEFAULT_ASK_MODEL).map(str::to_owned))
 }
 
 /// A whole number of searches from 1 to `MAX_SEARCHES_LIMIT`; anything else, or the default, reads as nothing.
@@ -520,6 +570,8 @@ fn device_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Optio
 
 /// A longer microphone name from the window is refused: Windows names are far shorter, so it can only be a mistake.
 const MAX_DEVICE_CHARS: usize = 200;
+/// The longest agent model name a change takes.
+const MAX_MODEL_CHARS: usize = 200;
 
 /// How long the history keeps its days (spec 3 §2); `history::prune` deletes the older ones.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Hash, Serialize)]
@@ -759,16 +811,14 @@ pub enum SettingChange {
     /// A language code CUE knows.
     TranslateTarget(String),
     UiLanguage(UiLanguage),
-    /// CUE's cleanup or the user's instructions.
-    RefineStyle(RefineStyle),
-    /// The user's instructions for the custom style; see [`Settings::apply`] for what is refused.
-    RefineCustom(String),
-    /// On this computer or in the cloud.
-    RefineRuns(Runs),
-    /// A connection id CUE lists.
-    RefineConnection(String),
-    /// A model of the connection chosen now.
-    RefineModel(String),
+    /// No AI, this computer or the user's agent.
+    RefineWhere(Where),
+    /// The agent the cleanup goes through.
+    RefineAgent(AgentId),
+    /// The model of an agent; empty: the agent's default. See [`Settings::apply`] for what is refused.
+    RefineAgentModel { agent: AgentId, model: String },
+    /// What to paste when the AI does not answer.
+    RefineFallback(Fallback),
     /// A word for the dictionary, put first; see [`Settings::apply`] for what is refused.
     DictAdd(String),
     /// A word out of the dictionary, as it is written there.
@@ -802,12 +852,10 @@ impl std::fmt::Debug for SettingChange {
             }
             Self::TranslateTarget(code) => f.debug_tuple("TranslateTarget").field(&translate::known(code)).finish(),
             Self::UiLanguage(language) => f.debug_tuple("UiLanguage").field(language).finish(),
-            Self::RefineStyle(style) => f.debug_tuple("RefineStyle").field(style).finish(),
-            // The instructions and an address may hold what the user wrote: only their length.
-            Self::RefineCustom(text) => f.debug_struct("RefineCustom").field("chars", &text.chars().count()).finish(),
-            Self::RefineRuns(runs) => f.debug_tuple("RefineRuns").field(runs).finish(),
-            Self::RefineConnection(id) => f.debug_tuple("RefineConnection").field(&connections::find(id).map(|c| c.id)).finish(),
-            Self::RefineModel(id) => f.debug_tuple("RefineModel").field(id).finish(),
+            Self::RefineWhere(w) => f.debug_tuple("RefineWhere").field(w).finish(),
+            Self::RefineAgent(agent) => f.debug_tuple("RefineAgent").field(agent).finish(),
+            Self::RefineAgentModel { agent, model } => f.debug_struct("RefineAgentModel").field("agent", agent).field("model", model).finish(),
+            Self::RefineFallback(fb) => f.debug_tuple("RefineFallback").field(fb).finish(),
             // A word of the dictionary may be a name: only its length.
             Self::DictAdd(word) => f.debug_struct("DictAdd").field("chars", &word.chars().count()).finish(),
             Self::DictRemove(word) => f.debug_struct("DictRemove").field("chars", &word.chars().count()).finish(),
@@ -853,25 +901,21 @@ impl Settings {
                 set_if_changed(&mut self.translate.target, (code != DEFAULT_TARGET).then(|| code.to_owned()))
             }
             SettingChange::UiLanguage(language) => set_if_changed(&mut self.ui.language, language),
-            SettingChange::RefineStyle(style) => set_if_changed(&mut self.refine.style, style),
-            SettingChange::RefineCustom(text) => {
-                let text = text.trim();
-                if text.chars().count() > MAX_CUSTOM_CHARS {
+            SettingChange::RefineWhere(w) => set_if_changed(&mut self.refine.where_, w),
+            SettingChange::RefineAgent(agent) => set_if_changed(&mut self.refine.agent, Some(agent)),
+            SettingChange::RefineAgentModel { agent, model } => {
+                let model = model.trim();
+                // Codex and Grok have a list CUE knows; OpenCode lists its own, so any short name goes.
+                let known = agent.models();
+                let listed = if known.is_empty() { model.chars().count() <= MAX_MODEL_CHARS } else { known.iter().any(|(id, _)| *id == model) };
+                if !model.is_empty() && !listed {
                     return false;
                 }
-                set_if_changed(&mut self.refine.custom, text.to_owned())
+                let default = known.first().map(|(id, _)| *id);
+                let chosen = (!model.is_empty() && Some(model) != default).then(|| model.to_owned());
+                set_entry(&mut self.refine.models, agent.id(), chosen)
             }
-            SettingChange::RefineRuns(runs) => set_if_changed(&mut self.refine.runs, runs),
-            SettingChange::RefineConnection(id) => {
-                let Some(c) = connections::find(&id) else { return false };
-                set_if_changed(&mut self.refine.connection, c.id.to_owned())
-            }
-            SettingChange::RefineModel(id) => {
-                let c = self.refine.connection();
-                let Some(m) = c.model(&id) else { return false };
-                let chosen = (m != c.recommended()).then(|| m.id.to_owned());
-                set_entry(&mut self.refine.models, c.id, chosen)
-            }
+            SettingChange::RefineFallback(fb) => set_if_changed(&mut self.refine.fallback, fb),
             SettingChange::DictAdd(word) => self.dictionary.put_first(word.trim()),
             SettingChange::DictLearn(l) => {
                 let (word, heard) = (l.word.trim(), l.heard.trim());
@@ -986,16 +1030,17 @@ pub enum SettingsError {
 impl Default for RefineSettings {
     fn default() -> Self {
         Self {
-            runs: Runs::Cloud,
+            where_: Where::Agent,
             local: String::new(),
-            connection: connections::DEFAULT_ID.to_owned(),
+            agent: None,
             models: BTreeMap::new(),
-            style: RefineStyle::Default,
-            custom: String::new(),
+            fallback: Fallback::Raw,
+            connection: default_connection(),
             context_chars: 500,
             min_ratio: 0.35,
             max_ratio: 1.25,
             min_overlap: 0.7,
+            legacy_custom: None,
         }
     }
 }
@@ -1140,7 +1185,7 @@ mod tests {
     fn defaults_are_as_documented() {
         let s = Settings::default();
         assert_eq!(s.stt.engine, SttEngineKind::Parakeet);
-        assert_eq!(s.refine.model().id, "claude-haiku-5-5");
+        assert_eq!((s.refine.where_, s.refine.agent, s.refine.fallback), (Where::Agent, None, Fallback::Raw));
         assert_eq!(s.refine.context_chars, 500);
         assert_eq!((s.refine.min_ratio, s.refine.max_ratio, s.refine.min_overlap), (0.35, 1.25, 0.7));
         assert_eq!(s.hold_hints_left, 2);
@@ -1170,7 +1215,7 @@ mod tests {
         std::fs::write(&p, r#"{"stt":{"soniox_model":"stt-rt-v6","future_stt":true},"refine":{"model":"claude-sonnet-5-5"},"future":1}"#).unwrap();
         let s = load(&p).unwrap();
         assert_eq!(s.stt.engine, SttEngineKind::Parakeet);
-        assert_eq!(s.refine.model().id, "claude-haiku-5-5");
+        assert_eq!((s.refine.where_, s.refine.agent, s.refine.fallback), (Where::Agent, None, Fallback::Raw));
         assert_eq!(s.refine.context_chars, 500);
         std::fs::remove_file(p).unwrap();
     }
@@ -1376,126 +1421,157 @@ mod tests {
         }
     }
 
+    fn read_refine(json: &str) -> RefineSettings {
+        serde_json::from_str::<Settings>(json).unwrap_or_else(|e| panic!("{json}: {e}")).refine
+    }
+
+    const OLD_RECOMMENDED: &str = "llm--unsloth--qwen3-4b-instruct-2507-gguf--q4_k_m";
+
     #[test]
-    fn refine_style_is_default_unless_custom() {
-        assert_eq!(Settings::default().refine.style, RefineStyle::Default);
-        for (value, expected) in [
-            (r#""custom""#, RefineStyle::Custom),
-            (r#"" Custom ""#, RefineStyle::Custom),
-            (r#""default""#, RefineStyle::Default),
-            // The bold and careful styles of earlier versions: CUE's own cleanup is now the bold one.
-            (r#""bold""#, RefineStyle::Default),
-            (r#""careful""#, RefineStyle::Default),
-            (r#""wild""#, RefineStyle::Default),
-            ("1", RefineStyle::Default),
-            ("null", RefineStyle::Default),
+    fn runs_local_keeps_its_model() {
+        let s = read_refine(r#"{"refine":{"runs":"local","local":" llm--qwen--qwen3-4b-gguf--q4_k_m ","context_chars":100}}"#);
+        assert_eq!((s.where_, s.local.as_str(), s.context_chars), (Where::Local, "llm--qwen--qwen3-4b-gguf--q4_k_m", 100));
+        assert_eq!(s.agent, None);
+        // A local server of an earlier version ran on this computer too.
+        for id in ["ollama", " LMStudio "] {
+            let s = read_refine(&format!(r#"{{"refine":{{"connection":"{id}","local":"llm--a--b--q4_k_m"}}}}"#));
+            assert_eq!((s.where_, s.local.as_str()), (Where::Local, "llm--a--b--q4_k_m"), "{id}");
+        }
+    }
+
+    #[test]
+    fn runs_local_with_empty_local_gets_old_recommended_id() {
+        // The id is the one `llm::id_for` builds for the model earlier versions recommended.
+        assert_eq!(crate::llm::id_for("unsloth/Qwen3-4B-Instruct-2507-GGUF", "Q4_K_M"), OLD_RECOMMENDED);
+        for json in [r#"{"refine":{"runs":"local"}}"#, r#"{"refine":{"runs":" LOCAL ","local":"  "}}"#] {
+            let s = read_refine(json);
+            assert_eq!((s.where_, s.local.as_str()), (Where::Local, OLD_RECOMMENDED), "{json}");
+        }
+    }
+
+    #[test]
+    fn runs_cloud_becomes_agent_unresolved() {
+        for json in [
+            r#"{"refine":{"runs":"cloud","connection":"openai","models":{"openai":"gpt-6.1-terra"}}}"#,
+            r#"{"refine":{"runs":"other"}}"#,
+            r#"{"refine":{"runs":1}}"#,
+            r#"{"refine":{"connection":"anthropic"}}"#,
+            r#"{"refine":{}}"#,
         ] {
-            let text = format!(r#"{{"refine":{{"style":{value},"context_chars":100}}}}"#);
-            let s: Settings = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{value}: {e}"));
-            assert_eq!((s.refine.style, s.refine.context_chars), (expected, 100), "{value}");
+            let s = read_refine(json);
+            assert_eq!((s.where_, s.agent), (Where::Agent, None), "{json}");
+            assert!(s.models.is_empty(), "a cloud connection's model is dropped: {json}");
         }
-        let written = serde_json::to_value(RefineSettings { style: RefineStyle::Custom, ..RefineSettings::default() }).unwrap();
-        assert_eq!(written["style"], "custom");
-        assert_eq!(serde_json::to_value(RefineSettings::default()).unwrap()["style"], "default");
+        assert_eq!(Settings::default().refine.where_, Where::Agent);
+        let s = read_refine(r#"{"refine":{"runs":"cloud","agent":" Codex ","models":{"codex":"gpt-6-sol","openai":"x"}}}"#);
+        assert_eq!((s.where_, s.agent), (Where::Agent, Some(AgentId::Codex)));
+        assert_eq!(s.models.get("codex").map(String::as_str), Some("gpt-6-sol"));
+        assert_eq!(s.models.len(), 1);
     }
 
     #[test]
-    fn refine_connection_is_a_listed_one_or_anthropic() {
-        assert_eq!(Settings::default().refine.connection().id, "anthropic");
-        for (value, expected) in [
-            (r#""openai""#, "openai"),
-            (r#"" OpenRouter ""#, "openrouter"),
-            (r#""lmstudio""#, "anthropic"),
-            (r#""bard""#, "anthropic"),
-            ("1", "anthropic"),
-            ("null", "anthropic"),
+    fn custom_style_text_is_legacy_custom() {
+        let s = read_refine(r#"{"refine":{"style":" Custom ","custom":"  пиши коротко \n"}}"#);
+        assert_eq!(s.legacy_custom(), Some("пиши коротко"));
+        for json in [
+            r#"{"refine":{"style":"custom","custom":" \n "}}"#,
+            r#"{"refine":{"style":"default","custom":"пиши коротко"}}"#,
+            r#"{"refine":{"style":"bold","custom":"пиши коротко"}}"#,
+            r#"{"refine":{"custom":"пиши коротко"}}"#,
+            r#"{"refine":{"style":"custom"}}"#,
         ] {
-            let text = format!(r#"{{"refine":{{"connection":{value},"context_chars":100}}}}"#);
-            let s: Settings = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{value}: {e}"));
-            assert_eq!((s.refine.connection().id, s.refine.context_chars), (expected, 100), "{value}");
-            assert_eq!(serde_json::to_value(&s.refine).unwrap()["connection"], expected, "{value}");
+            assert_eq!(read_refine(json).legacy_custom(), None, "{json}");
         }
+        assert_eq!(Settings::default().refine.legacy_custom(), None);
     }
 
-    /// The chosen model where one was picked and CUE still lists it, otherwise the recommended one; every listed model
-    /// is priced, so usage.csv never has an unpriced cleanup.
+    /// Whatever an earlier version left, none of its fields is written again, and the file reads back the same.
     #[test]
-    fn refine_model_is_the_chosen_one_or_the_recommended() {
-        let read = |json: &str| serde_json::from_str::<Settings>(json).unwrap().refine;
-        let s = RefineSettings::default();
-        assert_eq!((s.model().id, s.usage_model().as_str()), ("claude-haiku-5-5", "claude-haiku-5-5"));
-        let s = read(r#"{"refine":{"models":{"anthropic":"claude-sonnet-5-5"}}}"#);
-        assert_eq!(s.model().id, "claude-sonnet-5-5");
-        let s = read(r#"{"refine":{"models":{"anthropic":"claude-opus-5-5"}}}"#);
-        assert_eq!(s.model().id, "claude-haiku-5-5", "a model CUE does not list for the connection");
-        let s = read(r#"{"refine":{"connection":"openai","models":{"anthropic":"claude-sonnet-5-5"}}}"#);
-        assert_eq!((s.model().id, s.usage_model().as_str()), ("gpt-6-luna", "openai:gpt-6-luna"));
-        assert_eq!(s.model_for("anthropic").id, "claude-sonnet-5-5");
-        let p = Pricing::default();
-        for (id, ..) in crate::connections::prices() {
-            assert!(p.claude_price(&id).is_some(), "{id} is not priced");
+    fn old_fields_are_never_written_back() {
+        let dir = tmp("old-fields");
+        let p = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = r#"{"refine":{"runs":"cloud","style":"custom","custom":"пиши коротко","connection":"openai",
+            "model":"claude-sonnet-5-5","level":"low","addresses":{"ollama":"http://x"},"models":{"openai":"gpt-6.1-terra"},
+            "context_chars":300},"ask":{"model":"claude-opus-5-5"}}"#;
+        std::fs::write(&p, old).unwrap();
+        let s = load(&p).unwrap();
+        save(&s, &p).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        for absent in ["runs", "style", "custom", "connection", "model", "level", "addresses", "models", "legacy_custom"] {
+            assert!(json["refine"].get(absent).is_none(), "refine.{absent}: {json}");
         }
-    }
-
-    #[test]
-    fn refine_custom_text_only_with_the_custom_style() {
-        let custom = |text: &str| RefineSettings { style: RefineStyle::Custom, custom: text.into(), ..RefineSettings::default() };
-        assert_eq!(custom("  пиши коротко  ").custom_text(), Some("пиши коротко"));
-        assert_eq!(custom(" \n ").custom_text(), None, "blank instructions clean up as Default");
-        assert_eq!(RefineSettings { custom: "пиши коротко".into(), ..RefineSettings::default() }.custom_text(), None);
-    }
-
-    /// Ollama and LM Studio are gone: a settings.json that chose one runs the cleanup on this computer, and the
-    /// addresses of earlier versions are read past and never written again.
-    #[test]
-    fn old_local_servers_read_as_this_computer() {
-        for id in ["ollama", "lmstudio", " LMStudio "] {
-            let text = format!(r#"{{"refine":{{"connection":"{id}","addresses":{{"ollama":"http://x"}}}}}}"#);
-            let s: Settings = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{id}: {e}"));
-            assert_eq!((s.refine.runs, s.refine.connection.as_str()), (Runs::Local, "anthropic"), "{id}");
-            let written = serde_json::to_value(&s.refine).unwrap();
-            assert!(written.get("addresses").is_none(), "{id}: {written}");
-            assert_eq!(written["runs"], "local", "{id}");
-        }
+        assert!(json.get("ask").is_none_or(|a| a.get("model").is_none()), "ask.model: {json}");
+        assert_eq!(json["refine"]["where"], "agent");
+        assert_eq!(json["refine"]["fallback"], "raw");
+        assert_eq!(json["refine"]["context_chars"], 300);
+        // Written once, read again: the same (the old text was for the instructions file, not for the next start).
+        let again = load(&p).unwrap();
+        assert_eq!((again.refine.where_, again.refine.context_chars, again.refine.legacy_custom()), (Where::Agent, 300, None));
+        let mut s = s;
+        s.refine.legacy_custom = None;
+        assert_eq!(again, s);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn runs_is_cloud_unless_local() {
-        assert_eq!(Settings::default().refine.runs, Runs::Cloud);
-        for (value, expected) in [(r#""cloud""#, Runs::Cloud), (r#""LOCAL ""#, Runs::Local), (r#""other""#, Runs::Cloud), ("1", Runs::Cloud)] {
-            let text = format!(r#"{{"refine":{{"runs":{value}}}}}"#);
-            let s: Settings = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{value}: {e}"));
-            assert_eq!(s.refine.runs, expected, "{value}");
+    fn unknown_where_reads_as_default_agent() {
+        for (value, expected) in [
+            (r#""off""#, Where::Off),
+            (r#"" LOCAL ""#, Where::Local),
+            (r#""agent""#, Where::Agent),
+            (r#""cloud""#, Where::Agent),
+            (r#""""#, Where::Agent),
+            ("1", Where::Agent),
+            ("null", Where::Agent),
+        ] {
+            let s = read_refine(&format!(r#"{{"refine":{{"where":{value},"runs":"local","context_chars":100}}}}"#));
+            assert_eq!((s.where_, s.context_chars), (expected, 100), "{value}");
         }
-        assert_eq!(serde_json::to_value(RefineSettings::default()).unwrap()["runs"], "cloud");
+        assert_eq!(serde_json::to_value(RefineSettings::default()).unwrap()["where"], "agent");
+    }
+
+    #[test]
+    fn fallback_is_raw_unless_local() {
+        for (value, expected) in [(r#""local""#, Fallback::Local), (r#"" Local ""#, Fallback::Local), (r#""raw""#, Fallback::Raw), (r#""x""#, Fallback::Raw), ("3", Fallback::Raw)] {
+            let s = read_refine(&format!(r#"{{"refine":{{"where":"agent","fallback":{value}}}}}"#));
+            assert_eq!(s.fallback, expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn unknown_agent_reads_as_none() {
+        for value in [r#""claude""#, r#""gemini""#, "1", "null", r#""""#] {
+            assert_eq!(read_refine(&format!(r#"{{"refine":{{"agent":{value}}}}}"#)).agent, None, "{value}");
+        }
+        assert_eq!(read_refine(r#"{"refine":{"agent":"grok"}}"#).agent, Some(AgentId::Grok));
     }
 
     #[test]
     fn local_usage_model_names_the_local_model() {
-        let s = RefineSettings { runs: Runs::Local, local: "llm--qwen--qwen3-4b-gguf--q4_k_m".into(), ..RefineSettings::default() };
+        let s = RefineSettings { where_: Where::Local, local: "llm--qwen--qwen3-4b-gguf--q4_k_m".into(), ..RefineSettings::default() };
         assert_eq!(s.usage_model(), "local:llm--qwen--qwen3-4b-gguf--q4_k_m");
-        let s = RefineSettings { runs: Runs::Local, ..RefineSettings::default() };
+        let s = RefineSettings { where_: Where::Local, ..RefineSettings::default() };
         assert!(s.usage_model().starts_with("local:"), "the recommended one");
         assert_eq!(RefineSettings::default().usage_model(), "claude-haiku-5-5");
     }
 
     #[test]
-    fn apply_switches_runs() {
+    fn apply_switches_where() {
         let mut s = Settings::default();
-        assert!(s.apply(SettingChange::RefineRuns(Runs::Local)));
-        assert_eq!(s.refine.runs, Runs::Local);
-        assert!(!s.apply(SettingChange::RefineRuns(Runs::Local)), "the same value is no change");
-        assert!(s.apply(SettingChange::RefineRuns(Runs::Cloud)));
+        assert!(s.apply(SettingChange::RefineWhere(Where::Local)));
+        assert_eq!(s.refine.where_, Where::Local);
+        assert!(!s.apply(SettingChange::RefineWhere(Where::Local)), "the same value is no change");
+        assert!(s.apply(SettingChange::RefineWhere(Where::Off)));
     }
 
-    /// `model` and `level` of earlier versions are read past and never written again; empty choices are not written.
+    /// `level` and `addresses` of earlier versions are read past and never written again; empty choices are not written.
     #[test]
     fn old_refine_fields_are_read_past() {
-        let s: Settings =
-            serde_json::from_str(r#"{"refine":{"model":"claude-sonnet-5-5","level":"low","style":"bold","context_chars":300}}"#).unwrap();
-        assert_eq!((s.refine.model().id, s.refine.style, s.refine.context_chars), ("claude-haiku-5-5", RefineStyle::Default, 300));
-        let written = serde_json::to_value(&s.refine).unwrap();
-        for absent in ["model", "level", "models", "addresses", "custom"] {
+        let s = read_refine(r#"{"refine":{"model":"claude-sonnet-5-5","level":"low","style":"bold","context_chars":300}}"#);
+        assert_eq!(s.context_chars, 300);
+        let written = serde_json::to_value(&s).unwrap();
+        for absent in ["model", "level", "models", "addresses", "custom", "agent", "local"] {
             assert!(written.get(absent).is_none(), "{absent}: {written}");
         }
     }
@@ -1743,13 +1819,28 @@ mod tests {
     fn ask_defaults_and_reading() {
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert!(s.ask.enabled() && s.ask.web_search());
-        assert_eq!((s.ask.model(), s.ask.max_searches()), ("claude-haiku-5-5", 2));
+        assert_eq!(s.ask.max_searches(), 2);
         let s: Settings = serde_json::from_str(
-            r#"{"ask":{"enabled":false,"web_search":false,"model":" claude-sonnet-5-5 ","max_searches":5}}"#,
+            r#"{"ask":{"enabled":false,"web_search":false,"max_searches":5}}"#,
         )
         .unwrap();
         assert!(!s.ask.enabled() && !s.ask.web_search());
-        assert_eq!((s.ask.model(), s.ask.max_searches()), ("claude-sonnet-5-5", 5));
+        assert_eq!(s.ask.max_searches(), 5);
+    }
+
+    /// The Ask model of earlier versions is read past and never written again.
+    #[test]
+    fn ask_model_is_read_past() {
+        let dir = tmp("ask-model");
+        let p = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&p, r#"{"ask":{"model":"claude-sonnet-5-5","max_searches":5}}"#).unwrap();
+        let s = load(&p).unwrap();
+        assert_eq!(s.ask.max_searches(), 5);
+        save(&s, &p).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        assert_eq!(json["ask"], serde_json::json!({ "max_searches": 5 }));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A typo in `ask` reads as the default and never makes the file unreadable.
@@ -2108,10 +2199,10 @@ mod tests {
             SettingChange::MicDevice(Some(" ".into())),
             SettingChange::TranslateTarget("en".into()),
             SettingChange::UiLanguage(UiLanguage::Auto),
-            SettingChange::RefineStyle(RefineStyle::Default),
-            SettingChange::RefineCustom(" ".into()),
-            SettingChange::RefineConnection("anthropic".into()),
-            SettingChange::RefineModel("claude-haiku-5-5".into()),
+            SettingChange::RefineWhere(Where::Agent),
+            SettingChange::RefineAgentModel { agent: AgentId::Codex, model: " ".into() },
+            SettingChange::RefineAgentModel { agent: AgentId::Codex, model: "gpt-6-luna".into() },
+            SettingChange::RefineFallback(Fallback::Raw),
         ] {
             assert!(!s.apply(change.clone()), "{change:?}");
         }
@@ -2123,11 +2214,10 @@ mod tests {
             SettingChange::MicDevice(Some("Mic".into())),
             SettingChange::TranslateTarget("fr".into()),
             SettingChange::UiLanguage(UiLanguage::Ru),
-            SettingChange::RefineStyle(RefineStyle::Custom),
-            SettingChange::RefineCustom("пиши коротко".into()),
-            SettingChange::RefineRuns(Runs::Local),
-            SettingChange::RefineConnection("openai".into()),
-            SettingChange::RefineModel("gpt-6.1-terra".into()),
+            SettingChange::RefineWhere(Where::Local),
+            SettingChange::RefineAgent(AgentId::Codex),
+            SettingChange::RefineAgentModel { agent: AgentId::Codex, model: "gpt-6.1-terra".into() },
+            SettingChange::RefineFallback(Fallback::Local),
         ] {
             assert!(s.apply(change.clone()), "{change:?}");
             assert!(!s.apply(change.clone()), "the same change twice: {change:?}");
@@ -2137,25 +2227,25 @@ mod tests {
         assert_eq!((s.history.keep.known(), s.audio.device.as_deref()), (Some(Keep::Week), Some("Mic")));
         assert_eq!(s.history.audio.known(), Some(AudioKeep::Day));
         assert_eq!((s.translate.target(), s.ui.language), ("fr", UiLanguage::Ru));
-        assert_eq!((s.refine.style, s.refine.custom_text()), (RefineStyle::Custom, Some("пиши коротко")));
-        assert_eq!((s.refine.runs, s.refine.connection().id, s.refine.model().id), (Runs::Local, "openai", "gpt-6.1-terra"));
+        assert_eq!((s.refine.where_, s.refine.agent, s.refine.fallback), (Where::Local, Some(AgentId::Codex), Fallback::Local));
+        assert_eq!(s.refine.models.get("codex").map(String::as_str), Some("gpt-6.1-terra"));
     }
 
     #[test]
     fn apply_refuses_what_the_cleanup_could_not_use() {
         let mut s = Settings::default();
-        assert!(!s.apply(SettingChange::RefineConnection("bard".into())), "an unknown connection");
-        assert!(!s.apply(SettingChange::RefineModel("claude-opus-5-5".into())), "a model the connection does not list");
-        assert!(!s.apply(SettingChange::RefineCustom("я".repeat(MAX_CUSTOM_CHARS + 1))), "too long");
-        assert!(!s.apply(SettingChange::RefineConnection("ollama".into())), "a local server CUE no longer lists");
+        assert!(!s.apply(SettingChange::RefineAgentModel { agent: AgentId::Codex, model: "gpt-4".into() }), "a model CUE does not list");
+        assert!(!s.apply(SettingChange::RefineAgentModel { agent: AgentId::OpenCode, model: "m".repeat(201) }), "too long");
         assert_eq!(s, Settings::default());
-        // A model chosen and then the recommended one again: nothing is kept.
-        assert!(s.apply(SettingChange::RefineModel("claude-sonnet-5-5".into())));
-        assert!(s.apply(SettingChange::RefineModel("claude-haiku-5-5".into())));
+        // A model chosen and then the agent's default again: nothing is kept.
+        assert!(s.apply(SettingChange::RefineAgentModel { agent: AgentId::Codex, model: "gpt-6-sol".into() }));
+        assert!(s.apply(SettingChange::RefineAgentModel { agent: AgentId::Codex, model: "gpt-6-luna".into() }));
         assert!(s.refine.models.is_empty());
-        // The custom text is kept trimmed.
-        assert!(s.apply(SettingChange::RefineCustom("  кратко \n".into())));
-        assert_eq!(s.refine.custom, "кратко");
+        // OpenCode lists its own models: any name goes, trimmed; empty is "Быстрая · авто".
+        assert!(s.apply(SettingChange::RefineAgentModel { agent: AgentId::OpenCode, model: " anthropic/claude ".into() }));
+        assert_eq!(s.refine.models.get("opencode").map(String::as_str), Some("anthropic/claude"));
+        assert!(s.apply(SettingChange::RefineAgentModel { agent: AgentId::OpenCode, model: String::new() }));
+        assert!(s.refine.models.is_empty());
     }
 
     /// The window sends `{"kind": …, "value": …}`. An unknown retention is refused rather than read as a month, and an
@@ -2171,14 +2261,18 @@ mod tests {
         assert_eq!(read(r#"{"kind":"micDevice","value":null}"#).unwrap(), SettingChange::MicDevice(None));
         assert_eq!(read(r#"{"kind":"translateTarget","value":"de"}"#).unwrap(), SettingChange::TranslateTarget("de".into()));
         assert_eq!(read(r#"{"kind":"uiLanguage","value":"ru"}"#).unwrap(), SettingChange::UiLanguage(UiLanguage::Ru));
-        assert_eq!(read(r#"{"kind":"refineStyle","value":"custom"}"#).unwrap(), SettingChange::RefineStyle(RefineStyle::Custom));
-        assert_eq!(read(r#"{"kind":"refineCustom","value":"кратко"}"#).unwrap(), SettingChange::RefineCustom("кратко".into()));
+        assert_eq!(read(r#"{"kind":"refineWhere","value":"off"}"#).unwrap(), SettingChange::RefineWhere(Where::Off));
+        assert_eq!(read(r#"{"kind":"refineAgent","value":"codex"}"#).unwrap(), SettingChange::RefineAgent(AgentId::Codex));
+        assert!(read(r#"{"kind":"refineAgent","value":"claude"}"#).is_err(), "Claude Code is never offered");
+        assert_eq!(read(r#"{"kind":"refineFallback","value":"local"}"#).unwrap(), SettingChange::RefineFallback(Fallback::Local));
+        let m = r#"{"kind":"refineAgentModel","value":{"agent":"codex","model":"gpt-6-sol"}}"#;
+        assert_eq!(read(m).unwrap(), SettingChange::RefineAgentModel { agent: AgentId::Codex, model: "gpt-6-sol".into() });
         assert_eq!(read(r#"{"kind":"learn","value":false}"#).unwrap(), SettingChange::Learn(false));
         let word = LearnedWord { word: "GitHub".into(), heard: "гитхаб".into() };
         assert_eq!(read(r#"{"kind":"dictLearn","value":{"word":"GitHub","heard":"гитхаб"}}"#).unwrap(), SettingChange::DictLearn(word));
-        assert_eq!(read(r#"{"kind":"refineConnection","value":"openai"}"#).unwrap(), SettingChange::RefineConnection("openai".into()));
-        assert_eq!(read(r#"{"kind":"refineModel","value":"gpt-6.1-terra"}"#).unwrap(), SettingChange::RefineModel("gpt-6.1-terra".into()));
-        assert_eq!(read(r#"{"kind":"refineRuns","value":"local"}"#).unwrap(), SettingChange::RefineRuns(Runs::Local));
+        for gone in ["refineStyle", "refineCustom", "refineRuns", "refineConnection", "refineModel"] {
+            assert!(read(&format!(r#"{{"kind":"{gone}","value":"x"}}"#)).is_err(), "{gone} is gone");
+        }
         assert!(read(r#"{"kind":"refineAddress","value":"http://localhost:1/v1"}"#).is_err(), "local servers are gone");
         for json in [
             r#"{"kind":"historyKeep","value":"always"}"#,

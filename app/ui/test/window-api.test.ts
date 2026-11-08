@@ -1,7 +1,7 @@
 // The main window's command wrappers over a stand-in `invoke`: what they send and what they make of the answer.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
-import { historyAudio } from '../src/window/api';
+import { historyAudio, settingsSet } from '../src/window/api';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(), Channel: class {} }));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: vi.fn() }));
@@ -27,6 +27,23 @@ describe('historyAudio', () => {
     for (const code of ['notMain', 'badValue', 'failed']) {
       vi.mocked(invoke).mockRejectedValueOnce(code);
       await expect(historyAudio(ID)).rejects.toBe(code);
+    }
+  });
+});
+
+describe('settingsSet', () => {
+  beforeEach(() => vi.mocked(invoke).mockReset());
+
+  it('sends the cleanup choices as the core names them', async () => {
+    vi.mocked(invoke).mockResolvedValue({});
+    for (const change of [
+      { kind: 'refineWhere', value: 'off' },
+      { kind: 'refineAgent', value: 'codex' },
+      { kind: 'refineAgentModel', value: { agent: 'codex', model: 'gpt-6-luna' } },
+      { kind: 'refineFallback', value: 'local' },
+    ] as const) {
+      await settingsSet(change);
+      expect(invoke).toHaveBeenLastCalledWith('settings_set', { change });
     }
   });
 });
