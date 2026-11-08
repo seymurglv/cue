@@ -69,6 +69,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cue_core::ask::{AnswerPlace, AskContext, MAX_SELECTION_CHARS, SelectionKind, TurnState};
 use cue_core::audio::{Silence, SilenceDetector};
+use cue_core::basics;
 use cue_core::corrections::{self, Offers};
 use cue_core::flow::{DictationId, Effect, Flow, InsertOutcome, Input, Outcome, PasteHow, RefineOutcome, SttError, TimerKind};
 use cue_core::habits;
@@ -1656,9 +1657,12 @@ impl Runtime {
             Vec::new()
         };
         let ctx = ctx.with_habits(&sent);
+        let dict = self.settings.dictionary.clone();
+        // What the engines get, and what is pasted when none works: the text with the basics done (`raw_text` keeps the
+        // text as heard).
+        let raw = basics::tidy(&raw, &dict);
         self.habits_sent.put(id, (sent, raw.clone()));
         let (http, s, tx) = (self.http.clone(), self.settings.refine.clone(), self.tx.clone());
-        let dict = self.settings.dictionary.clone();
         let old = self.refine_task.start(id, |task| {
             tokio::spawn(async move {
                 let fallback_raw = raw.clone();
@@ -1877,6 +1881,12 @@ impl Runtime {
             self.conversation = Some(ask::Conversation::new(taken));
         }
         if let Some(c) = self.conversation.as_mut() {
+            // The first question gets the basics (a follow-up is typed or said into a conversation already going).
+            let tidied;
+            let question = if follow_up { question } else {
+                tidied = basics::tidy(question, &self.settings.dictionary);
+                &tidied
+            };
             c.ask(question);
         }
         if follow_up {
