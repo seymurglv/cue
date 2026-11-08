@@ -7,7 +7,7 @@
 use crate::refine::{is_term, usable_terms};
 use crate::settings::DictionarySettings;
 
-/// Sounds that mean nothing, removed wherever they stand alone.
+/// Sounds that mean nothing, removed wherever they stand alone ("мм" after a number is millimetres, not a filler).
 const FILLERS: [&str; 10] = ["э", "ээ", "эээ", "эм", "мм", "ммм", "um", "uh", "erm", "hmm"];
 /// Removed only as the first word of the dictation.
 const OPENERS: [&str; 2] = ["ну", "well"];
@@ -21,26 +21,29 @@ pub fn tidy(raw: &str, dict: &DictionarySettings) -> String {
         .map(|l| (l.heard.trim(), l.word.trim()))
         .filter(|(heard, word)| is_term(heard) && is_term(word))
         .collect();
-    learned.sort_by_key(|(heard, _)| std::cmp::Reverse(words(heard).len()));
+    learned.sort_by_key(|(heard, _)| std::cmp::Reverse(size(heard)));
     let mut terms: Vec<(&str, &str)> = usable_terms(&dict.terms).into_iter().map(|t| (t, t)).collect();
-    terms.sort_by_key(|(t, _)| std::cmp::Reverse(words(t).len()));
+    terms.sort_by_key(|(t, _)| std::cmp::Reverse(size(t)));
+    // The spellings the first two steps write: a capital never changes the start of one.
+    let spellings: Vec<&str> = learned.iter().chain(&terms).map(|&(_, to)| to).collect();
 
     let text = replace_phrases(raw, &learned);
     let text = replace_phrases(&text, &terms);
-    let (text, mut capital) = remove_fillers(&text);
-    let (text, opener) = remove_opener(&text);
-    capital |= opener;
+    let text = remove_fillers(&text, &spellings);
+    let text = remove_opener(&text, &spellings);
     let text = tidy_spacing(&text);
-    if !text.chars().any(char::is_alphanumeric) {
-        return raw.to_owned();
-    }
-    if capital { capitalize(&text) } else { text }
+    if text.chars().any(char::is_alphanumeric) { text } else { raw.to_owned() }
 }
 
 /// A word of the text: its byte range.
 type Span = (usize, usize);
 
-/// The words of `text` (letters, digits, and `-` `'` `’` between them) with their byte ranges.
+/// A joiner (`-` `'` `’`) between two letters or digits belongs to the word.
+fn joins(c: char) -> bool {
+    matches!(c, '-' | '\'' | '’')
+}
+
+/// The words of `text` (letters, digits, and joiners between them) with their byte ranges.
 fn word_spans(text: &str) -> Vec<Span> {
     let mut spans = Vec::new();
     let mut start: Option<usize> = None;
@@ -49,7 +52,7 @@ fn word_spans(text: &str) -> Vec<Span> {
         if c.is_alphanumeric() {
             start.get_or_insert(i);
             end = i + c.len_utf8();
-        } else if !(matches!(c, '-' | '\'' | '’') && start.is_some())
+        } else if !(joins(c) && start.is_some())
             && let Some(s) = start.take()
         {
             spans.push((s, end));
@@ -61,50 +64,124 @@ fn word_spans(text: &str) -> Vec<Span> {
     spans
 }
 
-/// The lowercase words of a phrase.
-fn words(phrase: &str) -> Vec<String> {
-    word_spans(phrase).into_iter().map(|(s, e)| phrase[s..e].to_lowercase()).collect()
+/// How many pieces (separated by white space) and characters an entry has: the longer one is tried first.
+fn size(entry: &str) -> (usize, usize) {
+    (entry.split_whitespace().count(), entry.chars().count())
 }
 
-/// Every phrase found as whole words (case-insensitive, only white space between them) becomes its replacement; at
-/// each place the first of `pairs` that fits wins, so the list goes longest first. The result is not searched again.
-fn replace_phrases(text: &str, pairs: &[(&str, &str)]) -> String {
-    if pairs.is_empty() {
-        return text.to_owned();
-    }
-    let spans = word_spans(text);
-    let lower: Vec<String> = spans.iter().map(|&(s, e)| text[s..e].to_lowercase()).collect();
-    let patterns: Vec<(Vec<String>, &str)> = pairs.iter().map(|&(from, to)| (words(from), to)).collect();
-    let mut out = String::with_capacity(text.len());
-    let mut copied = 0;
-    let mut i = 0;
-    while i < spans.len() {
-        let hit = patterns.iter().find(|(p, _)| {
-            !p.is_empty()
-                && i + p.len() <= spans.len()
-                && p.iter().zip(&lower[i..]).all(|(a, b)| a == b)
-                && (i..i + p.len() - 1).all(|k| text[spans[k].1..spans[k + 1].0].chars().all(char::is_whitespace))
-        });
-        match hit {
-            Some((p, to)) => {
-                out.push_str(&text[copied..spans[i].0]);
-                out.push_str(to);
-                copied = spans[i + p.len() - 1].1;
-                i += p.len();
+fn same_letter(a: char, b: char) -> bool {
+    a == b || a.to_lowercase().eq(b.to_lowercase())
+}
+
+/// The end of `pieces` found at byte `at` of `text`: each character equal apart from letter case, a run of white space
+/// between the pieces. The punctuation of an entry ("C#", "Node.js") has to be in the text as well.
+fn match_at(text: &str, at: usize, pieces: &[&str]) -> Option<usize> {
+    let mut pos = at;
+    for (k, piece) in pieces.iter().enumerate() {
+        if k > 0 {
+            let rest = &text[pos..];
+            let spaces = rest.len() - rest.trim_start().len();
+            if spaces == 0 {
+                return None;
             }
-            None => i += 1,
+            pos += spaces;
+        }
+        for want in piece.chars() {
+            let c = text[pos..].chars().next()?;
+            if !same_letter(c, want) {
+                return None;
+            }
+            pos += c.len_utf8();
         }
     }
-    out.push_str(&text[copied..]);
+    Some(pos)
+}
+
+/// No word goes on in front of byte `at`.
+fn word_ends_before(text: &str, at: usize) -> bool {
+    let mut before = text[..at].chars().rev();
+    match before.next() {
+        None => true,
+        Some(c) if c.is_alphanumeric() => false,
+        Some(c) => !(joins(c) && before.next().is_some_and(char::is_alphanumeric)),
+    }
+}
+
+/// No word goes on after byte `at`, and an entry's closing sign ("#" of "C#") is not doubled by the text.
+fn word_starts_after(text: &str, at: usize) -> bool {
+    let last = text[..at].chars().next_back();
+    let mut after = text[at..].chars();
+    match after.next() {
+        None => true,
+        Some(c) if Some(c) == last && !c.is_alphanumeric() => false,
+        Some(c) if c.is_alphanumeric() => false,
+        Some(c) => !(joins(c) && after.next().is_some_and(char::is_alphanumeric)),
+    }
+}
+
+/// Every entry found whole (equal apart from letter case, on word boundaries) becomes its replacement; at each place
+/// the first of `pairs` that fits wins, so the list goes longest first. The result is not searched again.
+fn replace_phrases(text: &str, pairs: &[(&str, &str)]) -> String {
+    let patterns: Vec<(Vec<&str>, &str)> = pairs
+        .iter()
+        .map(|&(from, to)| (from.split_whitespace().collect::<Vec<_>>(), to))
+        .filter(|(p, _)| !p.is_empty())
+        .collect();
+    if patterns.is_empty() {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while let Some(c) = text[i..].chars().next() {
+        let hit = if word_ends_before(text, i) {
+            patterns
+                .iter()
+                .find_map(|(p, to)| match_at(text, i, p).filter(|&end| word_starts_after(text, end)).map(|end| (end, *to)))
+        } else {
+            None
+        };
+        match hit {
+            Some((end, to)) => {
+                out.push_str(to);
+                i = end;
+            }
+            None => {
+                out.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
     out
 }
 
-/// Standalone filler words go, with the commas around them. True when the text then starts where a filler was.
-fn remove_fillers(text: &str) -> (String, bool) {
+/// The first character at or after byte `from`, if only white space comes before it and it is a small letter, gets its
+/// capital, unless a spelling of the dictionary starts there.
+fn capitalize_from(text: &mut String, from: usize, spellings: &[&str]) {
+    let rest = &text[from..];
+    let at = from + rest.len() - rest.trim_start().len();
+    if spellings.iter().any(|s| text[at..].starts_with(s)) {
+        return;
+    }
+    if let Some(c) = text[at..].chars().next()
+        && c.is_lowercase()
+    {
+        let upper: String = c.to_uppercase().collect();
+        text.replace_range(at..at + c.len_utf8(), &upper);
+    }
+}
+
+/// "мм" after a number is millimetres.
+fn is_unit(text: &str, word: Span) -> bool {
+    text[word.0..word.1].to_lowercase() == "мм" && text[..word.0].trim_end().ends_with(|c: char| c.is_ascii_digit())
+}
+
+/// Standalone filler words go, with the commas around them; where one stood at the start of a sentence, the next word
+/// takes the capital.
+fn remove_fillers(text: &str, spellings: &[&str]) -> String {
     let mut text = text.to_owned();
-    let mut at_start = false;
-    while let Some((s, e)) =
-        word_spans(&text).into_iter().find(|&(s, e)| FILLERS.contains(&text[s..e].to_lowercase().as_str()))
+    while let Some((s, e)) = word_spans(&text)
+        .into_iter()
+        .find(|&w| FILLERS.contains(&text[w.0..w.1].to_lowercase().as_str()) && !is_unit(&text, w))
     {
         let mut from = text[..s].trim_end().len();
         if text[..from].ends_with(',') {
@@ -115,22 +192,27 @@ fn remove_fillers(text: &str) -> (String, bool) {
         if after.starts_with(',') {
             to = text.len() - after.len() + 1;
         }
-        at_start |= text[..from].trim().is_empty();
+        let before = text[..from].trim_end_matches([' ', '\t']);
+        let sentence_start = before.is_empty() || before.ends_with(['.', '!', '?', '\n']);
         text.replace_range(from..to, " ");
+        if sentence_start {
+            capitalize_from(&mut text, from, spellings);
+        }
     }
-    (text, at_start)
+    text
 }
 
-/// "ну" or "well" as the first word goes, with its comma. True when it went.
-fn remove_opener(text: &str) -> (String, bool) {
+/// "ну" or "well" as the first word goes, with its comma; the next word takes the capital.
+fn remove_opener(text: &str, spellings: &[&str]) -> String {
     let lead = text.len() - text.trim_start().len();
-    let Some(&(s, e)) = word_spans(text).first() else { return (text.to_owned(), false) };
+    let Some(&(s, e)) = word_spans(text).first() else { return text.to_owned() };
     if s != lead || !OPENERS.contains(&text[s..e].to_lowercase().as_str()) {
-        return (text.to_owned(), false);
+        return text.to_owned();
     }
     let rest = text[e..].trim_start();
-    let rest = rest.strip_prefix(',').unwrap_or(rest);
-    (rest.to_owned(), true)
+    let mut rest = rest.strip_prefix(',').unwrap_or(rest).to_owned();
+    capitalize_from(&mut rest, 0, spellings);
+    rest
 }
 
 /// No space before `, . ! ? : ;`, single spaces, no doubled commas, no space at the edges.
@@ -154,14 +236,6 @@ fn tidy_spacing(text: &str) -> String {
         out.push(c);
     }
     out.trim().to_owned()
-}
-
-fn capitalize(text: &str) -> String {
-    let mut chars = text.chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().chain(chars).collect(),
-        None => String::new(),
-    }
 }
 
 #[cfg(test)]
@@ -269,5 +343,59 @@ mod tests {
     fn empty_result_keeps_raw() {
         let d = dict(&[], &[]);
         check(&d, &[("эм", "эм"), ("Um.", "Um."), ("", "")]);
+    }
+
+    #[test]
+    fn entries_with_punctuation_match_whole() {
+        let d = dict(&["C#", "C++", "Node.js"], &[("си шарп", "C#")]);
+        check(
+            &d,
+            &[
+                ("I like c and C# and c++ and node.js.", "I like c and C# and C++ and Node.js."),
+                ("c# is fine", "C# is fine"),
+                ("C# C++ Node.js", "C# C++ Node.js"),
+                ("a c b", "a c b"),
+                ("node js", "node js"),
+                ("напиши на си шарп", "напиши на C#"),
+                ("c##", "c##"),
+            ],
+        );
+    }
+
+    #[test]
+    fn capital_never_recases_a_spelling_of_the_dictionary() {
+        let d = dict(&["iPhone"], &[("эй пад", "iPad")]);
+        check(
+            &d,
+            &[
+                ("эм iphone", "iPhone"),
+                ("ну iphone купил", "iPhone купил"),
+                ("эм, эй пад", "iPad"),
+                ("Привет. Эм, iphone", "Привет. iPhone"),
+            ],
+        );
+    }
+
+    #[test]
+    fn mm_after_a_number_is_a_unit() {
+        let d = dict(&[], &[]);
+        check(
+            &d,
+            &[("5 мм", "5 мм"), ("размер 10 мм, э, ок", "размер 10 мм ок"), ("Привет мм ок", "Привет ок"), ("5, мм, ок", "5 ок")],
+        );
+    }
+
+    #[test]
+    fn filler_at_a_sentence_start_restores_the_capital() {
+        let d = dict(&[], &[]);
+        check(
+            &d,
+            &[
+                ("Привет. Эм, как дела?", "Привет. Как дела?"),
+                ("Ok! um what now", "Ok! What now"),
+                ("Привет, эм, как дела?", "Привет как дела?"),
+                ("Он пришёл эм и ушёл", "Он пришёл и ушёл"),
+            ],
+        );
     }
 }

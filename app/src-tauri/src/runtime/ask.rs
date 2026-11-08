@@ -107,6 +107,8 @@ pub struct Conversation {
     /// abort of the new one brings it back with its Retry (the flow's `AskAgain` names it then).
     replaced: Option<(TurnView, Value)>,
     pub view: AnswerView,
+    /// The question in flight as it was sent, with the basics done (`cue_core::basics`); the turn keeps it as heard.
+    sent: Option<String>,
     sources: Sources,
     /// The answer is on screen: the first step with something to show came.
     pub opened: bool,
@@ -141,6 +143,7 @@ impl Conversation {
                 missed: false,
                 actions: Vec::new(),
             },
+            sent: None,
             sources: Sources::default(),
             opened: false,
             write: None,
@@ -154,10 +157,16 @@ impl Conversation {
     /// A question goes out. Until an exchange has succeeded it is a first question, with the context (a question asked
     /// again after a failure or a refusal replaces it); after that a follow-up, alone (spec 2 §6.2).
     pub fn ask(&mut self, question: &str) {
+        self.ask_as(question, question);
+    }
+
+    /// A question that is shown (and kept in the history) as `question`, the words as heard, and goes out as `sent`.
+    pub fn ask_as(&mut self, question: &str, sent: &str) {
+        self.sent = Some(sent.to_owned());
         let text = if self.messages.is_empty() {
-            ask::first_message(question, &self.taken.ctx)
+            ask::first_message(sent, &self.taken.ctx)
         } else {
-            ask::follow_up_message(question)
+            ask::follow_up_message(sent)
         };
         let previous = self.messages.last().and_then(|m| m["content"].as_array()).map(Vec::as_slice);
         let message = user_turn(&text, previous);
@@ -177,12 +186,17 @@ impl Conversation {
         self.view.turns.last().map(|t| t.question.as_str())
     }
 
+    /// The question in flight (or the last one asked) as it goes out to the model.
+    pub fn sent_question(&self) -> Option<&str> {
+        self.sent.as_deref().or_else(|| self.question())
+    }
+
     /// The Ctrl+C copy of the first question came: it is the selection, one that can be changed (spec 2 §6.1), and the
     /// question waiting to go is asked with it.
     pub fn copied(&mut self, text: &str) {
         self.taken.copied(text);
         if self.messages.is_empty()
-            && let Some(question) = self.question().map(str::to_owned)
+            && let Some(question) = self.sent_question().map(str::to_owned)
         {
             self.pending = Some(first_turn(&question, &self.taken.ctx));
         }
@@ -878,6 +892,21 @@ mod tests {
         assert_eq!(o.view.actions, [AnswerAction::Insert, AnswerAction::Copy]);
         o.copied("Спасибо");
         assert_eq!(o.view.actions, [AnswerAction::Below, AnswerAction::Replace, AnswerAction::Copy], "the open answer's buttons follow");
+    }
+
+    /// The history and the answer show the question as it was heard; the model gets the one with the basics done, also
+    /// when the Ctrl+C copy rebuilds the first message.
+    #[test]
+    fn the_question_is_shown_as_heard_and_sent_with_the_basics_done() {
+        let mut c = Conversation::new(taken(SelectionKind::None, false));
+        c.ask_as("эм, переведи", "Переведи");
+        assert_eq!(c.question(), Some("эм, переведи"));
+        assert_eq!(c.sent_question(), Some("Переведи"));
+        assert_eq!(c.request()[0], first_turn("Переведи", &taken(SelectionKind::None, false).ctx));
+        c.copied("Спасибо");
+        let ctx = with_copied(&taken(SelectionKind::None, false).ctx, "Спасибо");
+        assert_eq!(c.request()[0], first_turn("Переведи", &ctx), "the copy keeps the tidied question");
+        assert_eq!(c.view.turns[0].question, "эм, переведи", "the history reads this");
     }
 
     /// A Ctrl+C copy that comes after Esc dropped the request waiting for it: what "restore" asks with gets it all the

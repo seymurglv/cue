@@ -1881,13 +1881,12 @@ impl Runtime {
             self.conversation = Some(ask::Conversation::new(taken));
         }
         if let Some(c) = self.conversation.as_mut() {
-            // The first question gets the basics (a follow-up is typed or said into a conversation already going).
-            let tidied;
-            let question = if follow_up { question } else {
-                tidied = basics::tidy(question, &self.settings.dictionary);
-                &tidied
-            };
-            c.ask(question);
+            // The first question goes out with the basics done; the answer and the history keep it as heard.
+            if follow_up {
+                c.ask(question);
+            } else {
+                c.ask_as(question, &basics::tidy(question, &self.settings.dictionary));
+            }
         }
         if follow_up {
             self.send_view(true);
@@ -1930,7 +1929,7 @@ impl Runtime {
         let messages = c.request();
         // The Ctrl+C copy of a first question, still on its way: the request task waits for it, never the core.
         let copy = match self.ask_copy.take() {
-            Some((i, rx)) if i == id => c.question().map(|q| (rx, q.to_owned(), c.taken.ctx.clone())),
+            Some((i, rx)) if i == id => c.sent_question().map(|q| (rx, q.to_owned(), c.taken.ctx.clone())),
             _ => None,
         };
         let core = self.tx.clone();
