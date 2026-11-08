@@ -1,0 +1,11 @@
+Global constraints (from the plan, binding):
+- Files are in English and say nothing about the tools the code was written with (no mention of AI assistants, agents, plans, reviewers in code, comments or docs).
+- NO git commits, no git stash/checkout/reset/add to the real index, no push. Leave all changes uncommitted in the working tree. (The owner commits only on request.)
+- The field's text never reaches disk or the log: the log gets "correction found / none" and numbers only. Every new Debug that could hold a word prints its length.
+- learn.enabled off: CUE never reads a field after a paste.
+- Texts in English and Russian; the Drop's capsule has no text besides the word; its buttons have accessible names "Add to dictionary" / «Добавить в словарь» and "Undo" / «Отменить».
+- Motion follows the family: parts open with max-width .5s var(--e-spring), rings deplete linearly, reduced motion respected by the existing drop.js rules.
+- Match the surrounding code: comment density, naming, idiom (edition 2024 Rust, let-chains are used in this repo).
+- Checks, from C:\Users\seymurglv\Desktop\cue-dev: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`; from C:\Users\seymurglv\Desktop\cue-dev\app: `npx vitest run`, `npx tsc --noEmit -p tsconfig.json`.
+- Spec: docs/specs/2026-11-02-corrections.md (binding authority).
+- Escapes: if you write a string literal containing \n (backslash-n), your edit tool may turn it into a real line break. After editing, check with `git diff -U0` that no added line ends inside an open string; fix with a small python -I script outside the repo if needed.

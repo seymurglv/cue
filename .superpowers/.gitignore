@@ -1,0 +1,6 @@
+# Working files that stay on this computer: review diffs, test logs, helper scripts
+*.diff
+*.log
+*.txt
+*.sh
+plan-path

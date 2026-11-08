@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CUE for Windows: how it works</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Montserrat:wght@800&display=swap">
+<style>
+:root{
+  --bg:#FBFBFA;--card:#FFFFFF;--surface2:#F3F3F1;--text:#111111;--muted:#6B6B67;--faint:#C4C4C0;--line:#ECECE9;
+  --rec:#FF4A1C;--warn:#935600;--ask:#2F6BFF;--ok:#1E7F4A;--graphite:#1C1C1F;
+  --font:"Segoe UI Variable Text","Segoe UI Variable","Segoe UI",-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
+  --num:"Bebas Neue","Montserrat",sans-serif;--head:"Montserrat",sans-serif;
+  --e-out:cubic-bezier(.22,1,.36,1);
+}
+[data-theme=dark]{
+  --bg:#0E0E0F;--card:#151517;--surface2:#1C1C1F;--text:#ECECEA;--muted:#9A9A9F;--faint:#4A4A4E;--line:#26262A;
+  --rec:#FF5A2E;--warn:#F5B82E;--ask:#7FA6FF;--ok:#33C27A;--graphite:#242428;
+}
+*{box-sizing:border-box}
+html{background:var(--bg);color:var(--text);font:13px/1.5 var(--font);-webkit-font-smoothing:antialiased}
+body{margin:0;transition:background .2s,color .2s}
+a{color:inherit}
+.wrap{max-width:1160px;margin:0 auto;padding:28px 28px 80px}
+header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding-bottom:22px;border-bottom:1px solid var(--line)}
+.logo{font:400 22px/1 var(--num);letter-spacing:.03em}
+.logo span{color:var(--muted)}
+header p{margin:6px 0 0;color:var(--muted);font-size:13px}
+.theme{display:flex;background:var(--surface2);border-radius:999px;padding:3px}
+.theme button{all:unset;cursor:pointer;font-size:12px;padding:5px 12px;border-radius:999px;color:var(--muted)}
+.theme button[aria-pressed=true]{background:var(--card);color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.theme button:focus-visible{outline:2px solid var(--text);outline-offset:1px}
+section{padding-top:34px}
+h2{font:600 13px/1.3 var(--font);margin:0 0 4px}
+.lede{color:var(--muted);margin:0 0 16px;max-width:760px}
+.tiles{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:22px}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+.tile b{display:block;font:400 38px/1 var(--num);letter-spacing:.01em;font-variant-numeric:tabular-nums}
+.tile small{display:block;color:var(--muted);font-size:12px;margin-top:6px;line-height:1.35}
+.changes{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.chg{display:grid;grid-template-columns:92px 1fr 300px;gap:18px;align-items:center;padding:14px 18px;border-top:1px solid var(--line)}
+.chg:first-child{border-top:0}
+.chg time{font:400 15px/1 var(--num);color:var(--muted);letter-spacing:.02em}
+.chg h3{font:600 13px/1.35 var(--font);margin:0}
+.chg p{margin:2px 0 0;color:var(--muted);font-size:12px;line-height:1.45}
+.bar{position:relative;height:28px;display:flex;align-items:center;gap:8px;cursor:default}
+.bar i{display:block;height:10px;border-radius:0 4px 4px 0;background:var(--text);min-width:3px;transition:width .6s var(--e-out)}
+.bar em{font-style:normal;font-size:12px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+.bar:hover i,.bar:focus i{opacity:.7}
+.tip{position:fixed;pointer-events:none;background:var(--graphite);color:#ECECEA;font-size:12px;padding:6px 9px;border-radius:8px;opacity:0;transform:translateY(4px);transition:opacity .15s,transform .15s var(--e-out);z-index:10;max-width:260px}
+.tip.on{opacity:1;transform:none}
+figure{margin:0;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px}
+figure svg{display:block;width:100%;height:auto;color:var(--text)}
+figcaption{color:var(--muted);font-size:12px;margin-top:10px;max-width:820px}
+.fx{display:grid;grid-template-columns:230px 1fr;gap:18px;align-items:start}
+nav.funcs{position:sticky;top:16px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:6px}
+nav.funcs a{display:flex;gap:10px;align-items:baseline;text-decoration:none;padding:7px 10px;border-radius:9px;color:var(--muted);font-size:13px}
+nav.funcs a b{font:400 15px/1 var(--num);width:18px;color:var(--muted)}
+nav.funcs a:hover{background:var(--surface2);color:var(--text)}
+nav.funcs a[aria-current=true]{background:var(--surface2);color:var(--text);font-weight:600}
+nav.funcs a[aria-current=true] b{color:var(--text)}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px;overflow:hidden;transition:height .45s var(--e-out)}
+#fbody{transition:opacity .16s}
+#fbody.out{opacity:0}
+.pulse{position:absolute;left:121px;top:0;width:7px;height:7px;border-radius:50%;background:var(--text);opacity:0;pointer-events:none}
+.node.lit{border-color:var(--text)}
+.arch-dot{opacity:0}
+.panel h3{font:800 24px/1.2 var(--head);margin:0;letter-spacing:-.01em}
+.trig{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 18px}
+.key{font:400 15px/1 var(--num);letter-spacing:.04em;background:var(--surface2);border-radius:6px;padding:5px 8px 3px}
+.trig span.t{color:var(--muted);font-size:12px;align-self:center;margin-left:4px}
+ol.flow{list-style:none;margin:0;padding:0;position:relative}
+ol.flow li{position:relative;display:grid;grid-template-columns:110px 1fr;gap:14px;padding:0 0 14px}
+ol.flow li::before{content:"";position:absolute;left:124px;top:30px;bottom:-2px;width:1px;background:var(--faint)}
+ol.flow li:last-child::before{display:none}
+ol.flow li::after{content:"";position:absolute;left:121px;bottom:0;width:7px;height:7px;border-right:1px solid var(--faint);border-bottom:1px solid var(--faint);transform:rotate(45deg);transform-origin:center}
+ol.flow li:last-child::after{display:none}
+.who{font-size:11px;color:var(--muted);text-align:right;padding-top:9px;line-height:1.3}
+.node{position:relative;transition:border-color .2s;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin-left:14px;opacity:0;transform:translateY(6px);animation:in .45s var(--e-out) forwards}
+.node.dec{border-style:dashed;border-color:var(--muted)}
+.node.end{background:var(--surface2)}
+.node p{margin:0;font-size:13px}
+.node code,.box code,td code,.lede code,figcaption code,header p code,.note code{font:12px/1.4 ui-monospace,"Cascadia Code",Consolas,monospace;color:var(--muted)}
+.node .file{display:block;margin-top:2px}
+.node .win{position:absolute;top:8px;right:10px;font-size:11px;font-weight:600;color:var(--text);background:var(--surface2);border-radius:6px;padding:1px 7px}
+.node.has-win{padding-right:92px}
+.outs{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}
+.outs span{font-size:12px;background:var(--card);border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+@keyframes in{to{opacity:1;transform:none}}
+.three{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:8px}
+.box{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:11px 13px}
+.box h4{margin:0 0 6px;font-size:11px;font-weight:600;color:var(--muted);text-transform:none}
+.box ul{margin:0;padding-left:16px}
+.box li{margin:2px 0;font-size:12px}
+.box.warnb h4{color:var(--warn)}
+.legend{display:flex;gap:16px;color:var(--muted);font-size:12px;margin:0 0 14px}
+.legend span{display:flex;align-items:center;gap:6px}
+.legend i{display:inline-block;width:18px;height:12px;border-radius:4px;border:1px solid var(--line);background:var(--bg)}
+.legend i.d{border:1px dashed var(--muted)}
+.legend b{font-size:11px;font-weight:600;background:var(--surface2);border-radius:6px;padding:1px 7px}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;font-size:12px}
+th{text-align:left;font-weight:600;font-size:11px;color:var(--muted);padding:10px 14px;border-bottom:1px solid var(--line);background:var(--bg)}
+td{padding:9px 14px;border-top:1px solid var(--line);vertical-align:top}
+tr:first-child td{border-top:0}
+td:first-child{font-weight:600;white-space:nowrap}
+.port{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.portable{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+.portable ul{margin:6px 0 0;padding-left:16px}
+.portable li{margin:3px 0}
+.portable b{font-weight:600}
+.note{color:var(--muted);font-size:12px;margin-top:10px}
+@media (max-width:900px){
+  .tiles{grid-template-columns:repeat(2,1fr)}
+  .chg{grid-template-columns:1fr;gap:6px}
+  .fx{grid-template-columns:1fr}
+  nav.funcs{position:static;display:flex;overflow-x:auto}
+  nav.funcs a{white-space:nowrap}
+  .three,.port{grid-template-columns:1fr}
+  ol.flow li{grid-template-columns:1fr}
+  .who{text-align:left;padding:0 0 2px 14px}
+  ol.flow li::before,ol.flow li::after{display:none}
+}
+@media (prefers-reduced-motion:reduce){.node{animation:none;opacity:1;transform:none}.bar i,.panel,#fbody,.node{transition:none}.pulse,.arch-dot{display:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div>
+    <div class="logo">CUE <span>for Windows · 0.1.3</span></div>
+    <p>How the Windows version works, function by function, and what changed in this release. Read from the code of <code>cue-dev</code> at <code>883977c</code>.</p>
+  </div>
+  <div class="theme" role="group" aria-label="Theme">
+    <button type="button" data-t="light">Light</button>
+    <button type="button" data-t="dark">Dark</button>
+  </div>
+</header>
+
+<div class="tiles" aria-label="This release in numbers">
+  <div class="tile"><b data-to="5">5</b><small>changes since 0.1.2</small></div>
+  <div class="tile"><b data-to="+10,327">+10,327</b><small>lines of code, −812, in 82 files (specs and lockfile not counted)</small></div>
+  <div class="tile"><b data-to="1,662">1,662</b><small>tests: 1,249 in Rust, 413 in the interface</small></div>
+  <div class="tile"><b>8 + 1</b><small>cloud connections for the cleanup, and this computer</small></div>
+  <div class="tile"><b data-to="149">149</b><small>commits since the first one on 28 Oct 2026</small></div>
+</div>
+
+<section id="changes">
+  <h2>What changed in 0.1.3</h2>
+  <p class="lede">Five changes since 0.1.2, oldest first. The bar is the lines of code each added; hover for the full count.</p>
+  <div class="changes" id="chg"></div>
+</section>
+
+<section id="architecture">
+  <h2>How it fits together</h2>
+  <p class="lede">One pure state machine decides everything; the runtime carries out what it decides and feeds the results back. The pages only draw and send clicks.</p>
+  <figure>
+    <svg id="arch" viewBox="0 0 1100 400" role="img" aria-label="Windows input reaches the core as Input events; Flow returns Effects; the runtime carries them out through Windows, the engines and the pages, and their results return as Input.">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
+      </defs>
+      <g font-family="Segoe UI Variable Text, Segoe UI, system-ui, sans-serif" font-size="12" fill="currentColor">
+        <!-- Windows column -->
+        <text x="20" y="26" font-size="11" fill="var(--muted)">WINDOWS (platform-win)</text>
+        <g fill="var(--surface2)" stroke="currentColor" stroke-width="1.6">
+          <rect x="20" y="40" width="210" height="44" rx="9"/>
+          <rect x="20" y="96" width="210" height="44" rx="9"/>
+          <rect x="20" y="152" width="210" height="44" rx="9"/>
+          <rect x="20" y="208" width="210" height="44" rx="9"/>
+          <rect x="20" y="264" width="210" height="44" rx="9"/>
+        </g>
+        <text x="34" y="60" font-weight="600">Keyboard hook</text><text x="34" y="76" fill="var(--muted)" font-size="11">WH_KEYBOARD_LL, chords</text>
+        <text x="34" y="116" font-weight="600">Microphone</text><text x="34" y="132" fill="var(--muted)" font-size="11">cpal, WASAPI</text>
+        <text x="34" y="172" font-weight="600">Focus and selection</text><text x="34" y="188" fill="var(--muted)" font-size="11">UI Automation</text>
+        <text x="34" y="228" font-weight="600">Paste</text><text x="34" y="244" fill="var(--muted)" font-size="11">clipboard, SendInput Ctrl+V</text>
+        <text x="34" y="284" font-weight="600">Sleep, lock, keys</text><text x="34" y="300" fill="var(--muted)" font-size="11">power, Credential Manager</text>
+
+        <!-- Core -->
+        <text x="330" y="26" font-size="11" fill="var(--muted)">THE CORE (cue-core thread)</text>
+        <rect x="330" y="40" width="300" height="268" rx="12" fill="var(--surface2)" stroke="none"/>
+        <rect x="360" y="70" width="240" height="64" rx="10" fill="var(--card)" stroke="currentColor"/>
+        <text x="480" y="97" text-anchor="middle" font-weight="600" font-size="13">Flow</text>
+        <text x="480" y="115" text-anchor="middle" fill="var(--muted)" font-size="11">pure state machine, no clock</text>
+        <rect x="360" y="214" width="240" height="64" rx="10" fill="var(--card)" stroke="currentColor"/>
+        <text x="480" y="241" text-anchor="middle" font-weight="600" font-size="13">Runtime</text>
+        <text x="480" y="259" text-anchor="middle" fill="var(--muted)" font-size="11">carries out each Effect</text>
+        <line x1="440" y1="136" x2="440" y2="212" stroke="currentColor" marker-end="url(#ar)"/>
+        <text x="432" y="178" text-anchor="end" font-size="11">Effects</text>
+        <line x1="520" y1="212" x2="520" y2="136" stroke="currentColor" marker-end="url(#ar)"/>
+        <text x="528" y="178" font-size="11">Input</text>
+
+        <line x1="232" y1="62" x2="358" y2="92" stroke="currentColor" marker-end="url(#ar)"/>
+        <text x="250" y="58" font-size="11" fill="var(--muted)">chord → Input</text>
+        <line x1="358" y1="236" x2="232" y2="128" stroke="currentColor" marker-end="url(#ar)" stroke-dasharray="3 3"/>
+        <line x1="358" y1="246" x2="232" y2="232" stroke="currentColor" marker-end="url(#ar)" stroke-dasharray="3 3"/>
+        <line x1="358" y1="256" x2="232" y2="176" stroke="currentColor" marker-end="url(#ar)" stroke-dasharray="3 3"/>
+        <text x="20" y="336" font-size="11" fill="var(--muted)">dashed: the runtime calls Windows</text>
+
+        <!-- Engines -->
+        <text x="730" y="26" font-size="11" fill="var(--muted)">ENGINES (cue-engines)</text>
+        <rect x="730" y="40" width="160" height="44" rx="9" fill="none" stroke="currentColor"/>
+        <text x="744" y="60" font-weight="600">Speech</text><text x="744" y="76" fill="var(--muted)" font-size="11">Parakeet, ONNX, CPU</text>
+        <rect x="730" y="96" width="160" height="44" rx="9" fill="none" stroke="currentColor"/>
+        <text x="744" y="116" font-weight="600">Cleanup, cloud</text><text x="744" y="132" fill="var(--muted)" font-size="11">claude, openrouter, chat</text>
+        <rect x="730" y="152" width="160" height="44" rx="9" fill="none" stroke="currentColor"/>
+        <text x="744" y="172" font-weight="600">Cleanup, local</text><text x="744" y="188" fill="var(--muted)" font-size="11">llama.cpp, GGUF</text>
+        <rect x="730" y="208" width="160" height="44" rx="9" fill="none" stroke="currentColor"/>
+        <text x="744" y="228" font-weight="600">Ask</text><text x="744" y="244" fill="var(--muted)" font-size="11">Claude, web search</text>
+        <rect x="730" y="264" width="160" height="44" rx="9" fill="none" stroke="currentColor"/>
+        <text x="744" y="284" font-weight="600">Downloads, checks</text><text x="744" y="300" fill="var(--muted)" font-size="11">Hugging Face, key probes</text>
+        <line x1="602" y1="240" x2="726" y2="174" stroke="currentColor" marker-end="url(#ar)"/>
+        <text x="668" y="226" text-anchor="middle" font-size="11" fill="var(--muted)" transform="rotate(-28 668 226)">tokio tasks</text>
+
+        <!-- UI -->
+        <text x="960" y="26" font-size="11" fill="var(--muted)">PAGES (WebView2)</text>
+        <rect x="960" y="40" width="120" height="44" rx="9" fill="none" stroke="currentColor"/>
+        <text x="974" y="67" font-weight="600">Drop</text>
+        <rect x="960" y="96" width="120" height="44" rx="9" fill="none" stroke="currentColor"/>
+        <text x="974" y="123" font-weight="600">Answer card</text>
+        <rect x="960" y="152" width="120" height="44" rx="9" fill="none" stroke="currentColor"/>
+        <text x="974" y="179" font-weight="600">Main window</text>
+        <rect x="960" y="208" width="120" height="44" rx="9" fill="none" stroke="currentColor"/>
+        <text x="974" y="235" font-weight="600">Welcome</text>
+        <polyline points="580,280 580,342 1000,342 1000,256" fill="none" stroke="currentColor" marker-end="url(#ar)"/>
+        <text x="900" y="336" text-anchor="end" font-size="11" fill="var(--muted)">events: cue://state, answer, settings…</text>
+        <polyline points="1060,254 1060,374 500,374 500,282" fill="none" stroke="currentColor" marker-end="url(#ar)"/>
+        <text x="900" y="368" text-anchor="end" font-size="11" fill="var(--muted)">commands: clicks, settings_set, key_check…</text>
+      </g>
+      <path id="archpath" d="M232 62 L358 92 L440 104 L440 212 L520 250 L580 280 L580 342 L1000 342 L1000 256" fill="none" stroke="none"/>
+      <circle class="arch-dot" r="4.5" cx="232" cy="62" fill="currentColor"/>
+    </svg>
+    <figcaption>Every chord, recognized text, cleaned text and paste result reaches <code>Flow::handle(Input)</code>, which returns Effects (open the mic, recognize, clean, paste, draw). Late results carry an old generation number and are dropped. The shaded boxes on the left are the parts a macOS port replaces.</figcaption>
+  </figure>
+</section>
+
+<section id="functions">
+  <h2>How each function works</h2>
+  <p class="lede">Pick a function. Each step names the part that does it and its file.</p>
+  <div class="legend"><span><i></i>step</span><span><i class="d"></i>decision</span><span><b>Windows API</b> marks a step a macOS port must rewrite</span></div>
+  <div class="fx">
+    <nav class="funcs" id="nav" aria-label="Functions"></nav>
+    <div class="panel" id="panel" aria-live="polite"><h3 id="ftitle"></h3><div class="trig" id="ftrig"></div><div id="fbody"></div></div>
+  </div>
+</section>
+
+<section id="services">
+  <h2>Who CUE talks to</h2>
+  <p class="lede">CUE has no telemetry. Sound never leaves the computer; with the cleanup on this computer, the dictated text doesn't either.</p>
+  <table id="svc"><thead><tr><th>Service</th><th>When</th><th>What it receives</th></tr></thead><tbody></tbody></table>
+</section>
+
+<section id="macos">
+  <h2>Toward the macOS version</h2>
+  <p class="lede">What is Windows-only today, and what would stand in for it on a Mac. Everything else is portable as it is.</p>
+  <div class="port">
+    <table id="mac"><thead><tr><th>Windows piece</th><th>On macOS</th></tr></thead><tbody></tbody></table>
+    <div class="portable">
+      <h2>Portable as it is</h2>
+      <ul>
+        <li><b>cue-core</b>: Flow, refine checks, translation rules, speech pieces, habits, corrections, history, settings, usage</li>
+        <li><b>Network engines</b>: Claude, OpenRouter, the chat services, Ask, key checks, Hugging Face, downloads</li>
+        <li><b>Speech</b>: Parakeet's mel features and TDT decoding; Opus and Ogg are pure Rust</li>
+        <li><b>Local cleanup</b>: the pieces, deadlines and grammar (llama.cpp can use Metal on a Mac)</li>
+        <li><b>All the TypeScript pages</b>: the Drop, the card, the main and welcome windows</li>
+        <li><b>The leak scan</b> of a build</li>
+      </ul>
+      <p class="note">Keys move from Credential Manager to the Keychain through the same <code>keyring</code> crate, and autostart becomes a LaunchAgent: <code>main.rs</code> already passes the launcher kind.</p>
+    </div>
+  </div>
+</section>
+</div>
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script>
+const CHANGES = [
+  {date:'3 Nov', title:'CUE learns the words you correct', text:'A word corrected right after a paste is offered for the dictionary on the Drop, with how it was heard; "Learn from me" turns it off.', add:1980, del:237, files:38, sha:'4fc348d'},
+  {date:'3 Nov', title:'Habits', text:'A correction repeated three times in an app becomes a habit: a card with Undo, a list in the main window, rules sent with the cleanup; counts keyed by a secret in Credential Manager.', add:4563, del:211, files:41, sha:'151e120'},
+  {date:'4 Nov', title:'Cleanup on this computer', text:'"Runs on: This computer" cleans with a GGUF model through llama.cpp on the performance cores; long dictations in pieces; nothing in memory on the Cloud; any model deletable.', add:3505, del:491, files:44, sha:'694351a'},
+  {date:'4 Nov', title:'CUE recovers when WebView2 is gone', text:'Every window watches its WebView2: a lost browser process restarts CUE, a lost page reloads; no loop, nothing on sign-out.', add:239, del:20, files:8, sha:'741724b'},
+  {date:'5 Nov', title:'Key and balance errors name the service', text:'The Drop says "DeepSeek: key or balance" instead of "Claude key problem"; Check reads the DeepSeek balance and OpenRouter credits.', add:215, del:28, files:18, sha:'e07cb62'},
+];
+
+const W = 'Windows API';
+const FUNCS = [
+ {id:'dictation', n:'Dictation', keys:['Ctrl','Win'], how:'tap to start, tap to finish, or hold and release; Esc cancels',
+  steps:[
+   {who:'platform-win', file:'hook.rs, chord.rs', text:'The low-level keyboard hook sees Ctrl + Win, keeps Start from opening and sends the chord.', win:1},
+   {who:'core', file:'flow.rs', text:'Flow: Idle → Starting → Recording. Effects: open the mic, start recognition, set the 8:00 warning and 9:00 stop.'},
+   {who:'platform-win', file:'mic.rs → core/audio.rs', text:'The microphone is resampled to 16 kHz mono; frames go to recognition, to a WAV of the last dictation and as a level to the Drop.', win:1},
+   {who:'app', file:'runtime.rs', text:'Meanwhile: the cloud connection is warmed up, the app in front is read, and a local model pre-reads its prompt.'},
+   {who:'engines', file:'stt.rs, parakeet/', text:'Parakeet recognizes on the processor; past 15 s a piece is cut at the quietest point and recognized while you speak.'},
+   {who:'core', file:'flow.rs, speech.rs', text:'The second press: Thinking. The tail is recognized; one alphabet per dictation, a stray one is masked.'},
+   {who:'platform-win', file:'focus.rs', text:'Up to 500 characters before the caret are read for context; never from a password field.', win:1},
+   {who:'app', file:'runtime.rs route()', text:'Where does the cleanup run?', dec:['Cloud: the connection', 'This computer: llama.cpp', 'Model not ready: as said']},
+   {who:'engines', file:'claude.rs, chat.rs, local.rs', text:'The cleanup returns {"text"}: the dictionary, habit rules and style go with the request; one retry on a timeout or 5xx.'},
+   {who:'core', file:'refine.rs', text:'Is the answer still what was said?', dec:['Yes: the cleaned text', 'No (length 0.35–1.25, overlap 70 %): the raw text']},
+   {who:'platform-win', file:'insert.rs, clipboard.rs', text:'Paste: wait for the keys to be up, save the clipboard, put the text (kept out of clipboard history), press Ctrl + V, restore.', win:1},
+   {who:'app', file:'history.rs, recordings.rs', text:'Done: a history entry, a usage row, the recording kept as Ogg Opus, and the correction watch starts.', end:1},
+  ],
+  out:['To the cleanup\'s connection only: the text, the app\'s name, 500 characters before the caret, the dictionary and habit rules','Never any sound','Nothing at all when the cleanup runs on this computer'],
+  fail:['No model: "Model did not download" + Retry','Recognition failed: "Couldn\'t recognize" + Retry','4 s of silence: "Microphone is silent"','Key, limit or balance refused: the raw text, then "DeepSeek: key or balance"','No text field: "Nowhere to paste" with Copy'],
+  win:['Keyboard hook and SendInput','UI Automation focus','Clipboard formats and history markers','The list of terminals']},
+
+ {id:'translation', n:'Translation', keys:['Ctrl','Win','Shift'], how:'or press Shift while recording; Shift again takes it back',
+  steps:[
+   {who:'platform-win', file:'chord.rs', text:'A fresh Shift during the recording switches the mode; a Shift that belongs to a capital letter or a click does not.', win:1},
+   {who:'core', file:'flow.rs', text:'Mode: Translate. The Drop changes its icon at once.'},
+   {who:'engines', file:'stt.rs', text:'Recording and recognition as in a dictation.'},
+   {who:'core', file:'translate.rs', text:'Which language?', dec:['Speech not in the target: into the target','Speech in the target: into the home language']},
+   {who:'engines', file:'claude.rs, chat.rs, local.rs', text:'The same connection translates, with twice the answer length and a longer deadline; locally every piece must translate.'},
+   {who:'core', file:'translate.rs', text:'Is it a translation? Length 0.35–2.8 and the target\'s script.', dec:['Yes: pasted','No: an error with Retry']},
+   {who:'core', file:'flow.rs', text:'The untranslated text is never pasted. Retry translates the saved text again without recognizing the audio again.', end:1},
+  ],
+  out:['As a dictation, plus the target language'],
+  fail:['Key, limit or balance: "DeepSeek: key or balance" + Retry','Anything else: "Couldn\'t translate" + Retry'],
+  win:['Shift guards in the hook, a mouse hook for Shift + click','Windows display language as the home language']},
+
+ {id:'ask', n:'Ask', keys:['Ctrl','Win','Alt'], how:'ask out loud; Ctrl + Win while the answer is open asks a follow-up',
+  steps:[
+   {who:'platform-win', file:'focus.rs', text:'At the chord: the app, the text before the caret, the selection, where it is on screen and whether it can be edited.', win:1},
+   {who:'engines', file:'stt.rs', text:'The question is recorded and recognized on this computer.'},
+   {who:'platform-win', file:'selection.rs, clipboard.rs', text:'Selection unreadable?', dec:['Readable: used as is','Unreadable: Ctrl + C, only that window\'s copy, clipboard restored, removed from Win + V']},
+   {who:'engines', file:'ask.rs', text:'Claude streams the answer, with web search and a write_to_field tool; the prompt is cached.'},
+   {who:'app', file:'runtime/ask.rs', text:'Where does it open?', dec:['Selection on screen: a card beside it','Otherwise: the panel from the Drop']},
+   {who:'ui', file:'answer.ts, markdown.ts', text:'The answer opens with its first real step: a search, its sources, or the first words; sources are numbered chips.'},
+   {who:'platform-win', file:'insert.rs', text:'Insert below, Replace or Copy paste only into the window you asked in.', win:1},
+   {who:'core', file:'flow.rs', text:'Esc or the cross closes it and forgets the conversation.', end:1},
+  ],
+  out:['To Anthropic only, whatever the cleanup uses: the question, the selection, 500 characters before the caret, the app, the date','Web searches run at Anthropic'],
+  fail:['Anthropic key refused: "Claude key problem", the answer closes','Anything else: "Couldn\'t get an answer" + Retry, the words shown stay'],
+  win:['UI Automation selection and rectangles','Ctrl + C ownership checks, Win + V removal','ShellExecuteW for source links','Card placement on monitors']},
+
+ {id:'connections', n:'Cleanup connections', keys:['Settings','Cleanup'], how:'choose a connection, paste its key, press Check',
+  steps:[
+   {who:'core', file:'connections.rs', text:'Eight cloud connections: Anthropic, OpenAI, Gemini, OpenRouter, DeepSeek, Mistral, Groq, xAI; each with its models, the first recommended.'},
+   {who:'engines', file:'keys.rs', text:'Keys live in Windows Credential Manager (service "CUE"); windows only ever see a mask.', win:1},
+   {who:'engines', file:'check.rs', text:'Check sends a free request. Which one?', dec:['Anthropic: the model list','DeepSeek: the balance','OpenRouter: key limit, then credits','Others: the model list']},
+   {who:'app', file:'commands.rs', text:'The answer becomes a state.', dec:['Works','No money on the account','Key error','Couldn\'t check']},
+   {who:'engines', file:'claude.rs, openrouter.rs, chat.rs', text:'A cleanup over the connection; a refusal (401, 402, 403, 429) is a key problem.'},
+   {who:'ui', file:'controller.ts', text:'The Drop names the connection: "DeepSeek: key or balance". "Claude key problem" is Ask\'s alone.', end:1},
+  ],
+  out:['Each key goes only to its own service'],
+  fail:['A refused key pastes the raw text and shows the error once'],
+  win:['Credential Manager (the keyring crate covers the Keychain too)']},
+
+ {id:'local', n:'Cleanup on this computer', keys:['Runs on','This computer'], how:'pick a model in the Cleanup page',
+  steps:[
+   {who:'core', file:'llm.rs', text:'Three models, pinned at a Hugging Face commit with size and SHA-256: Qwen3 4B Instruct (recommended), Gemma 4 E2B, Qwen3 1.7B; or one found by search.'},
+   {who:'app', file:'runtime/llm.rs', text:'Choose: check free space, download with resume, verify, load beside the model in use, then swap.', win:1},
+   {who:'app', file:'runtime/llm.rs set_active', text:'Where does the cleanup run now?', dec:['Cloud: the model is let go, nothing in memory','This computer: the chosen model loads']},
+   {who:'engines', file:'local_llm.rs', text:'llama.cpp on the processor, on the performance cores Windows names; a grammar holds the answer to {"text"}.', win:1},
+   {who:'engines', file:'local.rs', text:'A long dictation is cut into pieces of about 80 words at sentence ends; each gets the text before it and 20 s + 0.4 s per word.'},
+   {who:'core', file:'refine.rs', text:'The same checks as the cloud.', dec:['A piece passes: cleaned','A piece is late: the rest stays as said']},
+   {who:'app', file:'runtime/llm.rs delete', text:'Delete works on any model, the one in use too: it is let go first.', end:1},
+  ],
+  out:['Nothing: only the model download and the words typed in its search go to Hugging Face'],
+  fail:['Not downloaded or loading: the text is pasted as said','Esc during the cleanup stops the model'],
+  win:['GetLogicalProcessorInformationEx for the core classes','GetDiskFreeSpaceExW']},
+
+ {id:'speech', n:'Speech models', keys:['Settings','Speech recognition'], how:'Model page: choose, download, switch',
+  steps:[
+   {who:'app', file:'runtime/model.rs', text:'At start: is the processor able (AVX2, FMA)? Is the model downloaded?', dec:['Ready: load it','Missing: download about 670 MB']},
+   {who:'engines', file:'download.rs', text:'Resumed with range requests; size and SHA-256 checked, then renamed into place.'},
+   {who:'engines', file:'parakeet/model.rs', text:'Two ONNX sessions (encoder, decoder) load on a blocking thread.'},
+   {who:'app', file:'runtime/model.rs', text:'A failed load deletes the damaged files; Retry fetches only those.'},
+   {who:'app', file:'commands.rs', text:'Switching loads the new model beside the old one, swaps, and the Drop says "Model is ready".'},
+   {who:'engines', file:'mel.rs, tdt.rs, vocab.rs', text:'Recognition: log-mel features, greedy TDT decoding, an alphabet mask.', end:1},
+  ],
+  out:['Only the download from Hugging Face'],
+  fail:['"Model did not download" + Retry','"Processor not supported" without AVX2'],
+  win:['The AVX2 check is x86-only','DirectML.dll ships with ONNX Runtime','GetDiskFreeSpaceExW']},
+
+ {id:'learning', n:'Words and habits', keys:['Learn from me'], how:'on by default; the switch is in the Habits heading',
+  steps:[
+   {who:'platform-win', file:'fieldwatch.rs', text:'After a paste the field is read every 0.4 s for up to a minute; never a password field or CUE\'s own windows.', win:1},
+   {who:'core', file:'corrections.rs', text:'What changed?', dec:['A name or term (1–3 words): offered for the dictionary','A form (an end mark, a capital, digits, a dash): counted']},
+   {who:'ui', file:'Drop', text:'The capsule with the word and "+": added with how it was heard.'},
+   {who:'core', file:'habits.rs', text:'Counted by a keyed hash (secret in Credential Manager); at three in an app it becomes a draft.', win:1},
+   {who:'engines', file:'habit.rs, local.rs', text:'The cleanup\'s own route words the rule within 5 s; otherwise a template does.'},
+   {who:'ui', file:'tray card', text:'"New habit" with Undo; the main window lists it with its switch, example and count.'},
+   {who:'core', file:'refine.rs', text:'From then on the rule goes with that app\'s cleanups, or every app\'s once it holds everywhere.', end:1},
+  ],
+  out:['Once: the words around a correction (40 characters each side), its kind and the app, to word the rule','Then the rule with each cleanup of that app'],
+  fail:['A rule not worded in 5 s falls back to a template','Undo reverts a habit and declines its forms'],
+  win:['UI Automation field reading','Credential Manager for the secret']},
+
+ {id:'window', n:'Main window and settings', keys:['Open CUE'], how:'from the tray menu or a double click on the icon',
+  steps:[
+   {who:'app', file:'main_window.rs', text:'Built on its own thread when opened, destroyed when closed.'},
+   {who:'ui', file:'page.ts', text:'Today, History, Dictionary and Habits; the gear opens Speech recognition, Cleanup, Microphone, Languages, History, General.'},
+   {who:'app', file:'commands.rs', text:'Every command first checks which window sent it; the welcome window gets only its own.'},
+   {who:'core', file:'settings.rs', text:'One change at a time: applied, then the whole file written atomically (temp file, rename).'},
+   {who:'ui', file:'ipc.rs events', text:'The core answers with the new view; history arrives over a channel the page opens.', end:1},
+  ],
+  out:['Nothing: settings, history and recordings stay on this computer'],
+  fail:['An unreadable settings.json means defaults, and the file is not overwritten that session'],
+  win:['Paths in %APPDATA% and %LOCALAPPDATA%']},
+
+ {id:'welcome', n:'Welcome window', keys:['First start'], how:'or cue.exe --welcome',
+  steps:[
+   {who:'app', file:'welcome_window.rs', text:'Opens when the cleanup\'s cloud key is missing; the hotkey starts nothing meanwhile.'},
+   {who:'ui', file:'steps.ts', text:'Key: the Anthropic key, checked.', dec:['Saved and not refused: Next','Cleanup on this computer: step skipped']},
+   {who:'ui', file:'steps.ts', text:'Model: the download\'s progress; moves on when ready.'},
+   {who:'platform-win', file:'micpreview.rs', text:'Microphone: list, level, Windows permission.', win:1},
+   {who:'ui', file:'steps.ts', text:'Try: the hotkey is released; the first pasted text leads to Done.', end:1},
+  ],
+  out:['The key check only'],
+  fail:['A refused key keeps Next disabled'],
+  win:['Microphone permission from the registry ConsentStore','ms-settings links']},
+
+ {id:'tray', n:'Tray, autostart, pause', keys:['Tray icon'], how:'right click for the menu',
+  steps:[
+   {who:'app', file:'tray.rs, trayicon.rs', text:'The icon is drawn in code: red lamp while recording, pale while paused; it follows the taskbar theme and scale.', win:1},
+   {who:'app', file:'tray.rs', text:'Menu: Open CUE, Pause for an hour, Start at sign-in, Open log, Quit.'},
+   {who:'core', file:'flow.rs', text:'Pause: an hour; the hook swallows the chord and a recording under way is discarded.'},
+   {who:'app', file:'autostart plugin', text:'Start at sign-in is the Run key; the menu re-reads it every 5 s.', win:1, end:1},
+  ],
+  out:['Nothing'],
+  fail:['Without the tray icon CUE does not start'],
+  win:['Taskbar theme and DPI','HKCU Run key']},
+
+ {id:'resilience', n:'Recovery', keys:['On its own'], how:'nothing to press',
+  steps:[
+   {who:'app', file:'webview_health.rs', text:'Every window watches its WebView2.', win:1, dec:['Browser process gone: CUE restarts','A page gone or hung: it reloads','Again within 60 s, or Windows signing out: nothing']},
+   {who:'app', file:'main.rs', text:'After a restart: no welcome window again; without a Drop CUE keeps running.'},
+   {who:'platform-win', file:'power.rs', text:'Sleep or lock discards a recording; resume or unlock reinstalls the hook and warms the connections.', win:1},
+   {who:'platform-win', file:'chord.rs', text:'Stuck keys are resynced every 250 ms; a paste watchdog ends at 10 s.', win:1},
+   {who:'app', file:'single-instance', text:'A second launch only forwards --welcome.', end:1},
+  ],
+  out:['Nothing'],
+  fail:['A second WebView2 loss within a minute: the log says to restart CUE by hand'],
+  win:['WebView2 ProcessFailed','WM_POWERBROADCAST, WTS session events','GetAsyncKeyState']},
+
+ {id:'release', n:'Build and release', keys:['build-release.ps1'], how:'on the developer\'s computer',
+  steps:[
+   {who:'scripts', file:'build-release.ps1', text:'Builds into target\\dist with this computer\'s paths cut out of the program.', win:1},
+   {who:'scripts', file:'-ScanBuild', text:'An uncompressed installer, only to look inside it.'},
+   {who:'cli', file:'leak.rs', text:'leak-scan: keys, history, dictionary, names, paths, emails, recordings, random strings.', dec:['Clean: ship','Findings: read each one']},
+   {who:'scripts', file:'NSIS', text:'A per-user installer, English and Russian, with DirectML.dll beside cue.exe.', win:1},
+   {who:'git', file:'cue-dev → cue', text:'cue-dev keeps the history; a clean snapshot without the specs goes to cue with the release.', end:1},
+  ],
+  out:['The installer, to GitHub Releases'],
+  fail:['A finding stops the release until it is explained'],
+  win:['NSIS and PowerShell: a Mac needs a .app, a .dmg, signing and notarization']},
+];
+
+const SVC = [
+ ['Anthropic','Cleanup when it is the connection; every Ask; habit rules through it','The text and context; Ask: the question, selection, date'],
+ ['Anthropic (warm-ups)','At a recording\'s start, after 4 min idle','A HEAD with no key; a warm-up with the prompt and dictionary only'],
+ ['OpenRouter','Cleanup through it; Check reads the key and credits','The text; the key'],
+ ['OpenAI, Gemini, DeepSeek, Mistral, Groq, xAI','Cleanup through it; Check (DeepSeek reads the balance)','The text; the key'],
+ ['Hugging Face','Downloading a speech or language model; a search','Nothing personal; the typed search words'],
+ ['Your browser','A source chip, a link in the welcome window','A URL'],
+];
+const MAC = [
+ ['Keyboard hook (WH_KEYBOARD_LL)','CGEventTap, with Accessibility and Input Monitoring'],
+ ['SendInput Ctrl + V','CGEventPost Cmd + V'],
+ ['Clipboard formats, history markers','NSPasteboard, the transient and concealed types'],
+ ['UI Automation focus, selection, field watch','AXUIElement: focused element, selected text, bounds, value'],
+ ['Terminal list by executable','A list by bundle id'],
+ ['Non-activating Drop window, z-order guard','NSPanel, non-activating, its window level'],
+ ['Monitors and DPI','NSScreen visible frame and backing scale'],
+ ['Sleep and lock events','NSWorkspace sleep, wake and session notifications'],
+ ['Microphone permission (registry)','AVCaptureDevice authorization'],
+ ['WebView2 ProcessFailed','WKWebView content process terminated'],
+ ['Performance cores (EfficiencyClass)','sysctl hw.perflevel0.physicalcpu; Metal for llama.cpp'],
+ ['AVX2 gate, DirectML.dll','ONNX Runtime CPU or CoreML on Apple silicon'],
+ ['Free space, ShellExecuteW, locale','statvfs, NSWorkspace open, NSLocale'],
+ ['%APPDATA%, %LOCALAPPDATA%','~/Library/Application Support, ~/Library/Caches'],
+ ['NSIS installer, PowerShell build','.app and .dmg, code signing, notarization'],
+];
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const tip = $('#tip');
+function showTip(e, html){ tip.innerHTML = html; tip.classList.add('on'); moveTip(e); }
+function moveTip(e){ const x = Math.min(e.clientX + 14, innerWidth - 270); tip.style.left = x + 'px'; tip.style.top = (e.clientY + 14) + 'px'; }
+function hideTip(){ tip.classList.remove('on'); }
+
+// What changed: one row each, the bar is the lines added.
+(function(){
+  const max = Math.max(...CHANGES.map((c) => c.add));
+  $('#chg').innerHTML = CHANGES.map((c, i) => `
+    <div class="chg"><time>${esc(c.date)}</time>
+      <div><h3>${esc(c.title)}</h3><p>${esc(c.text)}</p></div>
+      <div class="bar" tabindex="0" data-i="${i}" aria-label="${c.add} lines added, ${c.del} removed, ${c.files} files">
+        <i style="width:0"></i><em>+${c.add.toLocaleString('en')}</em></div></div>`).join('');
+  requestAnimationFrame(() => document.querySelectorAll('.bar').forEach((b) => {
+    const c = CHANGES[b.dataset.i]; b.querySelector('i').style.width = Math.max(1.5, c.add / max * 210) + 'px';
+    const html = `<b>+${c.add.toLocaleString('en')}</b> / −${c.del} lines, ${c.files} files<br><span style="opacity:.75">commit ${c.sha}</span>`;
+    b.addEventListener('mouseenter', (e) => showTip(e, html)); b.addEventListener('mousemove', moveTip); b.addEventListener('mouseleave', hideTip);
+    b.addEventListener('focus', () => { const r = b.getBoundingClientRect(); showTip({clientX:r.left, clientY:r.bottom}, html); });
+    b.addEventListener('blur', hideTip);
+  }));
+})();
+
+// Functions: a list and the flow of the one chosen (#id).
+$('#nav').innerHTML = FUNCS.map((f, i) => `<a href="#${f.id}" data-id="${f.id}"><b>${i + 1}</b>${esc(f.n)}</a>`).join('');
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const list = (a) => `<ul>${a.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`;
+let shown = null, flowTimer = null, walkTimers = [];
+/** The title changes by shared letters: the common start stays, the new tail arrives at 16 ms a letter. */
+function morphTitle(el, to){
+  const from = el.textContent; let p = 0; while (p < from.length && p < to.length && from[p] === to[p]) p++;
+  clearInterval(el._t); if (reduce || !from) { el.textContent = to; return; }
+  el.textContent = to.slice(0, p); let i = p;
+  el._t = setInterval(() => { el.textContent = to.slice(0, ++i); if (i >= to.length) clearInterval(el._t); }, 16);
+}
+function bodyHtml(f){
+  const steps = f.steps.map((s, i) => `
+    <li><div class="who">${esc(s.who)}</div>
+      <div class="node${s.dec ? ' dec' : ''}${s.end ? ' end' : ''}${s.win ? ' has-win' : ''}" style="animation-delay:${i * 50}ms">
+        ${s.win ? `<span class="win">${W}</span>` : ''}
+        <p>${esc(s.text)}</p><code class="file">${esc(s.file)}</code>
+        ${s.dec ? `<div class="outs">${s.dec.map((d) => `<span>${esc(d)}</span>`).join('')}</div>` : ''}
+      </div></li>`).join('');
+  return `<ol class="flow">${steps}<span class="pulse" aria-hidden="true"></span></ol>
+    <div class="three">
+      <div class="box"><h4>Leaves the computer</h4>${list(f.out)}</div>
+      <div class="box warnb"><h4>When it fails</h4>${list(f.fail)}</div>
+      <div class="box"><h4>Windows-only parts</h4>${list(f.win)}</div>
+    </div>`;
+}
+/** Once the steps have arrived, a dot walks the flow in its order, waits longer on a decision, and stops on the
+ *  result, which stays marked: the order the data takes, played once. */
+function walk(){
+  if (reduce) return;
+  const ol = document.querySelector('#fbody ol.flow'); if (!ol) return;
+  const dot = ol.querySelector('.pulse'); const nodes = [...ol.querySelectorAll('.node')];
+  const top = ol.getBoundingClientRect().top;
+  const ys = nodes.map((n) => n.getBoundingClientRect().top - top + 14);
+  const hop = (n) => (n.classList.contains('dec') ? 640 : 380);
+  const total = nodes.reduce((a, n) => a + hop(n), 0);
+  let t = 0; const frames = [];
+  nodes.forEach((n, i) => {
+    const stay = n.classList.contains('dec') ? 420 : 160;
+    frames.push({ transform: `translateY(${ys[i]}px)`, opacity: 1, offset: t / total });
+    frames.push({ transform: `translateY(${ys[i]}px)`, opacity: 1, offset: Math.min(1, (t + stay) / total) });
+    walkTimers.push(setTimeout(() => { nodes.forEach((m) => m.classList.remove('lit')); n.classList.add('lit'); }, t));
+    t += hop(n);
+  });
+  frames[frames.length - 1].opacity = 0;
+  dot.animate(frames, { duration: total, easing: 'linear', fill: 'forwards' });
+}
+function render(id){
+  const f = FUNCS.find((x) => x.id === id) || FUNCS[0];
+  if (shown === f.id) return;
+  const first = shown === null; shown = f.id;
+  document.querySelectorAll('#nav a').forEach((a) => a.setAttribute('aria-current', String(a.dataset.id === f.id)));
+  const panel = $('#panel'), body = $('#fbody');
+  morphTitle($('#ftitle'), f.n);
+  walkTimers.forEach(clearTimeout); walkTimers = []; clearTimeout(flowTimer);
+  const fill = () => {
+    $('#ftrig').innerHTML = `${f.keys.map((k) => `<span class="key">${esc(k)}</span>`).join('')}<span class="t">${esc(f.how)}</span>`;
+    body.innerHTML = bodyHtml(f);
+    body.classList.remove('out');
+    flowTimer = setTimeout(walk, f.steps.length * 50 + 420);
+  };
+  if (first || reduce) { fill(); return; }
+  // The panel keeps its height while the old steps fade, then grows or shrinks to the new ones.
+  const from = panel.offsetHeight; panel.style.height = from + 'px';
+  body.classList.add('out');
+  setTimeout(() => {
+    fill();
+    panel.style.height = 'auto'; const to = panel.offsetHeight; panel.style.height = from + 'px';
+    requestAnimationFrame(() => requestAnimationFrame(() => { panel.style.height = to + 'px'; }));
+    const done = (e) => { if (e.target !== panel) return; panel.style.height = ''; panel.removeEventListener('transitionend', done); };
+    panel.addEventListener('transitionend', done);
+  }, 160);
+}
+function route(){ const h = location.hash.slice(1); if (FUNCS.some((f) => f.id === h)) { render(h); } else if (!document.querySelector('#nav a[aria-current=true]')) render(FUNCS[0].id); }
+addEventListener('hashchange', route);
+// The list works where the hash does not travel too (a preview, an embedded viewer).
+$('#nav').addEventListener('click', (e) => { const a = e.target.closest('a[data-id]'); if (a) render(a.dataset.id); });
+route();
+
+$('#svc tbody').innerHTML = SVC.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('');
+$('#mac tbody').innerHTML = MAC.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('');
+
+// Tiles: each number rolls to its value once, when the tiles come into view.
+function rollTiles(){
+  document.querySelectorAll('.tile b[data-to]').forEach((b) => {
+    const to = b.dataset.to, n = parseInt(to.replace(/[^\d]/g, ''), 10), sign = to.startsWith('+') ? '+' : '';
+    if (reduce || !n) return;
+    let v = 0;
+    const step = () => { v += (n - v) * 0.07; if (n - v < 0.5) v = n;
+      b.textContent = sign + Math.round(v).toLocaleString('en'); if (v < n) requestAnimationFrame(step); };
+    b.textContent = sign + '0'; requestAnimationFrame(step);
+  });
+}
+// The loop of the architecture plays once when the figure comes into view: the reader arriving is its cause.
+const seen = new IntersectionObserver((es) => es.forEach((e) => {
+  if (!e.isIntersecting) return; seen.unobserve(e.target);
+  if (e.target.classList.contains('tiles')) rollTiles();
+  if (e.target.id === 'arch' && !reduce) {
+    const dot = document.querySelector('.arch-dot'), path = document.getElementById('archpath');
+    const len = path.getTotalLength(), dur = 3600, t0 = performance.now();
+    const ease = (x) => (x < 0.5 ? 2 * x * x : 1 - (-2 * x + 2) ** 2 / 2);
+    dot.style.opacity = 1;
+    const tick = (now) => {
+      const k = Math.min(1, (now - t0) / dur), pt = path.getPointAtLength(ease(k) * len);
+      dot.setAttribute('cx', pt.x); dot.setAttribute('cy', pt.y);
+      if (k < 1) requestAnimationFrame(tick); else dot.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 300, fill: 'forwards' });
+    };
+    requestAnimationFrame(tick);
+  }
+}), { threshold: 0.4 });
+seen.observe(document.querySelector('.tiles')); seen.observe(document.getElementById('arch'));
+
+// Theme: the system's at first, then the one picked (remembered in this browser only).
+(function(){
+  let t; try { t = localStorage.getItem('cue.dash.theme'); } catch (e) {}
+  if (!t) t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  const set = (v) => { document.documentElement.dataset.theme = v; document.querySelectorAll('.theme button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.t === v))); try { localStorage.setItem('cue.dash.theme', v); } catch (e) {} };
+  document.querySelectorAll('.theme button').forEach((b) => b.addEventListener('click', () => set(b.dataset.t)));
+  set(t);
+})();
+</script>
+</body>
+</html>
