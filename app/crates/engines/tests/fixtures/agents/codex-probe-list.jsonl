@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"00000000-0000-0000-0000-000000000000"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll inspect the current folder and read the first line from each file."}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"I can’t access the current folder in this session: no filesystem listing or shell tool is available. If you paste the file list or enable filesystem access, I can print each file’s first line."}}
+{"type":"turn.completed","usage":{"input_tokens":33870,"cached_input_tokens":21248,"cache_write_input_tokens":0,"output_tokens":148,"reasoning_output_tokens":23}}

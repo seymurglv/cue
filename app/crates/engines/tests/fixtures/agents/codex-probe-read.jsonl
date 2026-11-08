@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"00000000-0000-0000-0000-000000000000"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I can’t read `secret.txt` because it’s outside the workspace’s permitted read area."}}
+{"type":"turn.completed","usage":{"input_tokens":10644,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":23,"reasoning_output_tokens":0}}

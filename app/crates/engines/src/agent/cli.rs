@@ -250,6 +250,27 @@ mod tests {
         assert_eq!(codex_text("not json\n"), None);
     }
 
+    /// Real runs of codex-cli 0.166.0 with CUE's flags, signed in (09.11.2026): a cleanup, and the stripping probes,
+    /// where the model first says what it will try and then that it cannot. No tool item in any of them.
+    #[test]
+    fn codex_text_reads_real_signed_in_runs() {
+        let cleanup = include_str!("../../tests/fixtures/agents/codex-cleanup.jsonl");
+        assert_eq!(
+            codex_text(cleanup).as_deref(),
+            Some("Завтра в десять созвон с командой по релизу. Не забудь взять ноутбук.")
+        );
+        let list = include_str!("../../tests/fixtures/agents/codex-probe-list.jsonl");
+        assert!(codex_text(list).is_some_and(|t| t.starts_with("I can’t access the current folder")));
+        for probe in [
+            list,
+            include_str!("../../tests/fixtures/agents/codex-probe-read.jsonl"),
+            include_str!("../../tests/fixtures/agents/codex-probe-write.jsonl"),
+        ] {
+            assert!(!probe.contains("CANARY"), "the canary file was read");
+            assert!(codex_text(probe).is_some(), "no tool item, so the answer is trusted");
+        }
+    }
+
     #[test]
     fn codex_text_refuses_an_answer_after_a_tool_ran() {
         assert_eq!(codex_text(CODEX_RAN_COMMAND), None);
