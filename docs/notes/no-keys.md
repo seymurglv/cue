@@ -57,8 +57,10 @@ it is local, not pushed. The ledger with every ruling made while the plan ran:
 
 ## What is left
 
-1. The live check of the installed build (a Russian and an English sentence through Codex, OpenCode and the local
-   model), by the controller.
+1. Installed on 09.11.2026 over the owner's everyday CUE (`scripts\build-release.ps1`, then the installer with `/S`;
+   the owner's data was backed up first). At startup it moved the settings to "Ваш AI · OpenCode", deleted the old
+   keys and wrote the standard instructions. Left: the owner's spoken check (a Russian and an English sentence
+   through OpenCode).
 2. The final whole-branch review.
 3. The owner's merge decision: merge `no-keys` into `main`, then a release and the installer (version bump and tag are
    the owner's).

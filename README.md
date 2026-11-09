@@ -5,11 +5,10 @@ speak), and the text appears at the caret in whatever app you are typing in: fil
 punctuation added, your own words kept, in Russian or English. Speech is recognized on your computer by a speech model
 CUE downloads once (Parakeet Ultra), and the text is tidied up by whoever you choose: the AI you already have (OpenCode
 or Codex, signed in by you), a small model CUE downloads and runs on your computer, or nobody (CUE's own tidy-up
-alone). CUE holds no API key. Add
-`Shift` and the text comes out translated; add `Alt` instead and ask a question out loud, and the answer appears next
-to your work. CUE runs quietly in the background: a small indicator at the bottom of the screen (the Drop) shows what
-it is doing, and an icon next to the clock opens the main window, with the history of everything CUE wrote and the
-settings.
+alone). CUE holds no API key. Add `Shift` and the text comes out translated; add `Alt` instead and ask a question out
+loud, and the answer appears next to your work. CUE runs quietly in the background: a small indicator at the bottom of
+the screen (the Drop) shows what it is doing, and an icon next to the clock opens the main window, with the history of
+everything CUE wrote and the settings.
 
 ## Install
 
