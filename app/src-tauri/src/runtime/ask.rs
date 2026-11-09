@@ -257,7 +257,7 @@ impl Conversation {
     pub fn step(&mut self, step: Step) -> bool {
         let Some(turn) = self.view.turns.last_mut() else { return false };
         match step {
-            // Answered without web search: the answer says so once it shows.
+            // Web search was on but not used: the answer says so once it shows (a write does not).
             Step::NoSearch => {
                 turn.no_search = true;
                 false
@@ -360,6 +360,8 @@ impl Conversation {
                 // on screen (a follow-up under way), the turn still shows what was written.
                 if let Some(turn) = self.view.turns.last_mut() {
                     turn.segments = vec![Segment { text: text.clone(), ..Segment::default() }];
+                    // A written text needs no search: nothing is said of one.
+                    turn.no_search = false;
                 }
                 self.finish_turn(TurnState::Done, false);
                 match target {
@@ -643,6 +645,16 @@ mod tests {
         c.end(&result(AskEnd::Failed(AskFailure::Timeout), ""), false, anywhere);
         c.again();
         assert!(!c.view.turns[1].no_search, "Retry starts the turn over");
+
+        // A turn that ends as a write, shown or pasted, says nothing of search.
+        for may_paste in [true, false] {
+            let mut w = Conversation::new(taken(SelectionKind::None, false));
+            w.ask("напиши Ане");
+            w.step(Step::NoSearch);
+            w.step(Step::WriteStart);
+            w.end(&result(AskEnd::Write { text: "Привет!".into(), replace: false }, "Привет!"), false, |_, _| may_paste);
+            assert!(!w.view.turns[0].no_search, "may_paste={may_paste}");
+        }
     }
 
     #[test]

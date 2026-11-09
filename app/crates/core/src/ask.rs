@@ -615,7 +615,8 @@ pub struct TurnView {
     pub step: Option<ThinkStep>,
     pub segments: Vec<Segment>,
     pub state: TurnState,
-    /// Answered without web search (it is off, or the AI cannot search): the answer says so (sent only when true).
+    /// Web search was on but the answer was given without it (the AI cannot search, or did not): the answer says so
+    /// (sent only when true). Never on a turn that ends as a write.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub no_search: bool,
 }
@@ -1035,7 +1036,7 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&quiet).unwrap(),
             r#"{"question":"q","step":null,"segments":[],"state":"pending","no_search":true}"#,
-            "answered without web search: named only when true"
+            "web search on but not used: named only when true"
         );
     }
 

@@ -784,14 +784,21 @@ deadlines of a question.
 - **Codex**: the instructions go in their own `codex-instructions-<hash>.md` and the answer's shape in
   `codex-ask-schema.json` (`ASK_SCHEMA`, every field required, nothing else), both in CUE's agent folder; the
   conversation goes on stdin only. With `ask.web_search` on, `-c web_search=live` replaces `web_search=disabled` and
-  every other flag stays as for a cleanup, so live web search is its only tool; its `web_search` items are then
-  allowed in the events, and any other tool item still refuses the answer (`codex_answer`). Codex streams no deltas:
-  the answer appears whole. `Esc` drops the request, which ends Codex's process tree.
+  `--disable code_mode_host` is left out: on 0.166.0 live search runs through the code-mode host, and with the host
+  off Codex has no web access at all (checked 10.11.2026; the run's events are `codex-ask-search.jsonl`, a
+  `web_search` item and the answer). Every other flag stays as for a cleanup, and a cleanup, a translation and a
+  question without search keep the host off. Its `web_search` items are then allowed in the events, and any other
+  tool item still refuses the answer (`codex_answer`). Codex streams no deltas: the answer appears whole. `Esc` drops
+  the request, which ends Codex's process tree.
 - **OpenCode** is asked as for a cleanup, with no tools: its API does not say whether a model has a search tool, so
-  it never searches. **This computer**: the same instructions and message, the answer held to `ASK_GRAMMAR` (its
-  `sources` always empty); it never searches.
-- A question answered without web search (it is off, or the route cannot search) gets `Step::NoSearch` first, and the
-  answer says "без поиска" / "no web search" under it once it is shown whole (`TurnView::no_search`).
+  it never searches. Its answer appears whole too: the reply is one JSON object, read once complete, never streamed
+  raw onto the card. **This computer**: the same instructions and message, the answer held to `ASK_GRAMMAR` (its
+  `sources` always empty); it never searches. Whether a route can search is decided in one place,
+  `agent::can_search` (Codex only), for both the question's deadline and its run.
+- With `ask.web_search` on, a question answered without it gets `Step::NoSearch`: first when the route cannot search
+  (OpenCode, this computer), before the answer when Codex did not search. The answer then says "без поиска" / "no web
+  search" under it once it is shown whole (`TurnView::no_search`); a turn that ends as a written text says nothing.
+  With web search off, nothing is said.
 - The deadlines (`Limits::SPEC`): through an agent the first words, which are the whole answer, within 15 s, 20 s with
   web search, plus the start allowance; on this computer the whole answer's 30 s, since nothing shows before it is all
   written.

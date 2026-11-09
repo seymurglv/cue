@@ -10,7 +10,8 @@ use cue_core::flow::AgentProblem;
 /// What the answer brought, for the answer on screen (spec 2 §7: the thinking line names only real steps).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Step {
-    /// The question is answered without web search: it is off, or the AI cannot search. Comes first.
+    /// Web search is on, but the question is answered without it: the AI cannot search (first), or did not (before
+    /// the answer). Never sent when the user turned web search off.
     NoSearch,
     /// The AI started a web search.
     Searching,

@@ -30,10 +30,13 @@ const CODEX_TOOLS_OFF: [&str; 16] = [
     "workspace_dependencies",
 ];
 
+/// The feature an "Ask" question with web search keeps on: Codex's live search runs through it.
+const CODEX_SEARCH_HOST: &str = "code_mode_host";
+
 /// `codex exec` reading the prompt from stdin (`-`): no session files (`--ephemeral`), events as JSON lines, the
 /// read-only sandbox, none of the user's `config.toml` (so none of their MCP servers) or `.rules`, the shell and every
-/// other tool off, low reasoning. Web search is off, and live only for an "Ask" question with `web_search` on: the
-/// only tool Codex then has. `instructions` replaces Codex's own long base instructions with CUE's fixed text (never
+/// other tool off, low reasoning. Web search is off, and live only for an "Ask" question with `web_search` on, with the
+/// code-mode host it runs through left on: the only tool Codex then has. `instructions` replaces Codex's own long base instructions with CUE's fixed text (never
 /// anything of a dictation or a question: that goes on stdin), and `schema` holds the shape of the answer (`{"text":
 /// …}`, or Ask's), the last message in the events; no file is written for the answer.
 pub fn codex_args(model: &str, instructions: &Path, schema: &Path, web_search: bool) -> Vec<String> {
@@ -52,6 +55,11 @@ pub fn codex_args(model: &str, instructions: &Path, schema: &Path, web_search: b
     .map(String::from)
     .into();
     for feature in CODEX_TOOLS_OFF {
+        // Codex 0.166.0 reaches the web only through its code-mode host: with it off, live search finds nothing
+        // (checked 10.11.2026). It stays off for everything but an "Ask" question with web search on.
+        if web_search && feature == CODEX_SEARCH_HOST {
+            continue;
+        }
         args.extend(["--disable".to_string(), feature.to_string()]);
     }
     // Bare words: Codex takes a value that is not TOML as the literal string (no quotes to survive cmd.exe), and a
@@ -388,18 +396,24 @@ mod tests {
         assert_eq!(codex_text(CODEX_RAN_COMMAND), None);
     }
 
-    /// "Ask" with web search on: live search replaces `disabled`, and every other flag stays as it is; off, the
-    /// arguments are the cleanup's own.
+    /// "Ask" with web search on: live search replaces `disabled`, and the code-mode host it runs through stays on;
+    /// every other flag stays as it is. Off, the arguments are the cleanup's own, the host disabled.
     #[test]
     fn codex_searches_when_asked() {
         let search = codex_args("gpt-6-luna", Path::new(INSTRUCTIONS), Path::new(SCHEMA), true);
         assert!(has_pair(&search, "-c", "web_search=live"), "{search:?}");
         assert!(!has_pair(&search, "-c", "web_search=disabled"));
+        assert!(!has_pair(&search, "--disable", "code_mode_host"), "live search needs the code-mode host");
         let quiet = codex("gpt-6-luna");
         assert!(has_pair(&quiet, "-c", "web_search=disabled"));
-        let differ: Vec<(&String, &String)> = search.iter().zip(&quiet).filter(|(a, b)| a != b).collect();
-        assert_eq!(differ.len(), 1, "only the search setting changes: {differ:?}");
-        assert_eq!(search.len(), quiet.len());
+        assert!(has_pair(&quiet, "--disable", "code_mode_host"));
+        // Exactly those two differ: the quiet run has the host's pair, and its search setting reads `disabled`.
+        let mut without_host = quiet.clone();
+        let at = without_host.windows(2).position(|w| w[0] == "--disable" && w[1] == "code_mode_host").unwrap();
+        without_host.drain(at..at + 2);
+        let differ: Vec<(&String, &String)> = search.iter().zip(&without_host).filter(|(a, b)| a != b).collect();
+        assert_eq!(differ.len(), 1, "only the search setting changes beside the host: {differ:?}");
+        assert_eq!(search.len(), without_host.len());
         for never in ["--search", "--full-auto"] {
             assert!(!search.iter().any(|a| a == never), "{never} in {search:?}");
         }
@@ -435,6 +449,18 @@ mod tests {
         }
         assert_eq!(codex_answer(CODEX_RAN_COMMAND, true), None);
         assert_eq!(codex_answer(CODEX_ANSWER, true), Some(("{\"text\": \"Hello world.\"}".to_string(), 0)));
+    }
+
+    /// A real searched run of codex-cli 0.166.0 (10.11.2026, the code-mode host on, live search): one `web_search`
+    /// item, then the answer; accepted only when search was granted.
+    #[test]
+    fn codex_answer_reads_a_real_searched_run() {
+        let run = include_str!("../../tests/fixtures/agents/codex-ask-search.jsonl");
+        let (text, searches) = codex_answer(run, true).expect("a searched answer is trusted when search was granted");
+        assert!(text.starts_with("The latest stable Rust version is **1.99.1**"), "{text}");
+        assert_eq!(searches, 1);
+        assert_eq!(codex_answer(run, false), None, "a search Codex was never given");
+        assert_eq!(codex_text(run), None);
     }
 
     #[test]

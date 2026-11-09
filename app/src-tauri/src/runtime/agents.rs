@@ -193,7 +193,7 @@ impl Agents {
         let allowance = if self.first(id) { Duration::from_millis(START_ALLOWANCE_MS) } else { Duration::ZERO };
         let limits = limits.later_by(allowance);
         let wait = self.budget.unwrap_or_else(|| {
-            let searching = web_search && id == AgentId::Codex;
+            let searching = web_search && agent::can_search(id);
             agent_ask::wait_for(limits, false, searching)
         });
         let deadline = tokio::time::Instant::now() + wait;
@@ -598,7 +598,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// "Ask" through Codex: its answer comes back, with search when asked, and Codex is marked signed in.
+    /// "Ask" through Codex: its answer comes back, said to be without search when it ran none, and Codex is marked
+    /// signed in.
     #[tokio::test]
     async fn ask_through_codex_answers_and_marks_it_signed_in() {
         let dir = temp_dir("ask-codex");
@@ -612,7 +613,8 @@ mod tests {
         let mut steps = Vec::new();
         let r = a.ask(AgentId::Codex, &RefineSettings::default(), true, &turns, Limits::SPEC, |st| steps.push(st)).await;
         assert_eq!((r.end, r.text.as_str()), (AskEnd::Answer, "Чайник."));
-        assert!(!steps.contains(&Step::NoSearch), "Codex searches when asked: {steps:?}");
+        // Codex could search but this run did not: "без поиска" before the answer.
+        assert_eq!(steps, [Step::NoSearch, Step::TextStart, Step::Text("Чайник.".into())]);
         assert!(a.marks.checked(AgentId::Codex));
         assert_eq!(runs(&dir), 1);
         let _ = std::fs::remove_dir_all(&dir);

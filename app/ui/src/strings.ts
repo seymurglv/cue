@@ -80,7 +80,7 @@ export interface AnswerText {
   missed: string;
   refused: string;
   failed: string;
-  /** Under an answer given without web search (it is off, or the AI cannot search). */
+  /** Under an answer given without web search while it is on (the AI cannot search, or did not). */
   noSearch: string;
 }
 

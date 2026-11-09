@@ -211,11 +211,17 @@ impl AgentClient {
         }
     }
 
-    /// Whether this client can search the web for "Ask": Codex can; OpenCode's API does not say whether a model has a
-    /// search tool, so CUE asks it with none.
+    /// Whether this client can search the web for "Ask" ([`can_search`]).
     pub fn searches(&self) -> bool {
-        matches!(self, AgentClient::Cli { found, .. } if found.id == AgentId::Codex)
+        can_search(self.id())
     }
+}
+
+/// Whether agent `id` can search the web for "Ask": Codex can (live search); OpenCode's API does not say whether a
+/// model has a search tool, so CUE asks it with none; Grok is not offered. The one place this is decided: the
+/// question's deadline and its run both ask here.
+pub fn can_search(id: AgentId) -> bool {
+    id == AgentId::Codex
 }
 
 /// What Codex says of its sign-in when asked (`codex login status`).

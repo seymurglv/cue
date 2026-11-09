@@ -29,6 +29,7 @@ run"). The answer fixtures of 08.11 are built from each CLI's documented output 
 | `codex-ran-command.jsonl` | constructed: the same with a `command_execution` item, which `codex_text` must refuse |
 | `codex-cleanup.jsonl` | real (09.11.2026, signed in): a cleanup with CUE's flags, gpt-6-luna |
 | `codex-probe-list.jsonl`, `codex-probe-read.jsonl`, `codex-probe-write.jsonl` | real (09.11.2026, signed in): the stripping probes below |
+| `codex-ask-search.jsonl` | real (10.11.2026, signed in): an "Ask" question with live search and the code-mode host on; thread id zeroed |
 | `grok-cleanup.json`, `grok-command-dictation.json`, `grok-max-turns.json` (+ `.stderr`), `grok-probe-read.json`, `grok-probe-write.json` | real (09.11.2026, signed in): see "Grok: signed-in run" |
 | `grok-answer.json` | constructed: `--output-format json`'s object as Grok's own headless guide (`~/.grok/docs/user-guide/14-headless-mode.md`) documents it: `{"text", "stopReason", "sessionId", "requestId"}` |
 
@@ -60,6 +61,10 @@ The `exec` tool itself is a JavaScript isolate that only composes the tools abov
 network access", its own description).
 
 **Verdict: Codex is offered.** With CUE's flags on 0.166.0 it has no shell, no file-reading tool and no network tool.
+
+**"Ask" with web search (10.11.2026):** search needs the code-mode host on: with `--disable code_mode_host` Codex has no
+web access at all, so an Ask with search leaves that one flag out and sets `-c web_search=live`. With it, the only
+extra item in the events is `web_search` (`codex-ask-search.jsonl`: one `web_search` item, then the `agent_message`).
 `codex_text` refuses any answer whose events show a tool item (`command_execution`, `file_change`, `mcp_tool_call`,
 `web_search`, …), as a tripwire.
 

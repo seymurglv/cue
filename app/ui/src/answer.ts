@@ -13,8 +13,8 @@ export type AnswerAction = 'insert' | 'below' | 'replace' | 'copy';
 /** The core's answer (cue_core::ask::AnswerView: the same names). `after_search` — a search came between this text block
  *  and the words before it (sent only when true). */
 export interface Segment { text: string; cites: number[]; after_search?: boolean }
-/** `no_search` — answered without web search (it is off, or the AI cannot search): the answer says so (sent only when
- *  true). */
+/** `no_search` — web search was on but the answer was given without it (the AI cannot search, or did not): the answer
+ *  says so (sent only when true; the core never sets it with search off, or on a write). */
 export interface Turn { question: string; step: ThinkStep | null; segments: Segment[]; state: TurnState; no_search?: boolean }
 export interface Source { n: number; site: string; title: string }
 export interface Answer {
@@ -97,7 +97,7 @@ interface Item {
   state: TurnState;
   cites: number[];
   chips: boolean;
-  /** Answered without web search: "no web search" goes under it with its sources. */
+  /** Web search was on but not used: "no web search" goes under it with its sources. */
   noSearch: boolean;
 }
 

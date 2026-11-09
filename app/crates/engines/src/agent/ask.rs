@@ -3,8 +3,9 @@
 //! (`AGENT_ASK_PROMPT`) and the whole conversation as one user message (`agent_messages`: an agent keeps no session of
 //! its own), and answers with one JSON object, `{"answer", "write", "replace", "sources"}`, which becomes the steps of
 //! the answer on screen and its end. Codex searches the web when `ask.web_search` is on (live search, its only tool);
-//! OpenCode is asked with no tools, and the model here never searches: the card then says "без поиска". No text of the
-//! question, the answer or its sources reaches the log.
+//! OpenCode is asked with no tools, and the model here never searches. With web search on, an answer given without it
+//! (OpenCode, this computer, a Codex run that did not search) says "без поиска"; with it off, nothing is said. No text
+//! of the question, the answer or its sources reaches the log.
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,7 +25,8 @@ pub enum AskRoute {
 }
 
 impl AskRoute {
-    /// Whether the question is asked with web search: only when the user wants it and the route can search.
+    /// Whether the question is asked with web search: only when the user wants it and the route can search
+    /// (`agent::can_search`).
     fn searches(&self, web_search: bool) -> bool {
         web_search && matches!(self, AskRoute::Agent(c) if c.searches())
     }
@@ -42,8 +44,9 @@ pub fn wait_for(limits: Limits, route_is_local: bool, searching: bool) -> Durati
 }
 
 /// One question (`turns`, the last one the question in flight) along `route`, with `model` (empty: the agent's
-/// default), within `limits`. `Step::NoSearch` comes first when the question is answered without web search. Never
-/// panics or hangs: every problem ends as `AskEnd::Failed`, with one log line of its kind.
+/// default), within `limits`. With `web_search` on, `Step::NoSearch` comes first when the route cannot search, and
+/// before the answer when a route that can did not; with it off, never. Never panics or hangs: every problem ends as
+/// `AskEnd::Failed`, with one log line of its kind.
 pub async fn run(
     route: AskRoute,
     model: &str,
@@ -53,7 +56,7 @@ pub async fn run(
     mut on_step: impl FnMut(Step) + Send,
 ) -> AskResult {
     let searching = route.searches(web_search);
-    if !searching {
+    if web_search && !searching {
         on_step(Step::NoSearch);
     }
     let user = agent_messages(turns);
@@ -79,7 +82,12 @@ pub async fn run(
         }
     };
     match reply {
-        Ok((text, searches)) => finish(&text, searches, &mut on_step),
+        Ok((text, searches)) => {
+            if searching && searches == 0 {
+                on_step(Step::NoSearch);
+            }
+            finish(&text, searches, &mut on_step)
+        }
         Err(why) => AskResult::failed(why),
     }
 }
@@ -235,7 +243,7 @@ mod tests {
     async fn answer_streams_as_text_steps() {
         let (route, api) = opencode(Some(r#"{"answer":"**I'm a teapot.**","write":false,"replace":false,"sources":[]}"#)).await;
         let (r, steps) = ask(route, false, &question()).await;
-        assert_eq!(steps, [Step::NoSearch, Step::TextStart, Step::Text("**I'm a teapot.**".into())]);
+        assert_eq!(steps, [Step::TextStart, Step::Text("**I'm a teapot.**".into())], "search off: nothing said of it");
         assert_eq!((r.end, r.text.as_str()), (AskEnd::Answer, "**I'm a teapot.**"));
         assert_eq!(r.usage, AskUsage::default());
         // CUE's instructions, then the question as the user message.
@@ -248,7 +256,7 @@ mod tests {
     async fn write_true_ends_as_write() {
         let here = Here::new(Ok(r#"{"answer":"Пришлю отчёт в пятницу.","write":true,"replace":false,"sources":[]}"#));
         let (r, steps) = ask(AskRoute::Local(here), false, &question()).await;
-        assert_eq!(steps, [Step::NoSearch, Step::WriteStart], "a write never shows as an answer's words");
+        assert_eq!(steps, [Step::WriteStart], "a write never shows as an answer's words");
         assert!(Step::WriteStart.is_first_words());
         assert_eq!(r.end, AskEnd::Write { text: "Пришлю отчёт в пятницу.".into(), replace: false });
         assert_eq!(r.text, "Пришлю отчёт в пятницу.", "the conversation keeps what was written");
@@ -332,8 +340,8 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
     }
 
-    /// OpenCode's API does not say whether a model can search, so it is asked with no tools: "без поиска" first, even
-    /// with web search on, and any sources it names are dropped.
+    /// OpenCode's API does not say whether a model can search, so it is asked with no tools: with web search on,
+    /// "без поиска" first, and any sources it names are dropped; with it off, nothing is said of search.
     #[tokio::test]
     async fn opencode_without_search_tool_says_no_search() {
         let said = r#"{"answer":"Сейчас +18.","write":false,"replace":false,"sources":[{"url":"https://a.io/","title":"A"}]}"#;
@@ -343,10 +351,13 @@ mod tests {
         assert!(!steps.iter().any(|s| matches!(s, Step::Cite { .. } | Step::Searching)), "{steps:?}");
         assert_eq!((r.end, r.usage.web_searches), (AskEnd::Answer, 0));
         assert_eq!(api.calls().len(), 3, "the probes, then one stateless generation (no tools)");
+        let (route, _api) = opencode(Some(said)).await;
+        let (_, steps) = ask(route, false, &question()).await;
+        assert!(!steps.contains(&Step::NoSearch), "search off: {steps:?}");
     }
 
-    /// The model on this computer never searches: "без поиска" first, its answer held to Ask's grammar, the same
-    /// instructions and conversation an agent gets.
+    /// The model on this computer never searches: with web search on, "без поиска" first (off, nothing), its answer
+    /// held to Ask's grammar, the same instructions and conversation an agent gets.
     #[tokio::test]
     async fn local_route_never_searches() {
         let here = Here::new(Ok(r#"{"answer":"Чайник.","write":false,"replace":false,"sources":[]}"#));
@@ -355,6 +366,8 @@ mod tests {
         assert_eq!(r.end, AskEnd::Answer);
         let (system, user, grammar) = here.asked();
         assert_eq!((system.as_str(), user.as_str(), grammar.as_str()), (AGENT_ASK_PROMPT, question()[0].text.as_str(), ASK_GRAMMAR));
+        let off = Here::new(Ok(r#"{"answer":"Чайник.","write":false,"replace":false,"sources":[]}"#));
+        assert_eq!(ask(AskRoute::Local(off), false, &question()).await.1, [Step::TextStart, Step::Text("Чайник.".into())]);
         // Its own failures: a timeout is a timeout; anything else a failure in a word.
         let late = Here::new(Err(EngineError::Timeout));
         assert_eq!(ask(AskRoute::Local(late), false, &question()).await.0.end, AskEnd::Failed(AskFailure::Timeout));

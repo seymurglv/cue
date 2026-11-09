@@ -236,7 +236,12 @@ describe('The "Ask" answer', () => {
     expect(opened).toEqual([1]);
   });
 
-  it('an answer without web search says so under it, once it is shown whole; one with search does not', () => {
+  it('an answer given without web search while it is on says so under it, once shown whole; search off or used: nothing', () => {
+    // Web search off (the core sends no flag): nothing is said.
+    view.update(answer({ turns: [done('A teapot.')] }));
+    revealAll();
+    expect(root.querySelector('.nos')).toBeNull();
+    view.update(null);
     view.update(answer({ turns: [done('A teapot.', { no_search: true })] }));
     expect(root.querySelector('.nos')).toBeNull();
     revealAll();

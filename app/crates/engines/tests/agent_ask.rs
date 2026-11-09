@@ -110,20 +110,28 @@ async fn codex_searches_when_asked() {
     assert_eq!((r.end, r.usage.web_searches), (AskEnd::Answer, 1));
     let args = c.args();
     assert!(has_pair(&args, "-c", "web_search=live"), "{args:?}");
+    assert!(!has_pair(&args, "--disable", "code_mode_host"), "live search runs through the code-mode host");
     for feature in ["shell_tool", "unified_exec", "apps", "plugins", "browser_use", "multi_agent"] {
         assert!(has_pair(&args, "--disable", feature), "{feature} stays off");
     }
     assert!(has_pair(&args, "-s", "read-only"));
 
-    // Off: no search, "без поиска" first, and a search item in the events refuses the answer.
+    // Off: no search, nothing said of it, and a search item in the events refuses the answer.
     let c = codex("no-search", &events(&[], SEARCHED), 0, 0);
     let (r, steps) = ask(&c, false, Limits::SPEC).await;
-    assert_eq!(steps.first(), Some(&Step::NoSearch));
+    assert!(!steps.contains(&Step::NoSearch), "the user turned search off: {steps:?}");
     assert!(!steps.iter().any(|s| matches!(s, Step::Cite { .. })), "no search, no sources: {steps:?}");
     assert_eq!(r.end, AskEnd::Answer);
     assert!(has_pair(&c.args(), "-c", "web_search=disabled"));
+    assert!(has_pair(&c.args(), "--disable", "code_mode_host"));
     let c = codex("unasked-search", &events(&searches(), SEARCHED), 0, 0);
     assert_eq!(ask(&c, false, Limits::SPEC).await.0.end, AskEnd::Failed(AskFailure::Failed("no answer")));
+
+    // On, but Codex did not search: "без поиска" before the answer, and no sources.
+    let c = codex("unsearched", &events(&[], SEARCHED), 0, 0);
+    let (r, steps) = ask(&c, true, Limits::SPEC).await;
+    assert_eq!(steps, [Step::NoSearch, Step::TextStart, Step::Text("Последняя версия — **1.95**.".into())]);
+    assert_eq!((r.end, r.usage.web_searches), (AskEnd::Answer, 0));
 }
 
 /// A searched answer is still refused when any other tool ran.
@@ -141,7 +149,7 @@ async fn codex_search_refuses_any_other_tool() {
 async fn codex_ask_keeps_the_question_on_stdin() {
     let c = codex("stdin", &events(&[], r#"{"answer":"Пришлю в пятницу.","write":true,"replace":true,"sources":[]}"#), 0, 0);
     let (r, steps) = ask(&c, false, Limits::SPEC).await;
-    assert_eq!(steps, [Step::NoSearch, Step::WriteStart]);
+    assert_eq!(steps, [Step::WriteStart]);
     assert_eq!(r.end, AskEnd::Write { text: "Пришлю в пятницу.".into(), replace: true });
     let got = c.got();
     assert_eq!(got["instructions"], AGENT_ASK_PROMPT);
