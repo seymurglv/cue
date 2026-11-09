@@ -51,8 +51,9 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl OpenCodeSlot {
     /// The slot for this computer: the user's server from OpenCode's state folder (OpenCode Desktop's, say), else
     /// `opencode serve` (OpenCode Desktop's `opencode-cli.exe` when that is the one found) started in OpenCode's own
-    /// empty folder in `home` (`%LOCALAPPDATA%\CUE\agent\opencode`, or a spare empty one beside it:
-    /// `agent::empty_cwd`), which is also the folder a V1 session on a server the user runs is told to work in.
+    /// empty folder in `home`, `%LOCALAPPDATA%\CUE\agent\opencode` only (`opencode::server_cwd`: OpenCode keeps a
+    /// server's folder as a project, so never a spare; something in it and no server is started). A V1 session on a
+    /// server the user runs is told to work in that folder, or a spare empty one beside it (`agent::empty_cwd`).
     pub fn new(home: PathBuf) -> Arc<Self> {
         let dir = home.clone();
         let find: Finder = Box::new(move || {
@@ -61,7 +62,7 @@ impl OpenCodeSlot {
         });
         let start: Starter = Box::new(move || {
             let exe = discover::program(AgentId::OpenCode).ok_or(AgentFailure::NotInstalled)?;
-            opencode::start(&exe, &agent::empty_cwd(&home, AgentId::OpenCode)?)
+            opencode::start(&exe, &opencode::server_cwd(&home)?)
         });
         Self::with(find, start, REST_AFTER)
     }

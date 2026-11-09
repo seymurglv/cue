@@ -159,7 +159,7 @@ pub fn failure(f: AgentFailure) -> AskFailure {
     match f {
         AgentFailure::NotInstalled => AskFailure::Agent(AgentProblem::Missing),
         AgentFailure::SignedOut => AskFailure::Agent(AgentProblem::SignedOut),
-        AgentFailure::Timeout => AskFailure::Timeout,
+        AgentFailure::Timeout | AgentFailure::RateLimited => AskFailure::Timeout,
         AgentFailure::Failed(why) => AskFailure::Failed(why),
     }
 }

@@ -1,4 +1,4 @@
-//! The check against the OpenCode server running on this computer, through CUE's own code (first run 10.11.2026,
+//! The check against the OpenCode server running on this computer, through CUE's own code (first run 09.11.2026,
 //! OpenCode Desktop 2.2.5). Ignored: it needs OpenCode running and a provider signed in, so it is run by hand:
 //!
 //! `cargo test -p cue-engines --lib agent::opencode::live -- --ignored --nocapture --test-threads=1`
@@ -17,6 +17,16 @@ use super::*;
 use crate::agent::{AgentClient, empty_cwd, refine};
 
 const RAW: &str = "ну эм завтра в десять созвон с командой";
+
+/// About 150 words of a harmless dictation (a weekend in the park), fillers and all.
+const LONG: &str = "ну короче в эти выходные мы с друзьями решили съездить в парк за городом потому что погода обещает быть \
+хорошей и солнечной эм сначала мы хотим встретиться у метро в десять утра купить в магазине воды хлеба сыра и фруктов а потом \
+сесть на электричку которая идет примерно сорок минут ну и уже в парке найти тихое место у озера где можно постелить плед и \
+спокойно посидеть в тени под деревьями кто-то обещал взять бадминтон и мяч так что поиграем немного а еще можно взять \
+фотоаппарат и пофотографировать уток и цветы на клумбах там вроде как раз сейчас цветут тюльпаны вот после обеда мы планируем \
+пройтись по большой тропинке вокруг озера она занимает где-то час и там есть смотровая площадка с красивым видом на лес а \
+вечером часов в шесть хотим вернуться обратно в город чтобы не попасть в пробки и успеть отдохнуть перед рабочей неделей \
+если вдруг пойдет дождь то просто зайдем в кафе у входа в парк и выпьем горячего чая с пирогами";
 
 fn ids(v: &Value) -> Vec<String> {
     let list = v.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -48,7 +58,8 @@ async fn live_opencode_cleans_through_cues_code() {
     let kind = if body.starts_with(b"<") { "html" } else { "other" };
     println!("GET /global/health -> {status} ({kind}, {} bytes)", body.len());
     let (status, info) = get(&server, "/api/info").await;
-    println!("GET /api/info -> {status} {info}");
+    let keys: Vec<&String> = info.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+    println!("GET /api/info -> {status}, keys {keys:?}, version {}", info["version"]);
     let started = std::time::Instant::now();
     let shape = server.shape(deadline).await.unwrap();
     println!("line: {shape:?} ({:?})", started.elapsed());
@@ -138,7 +149,7 @@ async fn live_opencode_server_cue_starts() {
     for d in [&data, &config, &cache, &state_apart] {
         std::fs::create_dir_all(d).unwrap();
     }
-    let cwd = empty_cwd(&base.join("agent"), AgentId::OpenCode).unwrap();
+    let cwd = server_cwd(&base.join("agent")).unwrap();
     let env = [
         ("XDG_DATA_HOME", data.to_str().unwrap()),
         ("XDG_CONFIG_HOME", config.to_str().unwrap()),
@@ -184,4 +195,40 @@ async fn live_opencode_server_cue_starts() {
     assert_eq!(shape, Ok(Shape::Generate(0)));
     assert!(while_running.is_empty() && after.is_empty(), "the server wrote into CUE's folder");
     assert_eq!(still, registered, "the user's registration changed");
+}
+
+/// A long dictation (about 150 words) cleaned three times through CUE's real path, against its budget.
+#[tokio::test]
+#[ignore = "needs the user's running OpenCode server and a provider signed in"]
+async fn live_opencode_long_dictation() {
+    let state = state_dir().expect("OpenCode's state folder");
+    let home = std::env::temp_dir().join("cue-live-opencode");
+    let cwd = empty_cwd(&home, AgentId::OpenCode).unwrap();
+    let server = Arc::new(Server::announced(&state, &cwd).expect("the registration"));
+    let auto = fast_auto(&server.models().await.unwrap()).expect("a model").clone();
+    let client = AgentClient::OpenCode(server);
+    let (ctx, dict, s) = (RefineContext::default(), DictionarySettings::default(), RefineSettings::default());
+    let words = LONG.split_whitespace().count();
+    let budget = refine::timeout_ms(&client, LONG, false);
+    let rules_ms = cue_core::refine::timeout_ms(LONG);
+    println!("{words} words, {} chars; refine::timeout_ms {rules_ms} ms (70%: {} ms); budget now {budget} ms; model {}", LONG.chars().count(), rules_ms * 7 / 10, auto.id);
+    for run in 0..3 {
+        // Within the budget a dictation has (not the first request), each step as `refine::run` takes it.
+        let p = refine::prompt(&client, LONG, &ctx, &dict, crate::prompt::Job::Rewrite, "");
+        let started = std::time::Instant::now();
+        let answer = client.complete(&auto.id, &p, Duration::from_millis(budget), None).await;
+        let took = started.elapsed();
+        let Ok(answer) = answer else {
+            println!("long cleanup {}: {answer:?} in {took:?}", run + 1);
+            continue;
+        };
+        let parsed = crate::prompt::parse_content(&answer, None, false);
+        let lead_in = matches!(&parsed, crate::prompt::Parsed::Text(t) if cue_core::refine::opens_with_lead_in(LONG, t, &[], &[]));
+        let (text, outcome) = crate::prompt::decide(LONG, parsed, &dict, &s);
+        let form = if answer.trim_start().starts_with('{') { "json" } else if answer.trim_start().starts_with("```") { "fenced" } else { "plain" };
+        println!("long cleanup {}: {outcome:?} (lead-in {lead_in}, {form}) in {took:?}, {} chars", run + 1, text.chars().count());
+        if outcome != cue_core::flow::RefineOutcome::Refined || lead_in {
+            println!("  answer: {answer}");
+        }
+    }
 }

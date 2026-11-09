@@ -56,7 +56,7 @@ pub fn codex_args(model: &str, instructions: &Path, schema: &Path, web_search: b
     .into();
     for feature in CODEX_TOOLS_OFF {
         // Codex 0.166.0 reaches the web only through its code-mode host: with it off, live search finds nothing
-        // (checked 10.11.2026). It stays off for everything but an "Ask" question with web search on.
+        // (checked 09.11.2026). It stays off for everything but an "Ask" question with web search on.
         if web_search && feature == CODEX_SEARCH_HOST {
             continue;
         }
@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(codex_answer(CODEX_ANSWER, true), Some(("{\"text\": \"Hello world.\"}".to_string(), 0)));
     }
 
-    /// A real searched run of codex-cli 0.166.0 (10.11.2026, the code-mode host on, live search): one `web_search`
+    /// A real searched run of codex-cli 0.166.0 (09.11.2026, the code-mode host on, live search): one `web_search`
     /// item, then the answer; accepted only when search was granted.
     #[test]
     fn codex_answer_reads_a_real_searched_run() {

@@ -382,7 +382,8 @@ At its first start this version deletes the Soniox key of earlier versions from 
   - `Where::Local`: the model in the slot (`local::refine`), or the raw text at once while none is ready, or a wait of
     at most `LOAD_WAIT` for the model loading again after a rest.
   - `Where::Agent`: the agent in `refine.agent` through `runtime::agents::Agents`. Its budget (`agent::refine::budget`:
-    Codex 10 s + 1 s per 100 words, OpenCode the cleanup's own timeout, a translation a second more, plus 5 s on the
+    10 s + 1 s per 100 words for Codex and OpenCode alike (OpenCode took 5–8 s for a 165-word cleanup, past the
+    cleanup's own 4 s), a translation a second more, plus 5 s on the
     agent's first request after CUE starts or after it rested: OpenCode's server let go, or 15 min without a request
     to Codex) counts from the moment it is asked, so finding or starting OpenCode's server (`OpenCodeSlot::get_or_start`,
     off the core's thread) comes out of it. The model is `refine.models[agent]`, else Codex's default (GPT-6 Luna), else
@@ -414,10 +415,16 @@ At its first start this version deletes the Soniox key of earlier versions from 
     run), else by a server it announces in `~\.local\state\opencode\service.json` that accepts a connection (then with
     no program: CUE uses that server and never starts one).
   - **OpenCode's requests** (`agent::opencode`): to the server the user runs (OpenCode Desktop's, announced with its
-    password), else to `opencode-cli serve` CUE starts in its empty folder. On OpenCode 2.2.5 a cleanup is one
-    stateless `POST /api/experimental/generate/text` (`{prompt, model}`, no tools, no session) and names no folder:
-    2.2.5 keeps every folder a request names as one of the user's projects. Its answer is the JSON CUE asks for, the
-    same in a code fence, or plain text (no schema holds it), each through the same check (`refine::held_to_schema`).
+    password), else to `opencode-cli serve` CUE starts in `%LOCALAPPDATA%\CUE\agent\opencode` only
+    (`opencode::server_cwd`): OpenCode keeps a server's folder as one of the user's projects, so never a spare beside
+    it; something in that folder and no server is started (`Failed("cwd")`, one warning). On OpenCode 2.2.5 a cleanup
+    is one stateless `POST /api/experimental/generate/text` (`{prompt, model}`, no tools, no session) and names no
+    folder: 2.2.5 keeps every folder a request names as one of the user's projects. Its answer is the JSON CUE asks
+    for, the same in a code fence, or plain text, fenced or not (no schema holds it), each through the same check
+    (`refine::held_to_schema`); a plain-text cleanup whose first line has a colon after words the speaker did not say
+    ("Вот исправленный текст:") is refused (`refine::opens_with_lead_in`). A rate limit or a used-up free allowance
+    (`ProviderRequestError`, `reason: "rate_limit"`) is `AgentFailure::RateLimited`: the agent did not answer
+    (`RawAgent(Silent)`, "не ответил"; the local fallback cleans as for any silence), the log's reason "rate limit".
 - The cloud request described below (the Messages API, OpenRouter, the OpenAI-compatible services) is no longer reached
   by a dictation; it stays in `cue_engines` until the keys go. Right after the second press the runtime asks
   `cue-focus` for the focused app and up to `refine.context_chars` characters before the caret, in parallel with
@@ -794,7 +801,7 @@ deadlines of a question.
   `codex-ask-schema.json` (`ASK_SCHEMA`, every field required, nothing else), both in CUE's agent folder; the
   conversation goes on stdin only. With `ask.web_search` on, `-c web_search=live` replaces `web_search=disabled` and
   `--disable code_mode_host` is left out: on 0.166.0 live search runs through the code-mode host, and with the host
-  off Codex has no web access at all (checked 10.11.2026; the run's events are `codex-ask-search.jsonl`, a
+  off Codex has no web access at all (checked 09.11.2026; the run's events are `codex-ask-search.jsonl`, a
   `web_search` item and the answer). Every other flag stays as for a cleanup, and a cleanup, a translation and a
   question without search keep the host off. Its `web_search` items are then allowed in the events, and any other
   tool item still refuses the answer (`codex_answer`). Codex streams no deltas: the answer appears whole. `Esc` drops

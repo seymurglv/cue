@@ -8,7 +8,7 @@
 //!   `POST /api/experimental/generate/text` `{prompt, model: {providerID, id}}` → `{data: {text}}` (the older names
 //!   `/api/experimental/generate` and `/api/generate` are tried when a route is missing). A stateless generation
 //!   has no tools and stores nothing. Models come from `/api/model` and `/api/model/default`. Found in OpenCode
-//!   Desktop 2.2.5 (10.11.2026), whose server announces itself in `service.json`. V2 requests name no folder: 2.2.5
+//!   Desktop 2.2.5 (09.11.2026), whose server announces itself in `service.json`. V2 requests name no folder: 2.2.5
 //!   keeps every folder a request names as a project of the user's (shown in OpenCode, with no way to remove it), and
 //!   a stateless generation reads no folder's files anyway (an `AGENTS.md` in the folder named did not reach it).
 //! - OpenCode V1 (`opencode-ai` 1.x, docs.opencode.ai): `GET /global/health` answers; a cleanup is a session created
@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use cue_core::agents::FAST_NAMES;
+use cue_core::agents::{AgentId, FAST_NAMES};
 use reqwest::{Method, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -252,6 +252,23 @@ impl std::fmt::Debug for Server {
         // Never the password.
         f.debug_struct("Server").field("url", &self.url.as_str()).field("owned", &self.owned).finish()
     }
+}
+
+/// The folder a server CUE starts works in: OpenCode's own folder in CUE's agent folder `home` (`agent::cwd`, created
+/// when missing), never a spare beside it. OpenCode 2.2.5 keeps a server's working folder as one of the user's projects,
+/// so each spare would add another. Something in it: `Failed("cwd")`, with one warning naming the agent, never a path.
+pub fn server_cwd(home: &Path) -> Result<PathBuf, AgentFailure> {
+    let dir = super::cwd(home, AgentId::OpenCode);
+    let empty = match std::fs::read_dir(&dir) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir_all(&dir).is_ok(),
+        Err(_) => false,
+    };
+    if !empty {
+        tracing::warn!(agent = AgentId::OpenCode.id(), "agent: folder not empty, CUE does not start its own server");
+        return Err(AgentFailure::Failed("cwd"));
+    }
+    Ok(dir)
 }
 
 /// Starts `opencode serve` (`exe`) on 127.0.0.1 on a free port, in `cwd` (created empty; refused when anything is in
@@ -626,6 +643,8 @@ fn generated(status: StatusCode, bytes: &[u8]) -> Result<String, AgentFailure> {
     Err(match tagged(bytes) {
         Some(t) => match t.tag.as_str() {
             "ProviderRequestError" if t.reason.as_deref() == Some("authentication") => AgentFailure::SignedOut,
+            // A rate limit, or a free allowance used up (seen on OpenCode 2.2.5's free default model).
+            "ProviderRequestError" if t.reason.as_deref() == Some("rate_limit") => AgentFailure::RateLimited,
             "ProviderNotFoundError" | "ModelNotFoundError" | "UnsupportedModelError" => AgentFailure::Failed("model"),
             "ServiceUnavailableError" => AgentFailure::Failed("unavailable"),
             _ => AgentFailure::Failed("agent"),
@@ -699,6 +718,7 @@ fn v1_failure(e: &Named) -> AgentFailure {
     match e.name.as_str() {
         "ProviderAuthError" => AgentFailure::SignedOut,
         "APIError" if matches!(status, Some(401 | 403)) => AgentFailure::SignedOut,
+        "APIError" if status == Some(429) => AgentFailure::RateLimited,
         "MessageAbortedError" => AgentFailure::Failed("aborted"),
         "MessageOutputLengthError" => AgentFailure::Failed("length"),
         _ => AgentFailure::Failed("agent"),
@@ -1068,6 +1088,48 @@ mod tests {
             assert!(start.elapsed() < Duration::from_secs(5), "{:?}", api.calls());
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// A server CUE starts works only in OpenCode's own folder: when something is in it, no spare is used.
+    #[test]
+    fn a_server_cue_starts_works_only_in_opencodes_own_folder() {
+        let home = temp_dir("server-cwd");
+        let own = home.join("opencode");
+        assert_eq!(server_cwd(&home), Ok(own.clone()), "created when missing");
+        assert!(own.is_dir());
+        assert_eq!(server_cwd(&home), Ok(own.clone()), "used while empty");
+        std::fs::write(own.join("AGENTS.md"), "orders").unwrap();
+        assert_eq!(server_cwd(&home), Err(AgentFailure::Failed("cwd")));
+        assert!(!home.join("opencode-1").exists(), "a spare folder was made");
+        assert_eq!(std::fs::read_to_string(own.join("AGENTS.md")).unwrap(), "orders", "nothing deleted");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A rate limit or a used-up free allowance is an agent that did not answer.
+    #[tokio::test]
+    async fn a_rate_limit_is_rate_limited() {
+        let api = fake_api(|method, path, _| match (method, path) {
+            ("GET", "/global/health") => Reply::Send(200, "<!doctype html>".into(), ""),
+            ("GET", "/api/info") => reply(200, V2_INFO),
+            ("POST", "/api/experimental/generate/text") => reply(
+                502,
+                r#"{"_tag":"ProviderRequestError","providerID":"opencode","reason":"rate_limit","message":"Free usage limit reached.","status":429,"retryAfterMs":56082000}"#,
+            ),
+            _ => reply(500, "{}"),
+        })
+        .await;
+        assert_eq!(server(&api.base).complete("", &prompt(), Duration::from_secs(5), None).await, Err(AgentFailure::RateLimited));
+        let v1 = fake_api(|method, path, _| match (method, path) {
+            ("GET", "/global/health") => reply(200, V1_HEALTH),
+            ("POST", "/session") => reply(200, r#"{"id":"ses_1"}"#),
+            ("POST", "/session/ses_1/message") => reply(
+                200,
+                r#"{"info":{"role":"assistant","error":{"name":"APIError","data":{"message":"x","statusCode":429}}},"parts":[]}"#,
+            ),
+            _ => reply(200, "true"),
+        })
+        .await;
+        assert_eq!(server(&v1.base).complete("", &prompt(), Duration::from_secs(5), None).await, Err(AgentFailure::RateLimited));
     }
 
     #[tokio::test]

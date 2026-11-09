@@ -156,7 +156,8 @@ Common to all three:
   list for that version, and the builder reports it.
 - Timeout **(my call)**: Codex and Grok start a process on every request, so agents get their own budget, `10 s + 1 s
   per 100 words`, plus a 5 s start allowance on the first request after CUE starts or the agent rests; OpenCode, a warm
-  server, uses today's `refine::timeout_ms` plus the same allowance. Ask's first words through an agent: 15 s (20 s with
+  server, has the same budget (planned as today's `refine::timeout_ms`, but OpenCode 2.2.5 took 5–8 s for a 165-word
+  cleanup on 09.11.2026, past that 4 s). Ask's first words through an agent: 15 s (20 s with
   search). The page says "не ответил вовремя", not a number. The local fallback is used only when the local model is
   loaded at that moment; a resting one is not woken for a fallback (it would add up to 15 s), and the text is pasted as
   said.
@@ -166,7 +167,10 @@ Common to all three:
   08.11.2026 found: claude 2.1.318 not used, codex-cli 0.166.0, grok 1.0.34; OpenCode not installed here).
 
 **OpenCode** (default):
-- Found as `opencode` on PATH or in its usual install folders.
+- Found as `opencode` on PATH or in its usual install folders, else as OpenCode Desktop's own CLI
+  (`%APPDATA%\ai.opencode.desktop\cli\<version>-<arch>\opencode-cli.exe`, the highest version), else by a running server
+  it announces in its state file (`~\.local\state\opencode\service.json`, loopback only): then CUE uses that server and
+  never starts one.
 - If an OpenCode server is already running and announces itself in OpenCode's own state file (loopback URL only), CUE
   uses it. Otherwise CUE starts `opencode serve` on 127.0.0.1 on a free port when cleanup first needs it, and stops it
   after the same 15 minutes without a dictation, on session lock, on sleep and when CUE quits — the rest rules of the
@@ -181,7 +185,7 @@ Common to all three:
 `--skip-git-repo-check`, `--ignore-user-config`, `-m <model>`. Uses the user's own Codex sign-in. (OpenAI's "Sign in with
 ChatGPT" would be faster, but CUE would then hold a login token, against decision 1.)
 
-**Grok: not offered — owner's decision 10.11.2026.** A named-pipe route was built and passed its checks (09–10.11:
+**Grok: not offered — owner's decision 09.11.2026.** A named-pipe route was built and passed its checks (09.11:
 the text through a one-shot pipe only CUE's own grok.exe could open, one turn, the session Grok keeps deleted after
 each answer), but grok-4.7, the only Grok model that cleans dictations without acting on or commenting on them, takes
 6–9 s for a short cleanup, against 3–4 s for Codex. The owner chose OpenCode and Codex only. The route lives in the

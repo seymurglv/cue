@@ -423,22 +423,57 @@ pub fn sanity_ok_with(raw: &str, refined: &str, terms: &[String], said: &[String
         // ("двадцать пять" → "25"), not a question ("какой сегодня день" → "26.10.2026").
         return content < 2;
     }
-    // An answer opens with a reply word ("Хорошо, напомню…", "Sure, I'll…"); a cleanup only keeps one that was said.
+    // An answer opens with a reply word ("Хорошо, напомню…", "Sure, I'll…") or a lead-in ("Вот исправленный текст:
+    // …", "Here is the cleaned text: …"); a cleanup only keeps one that was said.
     if REPLY_WORDS.contains(&new_words[0].as_str()) && !raw_words.contains(&new_words[0]) {
         return false;
     }
-    let habit_words = said.iter().map(|w| w.trim()).filter(|w| is_term(w));
-    let term_words: Vec<String> = usable_terms(terms).into_iter().chain(habit_words).flat_map(words).collect();
-    let known: std::collections::HashSet<&str> = raw_words.iter().chain(&term_words).map(String::as_str).collect();
-    // Both styles rewrite and change endings ("отправлен" → "отправлено"): a word of a said stem counts as said too.
-    let stems: std::collections::HashSet<&str> = known.iter().filter_map(|w| stem(w)).collect();
-    let said = |w: &str| known.contains(w) || stem(w).is_some_and(|st| stems.contains(st));
-    let hits = new_words.iter().filter(|w| said(w)).count();
+    let said = Said::new(&raw_words, terms, said);
+    let hits = new_words.iter().filter(|w| said.has(w)).count();
     hits as f32 / new_words.len() as f32 >= s.min_overlap
 }
 
-/// Words an answer opens with and a cleanup never adds (lowercase, as [`words`] gives them).
-const REPLY_WORDS: [&str; 12] = ["хорошо", "конечно", "ок", "окей", "ладно", "готово", "sure", "okay", "ok", "certainly", "done", "alright"];
+/// An answer that no schema held (an agent's plain text) opens with a lead-in: its first line has a colon that ends it
+/// or is followed by a space, and before that colon a word the speaker did not say ("Вот исправленный текст:",
+/// "Here is the cleaned text: …", "Исправленный вариант:"). A cleanup's own "Список покупок:" passes, its words said;
+/// a time ("10:30") is no such colon. Dictionary terms and the habits' words (`said`) count as said, as in
+/// [`sanity_ok_with`].
+pub fn opens_with_lead_in(raw: &str, refined: &str, terms: &[String], said: &[String]) -> bool {
+    let first = refined.trim_start().lines().next().unwrap_or("");
+    let colon =
+        first.char_indices().find(|&(i, c)| c == ':' && first[i + 1..].chars().next().is_none_or(char::is_whitespace));
+    let Some((at, _)) = colon else { return false };
+    let known = Said::new(&words(raw), terms, said);
+    words(&first[..at]).iter().any(|w| !known.has(w))
+}
+
+/// What counts as said: the speaker's words, the dictionary's and the habits' (`said`), and any word of their stems
+/// (both styles rewrite and change endings: "отправлен" → "отправлено").
+struct Said {
+    known: std::collections::HashSet<String>,
+    stems: std::collections::HashSet<String>,
+}
+
+impl Said {
+    fn new(raw_words: &[String], terms: &[String], said: &[String]) -> Said {
+        let habit_words = said.iter().map(|w| w.trim()).filter(|w| is_term(w));
+        let term_words = usable_terms(terms).into_iter().chain(habit_words).flat_map(words);
+        let known: std::collections::HashSet<String> = raw_words.iter().cloned().chain(term_words).collect();
+        let stems = known.iter().filter_map(|w| stem(w)).map(str::to_owned).collect();
+        Said { known, stems }
+    }
+
+    fn has(&self, w: &str) -> bool {
+        self.known.contains(w) || stem(w).is_some_and(|st| self.stems.contains(st))
+    }
+}
+
+/// Words an answer opens with and a cleanup never adds (lowercase, as [`words`] gives them): replies, and the words a
+/// lead-in to an answer opens with.
+const REPLY_WORDS: [&str; 19] = [
+    "хорошо", "конечно", "ок", "окей", "ладно", "готово", "sure", "okay", "ok", "certainly", "done", "alright",
+    "вот", "исправленный", "исправленная", "исправленное", "here", "cleaned", "corrected",
+];
 
 /// Letters a word and another form of it share: its first [`STEM_CHARS`]; `None` for a shorter word.
 const STEM_CHARS: usize = 4;
@@ -808,6 +843,38 @@ mod tests {
         let long = "сегодня мы обсудили релиз проверили логи и решили выкатить исправление после обеда а завтра посмотрим метрики";
         assert!(!sanity_ok(long, "Релиз.", &[], &s()), "almost all of the speech was lost");
         assert!(!sanity_ok(long, "", &[], &s()), "an empty answer to long speech");
+    }
+
+    /// A lead-in before the answer, said by no one, is refused; a dictation's own line ending with a colon is not.
+    #[test]
+    fn a_lead_in_the_speaker_did_not_say_is_refused() {
+        let raw = "ну короче завтра в десять у нас созвон с командой по релизу надо обсудить метрики за неделю и решить что делаем с багом в оплате а потом я напишу итоги в общий чат";
+        let clean = "Завтра в десять у нас созвон с командой по релизу. Надо обсудить метрики за неделю и решить, что делаем с багом в оплате, а потом я напишу итоги в общий чат.";
+        assert!(sanity_ok(raw, clean, &[], &s()));
+        assert!(!opens_with_lead_in(raw, clean, &[], &[]));
+        for lead in ["Вот исправленный текст:\n", "Исправленный вариант: ", "Вот очищенный текст:\n\n", "Готовый текст:\n"] {
+            assert!(opens_with_lead_in(raw, &format!("{lead}{clean}"), &[], &[]), "{lead:?}");
+        }
+        // Without a colon, a lead-in word the speaker did not say is a reply word.
+        assert!(!sanity_ok(raw, &format!("Вот {clean}"), &[], &s()));
+        let raw_en = "so tomorrow at ten we have a call with the team about the release we need to go over the weekly metrics and decide what to do with the payment bug and then I will post a summary in the team chat";
+        let clean_en = "Tomorrow at ten we have a call with the team about the release. We need to go over the weekly metrics and decide what to do with the payment bug, and then I will post a summary in the team chat.";
+        assert!(sanity_ok(raw_en, clean_en, &[], &s()));
+        assert!(!opens_with_lead_in(raw_en, clean_en, &[], &[]));
+        for lead in ["Here is the cleaned text:\n", "Cleaned text: ", "Corrected version:\n", "Here's the transcript, cleaned up:\n"] {
+            assert!(opens_with_lead_in(raw_en, &format!("{lead}{clean_en}"), &[], &[]), "{lead:?}");
+        }
+        assert!(!sanity_ok(raw_en, &format!("Here it is. {clean_en}"), &[], &s()));
+        // The speaker's own heading with a colon, a time, and a colon after said words pass.
+        let list = "список дел на завтра купить молоко позвонить в банк в десять тридцать и забрать посылку на почте до шести вечера потом зайти к маме";
+        let listed = "Список дел на завтра:\n- купить молоко;\n- позвонить в банк в 10:30;\n- забрать посылку на почте до 18:00;\n- потом зайти к маме.";
+        assert!(!opens_with_lead_in(list, listed, &[], &[]));
+        assert!(!opens_with_lead_in(raw, "Завтра в 10:00 у нас созвон с командой.", &[], &[]));
+        assert!(!opens_with_lead_in("напоминание завтра созвон", "Напоминание: завтра созвон.", &[], &[]));
+        // A dictionary term before the colon counts as said.
+        let terms = vec!["Soniox".to_string()];
+        assert!(!opens_with_lead_in("сониокс итоги теста хорошие", "Soniox: итоги теста хорошие.", &terms, &[]));
+        assert!(opens_with_lead_in("сониокс итоги теста хорошие", "Soniox: итоги теста хорошие.", &[], &[]));
     }
 
     /// An answer opens with a reply word the speaker never said; a cleanup keeps one they did say.

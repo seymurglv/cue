@@ -29,7 +29,7 @@ run"). The answer fixtures of 08.11 are built from each CLI's documented output 
 | `codex-ran-command.jsonl` | constructed: the same with a `command_execution` item, which `codex_text` must refuse |
 | `codex-cleanup.jsonl` | real (09.11.2026, signed in): a cleanup with CUE's flags, gpt-6-luna |
 | `codex-probe-list.jsonl`, `codex-probe-read.jsonl`, `codex-probe-write.jsonl` | real (09.11.2026, signed in): the stripping probes below |
-| `codex-ask-search.jsonl` | real (10.11.2026, signed in): an "Ask" question with live search and the code-mode host on; thread id zeroed |
+| `codex-ask-search.jsonl` | real (09.11.2026, signed in): an "Ask" question with live search and the code-mode host on; thread id zeroed |
 | `grok-cleanup.json`, `grok-command-dictation.json`, `grok-max-turns.json` (+ `.stderr`), `grok-probe-read.json`, `grok-probe-write.json` | real (09.11.2026, signed in): see "Grok: signed-in run" |
 | `grok-answer.json` | constructed: `--output-format json`'s object as Grok's own headless guide (`~/.grok/docs/user-guide/14-headless-mode.md`) documents it: `{"text", "stopReason", "sessionId", "requestId"}` |
 
@@ -62,7 +62,7 @@ network access", its own description).
 
 **Verdict: Codex is offered.** With CUE's flags on 0.166.0 it has no shell, no file-reading tool and no network tool.
 
-**"Ask" with web search (10.11.2026):** search needs the code-mode host on: with `--disable code_mode_host` Codex has no
+**"Ask" with web search (09.11.2026):** search needs the code-mode host on: with `--disable code_mode_host` Codex has no
 web access at all, so an Ask with search leaves that one flag out and sets `-c web_search=live`. With it, the only
 extra item in the events is `web_search` (`codex-ask-search.jsonl`: one `web_search` item, then the `agent_message`).
 `codex_text` refuses any answer whose events show a tool item (`command_execution`, `file_change`, `mcp_tool_call`,
@@ -158,7 +158,7 @@ not change it.
 dictations), third after OpenCode and Codex: the pipe, `--max-turns 1`, CUE's instructions as the system prompt, the five
 variables, and the session deleted after every run. It is slower than Codex (about 6 s against 3–4 s for a short cleanup).
 
-**10.11.2026:** the route was built (commits 5999546, 2054e46: CUE's own runs cleaned the text in 5.5–8.9 s and left no
+**09.11.2026:** the route was built (commits 5999546, 2054e46: CUE's own runs cleaned the text in 5.5–8.9 s and left no
 session). grok accepts no reasoning level below `low`; grok-4.5 tried a tool once and wrote the poem once. **The owner
 chose OpenCode and Codex only**, for speed; the route was reverted and Grok is not offered.
 
@@ -203,14 +203,17 @@ chose OpenCode and Codex only**, for speed; the route was reverted and Grok is n
 - A fallback probe `/api/health` was reported for Hex; neither source has that route. V1's health route is
   `/global/health`, V2's probe is `/api/info`.
 
-## OpenCode 2.2.5 (Desktop), live 10.11.2026
+## OpenCode 2.2.5 (Desktop), live 09.11.2026
 
 Checked through CUE's own code against the owner's running OpenCode Desktop (`agent::opencode::live`, ignored by
 default; run by hand with `cargo test -p cue-engines --lib agent::opencode::live -- --ignored --nocapture
---test-threads=1`). Only the sentence "ну эм завтра в десять созвон с командой" was sent.
+--test-threads=1`). Only the sentence "ну эм завтра в десять созвон с командой" and a 165-word dictation about a weekend
+in the park (`LONG` in `live.rs`) were sent.
 
 - **Where it is**: the app `%LOCALAPPDATA%\Programs\ai.opencode.desktop\OpenCode.exe`; its CLI
-  `%APPDATA%\ai.opencode.desktop\cli\2.2.5-x64\opencode-cli.exe` (`--version` → `opencode v2.2.5`). Nothing on `PATH`,
+  `%APPDATA%\ai.opencode.desktop\cli\2.2.5-x64\opencode-cli.exe` (`--version` → `opencode v2.2.5`); the app also
+  carries a newer one in its own `resources\opencode-cli.exe` (`opencode-cli.version`: 2.2.6), not yet copied to
+  `cli\`. Nothing on `PATH`,
   in `~/.opencode/bin`, npm, WinGet or Scoop. The app runs the CLI as `opencode-cli.exe serve --service`, which
   registers in `~/.local/state/opencode/service.json` `{id, version: "2.2.5", url: "http://127.0.0.1:<port>", pid,
   password}`. `serve --help`: "Start the v2 API and web server", flags `--hostname`, `--port`, `--cors`, `--service`,
@@ -221,8 +224,9 @@ default; run by hand with `cargo test -p cue-engines --lib agent::opencode::live
 - **Models**: `GET /api/model` → 200 `{location, data: [Model.Info]}`, 390 models here (anthropic, deepseek, opencode,
   openrouter, xai), listed in 17–470 ms; ids may hold a slash (`openrouter` / `liquid/lfm-3-1.7b`), so CUE splits a
   model at its first slash. `GET /api/model/default` → `{location, data}`: `opencode/iceman-free` here, whose free
-  allowance was used up (`502 {"_tag":"ProviderRequestError","reason":"rate_limit","status":429,…}`, about 0.2 s →
-  CUE's `Failed("agent")`, the text pasted as said). "Быстрая · авто" picked `anthropic/claude-haiku-5-5`.
+  allowance was used up (`502 {"_tag":"ProviderRequestError","reason":"rate_limit","status":429,…}`, about 0.2 s).
+  CUE takes that as an agent that did not answer (`AgentFailure::RateLimited`: the Drop's "не ответил", the log's
+  "rate limit"). "Быстрая · авто" picked `anthropic/claude-haiku-5-5`.
 - **A cleanup**: `POST /api/experimental/generate/text` `{prompt, model: {providerID, id}}` → 200 `{data: {text}}`
   (`/api/experimental/generate` is its deprecated alias). The request takes `prompt` and `model` only
   (`additionalProperties: false`), "one stateless model generation using the server's base configuration"; asked to
@@ -231,22 +235,32 @@ default; run by hand with `cargo test -p cue-engines --lib agent::opencode::live
   `ProviderRequestError {reason: authentication | rate_limit | content_filter | invalid_request | overloaded |
   provider}`, 503 `ServiceUnavailableError`.
 - **The answer's form varies**: with the same prompt Claude Haiku 5.5 answered `{"text": "…"}`, the same JSON in a
-  ```` ```json ```` fence, or the plain text. No schema holds it, so CUE takes all three (`refine::held_to_schema`);
-  before, a plain-text answer was refused as "does not match the schema" and the text went in as said.
-- **Time per cleanup** (`agent::refine::refine`, Claude Haiku 5.5, warm server): 1.90, 1.81, 1.75 s in one run and
-  2.10, 1.77, 2.00 s in another (3 s budget, 8 s on the first request); every one `Refined` as "Завтра в 10 созвон с
-  командой."
+  ```` ```json ```` fence, or the plain text. No schema holds it, so CUE takes all three (`refine::held_to_schema`;
+  plain text in a fence is taken without the fence); before, a plain-text answer was refused as "does not match the
+  schema" and the text went in as said. A plain-text cleanup whose first line has a colon after words the speaker did
+  not say ("Вот исправленный текст:", "Here is the cleaned text:") is refused (`opens_with_lead_in`), and "вот",
+  "here", "исправленный", "cleaned", "corrected" joined the reply words refused at an answer's start unless said.
+- **Time per cleanup** (`agent::refine::refine`, Claude Haiku 5.5, warm server), short sentence: 1.90, 1.81, 1.75 s;
+  2.10, 1.77, 2.00 s; 1.66, 2.01, 1.61 s; every one `Refined` as "Завтра в 10 созвон с командой.".
+- **A 165-word dictation** (`live_opencode_long_dictation`): 7.47, 6.98, 5.66 s; 6.50, 5.85, 6.10 s; then within the
+  new budget 6.91, 6.29, 5.05 s; 5.60, 7.47, 5.60 s; 7.21, 7.67, 7.93 s; 5.00, 5.30, 6.31 s; 7.89, 6.12, 6.77 s. The
+  cleanup's own `refine::timeout_ms` for it is 4 s (70 %: 2.8 s), so every run would have timed out: OpenCode now has
+  the agents' budget, 10 s + 1 s per 100 words (11 s here) and 5 s on the first request. 20 of 21 were `Refined`; one
+  (5.05 s) went in as said, its reason not caught (not the time; 12 later runs printed each step and all passed).
 - **Nothing left behind**: OpenCode's session list (`GET /api/session`) had 12 sessions before and after, none new;
   CUE's folder stayed empty.
 - **A folder named is kept as a project.** With `x-opencode-directory` (as CUE sent it, and as Hex does: its
   `%APPDATA%\hex\opencode` is among the owner's projects) 2.2.5 answers for that folder (`location.directory`), starts
   an instance for it (the owner's MCP servers connect there) and keeps it in `GET /api/project`, which has no way to
   remove one. An `AGENTS.md` in that folder did not reach a stateless generation. So V2 requests now name no folder
-  (the location is the server's own, `C:\Users\seymurglv`); V1 sessions still name CUE's. The first live run, before
-  this change, left one project behind: `%TEMP%\cue-live-opencode-11448\opencode`.
+  (the location is the server's own, `%USERPROFILE%`); V1 sessions still name CUE's. The first live run, before this
+  change, left one project behind: `%TEMP%\cue-live-opencode-11448\opencode`, a row of the `project` table (column
+  `worktree`) in `%USERPROFILE%\.local\share\opencode\opencode.db`.
 - **A server CUE starts** (`opencode-cli.exe serve --hostname 127.0.0.1 --port <n>`, run once with OpenCode's own
   folders moved to a temporary one through `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME`,
   which 2.2.5 follows): listening in about 0.3 s; `OPENCODE_SERVER_PASSWORD` is its password (401 without it, V2 with
   it); a plain `serve` writes no `service.json`; nothing is written into its working folder (CUE's empty
   `agent\opencode`), while it runs or after; but that working folder becomes its default location and so one of
-  OpenCode's projects. The owner's `service.json` was unchanged and their running server untouched.
+  OpenCode's projects. So CUE starts its server only in `agent\opencode` itself, never in a spare beside it
+  (`opencode::server_cwd`): a spare would be one more project. The owner's `service.json` was unchanged and their
+  running server untouched.

@@ -13,7 +13,7 @@ pub enum AgentId {
 
 /// The agents CUE offers, in the order every list shows them.
 ///
-/// Grok is left out (the owner's decision of 10.11.2026): the only Grok model that cleans dictations without acting on
+/// Grok is left out (the owner's decision of 09.11.2026): the only Grok model that cleans dictations without acting on
 /// or commenting on them, grok-4.7, takes 6–9 s for a short cleanup. A named-pipe route that kept the text off the
 /// command line and the disk was built and reverted; the evidence is in
 /// `app/crates/engines/tests/fixtures/agents/README.md`.

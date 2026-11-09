@@ -62,7 +62,7 @@ pub enum Parsed {
 
 /// The model's answer → parse result: cut by length is `Truncated`, a filter is `Refusal`; otherwise the `text` field
 /// of a JSON object (also inside a ```` ``` ```` fence). Without a schema (`structured == false`) the whole plain text is
-/// accepted too — except an empty one and a JSON fragment.
+/// accepted too, without a fence around it — except an empty one and a JSON fragment.
 pub fn parse_content(content: &str, finish_reason: Option<&str>, structured: bool) -> Parsed {
     match finish_reason {
         Some("length") => return Parsed::Truncated,
@@ -74,10 +74,10 @@ pub fn parse_content(content: &str, finish_reason: Option<&str>, structured: boo
     if let Some(text) = serde_json::from_str::<Value>(json).ok().and_then(|v| v.get("text")?.as_str().map(str::to_owned)) {
         return Parsed::Text(text);
     }
-    if structured || content.is_empty() || json.starts_with('{') {
+    if structured || json.is_empty() || json.starts_with('{') {
         return Parsed::Malformed;
     }
-    Parsed::Text(content.to_owned())
+    Parsed::Text(json.to_owned())
 }
 
 /// JSON inside a ```` ```json … ``` ```` fence → what is inside; otherwise as is.
@@ -258,6 +258,11 @@ mod tests {
     fn parse_content_plain_text_fallback_only_without_schema() {
         assert_eq!(parse_content("  Привет, как дела?\n", Some("stop"), false), Parsed::Text("Привет, как дела?".into()));
         assert_eq!(parse_content("Привет, как дела?", Some("stop"), true), Parsed::Malformed, "the schema was requested, so plain text is not accepted");
+        // Plain text in a fence: taken without the fence; an empty fence is nothing.
+        assert_eq!(parse_content("```\nПривет, как дела?\n```", None, false), Parsed::Text("Привет, как дела?".into()));
+        assert_eq!(parse_content("```text\nПривет, как дела?\n```\n", None, false), Parsed::Text("Привет, как дела?".into()));
+        assert_eq!(parse_content("```\n```", None, false), Parsed::Malformed);
+        assert_eq!(parse_content("```\nПривет, как дела?\n```", None, true), Parsed::Malformed);
         for broken in [r#"{"text":"Привет"#, r#"{"answer":"Привет"}"#, "", "  \n"] {
             assert_eq!(parse_content(broken, Some("stop"), false), Parsed::Malformed, "{broken:?}");
             assert_eq!(parse_content(broken, Some("stop"), true), Parsed::Malformed, "{broken:?}");

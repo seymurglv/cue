@@ -47,6 +47,9 @@ pub enum AgentFailure {
     /// Not signed in, the sign-in expired, or no access (the CLI's own message).
     SignedOut,
     Timeout,
+    /// The provider refused for now: a rate limit, or a free allowance used up (OpenCode 2.2.5's
+    /// `ProviderRequestError` with `reason: "rate_limit"`). Taken as an agent that did not answer.
+    RateLimited,
     /// Anything else, in a word for the log (never the text).
     Failed(&'static str),
 }
