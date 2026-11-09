@@ -53,6 +53,7 @@
 .mkw svg{width:var(--h);height:var(--h);margin-left:calc((var(--mk) - var(--h)) / 2);margin-right:calc((var(--mk) - var(--h)) / 2);margin-top:calc((var(--mk) - var(--h)) / 2);margin-bottom:calc((var(--mk) - var(--h)) / 2)}
 .lab{font-size:calc(13.5 * var(--u));font-weight:550;letter-spacing:-.01em;line-height:calc(24 * var(--u))}
 .lab span,.lbl span{display:inline-block}
+.drop.lone.hov .lab{padding-right:calc(10 * var(--u))}
 .ch-in{animation:chIn .42s var(--e-out) both;animation-delay:calc(var(--i)*16ms)}
 @keyframes chIn{from{opacity:0;transform:translateY(5px);filter:blur(2px)}to{opacity:1;transform:none;filter:none}}
 .chip{font-size:calc(11.5 * var(--u));font-weight:600;line-height:calc(20 * var(--u));border-radius:999px;background:rgba(255,255,255,.14)}

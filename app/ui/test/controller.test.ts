@@ -1089,18 +1089,18 @@ describe('Tray card', () => {
     expect(document.querySelector('.tray [data-act]')).toBeNull();
   });
 
-  it('modelSwitched card: "Model is ready" with the name of the model chosen, escaped; green, 5 s, no button', () => {
+  it('modelSwitched card: "Switched model" with the name of the model chosen, escaped; green, 5 s, no button', () => {
     expect(TRAYS.modelSwitched).toEqual({ icon: 'model', tone: 'ok', act: null, ttl: 5000 });
     ctl.modelName('Parakeet <v3> & Co');
     ctl.tray('modelSwitched');
-    expect(document.querySelector('.tray .nhd b')!.textContent).toBe('Model is ready');
+    expect(document.querySelector('.tray .nhd b')!.textContent).toBe('Switched model');
     const body = document.querySelector('.tray .nbd')!;
     expect(body.querySelector('b')!.textContent).toBe('Parakeet <v3> & Co');
     expect(document.querySelector('.tray [data-act]')).toBeNull();
     // In Russian, and no name heard (the Drop was reloaded meanwhile).
     const box = document.createElement('div');
     box.innerHTML = trayHtml('modelSwitched', ru, null, null);
-    expect(box.querySelector('.nhd b')!.textContent).toBe('Модель готова');
+    expect(box.querySelector('.nhd b')!.textContent).toBe('Модель переключена');
     expect(box.querySelector('.nbd')!.textContent).toBe(ru.tray.modelSwitched.unnamed);
   });
 

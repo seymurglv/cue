@@ -126,7 +126,7 @@ export const en: Dict = {
       body: 'Speech is recognized on this computer.',
     },
     modelSwitched: {
-      title: 'Model is ready',
+      title: 'Switched model',
       body: '<b>{NAME}</b>',
       unnamed: 'The model you chose',
     },
@@ -220,7 +220,7 @@ export const ru: Dict = {
       body: 'Речь распознаётся на этом компьютере.',
     },
     modelSwitched: {
-      title: 'Модель готова',
+      title: 'Модель переключена',
       body: '<b>{NAME}</b>',
       unnamed: 'Выбранная модель',
     },

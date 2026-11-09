@@ -98,6 +98,8 @@ class Drop{
  layout(){
   const s=this.s,h=this.hov,m=this.mode,ic=(this.api.lbl?this.api.lbl():'icons')==='icons',p=this.parts,T=this.api.text;
   this.p.classList.toggle('hov',h);
+  /* an error label with nothing after it (no retry) would end flush with the capsule: give it its end padding */
+  this.p.classList.toggle('lone',s==='error'&&ic&&!(this.api.retry?this.api.retry():true));
   p.mi.innerHTML=m==='translate'?IC.tr:m==='ask'?IC.ask:'';p.mi.classList.toggle('ask',m==='ask');
   p.chip.innerHTML=`<span>${m==='translate'?'EN':T.ask}</span>`;
   p.why.innerHTML=this.err==='mic'?IC.mic:IC.net;
