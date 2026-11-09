@@ -138,9 +138,6 @@ export function stub(settings: api.SettingsView = view()): void {
   core.historyPaste.mockResolvedValue('pasted');
   core.historyClear.mockResolvedValue(undefined);
   core.historyAudio.mockResolvedValue(null);
-  core.keyState.mockResolvedValue({ saved: false, mask: '' });
-  core.keySet.mockImplementation(async (_name, value) => ({ saved: true, mask: `${value.slice(0, 3)}…${value.slice(-3)}` }));
-  core.keyCheck.mockResolvedValue('works');
   core.micList.mockResolvedValue({ names: ['Laptop Microphone'], default: 'Laptop Microphone' });
   core.micPreview.mockResolvedValue(undefined);
   core.onMicLevel.mockImplementation(async (cb) => {

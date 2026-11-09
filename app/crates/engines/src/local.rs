@@ -1,6 +1,6 @@
 //! The cleanup, a translation and a habit's rule on this computer (docs/specs/2026-11-04-local-cleanup.md): the same
-//! system text and user message a chat service gets ([`chat::system_text`], `user_message`), answered by the local
-//! model ([`Generate`]) under a grammar, and the same checks after ([`claude::settle`]). Never "fails": on any problem
+//! system text and user message an agent gets ([`prompt::system_text`], `user_message`), answered by the local
+//! model ([`Generate`]) under a grammar, and the same checks after ([`prompt::settle`]). Never "fails": on any problem
 //! the raw text comes back; nothing leaves the computer and nothing costs.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,10 +13,8 @@ use cue_core::settings::{DictionarySettings, RefineSettings};
 use cue_core::translate;
 
 use crate::EngineError;
-use crate::chat;
-use crate::claude::{self, Job, Parsed, RefineResult, Usage};
+use crate::prompt::{self, Job, Parsed, RefineResult, Usage, parse_content};
 use crate::local_llm::{Generate, RULE_GRAMMAR, TEXT_GRAMMAR};
-use crate::openrouter::parse_content;
 
 /// The time a piece of a dictation gets on this computer, whatever its length: a processor is slow and nobody has
 /// measured it.
@@ -58,14 +56,14 @@ async fn answer(llm: Arc<dyn Generate>, system: String, user: String, grammar: &
 /// speaks: its cleanup then pays only for its own words. In the background; a cleanup waits for it and goes on from
 /// what it evaluated.
 pub fn warm(llm: Arc<dyn Generate>, dict: &DictionarySettings, habits: &[String], instructions: &str) {
-    let system = chat::system_text(dict, habits, Job::Rewrite, instructions);
+    let system = prompt::system_text(dict, habits, Job::Rewrite, instructions);
     let deadline = Instant::now() + WARM_FOR;
     tokio::task::spawn_blocking(move || llm.warm(&system, deadline, &AtomicBool::new(false)));
 }
 
 /// The raw text at once while no local model is ready (not chosen, downloading, loading): dictation never waits.
 pub fn not_ready(raw: &str) -> RefineResult {
-    claude::raw_fallback(raw, RefineOutcome::RawFallback, Usage::default(), "local model not ready")
+    prompt::raw_fallback(raw, RefineOutcome::RawFallback, Usage::default(), "local model not ready")
 }
 
 /// One cleanup on this computer, with the instructions file's text.
@@ -119,7 +117,7 @@ async fn run(llm: Arc<dyn Generate>, raw: &str, ctx: &RefineContext, dict: &Dict
         if r.outcome == RefineOutcome::Refined {
             cleaned += 1;
         } else if translating {
-            return claude::raw_fallback(raw, RefineOutcome::RawFallback, Usage::default(), "local model: a piece was not translated");
+            return prompt::raw_fallback(raw, RefineOutcome::RawFallback, Usage::default(), "local model: a piece was not translated");
         }
         text.push_str(&r.text);
         if i + 1 < parts.len() {
@@ -142,7 +140,7 @@ async fn one(llm: Arc<dyn Generate>, raw: &str, ctx: &RefineContext, dict: &Dict
         Job::Translate(_) => translate::timeout_ms(raw) - refine::timeout_ms(raw),
     };
     let deadline = Instant::now() + Duration::from_millis(local_timeout_ms(raw) + extra);
-    let system = chat::system_text(dict, &ctx.habits, job, instructions);
+    let system = prompt::system_text(dict, &ctx.habits, job, instructions);
     let user = user_message(ctx, raw);
     match answer(llm, system, user, TEXT_GRAMMAR, deadline).await {
         Some(Ok(content)) => {
@@ -150,10 +148,10 @@ async fn one(llm: Arc<dyn Generate>, raw: &str, ctx: &RefineContext, dict: &Dict
                 Parsed::Text(t) => Parsed::Text(refine::drop_copied_context(&t, ctx.before_cursor.as_deref(), raw).to_owned()),
                 other => other,
             };
-            (claude::settle(raw, parsed, dict, &ctx.said, s, job, Usage::default()), false)
+            (prompt::settle(raw, parsed, dict, &ctx.said, s, job, Usage::default()), false)
         }
-        Some(Err(e)) => (claude::raw_fallback(raw, RefineOutcome::RawFallback, Usage::default(), &format!("local model: {}", why(&e))), e == EngineError::Timeout),
-        None => (claude::raw_fallback(raw, RefineOutcome::RawFallback, Usage::default(), "local model: stopped"), false),
+        Some(Err(e)) => (prompt::raw_fallback(raw, RefineOutcome::RawFallback, Usage::default(), &format!("local model: {}", why(&e))), e == EngineError::Timeout),
+        None => (prompt::raw_fallback(raw, RefineOutcome::RawFallback, Usage::default(), "local model: stopped"), false),
     }
 }
 
@@ -189,7 +187,6 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use cue_core::connections::find;
     use cue_core::habits::{Draft, Form};
     use cue_core::refine::{user_message, BOLD_PROMPT};
 
@@ -233,8 +230,8 @@ mod tests {
         let r = refine(fake.clone(), RAW, &with, &dict, &s, "пиши коротко").await;
         assert_eq!(r.outcome, RefineOutcome::Refined);
         let (system, user, grammar, _) = fake.asked();
-        let cloud = crate::chat::request_body(find("openai").unwrap(), "gpt-6-luna", RAW, &with, &dict, Job::Rewrite, "пиши коротко");
-        assert_eq!(system, cloud["messages"][0]["content"].as_str().unwrap(), "the same rules, dictionary, habits and style");
+        let cue = prompt::system_text(&dict, &with.habits, Job::Rewrite, "пиши коротко");
+        assert_eq!(system, cue, "the same rules, dictionary, habits and style");
         assert_eq!(user, user_message(&with, RAW));
         assert_eq!(grammar, TEXT_GRAMMAR);
     }

@@ -2,7 +2,6 @@ pub mod agents;
 pub mod ask;
 pub mod audio;
 pub mod basics;
-pub mod connections;
 pub mod corrections;
 pub mod flow;
 pub mod habits;

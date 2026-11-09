@@ -14,8 +14,6 @@ pub struct Seen {
     /// Name in lower case, value without spaces at the edges; in arrival order.
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
-    /// Connection number (0, 1, …, in accept order): the same number means the request came over the same connection.
-    pub conn: usize,
 }
 
 impl Seen {
@@ -79,16 +77,14 @@ where
     let seen = Arc::new(Mutex::new(Vec::new()));
     let (route, log) = (Arc::new(route), seen.clone());
     tokio::spawn(async move {
-        let mut conn = 0;
         while let Ok((sock, _)) = listener.accept().await {
-            tokio::spawn(serve(sock, conn, route.clone(), log.clone()));
-            conn += 1;
+            tokio::spawn(serve(sock, route.clone(), log.clone()));
         }
     });
     FakeApi { base, seen }
 }
 
-async fn serve<F>(sock: tokio::net::TcpStream, conn: usize, route: Arc<F>, seen: Arc<Mutex<Vec<Seen>>>)
+async fn serve<F>(sock: tokio::net::TcpStream, route: Arc<F>, seen: Arc<Mutex<Vec<Seen>>>)
 where
     F: Fn(&str, &str, usize) -> Reply,
 {
@@ -122,7 +118,7 @@ where
         let nth = {
             let mut seen = seen.lock().unwrap();
             let nth = seen.iter().filter(|r| r.method == method && r.path == path).count();
-            seen.push(Seen { method: method.clone(), path: path.clone(), headers, body, conn });
+            seen.push(Seen { method: method.clone(), path: path.clone(), headers, body });
             nth
         };
         let resp = match route(&method, &path, nth) {

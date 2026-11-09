@@ -1,9 +1,8 @@
 //! settings.json: engine and models, refine thresholds, the hint counter, bench, interface language, where the Drop
 //! sits, the user's dictionary, the habits, the translation pair, "Ask", the pinned microphone, how long the history keeps its days
-//! and their recordings, prices for usage accounting. The main window changes a setting one at a time
+//! and their recordings. The main window changes a setting one at a time
 //! (`SettingChange`).
 use crate::agents::AgentId;
-use crate::connections::{self, Connection, Model};
 use crate::habits::Habits;
 use crate::refine;
 use crate::translate;
@@ -68,10 +67,6 @@ pub struct RefineSettings {
     pub min_ratio: f32,
     pub max_ratio: f32,
     pub min_overlap: f32,
-    /// The cloud connection of the temporary cloud path; never read or written.
-    // Task 8: goes with the cloud providers (the cleanup no longer reaches them).
-    #[serde(skip, default = "default_connection")]
-    pub connection: String,
     /// The text of the old custom style, read for the move into the instructions file. It is written back as the old
     /// `style: "custom"` and `custom` until the runtime has seen `instructions.md` exist and clears it, so a failed
     /// first write of that file never loses the user's text.
@@ -91,10 +86,6 @@ impl Serialize for LegacyCustom {
         o.serialize_field("custom", &self.0)?;
         o.end()
     }
-}
-
-fn default_connection() -> String {
-    connections::DEFAULT_ID.to_owned()
 }
 
 /// Where the cleanup runs.
@@ -241,35 +232,14 @@ impl From<StoredRefine> for RefineSettings {
             min_ratio: s.min_ratio,
             max_ratio: s.max_ratio,
             min_overlap: s.min_overlap,
-            connection: default_connection(),
             legacy_custom,
         }
     }
 }
 
 impl RefineSettings {
-    /// The cloud connection the cleanup goes through until the agent path replaces it.
-    // Task 8: goes with the cloud providers (the cleanup no longer reaches them).
-    pub fn connection(&self) -> &'static Connection {
-        connections::find(&self.connection).unwrap_or_else(connections::default)
-    }
-
-    /// The model the cloud path asks for: the connection's recommended one.
-    // Task 8: goes with the cloud providers (the cleanup no longer reaches them).
-    pub fn model(&self) -> &'static Model {
-        self.model_for(self.connection().id)
-    }
-
-    /// The model set for the connection `id` (still listed), or its recommended one.
-    // Task 8: goes with the cloud providers (the cleanup no longer reaches them).
-    pub fn model_for(&self, id: &str) -> &'static Model {
-        let c = connections::find(id).unwrap_or_else(connections::default);
-        self.models.get(c.id).and_then(|m| c.model(m)).unwrap_or_else(|| c.recommended())
-    }
-
-    /// The model's id in usage.csv and the price table: a local model's is `local:<id>`, an agent's
-    /// `agent:<agent>:<model>` (`auto` for OpenCode's "Быстрая · авто"); both cost CUE nothing. No AI, or nothing
-    /// chosen, is `off`.
+    /// The model's id in usage.csv: a local model's is `local:<id>`, an agent's `agent:<agent>:<model>` (`auto` for
+    /// OpenCode's "Быстрая · авто"). No AI, or nothing chosen, is `off`.
     pub fn usage_model(&self) -> String {
         match (self.where_, self.agent) {
             (Where::Local, _) if !self.local.is_empty() => format!("local:{}", self.local),
@@ -993,30 +963,13 @@ fn set_entry(map: &mut BTreeMap<String, String>, key: &str, value: Option<String
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ModelPrice {
-    pub model: String,
-    pub input_per_mtok: f64,
-    pub output_per_mtok: f64,
-    pub cache_read_per_mtok: f64,
-    pub cache_write_per_mtok: f64,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Pricing {
-    pub claude: Vec<ModelPrice>,
-    /// One server-side web search of "Ask" (spec 2 §10).
-    pub web_search_usd: f64,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub stt: SttSettings,
     pub refine: RefineSettings,
     pub hold_hints_left: u8,
     pub bench: BenchSettings,
-    /// Not written while it is the default (`auto`), like `pricing`: files of users who never set it stay as they were.
+    /// Not written while it is the default (`auto`): files of users who never set it stay as they were.
     #[serde(skip_serializing_if = "UiSettings::is_default")]
     pub ui: UiSettings,
     /// Where the Drop sits. Not written while it is the default (`bottom`), like `ui`.
@@ -1043,10 +996,6 @@ pub struct Settings {
     /// How long the history keeps its days and their recordings. Not written while it is the default, like `translate`.
     #[serde(deserialize_with = "section_or_default", skip_serializing_if = "HistorySettings::is_default")]
     pub history: HistorySettings,
-    /// Default prices are not written to the file, so a price fix in the code also reaches existing installs.
-    /// If the user changed even one price, the whole block is written.
-    #[serde(skip_serializing_if = "Pricing::is_default")]
-    pub pricing: Pricing,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1065,34 +1014,11 @@ impl Default for RefineSettings {
             agent: None,
             models: BTreeMap::new(),
             fallback: Fallback::Raw,
-            connection: default_connection(),
             context_chars: 500,
             min_ratio: 0.35,
             max_ratio: 1.25,
             min_overlap: 0.7,
             legacy_custom: None,
-        }
-    }
-}
-
-fn price(model: &str, input: f64, output: f64, cache_read: f64) -> ModelPrice {
-    // A write to the 5-minute cache costs 1.25 × the input price.
-    ModelPrice { model: model.into(), input_per_mtok: input, output_per_mtok: output, cache_read_per_mtok: cache_read, cache_write_per_mtok: input * 1.25 }
-}
-
-impl Default for Pricing {
-    fn default() -> Self {
-        Self {
-            claude: vec![
-                price("claude-haiku-5-5", 0.10, 0.50, 0.01),
-                price("claude-sonnet-5-5", 2.0, 10.0, 0.10),
-                price("claude-opus-5-5", 4.0, 20.0, 0.20),
-            ]
-            .into_iter()
-            // Every model of the cleanup's connections (`connections::prices`); the Messages API's are above.
-            .chain(connections::prices().filter(|(id, ..)| !id.starts_with("claude-")).map(|(id, i, o, c)| price(&id, i, o, c)))
-            .collect(),
-            web_search_usd: 0.01,
         }
     }
 }
@@ -1113,7 +1039,6 @@ impl Default for Settings {
             ask: AskSettings::default(),
             audio: AudioSettings::default(),
             history: HistorySettings::default(),
-            pricing: Pricing::default(),
         }
     }
 }
@@ -1139,16 +1064,6 @@ impl DictionarySettings {
         }
         self.terms.insert(0, word.to_owned());
         true
-    }
-
-    fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-}
-
-impl Pricing {
-    pub fn claude_price(&self, model: &str) -> Option<&ModelPrice> {
-        self.claude.iter().find(|p| p.model == model)
     }
 
     fn is_default(&self) -> bool {
@@ -1223,14 +1138,6 @@ mod tests {
         assert_eq!(s.ui.language, UiLanguage::Auto);
         assert_eq!(s.drop.position, DropPosition::Bottom);
         assert!(s.dictionary.terms.is_empty());
-        let haiku = s.pricing.claude_price("claude-haiku-5-5").unwrap();
-        assert_eq!((haiku.input_per_mtok, haiku.output_per_mtok), (0.10, 0.50));
-        assert!(s.pricing.claude_price("claude-sonnet-5-5").is_some());
-        assert!(s.pricing.claude_price("claude-opus-5-5").is_some());
-        // Cache reads for Sonnet 5.5 and Opus 5.5 cost 0.05 × the input price (Anthropic pricing page, 2026-10-26).
-        assert_eq!(s.pricing.claude_price("claude-sonnet-5-5").unwrap().cache_read_per_mtok, 0.10);
-        assert_eq!(s.pricing.claude_price("claude-opus-5-5").unwrap().cache_read_per_mtok, 0.20);
-        assert_eq!(s.pricing.web_search_usd, 0.01);
         assert_eq!(s.ask, AskSettings::default());
     }
 
@@ -1289,13 +1196,13 @@ mod tests {
         expected.refine.context_chars = 300;
         expected.hold_hints_left = 0;
         expected.bench.save_recordings = true;
-        expected.pricing.claude = vec![price("claude-haiku-5-5", 0.10, 0.50, 0.01)];
         assert_eq!(s.stt.engine, SttEngineKind::Parakeet);
         assert_eq!(s, expected);
 
         save(&s, &p).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(!text.contains("elevenlabs") && !text.contains("soniox"), "old fields are still in the file: {text}");
+        assert!(!text.contains("pricing") && !text.contains("per_mtok"), "prices are no setting: {text}");
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(json["stt"]["engine"], "parakeet");
         assert_eq!(load(&p).unwrap(), expected);
@@ -1387,28 +1294,20 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Prices of an earlier version (CUE kept them for usage accounting), even ones the user changed: the file loads as
+    /// it did, and a save leaves them out.
     #[test]
-    fn default_pricing_is_not_written_and_loads_back_as_default() {
-        let dir = tmp("default-pricing");
+    fn prices_of_an_earlier_version_are_read_past_and_never_written() {
+        let dir = tmp("old-pricing");
         let p = dir.join("settings.json");
-        save(&Settings::default(), &p).unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-        assert!(json.get("pricing").is_none(), "default prices ended up in the file: {json}");
-        assert!(json.get("stt").is_some());
-        assert_eq!(load(&p).unwrap().pricing, Pricing::default());
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn edited_pricing_is_written_and_survives_roundtrip() {
-        let dir = tmp("edited-pricing");
-        let p = dir.join("settings.json");
-        let mut s = Settings::default();
-        s.pricing.web_search_usd = 0.5;
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&p, r#"{"hold_hints_left":1,"pricing":{"web_search_usd":0.5,"claude":[]}}"#).unwrap();
+        let s = load(&p).unwrap();
+        assert_eq!(s, Settings { hold_hints_left: 1, ..Settings::default() });
         save(&s, &p).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-        assert!(json.get("pricing").is_some());
-        assert_eq!(load(&p).unwrap(), s);
+        assert!(json.get("pricing").is_none(), "{json}");
+        assert!(json.get("stt").is_some());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1687,7 +1586,7 @@ mod tests {
         std::fs::remove_file(p).unwrap();
     }
 
-    /// Like `pricing`: the default (`auto`, also when the file says so explicitly) is not written back.
+    /// The default (`auto`, also when the file says so explicitly) is not written back.
     #[test]
     fn default_ui_language_is_not_written() {
         let dir = tmp("default-ui");

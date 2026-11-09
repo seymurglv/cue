@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { $, $$, NOW, click, core, feeds, habit, mount, settle, stub, text, view } from './windowFixture';
 import { mountWindow, type WindowPage } from '../src/window/page';
-import type { KeyView } from '../src/window/api';
 
 vi.mock('../src/window/api', async (importOriginal) => {
   const real = await importOriginal<typeof import('../src/window/api')>();
@@ -164,46 +163,23 @@ describe('Habits', () => {
     expect(rows()[0]).not.toBe(row);
   });
 
-  it('with no cleanup connected, a line says habits need it', async () => {
+  it('with the cleanup off (no AI), a line says habits need it', async () => {
+    stub(view({ refineWhere: 'off' }));
     page = await mount();
     expect($<HTMLElement>('.hnocl')!.hidden).toBe(false);
     expect(text($('.hnocl'))).toBe('Habits work when the cleanup is on.');
   });
 
-  it('a key saved: no such line', async () => {
-    core.keyState.mockResolvedValue({ saved: true, mask: 'sk-…789' });
+  it('the user\'s own AI or this computer: no such line, and no key is asked for', async () => {
     page = await mount();
     expect($<HTMLElement>('.hnocl')!.hidden).toBe(true);
-  });
-
-  it('two checks of the key answered out of order: the later one counts', async () => {
-    const replies: ((v: KeyView) => void)[] = [];
-    core.keyState.mockImplementation(() => new Promise<KeyView>((r) => replies.push(r)));
-    page = await mount();
+    for (const refineWhere of ['local', 'off', 'agent'] as const) {
+      feeds.settings(view({ habits: [habit('h1'), DIGITS], refineWhere }));
+      expect($<HTMLElement>('.hnocl')!.hidden).toBe(refineWhere !== 'off');
+    }
     window.dispatchEvent(new Event('focus'));
     await settle();
-    expect(replies).toHaveLength(2);
-    replies[1]({ saved: true, mask: 'sk-…789' });
-    await settle();
-    replies[0]({ saved: false, mask: '' });
-    await settle();
     expect($<HTMLElement>('.hnocl')!.hidden).toBe(true);
-  });
-
-  it('a cloud check still pending when the cleanup turns to this computer: no line', async () => {
-    const replies: ((v: KeyView) => void)[] = [];
-    core.keyState.mockImplementation(() => new Promise<KeyView>((r) => replies.push(r)));
-    page = await mount();
-    feeds.settings(view({ habits: [habit('h1'), DIGITS], refineWhere: 'local' }));
-    expect($<HTMLElement>('.hnocl')!.hidden).toBe(true);
-    replies[0]({ saved: false, mask: '' });
-    await settle();
-    expect($<HTMLElement>('.hnocl')!.hidden).toBe(true);
-  });
-
-  it('the cleanup on this computer needs no key: no such line', async () => {
-    stub(view({ refineWhere: 'local' }));
-    page = await mount();
-    expect($<HTMLElement>('.hnocl')!.hidden).toBe(true);
+    expect('keyState' in core).toBe(false);
   });
 });

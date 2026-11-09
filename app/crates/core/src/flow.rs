@@ -491,7 +491,7 @@ impl Flow {
                 fx.push(Effect::Finished { id, outcome: Outcome::Failed });
                 match error {
                     // Retry would fail the same way: the Drop's "Ask: choose an AI" (until Ask follows the cleanup's
-                    // route, its missing or refused Anthropic key is no AI for it); the answer closes, and a follow-up
+                    // route, CUE holds no key for it: it ends at once); the answer closes, and a follow-up
                     // under way goes with it (spec 2 §8).
                     // Task 9: raised by Ask's own route.
                     AskError::Key => {

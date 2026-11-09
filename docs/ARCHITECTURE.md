@@ -1437,21 +1437,21 @@ icon and path `!define`s); makensis stores none of them.
   pruned at startup and daily (7 days, 10 MB).
 - Logged: events, per-stage timings (`stt_ms`, `refine_ms`, `insert_ms`, `latency_ms`), outcomes and error kinds;
   at startup, how many dictionary terms are used and skipped, and the translation pair (two language codes); the
-  target code of each translation; the token counts of each cache warm-up; for "Ask", the kind and length of the
+  target code of each translation; the names of the API keys an earlier version saved that were deleted at startup,
+  or could not be (never a value); for "Ask", the kind and length of the
   selection read, whether the `Ctrl + C` fallback ran and what became of its Win+V copy (a kind), the number of turns
   of a request, where the answer opened (tray or card), how a request ended and its number of web searches; for the
   main window, its opening and closing, a command refused to another window (its label and the command), a setting
   change as codes and states (the periods' codes, whether a microphone is pinned, the interface language), how many old
   days of history and recordings were deleted, a recording kept (its length and size), dropped, or not kept (the
   error, no path), the length of an id a recording was asked for by when it is no entry id, where Paste again went
-  (`pasted` or `clipboard`), which key was saved or checked, from which window, and the check's result, a microphone
-  preview started or stopped (the window, whether a microphone is pinned), and that a pinned microphone was not there;
-  for the welcome window, at startup whether the key is saved,
-  missing or unreadable, whether `--welcome` asked for it and whether it opens, its opening, closing and coming
+  (`pasted` or `clipboard`), a microphone preview started or stopped (the window, whether a microphone is pinned), and
+  that a pinned microphone was not there; for the welcome window, at startup whether `--welcome` asked for it, its
+  opening, closing and coming
   forward, each step's hold of the hotkey, whether Windows allows the microphone, and the name of a link that did not
   open; for the speech model, its state changes, the bytes and seconds of a download, the load time, the files a
-  check deleted, each recognition's audio length, time and whether the other alphabet was masked out, and whether the
-  Soniox key of an earlier version was deleted; for the correction watch, whether a correction was found, the length of
+  check deleted, each recognition's audio length, time and whether the other alphabet was masked out; for the
+  correction watch, whether a correction was found, the length of
   its span and the number of candidates. Never logged: dictation text, text before the caret, translations,
   dictionary terms and the words learned, the text of a field read after a paste, questions, answers, selected text,
   written texts, history entries, microphone names, the addresses
@@ -1462,8 +1462,10 @@ icon and path `!define`s); makensis stores none of them.
   contain dictated text. Debug output of focus results, of the selection read and copied, of the "Ask" context, of
   microphone frames and events, of history entries (their `raw` too) and their views, and of the microphone setting
   and its changes shows only lengths and counts; a recording's snapshot has no `Debug` at all.
-- Keys are read from Credential Manager on use, appear in the CLI and the main and welcome windows only masked, and are
-  cut out of engine error texts.
+- CUE holds no API key: the eight an earlier version saved in Credential Manager (service `CUE`: anthropic,
+  openrouter, openai, gemini, deepseek, mistral, groq, xai) are deleted at startup, off the core thread
+  (`keys::forget_api_keys`); the habits' secret is the one entry kept there. No window, command or `cue-cli` reads or
+  asks for a key.
 - The history's text and its recordings go to the main window alone: its commands read the files, and new entries come
   over its own channel (see Main window). The microphone names of the "Another microphone" card go to the Drop alone,
   and the main and welcome windows get the device list.

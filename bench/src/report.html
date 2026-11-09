@@ -97,26 +97,25 @@ function choices() {
   return DATA.map((it, n) => ({ file: it.file, stt: picked('stt', n), refine: picked('ref', n) }));
 }
 function median(v) { const s = v.slice().sort((a, b) => a - b), n = s.length; return n === 0 ? null : n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2; }
-// 90th percentile by nearest rank — as in refine_compare.
+// 90th percentile by nearest rank.
 function p90(v) { const s = v.slice().sort((a, b) => a - b), r = Math.ceil(0.9 * s.length); return r ? s[r - 1] : null; }
 const ms = (x) => (x === null ? '—' : `${Math.round(x)} ms`);
-// Results for one question. Latency and price count successful calls only: one cold or hung call does not move the
-// median, and a refine that missed its timeout does not cost $0 (it has no tokens).
+// Results for one question. Latency counts successful calls only: one cold or hung call does not move the median.
 function table(title, name, runsOf, key, failed) {
   const ch = choices(), acc = new Map();
-  const get = (k) => { if (!acc.has(k)) acc.set(k, { all: 0, short: 0, long: 0, lat: [], cost: 0, calls: 0, fails: 0 }); return acc.get(k); };
+  const get = (k) => { if (!acc.has(k)) acc.set(k, { all: 0, short: 0, long: 0, lat: [], calls: 0, fails: 0 }); return acc.get(k); };
   let asked = 0, answered = 0;
   DATA.forEach((it, n) => {
-    runsOf(it).forEach((r) => { const a = get(r[key]); a.calls++; if (failed(r)) a.fails++; else { a.lat.push(r.latency_ms); a.cost += r.cost_usd; } });
+    runsOf(it).forEach((r) => { const a = get(r[key]); a.calls++; if (failed(r)) a.fails++; else a.lat.push(r.latency_ms); });
     if (GROUPS[n][name].length >= 2) asked++;
     const keys = name === 'stt' ? ch[n].stt : ch[n].refine;
     if (!keys) return;
     answered++;
     keys.forEach((k) => { const a = get(k); a.all++; if (it.audio_ms < SHORT_MS) a.short++; else a.long++; });
   });
-  const rows = [...acc].map(([k, a]) => `<tr><td>${esc(k)}</td><td>${a.all}</td><td>${a.short}</td><td>${a.long}</td><td>${ms(median(a.lat))}</td><td>${ms(p90(a.lat))}</td><td>${a.lat.length ? '$' + (a.cost / a.lat.length).toFixed(5) : '—'}</td><td>${a.fails} of ${a.calls}</td></tr>`).join('');
-  return `<h2>${title}</h2><div class="note">Answered ${answered} of ${asked}. Identical texts are one variant; a choice counts for everyone who produced it. Latency and price are from successful calls.</div>
-    <div class="wide"><table><tr><th>${name === 'stt' ? 'Engine' : 'Model'}</th><th>Chosen</th><th>&lt; 10 s</th><th>≥ 10 s</th><th>Median</th><th>p90</th><th>Price per dictation</th><th>Failures</th></tr>${rows}</table></div>`;
+  const rows = [...acc].map(([k, a]) => `<tr><td>${esc(k)}</td><td>${a.all}</td><td>${a.short}</td><td>${a.long}</td><td>${ms(median(a.lat))}</td><td>${ms(p90(a.lat))}</td><td>${a.fails} of ${a.calls}</td></tr>`).join('');
+  return `<h2>${title}</h2><div class="note">Answered ${answered} of ${asked}. Identical texts are one variant; a choice counts for everyone who produced it. Latency is from successful calls.</div>
+    <div class="wide"><table><tr><th>${name === 'stt' ? 'Engine' : 'Model'}</th><th>Chosen</th><th>&lt; 10 s</th><th>≥ 10 s</th><th>Median</th><th>p90</th><th>Failures</th></tr>${rows}</table></div>`;
 }
 document.getElementById('show').onclick = () => {
   const sum = document.getElementById('sum');

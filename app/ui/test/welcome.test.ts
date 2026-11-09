@@ -1,10 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { $, $$, NOW, click, core, feeds, settle, stub, text, view } from './windowFixture';
 import { mountWelcome, TYPED_TO_DONE_MS, type WelcomePage } from '../src/welcome/page';
-import { keysReady, wordCount } from '../src/welcome/steps';
+import { STEPS, wordCount } from '../src/welcome/steps';
 import { doneTitle, en, ru } from '../src/welcome/text';
-import { KeyRows } from '../src/window/keys';
-import type { KeyName } from '../src/window/api';
 
 vi.mock('../src/window/api', async (importOriginal) => {
   const real = await importOriginal<typeof import('../src/window/api')>();
@@ -35,16 +33,10 @@ const next = async () => {
 };
 const steps = () => core.welcomeStep.mock.calls.map(([dictation]) => dictation);
 const previews = () => core.micPreview.mock.calls.map(([on, device]) => (on ? `on:${device ?? 'windows'}` : 'off'));
-const saved = () => core.keyState.mockResolvedValue({ saved: true, mask: 'sk-…789' });
 const field = () => pg().querySelector<HTMLTextAreaElement>('textarea[data-field]')!;
 const dictate = (value: string) => {
   field().value = value;
   field().dispatchEvent(new Event('input', { bubbles: true }));
-};
-/** A key pasted into its field, not checked. */
-const paste = (input: HTMLInputElement, value: string) => {
-  input.value = value;
-  input.dispatchEvent(new Event('input', { bubbles: true }));
 };
 /** A mouse press on `e`; true — the page cancelled it, so the focus stays where it is. */
 const press = (e: Element) => !e.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
@@ -70,33 +62,29 @@ afterEach(() => {
 
 describe('The welcome window', () => {
   it('goes through its steps, and Back goes back', async () => {
-    saved();
     page = await mount();
     const dots = () => $$('.dots i').map((d) => d.className);
-    expect($$('.dots i').map((d) => d.title)).toEqual(['Hello', 'Key', 'Model', 'Microphone', 'First dictation', 'Done']);
+    expect($$('.dots i').map((d) => d.title)).toEqual(['Hello', 'Model', 'Microphone', 'First dictation', 'Done']);
     expect(step()).toBe('hello');
     expect(heading()).toBe('Speak — CUE writes');
-    expect(dots()).toEqual(['on', '', '', '', '', '']);
+    expect(dots()).toEqual(['on', '', '', '', '']);
     expect(back().hidden).toBe(true);
     expect(text(primary())).toBe('Start');
     await next();
-    expect(step()).toBe('keys');
-    expect(heading()).toBe('Key');
-    expect(dots()).toEqual(['ok', 'on', '', '', '', '']);
+    expect(step()).toBe('model');
+    expect(dots()).toEqual(['ok', 'on', '', '', '']);
     expect(back().hidden).toBe(false);
-    expect(text(primary())).toBe('Next');
     click(back());
     await settle();
     expect(step()).toBe('hello');
     expect(back().hidden).toBe(true);
-    await next();
     await next();
     expect(step()).toBe('model');
     expect(heading()).toBe('Model');
     expect(text(pg().querySelector('.op'))).toBe('CUE recognizes speech on this computer. The model downloads once — go on meanwhile.');
     expect(text(mrow().querySelector('.stx b'))).toBe('Parakeet Ultra');
     expect(text(mrow().querySelector('.stx small.ok'))).toBe('Ready · 668 MB on this computer');
-    expect(dots()).toEqual(['ok', 'ok', 'on', '', '', '']);
+    expect(dots()).toEqual(['ok', 'on', '', '', '']);
     expect(text(primary())).toBe('Next');
     expect(primary().disabled).toBe(false);
     await next();
@@ -116,23 +104,29 @@ describe('The welcome window', () => {
     click(back());
     await settle();
     expect(step()).toBe('mic');
-    expect(dots()).toEqual(['ok', 'ok', 'ok', 'on', '', '']);
+    expect(dots()).toEqual(['ok', 'ok', 'on', '', '']);
     expect(primary().classList.contains('wait')).toBe(false);
     expect(primary().disabled).toBe(false);
   });
 
-  it('with the cleanup on this computer the Keys step is skipped', async () => {
-    stub(view({ refineWhere: 'local' }));
-    page = await mount();
-    expect($$('.dots i').map((d) => d.title)).toEqual(['Hello', 'Model', 'Microphone', 'First dictation', 'Done']);
-    await next();
-    expect(step()).toBe('model');
+  it('asks for no key, wherever the cleanup runs', async () => {
+    expect(STEPS).toEqual(['hello', 'model', 'mic', 'try', 'done']);
+    for (const refineWhere of ['agent', 'local', 'off'] as const) {
+      stub(view({ refineWhere }));
+      page?.dispose();
+      page = await mount();
+      expect($$('.dots i').map((d) => d.title)).toEqual(['Hello', 'Model', 'Microphone', 'First dictation', 'Done']);
+      for (let i = 0; i < 3; i++) {
+        expect($$('input[data-key], [data-check], [data-link="anthropic"]')).toHaveLength(0);
+        await next();
+      }
+      expect(step()).toBe('try');
+    }
   });
 
   it('First dictation waits in its field, not on a button', async () => {
-    saved();
     page = await mount(false);
-    for (let i = 0; i < 4; i++) await next();
+    for (let i = 0; i < 3; i++) await next();
     expect(step()).toBe('try');
     // The field says it waits, and its border breathes.
     expect(field().placeholder).toBe('Waiting — press the keys');
@@ -150,7 +144,7 @@ describe('The welcome window', () => {
     // With reduced motion the field stands still.
     page.dispose();
     page = await mount(true);
-    for (let i = 0; i < 4; i++) await next();
+    for (let i = 0; i < 3; i++) await next();
     expect(field().placeholder).toBe('Waiting — press the keys');
     expect(field().classList.contains('wait')).toBe(false);
   });
@@ -163,118 +157,9 @@ describe('The welcome window', () => {
     expect(previews()).toEqual(['off']);
   });
 
-  it('Next on Keys stays off without the key and on a key error', async () => {
-    page = await mount();
-    await next();
-    expect($$('input[data-key]').map((i) => i.dataset.key)).toEqual(['anthropic']);
-    expect(text($('small[data-state="anthropic"]'))).toBe('No key');
-    expect(primary().disabled).toBe(true);
-    // A click on the disabled button goes nowhere.
-    click(primary());
-    await settle();
-    expect(step()).toBe('keys');
-    const typeKey = async (name: KeyName, value: string) => {
-      $<HTMLInputElement>(`input[data-key="${name}"]`)!.value = value;
-      click($(`[data-check="${name}"]`));
-      await settle();
-    };
-    core.keyCheck.mockResolvedValueOnce('badKey');
-    await typeKey('anthropic', 'sk-ant-wrong-5678');
-    expect(text($('small[data-state="anthropic"]'))).toBe('Key error');
-    expect(primary().disabled).toBe(true);
-    // While a check runs, its result is not known yet.
-    let answer: (v: 'works') => void = () => {};
-    core.keyCheck.mockImplementationOnce(() => new Promise((r) => (answer = r)));
-    click($('[data-check="anthropic"]'));
-    await settle();
-    expect(text($('small[data-state="anthropic"]'))).toBe('Checking…');
-    expect(primary().disabled).toBe(true);
-    answer('works');
-    await settle();
-    expect(text($('small[data-state="anthropic"]'))).toBe('Works');
-    expect(primary().disabled).toBe(false);
-    await next();
-    expect(step()).toBe('model');
-  });
-
-  it('a key pasted over the saved one holds Next until it is checked', async () => {
-    saved();
-    page = await mount();
-    await next();
-    expect(primary().disabled).toBe(false);
-    const input = $<HTMLInputElement>('input[data-key="anthropic"]')!;
-    paste(input, 'sk-ant-newer-2468');
-    expect(primary().disabled).toBe(true);
-    click(primary());
-    await settle();
-    expect(step()).toBe('keys');
-    expect(core.keySet).not.toHaveBeenCalled();
-    // Taken out again (spaces alone are no key): Next as before.
-    paste(input, '  ');
-    expect(primary().disabled).toBe(false);
-    paste(input, 'sk-ant-newer-2468');
-    click($('[data-check="anthropic"]'));
-    await settle();
-    expect(core.keySet).toHaveBeenCalledWith('anthropic', 'sk-ant-newer-2468');
-    expect(input.value).toBe('');
-    expect(text($('small[data-state="anthropic"]'))).toBe('Works');
-    expect(primary().disabled).toBe(false);
-    await next();
-    expect(step()).toBe('model');
-  });
-
-  it('a key never stays in the page after it is saved, only its mask', async () => {
-    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
-    page = await mount();
-    await next();
-    const input = $<HTMLInputElement>('input[data-key="anthropic"]')!;
-    expect(input.type).toBe('password');
-    expect(input.getAttribute('autocomplete')).toBe('off');
-    input.value = 'sk-ant-secret-4321';
-    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-    // Emptied at once, before the core answers.
-    expect(input.value).toBe('');
-    await settle();
-    expect(core.keySet).toHaveBeenCalledWith('anthropic', 'sk-ant-secret-4321');
-    expect(input.placeholder).toBe('sk-…321');
-    expect(document.documentElement.outerHTML).not.toContain('secret');
-    // A refused save: nothing in the page or the log either.
-    core.keySet.mockRejectedValueOnce('store');
-    input.value = 'sk-ant-hidden-8765';
-    click($('[data-check="anthropic"]'));
-    await settle();
-    expect(input.value).toBe('');
-    expect(document.documentElement.outerHTML).not.toContain('hidden-8765');
-    expect(JSON.stringify(errors.mock.calls)).not.toContain('hidden-8765');
-    // A key typed and not checked leaves with its step.
-    input.value = 'sk-ant-typed-1111';
-    click(back());
-    await settle();
-    expect(input.value).toBe('');
-    expect(core.keySet).not.toHaveBeenCalledWith('anthropic', 'sk-ant-typed-1111');
-  });
-
-  it('the link opens the Anthropic Console, and the step says what it costs and where things go', async () => {
-    page = await mount();
-    await next();
-    expect(text(pg().querySelector('.op'))).toBe(
-      'CUE cleans up your speech with your own Anthropic account. Paste its key and press Check.',
-    );
-    expect(text(pg().querySelector('.olinks'))).toBe('Where to get it: Anthropic Console');
-    expect($$('[data-link]').map((l) => l.dataset.link)).toEqual(['anthropic']);
-    click($('[data-link="anthropic"]'));
-    expect(core.openLink.mock.calls).toEqual([['anthropic']]);
-    expect($$('.onote').map(text)).toEqual([
-      'Recognition is free, on this computer; Anthropic bills only the cleanup.',
-      'Sound stays on this computer; text goes to Anthropic for the cleanup; the history stays on this computer only.',
-    ]);
-  });
-
   it('the Model step shows the download as it goes, in place: the percent, a bar and the bytes', async () => {
-    saved();
     core.modelGet.mockResolvedValue({ state: 'downloading', done: 100 * MB, total: TOTAL });
     page = await mount();
-    await next();
     await next();
     expect(step()).toBe('model');
     expect(pg().querySelector('.sgrp.orows > .mrow')).not.toBeNull();
@@ -299,9 +184,7 @@ describe('The welcome window', () => {
   });
 
   it('Retry on a failed download asks the core to download the model again', async () => {
-    saved();
     page = await mount();
-    await next();
     await next();
     feeds.model({ state: 'failed', done: 200 * MB, total: TOTAL });
     const row = mrow();
@@ -321,12 +204,10 @@ describe('The welcome window', () => {
   });
 
   it('the model ready while the Model step is shown moves on to Microphone by itself', async () => {
-    saved();
     core.modelGet.mockResolvedValue({ state: 'downloading', done: 10 * MB, total: TOTAL });
     page = await mount();
     expect(core.onModel).toHaveBeenCalledTimes(1);
     expect(core.modelGet).toHaveBeenCalledTimes(1);
-    await next();
     await next();
     expect(step()).toBe('model');
     feeds.model({ state: 'loading' });
@@ -349,14 +230,12 @@ describe('The welcome window', () => {
   });
 
   it('the model ready on another step moves nothing', async () => {
-    saved();
     core.modelGet.mockResolvedValue({ state: 'downloading', done: 10 * MB, total: TOTAL });
     page = await mount();
-    await next();
-    expect(step()).toBe('keys');
+    expect(step()).toBe('hello');
     feeds.model({ state: 'ready', total: TOTAL });
     await settle();
-    expect(step()).toBe('keys');
+    expect(step()).toBe('hello');
     // Its step then shows it ready, and waits for Next.
     await next();
     expect(step()).toBe('model');
@@ -366,10 +245,9 @@ describe('The welcome window', () => {
   });
 
   it('the microphone preview runs only on its step', async () => {
-    saved();
     page = await mount();
     core.micPreview.mockClear();
-    for (let i = 0; i < 3; i++) await next();
+    for (let i = 0; i < 2; i++) await next();
     expect(previews()).toEqual(['on:windows']);
     const lit = () => $$('[data-meter] i.on').length;
     feeds.level(0.5);
@@ -391,10 +269,9 @@ describe('The welcome window', () => {
   });
 
   it('the preview follows a new microphone', async () => {
-    saved();
     core.micList.mockResolvedValue({ names: ['Laptop Microphone', 'USB Microphone'], default: 'Laptop Microphone' });
     page = await mount();
-    for (let i = 0; i < 3; i++) await next();
+    for (let i = 0; i < 2; i++) await next();
     click($('[data-dd="mic"]'));
     expect($$('.menu [data-i] .mlb').map((e) => e.textContent)).toEqual([
       'As in Windows (Laptop Microphone)',
@@ -414,10 +291,9 @@ describe('The welcome window', () => {
   });
 
   it('a denied, failed or missing microphone shows the hint with the Windows settings', async () => {
-    saved();
     core.micAccess.mockResolvedValue('denied');
     page = await mount();
-    for (let i = 0; i < 3; i++) await next();
+    for (let i = 0; i < 2; i++) await next();
     const hint = () => pg().querySelector<HTMLElement>('.ohint')!;
     expect(hint().hidden).toBe(false);
     expect(text(hint().querySelector('span'))).toBe('Windows is blocking CUE from using the microphone');
@@ -445,10 +321,9 @@ describe('The welcome window', () => {
   });
 
   it('looks at the microphone again when the window has the focus back', async () => {
-    saved();
     core.micAccess.mockResolvedValue('denied');
     page = await mount();
-    for (let i = 0; i < 3; i++) await next();
+    for (let i = 0; i < 2; i++) await next();
     const hint = () => pg().querySelector<HTMLElement>('.ohint')!;
     feeds.failed();
     expect(hint().hidden).toBe(false);
@@ -489,9 +364,8 @@ describe('The welcome window', () => {
   });
 
   it('First dictation keeps its field in focus, so the dictation is pasted into it', async () => {
-    saved();
     page = await mount();
-    for (let i = 0; i < 3; i++) await next();
+    for (let i = 0; i < 2; i++) await next();
     // Before the step a press is the browser's as usual.
     expect(press(pg())).toBe(false);
     await next();
@@ -521,9 +395,8 @@ describe('The welcome window', () => {
   });
 
   it('lets the hotkey go on First dictation and holds it again when leaving', async () => {
-    saved();
     page = await mount();
-    for (let i = 0; i < 3; i++) await next();
+    for (let i = 0; i < 2; i++) await next();
     expect(step()).toBe('mic');
     expect(steps()).toEqual([false]);
     await next();
@@ -542,9 +415,8 @@ describe('The welcome window', () => {
   });
 
   it('text in the field leads to Done with its words', async () => {
-    saved();
     page = await mount();
-    for (let i = 0; i < 4; i++) await next();
+    for (let i = 0; i < 3; i++) await next();
     expect(document.activeElement).toBe(field());
     const keys = pg().querySelector('.keys')!;
     expect(keys.classList.contains('wait')).toBe(true);
@@ -570,9 +442,8 @@ describe('The welcome window', () => {
   });
 
   it('Back during the wait for Done stays on the steps', async () => {
-    saved();
     page = await mount();
-    for (let i = 0; i < 4; i++) await next();
+    for (let i = 0; i < 3; i++) await next();
     dictate('Hello');
     click(back());
     await settle();
@@ -582,9 +453,8 @@ describe('The welcome window', () => {
   });
 
   it('Done closes the window', async () => {
-    saved();
     page = await mount();
-    for (let i = 0; i < 4; i++) await next();
+    for (let i = 0; i < 3; i++) await next();
     dictate('Hello');
     vi.advanceTimersByTime(TYPED_TO_DONE_MS);
     await settle();
@@ -600,17 +470,16 @@ describe('The welcome window', () => {
     try {
       for (const reduced of [false, true]) {
         stub();
-        saved();
-        page?.dispose();
+            page?.dispose();
         page = await mount(reduced);
         expect($$('.pgv')).toHaveLength(1);
-        for (let i = 0; i < 4; i++) await next();
+        for (let i = 0; i < 3; i++) await next();
         dictate('Hello');
         vi.advanceTimersByTime(TYPED_TO_DONE_MS);
         await settle();
         expect(step()).toBe('done');
         // The steps slid with motion, and went at once without it.
-        expect($$('.pgv')).toHaveLength(reduced ? 1 : 6);
+        expect($$('.pgv')).toHaveLength(reduced ? 1 : 5);
         expect($$('.bp')).toHaveLength(0);
         vi.advanceTimersByTime(420);
         expect($$('.bp')).toHaveLength(reduced ? 0 : 30);
@@ -622,19 +491,10 @@ describe('The welcome window', () => {
 
   it('speaks Russian when the core does', async () => {
     stub(view({ lang: 'ru', uiLanguage: 'ru' }));
-    saved();
     page = await mount();
     expect(document.documentElement.lang).toBe('ru');
     expect(heading()).toBe('Говорите — CUE напишет');
     expect(text(primary())).toBe('Начать');
-    await next();
-    expect(heading()).toBe('Ключ');
-    expect(text($('[data-check="anthropic"]'))).toBe('Проверить');
-    expect(text(pg().querySelector('.olinks'))).toBe('Где его взять: Anthropic Console');
-    expect($$('.onote').map(text)).toEqual([
-      'Распознавание бесплатное, на этом компьютере; Anthropic берёт плату только за чистку.',
-      'Звук остаётся на этом компьютере; текст уходит в Anthropic на чистку; история хранится только на этом компьютере.',
-    ]);
     await next();
     expect(heading()).toBe('Модель');
     expect(text(mrow().querySelector('.stx small.ok'))).toBe('Готово · 668 МБ на этом компьютере');
@@ -660,31 +520,5 @@ describe('The welcome window', () => {
     expect(doneTitle(en, 6, 'en')).toBe('First 6 words!');
     expect(['Первое слово!', 'Первые 2 слова!', 'Первые 5 слов!', 'Первые 21 слово!'])
       .toEqual([1, 2, 5, 21].map((n) => doneTitle(ru, n, 'ru')));
-  });
-
-  it('the key is ready when it is saved and not refused', () => {
-    const rows = new KeyRows({ t: {} as any }, () => null, () => {});
-    expect(keysReady(rows)).toBe(false);
-    rows.read = true;
-    expect(keysReady(rows)).toBe(false);
-    rows.keys.anthropic.saved = true;
-    expect(keysReady(rows)).toBe(true);
-    for (const state of ['unchecked', 'store', 'works'] as const) {
-      rows.keys.anthropic.state = state;
-      expect(keysReady(rows)).toBe(true);
-    }
-    for (const state of ['badKey', 'checking', 'missing'] as const) {
-      rows.keys.anthropic.state = state;
-      expect(keysReady(rows)).toBe(false);
-    }
-    // A key typed and not checked yet.
-    const box = document.createElement('div');
-    box.innerHTML = '<input data-key="anthropic">';
-    const typed = new KeyRows({ t: {} as any }, () => box, () => {});
-    typed.read = true;
-    typed.keys.anthropic.saved = true;
-    expect(keysReady(typed)).toBe(true);
-    box.querySelector('input')!.value = 'sk-ant-typed-1357';
-    expect(keysReady(typed)).toBe(false);
   });
 });

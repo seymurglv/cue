@@ -17,12 +17,10 @@ import {
   KEEPS,
   type AudioKeep,
   type Keep,
-  type KeyName,
   type UiLanguage,
 } from './api';
 import { CUE } from '../designParts';
 import { icon, type IconName } from './icons';
-import { KeyRows } from './keys';
 import { MicRows } from './mic';
 import { bar, modelRow, modelValue, percent, stepModelRow } from './model';
 import { ModelsPage, llmSource, speechSource } from './models';
@@ -99,7 +97,6 @@ export class SettingsTray {
   private current: HTMLElement | null = null;
   private hideTimer: ReturnType<typeof setTimeout> | null = null;
   private swapTimer: ReturnType<typeof setTimeout> | null = null;
-  private readonly keys: KeyRows;
   private readonly mic: MicRows;
   private readonly models: ModelsPage;
   /** The cleanup's local models, on the Cleanup page while it runs on this computer. */
@@ -119,11 +116,6 @@ export class SettingsTray {
     private readonly ctx: Ctx,
     private readonly clearHistory: () => Promise<void>,
   ) {
-    this.keys = new KeyRows(ctx, () => this.current, () => {
-      this.paintCleanupValue();
-      this.fit();
-      this.ctx.keysChanged?.();
-    });
     this.mic = new MicRows(ctx, () => this.current, () => {
       if (this.sub === 'mic') this.redraw();
     });
@@ -209,11 +201,6 @@ export class SettingsTray {
     this.current = null;
     el.addEventListener('click', (e) => this.onClick(e));
     el.addEventListener('keydown', (e) => {
-      const input = (e.target as Element).closest<HTMLInputElement>('input[data-key]');
-      if (input && e.key === 'Enter') {
-        e.preventDefault();
-        void this.keys.check(input.dataset.key as KeyName);
-      }
       // The model row is a button of its own: Enter or Space opens the Model page.
       if ((e.key === 'Enter' || e.key === ' ') && (e.target as Element).matches('.mrow[data-sub]')) {
         e.preventDefault();
@@ -248,7 +235,6 @@ export class SettingsTray {
     this.show(null, 0);
     el.classList.add('open');
     this.gear.classList.add('hid');
-    void this.keys.readAll();
     // General's value says whether CUE starts at sign-in.
     void this.readAutostart();
   }
@@ -453,7 +439,6 @@ export class SettingsTray {
     if ((b = t.closest<HTMLElement>('[data-sub]')) && !t.closest('[data-model-retry]')) this.go(b.dataset.sub as Sub);
     else if (t.closest('[data-tback]')) this.back();
     else if (t.closest('[data-tclose]')) this.close();
-    else if ((b = t.closest<HTMLElement>('[data-check]'))) void this.keys.check(b.dataset.check as KeyName);
     else if ((b = t.closest<HTMLElement>('[data-dd="mic"]'))) this.mic.menu(b);
     else if ((b = t.closest<HTMLElement>('[data-dd="target"]'))) this.targetMenu(b);
     else if ((b = t.closest<HTMLElement>('[data-dd="hkeep"]'))) this.keepMenu(b);

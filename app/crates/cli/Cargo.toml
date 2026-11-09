@@ -13,6 +13,5 @@ aho-corasick.workspace = true
 regex.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
-rpassword.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true

@@ -1,8 +1,8 @@
 // The main window's commands (app/src-tauri/src/commands.rs) and its two feeds: new history entries over its own
 // channel, and a microphone's level while the settings show it. The welcome window calls those its steps need — the
-// settings (it changes the microphone alone), the keys, the microphone — and its own (welcomeStep, welcomeClose,
-// openLink); any other answers it notMain. An error is a short code (notMain, core, notFound, badValue, badName,
-// emptyKey, store, autostart, failed), never text.
+// settings (it changes the microphone alone), the speech model, the microphone — and its own (welcomeStep,
+// welcomeClose, openLink); any other answers it notMain. An error is a short code (notMain, core, notFound, badValue,
+// autostart, failed), never text.
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 
@@ -105,14 +105,6 @@ export type SettingChange =
   | { kind: 'habitForget'; value: string }
   | { kind: 'habitsForget' };
 
-/** The keys of the cleanup's cloud connections, each under its connection's id. */
-export type KeyName = 'anthropic' | 'openrouter' | 'openai' | 'gemini' | 'deepseek' | 'mistral' | 'groq' | 'xai';
-/** Whether a key is saved and its mask; never the key. */
-export interface KeyView {
-  saved: boolean;
-  mask: string;
-}
-export type KeyCheck = 'works' | 'badKey' | 'noBalance' | 'unchecked' | 'missing' | 'store';
 /** The microphones as Windows names them, and the one it records from by default. */
 export interface MicList {
   names: string[];
@@ -122,7 +114,7 @@ export type PasteAgain = 'pasted' | 'clipboard';
 /** Whether Windows lets CUE use the microphone. */
 export type MicAccess = 'allowed' | 'denied';
 /** The welcome window's links, by name. */
-export type LinkTarget = 'anthropic' | 'micPrivacy';
+export type LinkTarget = 'micPrivacy';
 
 export const settingsGet = () => invoke<SettingsView>('settings_get');
 export const settingsSet = (change: SettingChange) => invoke<SettingsView>('settings_set', { change });
@@ -168,11 +160,6 @@ export async function historyAudio(id: string): Promise<ArrayBuffer | null> {
     throw e;
   }
 }
-
-export const keyState = (name: KeyName) => invoke<KeyView>('key_state', { name });
-/** The value goes to Windows Credential Manager; the answer is its mask. */
-export const keySet = (name: KeyName, value: string) => invoke<KeyView>('key_set', { name, value });
-export const keyCheck = (name: KeyName) => invoke<KeyCheck>('key_check', { name });
 
 export const micList = () => invoke<MicList>('mic_list');
 /** `device` null — the Windows microphone. The preview is this window's: its level comes here, and only this window's

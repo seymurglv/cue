@@ -5,7 +5,7 @@
 //! by the local offset now.
 use serde::Serialize;
 
-use crate::usage::{COLUMNS, COLUMNS_V1, COLUMNS_V2, DICTATE, INSERTED, NO_FIELD, split_record};
+use crate::usage::{DICTATE, INSERTED, NO_FIELD, fields, split_record};
 
 /// Days the bars show, today the last.
 pub const DAYS: usize = 30;
@@ -98,20 +98,19 @@ struct Counted {
 
 fn counted(line: &str, offset_minutes: i32) -> Option<Counted> {
     let c = split_record(line)?;
-    let (mode, words, day) = match c.len() {
-        COLUMNS_V1 => (DICTATE, None, None),
-        COLUMNS_V2 => (c[13].as_str(), None, None),
-        COLUMNS => (c[13].as_str(), Some(c[16].parse().ok()?), day_number(&c[17])),
-        _ => return None,
-    };
-    if !matches!(mode, DICTATE | "translate") || !matches!(c[12].as_str(), INSERTED | NO_FIELD) {
+    let f = fields(&c)?;
+    if !matches!(f.mode, DICTATE | "translate") || !matches!(f.outcome, INSERTED | NO_FIELD) {
         return None;
     }
-    let day = match day {
-        Some(d) => d,
-        None => local_day_of(&c[0], offset_minutes)?,
+    let words = match f.words {
+        Some(w) => Some(w.parse().ok()?),
+        None => None,
     };
-    Some(Counted { day, words, audio_ms: c[1].parse().ok()? })
+    let day = match f.day.and_then(day_number) {
+        Some(d) => d,
+        None => local_day_of(f.ts, offset_minutes)?,
+    };
+    Some(Counted { day, words, audio_ms: f.audio_ms.parse().ok()? })
 }
 
 /// Today's numbers from the text of usage.csv; `today` is the local date, `offset_minutes` local time minus UTC.
@@ -167,6 +166,10 @@ mod tests {
 
     /// A row of today's width: ts, audio, outcome, mode, words, day.
     fn row(ts: &str, audio_ms: u64, outcome: &str, mode: &str, words: u64, day: &str) -> String {
+        format!("{ts},{audio_ms},parakeet,local,agent:codex:gpt-6-luna,0,0,0,0,900,{outcome},{mode},0,{words},{day}")
+    }
+    /// A row of the version before, with its dollars: 18 columns.
+    fn priced(ts: &str, audio_ms: u64, outcome: &str, mode: &str, words: u64, day: &str) -> String {
         format!("{ts},{audio_ms},soniox,stream,0.0,claude-sonnet-5-5,0,0,0,0,0.0,900,{outcome},{mode},0,0.000000,{words},{day}")
     }
     /// A row before the words: 16 columns.
@@ -259,6 +262,17 @@ mod tests {
         assert_eq!(milestone(24_999), Some(10_000));
         assert_eq!(milestone(100_000), Some(100_000));
         assert_eq!(milestone(260_000), Some(200_000));
+    }
+
+    /// A row written with its dollars counts its words as it did.
+    #[test]
+    fn rows_with_dollars_of_the_version_before_count_their_words() {
+        let csv = file(&[
+            priced("2026-11-01T07:00:00Z", 60_000, "inserted", "dictate", 40, TODAY),
+            row("2026-11-01T08:00:00Z", 60_000, "inserted", "dictate", 60, TODAY),
+        ]);
+        let s = compute(&csv, TODAY, 0);
+        assert_eq!((s.today_words, s.total, s.wpm), (100, 100, Some(50)));
     }
 
     #[test]

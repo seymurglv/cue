@@ -1,6 +1,6 @@
-//! Bench: the user's recordings → every local speech model → refine models from settings → a report with blind pairs.
+//! Bench: the user's recordings → every local speech model → a report with blind pairs.
 //!
-//! cue-bench run [--limit N] [--max-usd X]    cue-bench report <run folder>
+//! cue-bench run [--limit N]    cue-bench report <run folder>
 //!
 //! - Recordings live in `%LOCALAPPDATA%\CUE\bench\recordings\` (`<time>-<id>.wav` + `.json` with `{"app": …}`); the app
 //!   saves them when settings.json has `"bench": {"save_recordings": true}`. A run goes to `%LOCALAPPDATA%\CUE\bench\runs\<time>\`
@@ -9,41 +9,30 @@
 //! - Transcription compares the speech models on this computer: every folder in `%LOCALAPPDATA%\CUE\models\` that loads
 //!   is one engine, named by the folder (`parakeet-ultra-int8` is the app's model; another export, such as NVIDIA's v3,
 //!   can be put next to it). Each model is loaded once before the run and recognizes every whole recording in turn;
-//!   latency is the model's own recognition time, the cost is $0. When transcription starts, like the app on the
-//!   second press, the connection to Anthropic is warmed up (HEAD without a key).
-//! - Refine runs on the text of `parakeet-ultra-int8` (if it failed or is not installed, on the first model that
-//!   succeeded), each model in turn: the same request (with `dictionary.terms`), sanity check and timeout as in the app
-//!   (`claude::refine`). Models come from settings.json.
-//! - Before the first measurement there is a warm-up: one request per model; it is not in the report, but it is in the spend.
-//! - Spending limit `--max-usd` (default $1): once reached, no new paid calls start; what was collected is saved.
-//! - Ctrl+C means "finish the current step and stop": the recognition or refine request under way finishes, nothing
-//!   new starts, the current recording is not in the results. The next Ctrl+C exits at once.
-//! - The console gets numbers, file names, durations, latencies, outcomes, tokens and prices; stderr gets engine
-//!   warnings (WARN). No dictation text and no keys there.
+//!   latency is the model's own recognition time.
+//! - The cleanup is not compared: CUE holds no API key, and nothing here calls a cloud service. A report rebuilt from a
+//!   run of an earlier version still shows that run's cleanup.
+//! - Ctrl+C means "finish the current step and stop": the recognition under way finishes, nothing new starts, the
+//!   current recording is not in the results. The next Ctrl+C exits at once.
+//! - The console gets numbers, file names, durations, latencies and outcomes; stderr gets engine warnings (WARN). No
+//!   dictation text there.
 mod report;
 
 use anyhow::{Context, Result, anyhow, bail};
 use cue_core::model::{DEFAULT_ID, ultra};
-use cue_core::refine::RefineContext;
-use cue_core::settings::Settings;
-use cue_core::usage::{refine_cost, utc_timestamp};
+use cue_core::usage::utc_timestamp;
 use cue_engines::EngineError;
-use cue_engines::claude;
-use cue_engines::keys::{self, KeyName};
 use cue_engines::parakeet::model::{self as parakeet, Recognized, Recognizer};
 use cue_engines::stt::SAMPLES_PER_MS;
 use cue_platform_win::focus::UNKNOWN_APP;
-use report::{Item, RefineRun, SttRun};
+use report::{Item, SttRun};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-const USAGE: &str = "cue-bench run [--limit N] [--max-usd X] | cue-bench report <run folder>";
-const DEFAULT_MAX_USD: f64 = 1.0;
-/// Connection warm-up timeout — like the app's (`WARM_TIMEOUT` in runtime.rs).
-const WARM_TIMEOUT: Duration = Duration::from_secs(5);
+const USAGE: &str = "cue-bench run [--limit N] | cue-bench report <run folder>";
 /// Engine log: warnings only. The filter is fixed, so no environment variable can turn on the HTTP stack's
 /// debug output, which would carry request headers.
 const LOG_FILTER: &str = "warn";
@@ -53,43 +42,27 @@ const NO_RECORDINGS: &str = "no recordings: set \"bench\": {\"save_recordings\":
 #[derive(Debug, PartialEq)]
 enum Command {
     /// `limit: None` means all recordings.
-    Run { limit: Option<usize>, max_usd: f64 },
+    Run { limit: Option<usize> },
     Report { dir: PathBuf },
 }
 
 fn parse_args(args: &[String]) -> Result<Command> {
     match args.split_first() {
         Some((cmd, rest)) if cmd == "run" => {
-            let (mut limit, mut max_usd) = (None, DEFAULT_MAX_USD);
+            let mut limit = None;
             let mut it = rest.iter();
             while let Some(arg) = it.next() {
                 let mut value = || it.next().with_context(|| format!("{arg} needs a value\n{USAGE}"));
                 match arg.as_str() {
                     "--limit" => limit = Some(value()?.parse().ok().filter(|n: &usize| *n >= 1).context("--limit: an integer from 1")?),
-                    "--max-usd" => {
-                        max_usd = value()?.parse().ok().filter(|x: &f64| x.is_finite() && *x > 0.0).context("--max-usd: a number greater than 0")?
-                    }
                     other => bail!("unknown argument {other}\n{USAGE}"),
                 }
             }
-            Ok(Command::Run { limit, max_usd })
+            Ok(Command::Run { limit })
         }
         Some((cmd, [dir])) if cmd == "report" && !dir.starts_with("--") => Ok(Command::Report { dir: PathBuf::from(dir) }),
         _ => bail!("{USAGE}"),
     }
-}
-
-/// Refine models: the Anthropic model picked in settings first, then the priced Claude models (not the other
-/// connections' ids: the bench calls Anthropic directly) — in order, without repeats.
-fn refine_models(s: &Settings) -> Vec<String> {
-    let mut models: Vec<String> = Vec::new();
-    let priced = s.pricing.claude.iter().map(|p| p.model.as_str()).filter(|m| m.starts_with("claude-"));
-    for m in std::iter::once(s.refine.model_for("anthropic").id).chain(priced) {
-        if !m.trim().is_empty() && !models.iter().any(|x| x == m) {
-            models.push(m.to_owned());
-        }
-    }
-    models
 }
 
 /// The recording's app from `<recording>.json`: a real name as is; `null`, no field, no file or broken json —
@@ -208,42 +181,8 @@ fn load_models<T>(dirs: &[PathBuf], mut load: impl FnMut(&Path) -> Result<T, Eng
     models
 }
 
-/// Spending limit: a paid call starts only while the spend is below the limit. A call started before the limit
-/// may go past it — by the price of one call (cents).
-#[derive(Debug)]
-struct Budget {
-    max_usd: f64,
-    spent: f64,
-}
-
-impl Budget {
-    fn new(max_usd: f64) -> Self {
-        Budget { max_usd, spent: 0.0 }
-    }
-
-    fn allows(&self) -> bool {
-        self.spent < self.max_usd
-    }
-
-    fn add(&mut self, usd: f64) {
-        self.spent += usd;
-    }
-}
-
 fn ms(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
-}
-
-/// Warm-up, like the app's `warm_up`: HEAD to the API address without a key and without text — for a TLS connection
-/// in the shared client's pool, so refine does not pay for the handshake after the transcription. The response
-/// (a refusal) is not needed; a failure is a log line.
-fn warm_at(http: &reqwest::Client, url: String) -> tokio::task::JoinHandle<()> {
-    let http = http.clone();
-    tokio::spawn(async move {
-        if let Err(e) = http.head(url).timeout(WARM_TIMEOUT).send().await {
-            tracing::warn!("Anthropic connection warm-up: {}", if e.is_timeout() { "timeout" } else { "network" });
-        }
-    })
 }
 
 /// A recognition result and the wall time of the call (the latency of a failure, which has no `took_ms`).
@@ -259,8 +198,7 @@ async fn recognize(model: Arc<Recognizer>, pcm: Arc<[i16]>) -> Heard {
     (r, ms(t0.elapsed()))
 }
 
-/// A request to stop — the first Ctrl+C. It is looked at between steps: a recognition cannot be interrupted, and a
-/// refine request under way is already paid for.
+/// A request to stop — the first Ctrl+C. It is looked at between steps: a recognition cannot be interrupted.
 #[derive(Clone, Default)]
 struct Stop(Arc<AtomicBool>);
 
@@ -281,7 +219,7 @@ fn stt_run(engine: &str, (result, elapsed_ms): Heard) -> (SttRun, bool) {
         Ok(r) => (r.text, r.took_ms, None, r.masked),
         Err(e) => (String::new(), elapsed_ms, Some(e.to_string()), false),
     };
-    (SttRun { engine: engine.into(), text, latency_ms, cost_usd: 0.0, error }, masked)
+    (SttRun { engine: engine.into(), text, latency_ms, error }, masked)
 }
 
 /// Transcription of a recording: each model in turn (`recognize(i)` is model `i` of `names`), a console line each.
@@ -299,71 +237,10 @@ async fn stt_phase<Fut: Future<Output = Heard>>(names: &[String], stop: &Stop, m
     Some(runs)
 }
 
-/// Text for refine — as in the app: the app's model's text; if it failed or is not installed, the first model that
-/// succeeded. The app does not refine empty text (outcome "empty") — neither does the bench.
-fn refine_input(runs: &[SttRun]) -> Option<String> {
-    let ok = |r: &&SttRun| r.error.is_none();
-    let source = runs.iter().filter(ok).find(|r| r.engine == DEFAULT_ID).or_else(|| runs.iter().find(ok))?;
-    (!source.text.trim().is_empty()).then(|| source.text.clone())
-}
-
-/// One refine request — the same as in the app (`claude::refine`: request with the dictionary from settings, check,
-/// timeout). Latency is the whole call.
-async fn refine_once(http: &reqwest::Client, key: &str, model: &str, raw: &str, ctx: &RefineContext, s: &Settings) -> RefineRun {
-    let t0 = Instant::now();
-    let r = claude::refine(http, Some(key), model, raw, ctx, &s.dictionary, &s.refine, cue_core::refine::BOLD_PROMPT).await;
-    let latency_ms = ms(t0.elapsed());
-    let u = r.usage;
-    RefineRun {
-        model: model.into(),
-        text: r.text,
-        outcome: format!("{:?}", r.outcome),
-        latency_ms,
-        cost_usd: refine_cost(&s.pricing, model, u.input_tokens, u.cache_read_input_tokens, u.cache_creation_input_tokens, u.output_tokens),
-        input_tokens: u.input_tokens,
-        cache_read_tokens: u.cache_read_input_tokens,
-        cache_write_tokens: u.cache_creation_input_tokens,
-        output_tokens: u.output_tokens,
-    }
-}
-
-/// Refine for one recording: warm-up (if `warm_up`), then a measurement per model — in turn, while the limit allows
-/// and no stop was requested. `call(model)` is one request. Returns the measurements (warm-up is not among them) and
-/// why the phase ended early: `Some(End::Budget)` or `Some(End::Interrupted)`.
-async fn refine_phase<'a, Fut: Future<Output = RefineRun>>(
-    models: &'a [String],
-    warm_up: bool,
-    budget: &mut Budget,
-    stop: &Stop,
-    mut call: impl FnMut(&'a str) -> Fut,
-) -> (Vec<RefineRun>, Option<End>) {
-    let warm: &[String] = if warm_up { models } else { &[] };
-    let mut runs = Vec::new();
-    for (model, warm) in warm.iter().map(|m| (m, true)).chain(models.iter().map(|m| (m, false))) {
-        if stop.requested() {
-            return (runs, Some(End::Interrupted));
-        }
-        if !budget.allows() {
-            return (runs, Some(End::Budget));
-        }
-        let r = call(model).await;
-        budget.add(r.cost_usd);
-        if warm {
-            println!("{}", warm_line(&r));
-        } else {
-            println!("{}", refine_line(&r));
-            runs.push(r);
-        }
-    }
-    (runs, None)
-}
-
 /// How the run ended.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum End {
     Done,
-    /// Reached the spending limit.
-    Budget,
     /// Ctrl+C.
     Interrupted,
 }
@@ -388,24 +265,12 @@ fn stt_line(r: &SttRun, masked: bool) -> String {
     }
 }
 
-fn refine_line(r: &RefineRun) -> String {
-    format!(
-        "  {}: {} ms, {}, ${:.5}; tokens: input {}, cache {}/{}, output {}",
-        r.model, r.latency_ms, r.outcome, r.cost_usd, r.input_tokens, r.cache_read_tokens, r.cache_write_tokens, r.output_tokens
-    )
-}
-
-fn warm_line(r: &RefineRun) -> String {
-    format!("  warm-up {}: {} ms, {}, ${:.5}", r.model, r.latency_ms, r.outcome, r.cost_usd)
-}
-
-fn summary_line(done: usize, total: usize, spent: f64, max_usd: f64, end: End, report: &Path) -> String {
+fn summary_line(done: usize, total: usize, end: End, report: &Path) -> String {
     let head = match end {
-        End::Done => "Done".to_owned(),
-        End::Budget => format!("Spending limit ${max_usd:.2} reached — run stopped"),
-        End::Interrupted => "Interrupted (Ctrl+C)".to_owned(),
+        End::Done => "Done",
+        End::Interrupted => "Interrupted (Ctrl+C)",
     };
-    format!("{head}: recordings {done} of {total}, spent ${spent:.4}; report: {}", report.display())
+    format!("{head}: recordings {done} of {total}; report: {}", report.display())
 }
 
 /// The recording where we stopped.
@@ -425,15 +290,6 @@ fn run_stamp(unix_secs: u64) -> String {
     utc_timestamp(unix_secs).replace(':', "-")
 }
 
-/// A key from Credential Manager; if it is missing, a hint on how to save it. Neither the key nor its mask is in the text.
-fn key(name: KeyName) -> Result<String> {
-    match keys::lookup(name) {
-        Ok(Some(key)) => Ok(key),
-        Ok(None) => bail!("no {0} key\nSave the key: cargo run -p cue-cli -- keys set {0}", name.as_str()),
-        Err(e) => bail!("{e}"),
-    }
-}
-
 /// `results.json` and `report.html` after every recording: an interrupted run loses nothing it collected.
 fn save(dir: &Path, items: &[Item]) -> Result<()> {
     std::fs::write(dir.join("results.json"), serde_json::to_string_pretty(items)?).context("results.json not written")?;
@@ -441,25 +297,16 @@ fn save(dir: &Path, items: &[Item]) -> Result<()> {
     Ok(())
 }
 
-/// Everything the run needs before the first paid call. No `Debug`: it holds a key.
+/// Everything the run needs before the first recognition.
 struct Plan {
-    settings: Settings,
     /// The run's recordings: readable and at most `--limit`. "n of N" comes from this list.
     files: Vec<PathBuf>,
     speech: Vec<Model<Arc<Recognizer>>>,
-    models: Vec<String>,
-    anthropic_key: String,
-    /// One client for the whole run — as in the app: connections are reused.
-    http: reqwest::Client,
     dir: PathBuf,
 }
 
-/// Settings, recordings, refine models, the key, the speech models and the run folder — no paid calls yet.
-/// The models load last of the checks: it takes seconds, and a missing key should not wait for it.
-fn prepare(limit: Option<usize>, max_usd: f64) -> Result<Plan> {
-    let app_data = cue_core::paths::app_data().context("no %APPDATA% (or the path is not absolute)")?;
-    let settings_file = cue_core::paths::settings_json(&app_data);
-    let settings = cue_core::settings::load(&settings_file).with_context(|| format!("settings {}", settings_file.display()))?;
+/// Recordings, the speech models and the run folder. The models load last of the checks: it takes seconds.
+fn prepare(limit: Option<usize>) -> Result<Plan> {
     let base = cue_core::paths::local_app_data().context("no %LOCALAPPDATA% (or the path is not absolute)")?;
     let bench = cue_core::paths::bench_dir(&base);
     let all = recordings(&bench.join("recordings"))?;
@@ -467,8 +314,6 @@ fn prepare(limit: Option<usize>, max_usd: f64) -> Result<Plan> {
     if files.is_empty() {
         bail!("no recording is readable (skipped: {})", all.len());
     }
-    let models = refine_models(&settings);
-    let anthropic_key = key(KeyName::Anthropic)?;
 
     // The same folder the app keeps its model in (`paths::model_dir`).
     let models_root = cue_core::paths::local_dir(&base).join("models");
@@ -480,37 +325,23 @@ fn prepare(limit: Option<usize>, max_usd: f64) -> Result<Plan> {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     let dir = bench.join("runs").join(run_stamp(secs));
     std::fs::create_dir_all(&dir).with_context(|| format!("run folder {}", dir.display()))?;
-    // An empty report right away: writing into the run folder is checked before the first paid request.
+    // An empty report right away: writing into the run folder is checked before the first recognition.
     save(&dir, &[])?;
-    let plan = Plan { settings, files, speech, models, anthropic_key, http: reqwest::Client::new(), dir };
+    let plan = Plan { files, speech, dir };
 
     let speech_names: Vec<&str> = plan.speech.iter().map(|m| m.name.as_str()).collect();
-    println!(
-        "recordings {}, speech models: {}; refine models: {}; limit ${max_usd:.2}",
-        plan.files.len(),
-        speech_names.join(", "),
-        plan.models.join(", ")
-    );
-    for m in plan.models.iter().filter(|m| plan.settings.pricing.claude_price(m).is_none()) {
-        println!("model {m} has no price in settings.json — its spend counts as $0, the limit does not see it");
-    }
+    println!("recordings {}, speech models: {}", plan.files.len(), speech_names.join(", "));
     Ok(plan)
 }
 
-/// Recordings in turn: transcription by every model, warm-up (once), refine. After every recording — results.json and
-/// report.html. On a stop request the step under way finishes and nothing new starts; the current recording is not in
-/// the results (a model it was not heard by would skew the failure count, an incomplete refine the choice count); its
-/// spend is counted in the total.
-async fn work(plan: &Plan, items: &mut Vec<Item>, budget: &mut Budget, stop: &Stop) -> Result<End> {
-    let s = &plan.settings;
+/// Recordings in turn: transcription by every model. After every recording — results.json and report.html. On a stop
+/// request the step under way finishes and nothing new starts; the current recording is not in the results (a model it
+/// was not heard by would skew the failure count).
+async fn work(plan: &Plan, items: &mut Vec<Item>, stop: &Stop) -> Result<End> {
     let names: Vec<String> = plan.speech.iter().map(|m| m.name.clone()).collect();
-    let mut warmed = false;
     for (n, file) in plan.files.iter().enumerate() {
         if stop.requested() {
             return Ok(End::Interrupted);
-        }
-        if !budget.allows() {
-            return Ok(End::Budget);
         }
         // Checked during preparation; unreadable now means the file was touched during the run.
         let rec = match read_recording(file) {
@@ -523,44 +354,14 @@ async fn work(plan: &Plan, items: &mut Vec<Item>, budget: &mut Budget, stop: &St
         let audio_ms = rec.pcm.len() as u64 / SAMPLES_PER_MS;
         println!("{}", item_line(n + 1, plan.files.len(), &file_name(file), audio_ms));
 
-        // The start of recognition is the "second press": like the app, the connection to Anthropic warms up by the time the text is there.
-        drop(warm_at(&plan.http, claude::API_URL.to_owned()));
         let pcm: Arc<[i16]> = rec.pcm.into();
         let phase = stt_phase(&names, stop, |i| recognize(plan.speech[i].recognizer.clone(), pcm.clone())).await;
         let Some(stt) = phase else {
             println!("{INTERRUPTED_ITEM}");
             return Ok(End::Interrupted);
         };
-        let raw = refine_input(&stt);
-        let mut item = Item { file: file.display().to_string(), app: rec.app.clone(), audio_ms, stt, refine: vec![] };
-
-        let mut end = None;
-        if let Some(raw) = raw {
-            let ctx = RefineContext::new(rec.app.as_str(), None, s.refine.context_chars);
-            // Warm-up on the first transcript, before the first measurement: a cold connection and the prompt cache write.
-            let warm_up = !warmed;
-            warmed = true;
-            let (runs, phase_end) = refine_phase(&plan.models, warm_up, budget, stop, |model| {
-                refine_once(&plan.http, &plan.anthropic_key, model, &raw, &ctx, s)
-            })
-            .await;
-            if phase_end == Some(End::Interrupted) {
-                println!("{INTERRUPTED_ITEM}");
-                return Ok(End::Interrupted);
-            }
-            item.refine = runs;
-            end = phase_end;
-        } else if stop.requested() {
-            println!("{INTERRUPTED_ITEM}");
-            return Ok(End::Interrupted);
-        } else {
-            println!("  refine: nothing to refine (empty, or transcription failed)");
-        }
-        items.push(item);
+        items.push(Item { file: file.display().to_string(), app: rec.app.clone(), audio_ms, stt, refine: vec![] });
         save(&plan.dir, items)?;
-        if let Some(end) = end {
-            return Ok(end);
-        }
     }
     Ok(End::Done)
 }
@@ -572,9 +373,9 @@ async fn interrupted() {
     }
 }
 
-async fn run(limit: Option<usize>, max_usd: f64) -> Result<()> {
-    let plan = prepare(limit, max_usd)?;
-    let (mut items, mut budget, stop) = (Vec::new(), Budget::new(max_usd), Stop::default());
+async fn run(limit: Option<usize>) -> Result<()> {
+    let plan = prepare(limit)?;
+    let (mut items, stop) = (Vec::new(), Stop::default());
     // The first Ctrl+C is a stop request: `work` finishes the step under way and returns on its own.
     // The next one exits at once.
     let ctrl_c = async {
@@ -585,7 +386,7 @@ async fn run(limit: Option<usize>, max_usd: f64) -> Result<()> {
     };
     let report = plan.dir.join("report.html");
     let end = tokio::select! {
-        end = work(&plan, &mut items, &mut budget, &stop) => end,
+        end = work(&plan, &mut items, &stop) => end,
         () = ctrl_c => {
             // `work` is dropped at an await, never inside `save`, so the files on disk are whole. The process ends
             // here rather than by returning: the runtime's shutdown would wait for a recognition under way.
@@ -594,7 +395,7 @@ async fn run(limit: Option<usize>, max_usd: f64) -> Result<()> {
         }
     };
     if let Ok(end) = end {
-        println!("{}", summary_line(items.len(), plan.files.len(), budget.spent, max_usd, end, &report));
+        println!("{}", summary_line(items.len(), plan.files.len(), end, &report));
     }
     end.map(|_| ())
 }
@@ -612,7 +413,7 @@ fn write_report(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Engine warnings (refine fallback reasons, model load problems) go to stderr. Their texts hold no dictation.
+/// Engine warnings (model load problems) go to stderr. Their texts hold no dictation.
 fn init_log() {
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -635,7 +436,7 @@ async fn main() -> Result<()> {
     hide_panic_text();
     init_log();
     match parse_args(&std::env::args().skip(1).collect::<Vec<_>>())? {
-        Command::Run { limit, max_usd } => run(limit, max_usd).await,
+        Command::Run { limit } => run(limit).await,
         Command::Report { dir } => write_report(&dir),
     }
 }
@@ -643,10 +444,9 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cue_core::settings::{ModelPrice, Settings};
     use cue_engines::EngineError;
     use cue_platform_win::focus::UNKNOWN_APP;
-    use report::{RefineRun, SttRun};
+    use report::SttRun;
     use std::path::{Path, PathBuf};
 
     fn args(list: &[&str]) -> anyhow::Result<Command> {
@@ -655,11 +455,8 @@ mod tests {
 
     #[test]
     fn args_run_and_report() {
-        assert_eq!(args(&["run"]).unwrap(), Command::Run { limit: None, max_usd: 1.0 });
-        assert_eq!(args(&["run", "--limit", "2"]).unwrap(), Command::Run { limit: Some(2), max_usd: 1.0 });
-        assert_eq!(args(&["run", "--max-usd", "0.25"]).unwrap(), Command::Run { limit: None, max_usd: 0.25 });
-        assert_eq!(args(&["run", "--limit", "3", "--max-usd", "2"]).unwrap(), Command::Run { limit: Some(3), max_usd: 2.0 });
-        assert_eq!(args(&["run", "--max-usd", "2", "--limit", "3"]).unwrap(), Command::Run { limit: Some(3), max_usd: 2.0 });
+        assert_eq!(args(&["run"]).unwrap(), Command::Run { limit: None });
+        assert_eq!(args(&["run", "--limit", "2"]).unwrap(), Command::Run { limit: Some(2) });
         assert_eq!(args(&["report", r"C:\runs\x"]).unwrap(), Command::Report { dir: PathBuf::from(r"C:\runs\x") });
     }
 
@@ -672,11 +469,7 @@ mod tests {
             &["run", "--limit", "0"],
             &["run", "--limit", "two"],
             &["run", "--limit", "-1"],
-            &["run", "--max-usd"],
-            &["run", "--max-usd", "0"],
-            &["run", "--max-usd", "-1"],
-            &["run", "--max-usd", "NaN"],
-            &["run", "--max-usd", "inf"],
+            &["run", "--max-usd", "1"],
             &["run", "--fast"],
             &["run", "extra"],
             &["report"],
@@ -687,31 +480,6 @@ mod tests {
         }
         let e = args(&["run", "--fast"]).unwrap_err().to_string();
         assert!(e.contains("--fast") && e.contains("cue-bench run"), "{e}");
-    }
-
-    fn price(model: &str) -> ModelPrice {
-        ModelPrice { model: model.into(), input_per_mtok: 1.0, output_per_mtok: 1.0, cache_read_per_mtok: 0.1, cache_write_per_mtok: 1.25 }
-    }
-
-    #[test]
-    fn models_from_settings_refine_model_first_without_duplicates() {
-        let s = Settings::default();
-        assert_eq!(refine_models(&s), ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]);
-
-        let mut s = Settings::default();
-        s.refine.models.insert("anthropic".into(), "claude-sonnet-5-5".into());
-        assert_eq!(refine_models(&s), ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5"], "the refine model comes first");
-
-        // The picked model without a price is still listed; a repeat in prices, an empty name and another connection's
-        // id are skipped.
-        let mut s = Settings::default();
-        s.pricing.claude =
-            vec![price("claude-sonnet-5-5"), price(" "), price("claude-sonnet-5-5"), price("openai:gpt-6-luna"), price("claude-opus-5-5")];
-        assert_eq!(refine_models(&s), ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]);
-
-        let mut s = Settings::default();
-        s.pricing.claude.clear();
-        assert_eq!(refine_models(&s), ["claude-haiku-5-5"]);
     }
 
     #[test]
@@ -851,10 +619,10 @@ mod tests {
     #[test]
     fn stt_run_keeps_text_or_error() {
         let (ok, masked) = stt_run(DEFAULT_ID, (Ok(recognized("привет", true)), 330));
-        assert_eq!(ok, SttRun { engine: DEFAULT_ID.into(), text: "привет".into(), latency_ms: 310, cost_usd: 0.0, error: None }, "latency is the model's own time");
+        assert_eq!(ok, SttRun { engine: DEFAULT_ID.into(), text: "привет".into(), latency_ms: 310, error: None }, "latency is the model's own time");
         assert!(masked);
         let (failed, masked) = stt_run(V3, (Err(EngineError::Model("encoder: broken".into())), 45));
-        assert_eq!(failed, SttRun { engine: V3.into(), text: String::new(), latency_ms: 45, cost_usd: 0.0, error: Some("speech model: encoder: broken".into()) });
+        assert_eq!(failed, SttRun { engine: V3.into(), text: String::new(), latency_ms: 45, error: Some("speech model: encoder: broken".into()) });
         assert!(!masked);
     }
 
@@ -883,117 +651,11 @@ mod tests {
         assert_eq!(asked, 1);
     }
 
-    fn priced(model: &str, cost_usd: f64) -> RefineRun {
-        RefineRun { model: model.into(), cost_usd, ..refine_run("") }
-    }
-
-    #[tokio::test]
-    async fn refine_is_not_started_after_stop_and_the_one_under_way_finishes() {
-        let models = vec!["claude-haiku-5-5".to_owned(), "claude-sonnet-5-5".to_owned()];
-        let mut budget = Budget::new(1.0);
-
-        // The stop request is already there (Ctrl+C during transcription) — not a single request.
-        let stop = Stop::default();
-        stop.request();
-        let mut calls = 0;
-        let (runs, end) = refine_phase(&models, true, &mut budget, &stop, |m| {
-            calls += 1;
-            std::future::ready(priced(m, 0.0))
-        })
-        .await;
-        assert_eq!((calls, runs.len(), end), (0, 0, Some(End::Interrupted)), "refine is not called");
-
-        // A stop request during a request — that one is awaited and paid for, the next one is not started.
-        let stop = Stop::default();
-        let mut calls = 0;
-        let (runs, end) = refine_phase(&models, false, &mut budget, &stop, |m| {
-            calls += 1;
-            stop.request();
-            std::future::ready(priced(m, 0.25))
-        })
-        .await;
-        assert_eq!((calls, runs.len(), end), (1, 1, Some(End::Interrupted)));
-        assert!((budget.spent - 0.25).abs() < 1e-12, "its spend is counted: {}", budget.spent);
-    }
-
-    #[tokio::test]
-    async fn refine_phase_warms_up_then_measures_within_budget() {
-        let models = vec!["claude-haiku-5-5".to_owned(), "claude-sonnet-5-5".to_owned()];
-        let stop = Stop::default();
-        let mut called = Vec::new();
-        let mut budget = Budget::new(1.0);
-        let (runs, end) = refine_phase(&models, true, &mut budget, &stop, |m| {
-            called.push(m.to_owned());
-            std::future::ready(priced(m, 0.1))
-        })
-        .await;
-        assert_eq!(called, ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-sonnet-5-5"], "warm-up first");
-        assert_eq!(runs.iter().map(|r| r.model.as_str()).collect::<Vec<_>>(), ["claude-haiku-5-5", "claude-sonnet-5-5"], "warm-up is not in the report");
-        assert_eq!(end, None);
-        assert!((budget.spent - 0.4).abs() < 1e-12, "warm-up is in the spend: {}", budget.spent);
-
-        // The limit ran out in the middle of the warm-up — no new requests, the result is "limit".
-        let mut called = 0;
-        let mut budget = Budget::new(0.5);
-        let (runs, end) = refine_phase(&models, true, &mut budget, &stop, |m| {
-            called += 1;
-            std::future::ready(priced(m, 0.3))
-        })
-        .await;
-        assert_eq!((called, runs.len(), end), (2, 0, Some(End::Budget)));
-    }
-
-    #[test]
-    fn budget_stops_new_calls_at_the_limit() {
-        let mut b = Budget::new(0.01);
-        assert!(b.allows());
-        b.add(0.004);
-        b.add(0.004);
-        assert!(b.allows(), "spent 0.008 of 0.01");
-        b.add(0.002);
-        assert!(!b.allows(), "the limit is reached — no new calls");
-        b.add(0.003);
-        assert!(!b.allows());
-        assert!((b.spent - 0.013).abs() < 1e-12, "what went past the limit is counted too: {}", b.spent);
-    }
-
     fn stt(engine: &str, text: &str, error: Option<&str>) -> SttRun {
-        SttRun { engine: engine.into(), text: text.into(), latency_ms: 10, cost_usd: 0.0, error: error.map(str::to_owned) }
-    }
-
-    #[test]
-    fn refine_takes_the_app_model_text_then_the_first_that_succeeded() {
-        let ultra = |t: &str| stt(DEFAULT_ID, t, None);
-        let v3 = |t: &str| stt(V3, t, None);
-        let other = |t: &str| stt("aaa-export", t, None);
-        let failed = |engine: &str| stt(engine, "", Some("speech model: broken"));
-        assert_eq!(refine_input(&[ultra("ultra"), v3("v3")]).as_deref(), Some("ultra"));
-        // The app's model is not first in the list — it is still the one refined.
-        assert_eq!(refine_input(&[other("other"), ultra("ultra")]).as_deref(), Some("ultra"));
-        assert_eq!(refine_input(&[failed(DEFAULT_ID), other("other"), v3("v3")]).as_deref(), Some("other"), "the app's model failed — the first that succeeded");
-        assert_eq!(refine_input(&[failed("aaa-export"), v3("v3")]).as_deref(), Some("v3"), "the app's model is not installed");
-        assert_eq!(refine_input(&[failed(DEFAULT_ID), failed(V3)]), None);
-        assert_eq!(refine_input(&[]), None);
-        // The app's model gave empty text — for the app that is "empty", refine does not run.
-        assert_eq!(refine_input(&[ultra("  "), v3("v3")]), None);
-        assert_eq!(refine_input(&[failed(DEFAULT_ID), v3(" "), other("other")]), None);
+        SttRun { engine: engine.into(), text: text.into(), latency_ms: 10, error: error.map(str::to_owned) }
     }
 
     const SECRET: &str = "секретная диктовка";
-
-    fn refine_run(text: &str) -> RefineRun {
-        RefineRun {
-            model: "claude-haiku-5-5".into(),
-            text: text.into(),
-            outcome: "Refined".into(),
-            latency_ms: 1_234,
-            cost_usd: 0.00012,
-            input_tokens: 120,
-            cache_read_tokens: 950,
-            cache_write_tokens: 0,
-            output_tokens: 40,
-        }
-    }
 
     #[test]
     fn console_lines_have_numbers_but_no_dictation_text() {
@@ -1003,11 +665,6 @@ mod tests {
         assert!(!line.contains(SECRET) && line.contains(V3) && line.ends_with("masked: yes"), "{line}");
         let line = stt_line(&stt(V3, "", Some("speech model: encoder: broken")), false);
         assert!(line.contains(V3) && line.contains("failed — speech model: encoder: broken") && line.contains("10 ms"), "{line}");
-        for line in [refine_line(&refine_run(SECRET)), warm_line(&refine_run(SECRET))] {
-            assert!(!line.contains(SECRET), "{line}");
-            assert!(line.contains("claude-haiku-5-5") && line.contains("1234 ms") && line.contains("Refined"), "{line}");
-        }
-        assert!(warm_line(&refine_run(SECRET)).contains("warm-up"));
         let line = item_line(3, 30, "2026-10-27T10-00-00Z-7.wav", 4_210);
         assert_eq!(line, "3/30 · 2026-10-27T10-00-00Z-7.wav · 4.2 s");
     }
@@ -1015,13 +672,9 @@ mod tests {
     #[test]
     fn summary_line_tells_why_the_run_ended() {
         let path = Path::new(r"C:\x\report.html");
-        let done = summary_line(2, 2, 0.0123, 1.0, End::Done, path);
-        assert!(done.contains("recordings 2 of 2") && done.contains("$0.0123") && done.contains(r"C:\x\report.html"), "{done}");
-        assert!(!done.contains("limit") && !done.contains("Ctrl+C"), "{done}");
-        let stopped = summary_line(12, 30, 1.0034, 1.0, End::Budget, path);
-        assert!(stopped.contains("limit") && stopped.contains("$1.00") && stopped.contains("$1.0034"), "{stopped}");
-        assert!(stopped.contains("recordings 12 of 30"), "{stopped}");
-        let interrupted = summary_line(3, 30, 0.02, 1.0, End::Interrupted, path);
+        let done = summary_line(2, 2, End::Done, path);
+        assert_eq!(done, r"Done: recordings 2 of 2; report: C:\x\report.html");
+        let interrupted = summary_line(3, 30, End::Interrupted, path);
         assert!(interrupted.contains("Ctrl+C") && interrupted.contains("recordings 3 of 30"), "{interrupted}");
     }
 
@@ -1030,35 +683,6 @@ mod tests {
         assert!(STOPPING.contains("current step") && STOPPING.contains("again"), "{STOPPING}");
         let line = exit_line(Path::new(r"C:\x\report.html"));
         assert!(line.contains("at once") && line.contains(r"C:\x\report.html"), "{line}");
-    }
-
-    /// A fake server on this computer: accepts one request, answers 405 and returns the request line.
-    fn one_request_server() -> (String, std::thread::JoinHandle<String>) {
-        use std::io::{BufRead, BufReader, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/v1/messages", listener.local_addr().unwrap());
-        let server = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut first = String::new();
-            reader.read_line(&mut first).unwrap();
-            let mut line = String::new();
-            while reader.read_line(&mut line).unwrap() > 2 {
-                line.clear();
-            }
-            let mut stream = stream;
-            stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").unwrap();
-            first.trim_end().to_owned()
-        });
-        (url, server)
-    }
-
-    #[tokio::test]
-    async fn warm_up_sends_head_to_the_api_address() {
-        let (url, server) = one_request_server();
-        let http = reqwest::Client::builder().no_proxy().build().unwrap();
-        warm_at(&http, url).await.unwrap();
-        assert_eq!(server.join().unwrap(), "HEAD /v1/messages HTTP/1.1", "no body and no key — only the connection");
     }
 
     #[test]

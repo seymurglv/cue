@@ -23,7 +23,6 @@ const open = async () => {
   await settle();
 };
 const previews = () => core.micPreview.mock.calls.map(([on, device]) => (on ? `on:${device ?? 'windows'}` : 'off'));
-const saved = () => core.keyState.mockResolvedValue({ saved: true, mask: 'sk-…789' });
 /** Megabytes as the model's row writes them (decimal), and the model's size (668 MB). */
 const MB = 1_000_000;
 const TOTAL = 667_729_022;
@@ -98,7 +97,6 @@ describe('The settings tray', () => {
   });
 
   it('the Speech recognition row shows the model state and follows it', async () => {
-    saved();
     page = await mount();
     expect(core.modelGet).toHaveBeenCalledTimes(1);
     expect(core.onModel).toHaveBeenCalledTimes(1);
@@ -128,7 +126,6 @@ describe('The settings tray', () => {
   });
 
   it('while the model downloads, its row shows the percent in Bebas and a line under it, changed in place', async () => {
-    saved();
     page = await mount();
     await open();
     const row = $<HTMLElement>('.btray [data-sub="model"]')!;
@@ -156,7 +153,6 @@ describe('The settings tray', () => {
   });
 
   it('the Speech recognition page: the model row and the note', async () => {
-    saved();
     core.modelGet.mockResolvedValue({ state: 'downloading', done: 412 * MB, total: TOTAL });
     page = await mount();
     await open();
@@ -701,7 +697,6 @@ describe('The settings tray', () => {
   });
 
   it('settings pushed by the core leave the tray as it is: the Habits switch follows', async () => {
-    saved();
     page = await mount();
     await open();
     await sub('cleanup');

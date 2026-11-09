@@ -110,7 +110,7 @@ pub fn empty_cwd(home: &Path, id: AgentId) -> Result<PathBuf, AgentFailure> {
 pub const CODEX_INSTRUCTIONS: &str = "codex-instructions";
 /// The file that holds Codex's answer to `{"text": …}`, in CUE's agent folder.
 pub const CODEX_SCHEMA: &str = "codex-schema.json";
-/// The answer CUE asks Codex for, as the cloud path asks for it.
+/// The answer CUE asks Codex for, as every route asks for it.
 const ANSWER_SCHEMA: &str =
     r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}"#;
 

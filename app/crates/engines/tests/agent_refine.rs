@@ -9,7 +9,7 @@ use cue_core::refine::{BOLD_PROMPT, RefineContext, SYSTEM_PROMPT, user_message};
 use cue_core::settings::{DictionarySettings, RefineSettings};
 use cue_engines::agent::refine::{self, KEEP_EVERY_SENTENCE};
 use cue_engines::agent::{AgentClient, Found, codex_instructions};
-use cue_engines::claude::Job;
+use cue_engines::prompt::Job;
 use serde_json::{Value, json};
 
 const FAKE: &str = env!("CARGO_BIN_EXE_fake_agent");
@@ -111,7 +111,7 @@ fn ctx() -> RefineContext {
     RefineContext { app: "Obsidian-Q7".into(), ..Default::default() }
 }
 
-async fn clean(c: &Codex, raw: &str, ctx: &RefineContext, dict: &DictionarySettings) -> cue_engines::claude::RefineResult {
+async fn clean(c: &Codex, raw: &str, ctx: &RefineContext, dict: &DictionarySettings) -> cue_engines::prompt::RefineResult {
     refine::refine(&c.client, "gpt-6-luna", raw, ctx, dict, &RefineSettings::default(), BOLD_PROMPT, false).await
 }
 

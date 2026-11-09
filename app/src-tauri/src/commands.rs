@@ -1,16 +1,13 @@
 //! The main window's commands (spec 3 §2–3), and the welcome window's (spec 4a §1). Each one answers the main window,
 //! and the welcome window only those its steps need (`guard`): the Drop and the card draw a model's answer, and no page
-//! of theirs may read the history, change a setting or touch a key; the welcome window never reads the history, and of
-//! the settings changes the microphone alone. An error is a short code, never text.
+//! of theirs may read the history or change a setting; the welcome window never reads the history, and of the settings
+//! changes the microphone alone. An error is a short code, never text.
 //!
 //! The history is read here, off the async threads; only the core writes it, and its new entries come over the main
 //! window's own channel (`history_subscribe`). An entry's recording is read by its id alone, checked to be an entry
 //! id, never a path from the page, and comes as bytes (`history_audio`). The settings are read and changed through the
 //! core, which owns them (`CoreEvent::Settings`). Start at sign-in is the autostart plugin's Run key, as in the tray
-//! menu, whose check follows within 5 s. Keys are read and saved in Windows Credential Manager, where `cue-cli keys`
-//! keeps them: a key never leaves this module — not in a reply, an error or the log — only its mask does; a check is a
-//! free probe request (`cue_engines::check`), never a paid one. The microphones are listed as Windows names them, and a
-//! preview sends the page that started it a microphone's level alone (`micpreview`). The welcome window opens its links
+//! menu, whose check follows within 5 s. The microphones are listed as Windows names them, and a preview sends the page that started it a microphone's level alone (`micpreview`). The welcome window opens its links
 //! by name, never by an address of its page's (`open_link`).
 use std::path::Path;
 use std::time::Duration;
@@ -20,9 +17,7 @@ use cue_core::history;
 use cue_core::model::{ModelState, ModelsView};
 use cue_core::settings::SettingChange;
 use cue_core::stats::{self, Stats};
-use cue_engines::EngineError;
 use cue_engines::hub;
-use cue_engines::keys::{self, KeyName};
 use cue_platform_win::{focus, mic};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, State, WebviewWindow};
@@ -44,20 +39,15 @@ const MODELS_QUERY_CHARS: usize = 100;
 const EARLIER_DAYS: usize = 7;
 /// The most entries a search finds.
 const SEARCH_LIMIT: usize = 200;
-/// A key check gives up after this, as `cue-cli keys check` does.
-const KEY_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long "Paste again" waits for the window under the main one to come in front.
 const BRING_TIMEOUT: Duration = Duration::from_millis(500);
-/// The commands the welcome window's page may call: what its steps need — the language, the key, the speech model, the
+/// The commands the welcome window's page may call: what its steps need — the language, the speech model, the
 /// microphone (of the settings it changes the microphone alone: `may_change`) — and its own (`WELCOME_ONLY`).
-const WELCOME_COMMANDS: [&str; 13] = [
+const WELCOME_COMMANDS: [&str; 10] = [
     "settings_get",
     "model_get",
     "model_retry",
     "settings_set",
-    "key_state",
-    "key_set",
-    "key_check",
     "mic_list",
     "mic_preview",
     "mic_access",
@@ -82,12 +72,6 @@ pub enum CmdError {
     /// A setting change the settings do not know, a link CUE does not have, or a recording asked for by a name that is
     /// no entry id.
     BadValue,
-    /// A key other than `anthropic`.
-    BadName,
-    /// An empty key is not saved.
-    EmptyKey,
-    /// Windows Credential Manager failed.
-    Store,
     /// The Run key of start at sign-in could not be read.
     Autostart,
     /// The command's work crashed.
@@ -105,38 +89,9 @@ pub enum PasteAgain {
     Clipboard,
 }
 
-/// A key as the window shows it: whether one is saved, and its mask (`keys::mask`), never the key itself.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub struct KeyView {
-    saved: bool,
-    mask: String,
-}
-
-impl KeyView {
-    fn of(key: Option<&str>) -> Self {
-        Self { saved: key.is_some(), mask: key.map(keys::mask).unwrap_or_default() }
-    }
-}
-
-/// What a key check found (camelCase in JSON): the key works; the service refused it (key, balance or limit); the check
-/// did not get through (network, timeout, the service); no key is saved; Windows Credential Manager failed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum KeyCheck {
-    Works,
-    BadKey,
-    /// The key works, but the account cannot pay (DeepSeek, OpenRouter tell).
-    NoBalance,
-    Unchecked,
-    Missing,
-    Store,
-}
-
-/// Where the welcome window's links go, by the names its page gives (`open_link`): where to get the key, and the
-/// Windows microphone settings.
+/// Where the welcome window's links go, by the names its page gives (`open_link`): the Windows microphone settings.
 fn link(target: &str) -> Option<&'static str> {
     match target {
-        "anthropic" => Some("https://console.anthropic.com"),
         "micPrivacy" => Some(MIC_SETTINGS),
         _ => None,
     }
@@ -584,57 +539,6 @@ pub async fn mic_access(window: WebviewWindow) -> Result<MicAccess, CmdError> {
     Ok(access)
 }
 
-/// Whether a key is saved, and its mask.
-#[tauri::command]
-pub async fn key_state(window: WebviewWindow, name: String) -> Result<KeyView, CmdError> {
-    guard(&window, "key_state")?;
-    let name = key_name(&name)?;
-    match blocking(move || keys::lookup(name)).await? {
-        Ok(key) => Ok(KeyView::of(key.as_deref())),
-        Err(e) => {
-            tracing::warn!("{} key: {e}", name.as_str());
-            Err(CmdError::Store)
-        }
-    }
-}
-
-/// Saves a key pasted in the window (`keys::set` trims it and refuses an empty one); the answer is its mask.
-#[tauri::command]
-pub async fn key_set(window: WebviewWindow, name: String, value: String) -> Result<KeyView, CmdError> {
-    guard(&window, "key_set")?;
-    let name = key_name(&name)?;
-    let saved = blocking(move || keys::set(name, &value).map(|()| KeyView::of(Some(value.trim())))).await?;
-    match saved {
-        Ok(view) => {
-            tracing::info!(key = name.as_str(), window = window.label(), "key saved");
-            Ok(view)
-        }
-        Err(EngineError::KeyProblem(_)) => Err(CmdError::EmptyKey),
-        Err(e) => {
-            tracing::warn!("{} key not saved: {e}", name.as_str());
-            Err(CmdError::Store)
-        }
-    }
-}
-
-/// Checks a saved key with a free probe request, as `cue-cli keys check` does.
-#[tauri::command]
-pub async fn key_check(window: WebviewWindow, name: String) -> Result<KeyCheck, CmdError> {
-    guard(&window, "key_check")?;
-    let name = key_name(&name)?;
-    let probed = match blocking(move || keys::lookup(name)).await? {
-        Ok(Some(key)) => Ok(Some(probe(name, &key).await)),
-        Ok(None) => Ok(None),
-        Err(e) => {
-            tracing::warn!("{} key: {e}", name.as_str());
-            Err(e)
-        }
-    };
-    let check = key_check_of(&probed);
-    tracing::info!(key = name.as_str(), ?check, window = window.label(), "key checked");
-    Ok(check)
-}
-
 /// The welcome window's step (spec 4a §1), told on every change and when its page loads: on its first dictation's
 /// step (`dictation`) the hotkey works, on any other it starts nothing (`Input::WelcomeGate`). Not `async` on purpose,
 /// as `mic_preview`: the steps reach the core in the order the page took them.
@@ -675,46 +579,11 @@ pub async fn open_link(window: WebviewWindow, target: String) -> Result<(), CmdE
     }
 }
 
-/// The probe of `name`'s service with `key`; the error never holds the key (`cue_engines::check`).
-async fn probe(name: KeyName, key: &str) -> Result<(), EngineError> {
-    let http = reqwest::Client::builder()
-        .timeout(KEY_CHECK_TIMEOUT)
-        .build()
-        .map_err(|e| EngineError::Network(e.to_string()))?;
-    match name {
-        KeyName::Anthropic => cue_engines::check::anthropic(&http, key).await,
-        KeyName::OpenRouter => cue_engines::check::openrouter(&http, key).await,
-        KeyName::DeepSeek => cue_engines::check::deepseek(&http, key).await,
-        // Any other is an OpenAI-compatible service: its model list.
-        other => match cue_core::connections::find(other.as_str()) {
-            Some(c) => cue_engines::chat::check(&http, c.base_url, Some(key)).await,
-            None => Err(EngineError::KeyProblem(format!("no connection for the {} key", other.as_str()))),
-        },
-    }
-}
-
-/// The store read and, with a key, the probe → what the window shows.
-fn key_check_of(probed: &Result<Option<Result<(), EngineError>>, EngineError>) -> KeyCheck {
-    match probed {
-        Ok(Some(Ok(()))) => KeyCheck::Works,
-        Ok(Some(Err(e))) if e.is_no_balance() => KeyCheck::NoBalance,
-        Ok(Some(Err(e))) if e.is_key_problem() => KeyCheck::BadKey,
-        Ok(Some(Err(_))) => KeyCheck::Unchecked,
-        Ok(None) => KeyCheck::Missing,
-        Err(_) => KeyCheck::Store,
-    }
-}
-
-/// The keys the window shows: those of the cleanup's cloud connections.
-fn key_name(name: &str) -> Result<KeyName, CmdError> {
-    KeyName::parse(name).ok_or(CmdError::BadName)
-}
-
 fn send(core: &CoreTx, ev: CoreEvent) -> Result<(), CmdError> {
     core.0.send(ev).map_err(|_| CmdError::Core)
 }
 
-/// File and Credential Manager work, off the async threads.
+/// File and system work (the history, the microphones), off the async threads.
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, CmdError> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(|_| CmdError::Failed)
 }
@@ -726,7 +595,7 @@ mod tests {
     use serde_json::json;
 
     /// Every command a window's page calls (`main`'s handler list, but for the Drop's and the card's own).
-    const COMMANDS: [&str; 31] = [
+    const COMMANDS: [&str; 28] = [
         "settings_get",
         "model_get",
         "model_retry",
@@ -749,9 +618,6 @@ mod tests {
         "history_paste",
         "history_clear",
         "history_audio",
-        "key_state",
-        "key_set",
-        "key_check",
         "mic_list",
         "mic_preview",
         "mic_access",
@@ -771,27 +637,30 @@ mod tests {
         }
         // Errors and answers are short codes.
         assert_eq!(serde_json::to_value(CmdError::NotMain).unwrap(), json!("notMain"));
-        assert_eq!(serde_json::to_value(CmdError::EmptyKey).unwrap(), json!("emptyKey"));
+        assert_eq!(serde_json::to_value(CmdError::BadValue).unwrap(), json!("badValue"));
         assert_eq!(serde_json::to_value(PasteAgain::Pasted).unwrap(), json!("pasted"));
         assert_eq!(serde_json::to_value(PasteAgain::Clipboard).unwrap(), json!("clipboard"));
         let access = [MicAccess::Allowed, MicAccess::Denied];
         assert_eq!(serde_json::to_value(access).unwrap(), json!(["allowed", "denied"]));
     }
 
-    /// The welcome window gets what its steps need — the language, the keys, the microphone — and its own commands,
-    /// never the history or start at sign-in; its own are no other window's.
+    /// The welcome window gets what its steps need — the language, the speech model, the microphone — and its own
+    /// commands, never the history or start at sign-in; its own are no other window's. No window has a key command.
     #[test]
     fn welcome_label_may_call_only_its_commands() {
-        let settings_and_keys = ["settings_get", "settings_set", "model_get", "model_retry", "key_state", "key_set", "key_check"];
+        let settings_and_model = ["settings_get", "settings_set", "model_get", "model_retry"];
         let microphone = ["mic_list", "mic_preview", "mic_access"];
         let own = ["welcome_step", "welcome_close", "open_link"];
         for command in COMMANDS {
-            let welcome = [&settings_and_keys[..], &microphone, &own].iter().any(|its| its.contains(&command));
+            let welcome = [&settings_and_model[..], &microphone, &own].iter().any(|its| its.contains(&command));
             assert_eq!(guard_label(WELCOME_LABEL, command).is_ok(), welcome, "{command}");
             assert_eq!(guard_label(MAIN_LABEL, command).is_ok(), !own.contains(&command), "{command}");
         }
         for command in ["history_page", "history_subscribe", "history_paste", "autostart_set", "drop_action", ""] {
             assert_eq!(guard_label(WELCOME_LABEL, command), Err(CmdError::NotMain), "{command:?}");
+        }
+        for gone in ["key_state", "key_set", "key_check"] {
+            assert!(!COMMANDS.contains(&gone) && !WELCOME_COMMANDS.contains(&gone), "{gone}");
         }
     }
 
@@ -856,12 +725,12 @@ mod tests {
         assert!(mic.iter().chain(&others).all(|c| !may_change("drop", c)));
     }
 
-    /// The page names a link, CUE has the address — where the README sends for each key, and the Windows microphone
-    /// settings; nothing else opens, an address least of all.
+    /// The page names a link, CUE has the address — the Windows microphone settings; nothing else opens, an address
+    /// least of all, nor a page for a key.
     #[test]
     fn open_link_accepts_only_known_targets() {
         assert_eq!(link("soniox"), None, "the Soniox key is gone");
-        assert_eq!(link("anthropic"), Some("https://console.anthropic.com"));
+        assert_eq!(link("anthropic"), None, "CUE asks for no key");
         assert_eq!(link("micPrivacy"), Some("ms-settings:privacy-microphone"));
         for other in [
             "https://console.soniox.com",
@@ -928,44 +797,6 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// As `cue-cli keys check` tells them apart: a refusal is the key's fault; a network, a timeout or a failing
-    /// service leave it unchecked.
-    #[test]
-    fn key_check_maps_engine_errors() {
-        let probed = |r: Result<(), EngineError>| key_check_of(&Ok(Some(r)));
-        assert_eq!(probed(Ok(())), KeyCheck::Works);
-        assert_eq!(probed(Err(EngineError::KeyProblem("401: invalid x-api-key".into()))), KeyCheck::BadKey);
-        assert_eq!(probed(Err(EngineError::from_status(402, "balance"))), KeyCheck::BadKey);
-        // The key works, the account cannot pay: told apart from a wrong key.
-        assert_eq!(probed(Err(EngineError::NoBalance("DeepSeek".into()))), KeyCheck::NoBalance);
-        assert_eq!(probed(Err(EngineError::Timeout)), KeyCheck::Unchecked);
-        assert_eq!(probed(Err(EngineError::Network("dns".into()))), KeyCheck::Unchecked);
-        assert_eq!(probed(Err(EngineError::from_status(503, "overloaded"))), KeyCheck::Unchecked);
-        assert_eq!(probed(Err(EngineError::Protocol("404: not found".into()))), KeyCheck::Unchecked);
-        assert_eq!(key_check_of(&Ok(None)), KeyCheck::Missing);
-        assert_eq!(key_check_of(&Err(EngineError::Service("could not read the soniox key".into()))), KeyCheck::Store);
-        let codes = [KeyCheck::Works, KeyCheck::BadKey, KeyCheck::NoBalance, KeyCheck::Unchecked, KeyCheck::Missing, KeyCheck::Store];
-        assert_eq!(
-            serde_json::to_value(codes).unwrap(),
-            json!(["works", "badKey", "noBalance", "unchecked", "missing", "store"])
-        );
-    }
-
-    /// Only the mask leaves: in the reply, in `Debug`.
-    #[test]
-    fn key_view_never_holds_the_value() {
-        let key = "sk-ant-api03-SECRETMIDDLEPART-0123-f3a9";
-        let view = KeyView::of(Some(key));
-        let shown = [serde_json::to_string(&view).unwrap(), format!("{view:?}")];
-        for s in &shown {
-            assert!(!s.contains("SECRET") && !s.contains(key), "{s}");
-        }
-        assert_eq!(serde_json::to_value(&view).unwrap(), json!({ "saved": true, "mask": "sk-ant…f3a9" }));
-        let short = KeyView::of(Some("short-key-123"));
-        assert_eq!(serde_json::to_value(&short).unwrap(), json!({ "saved": true, "mask": "•".repeat(13) }));
-        assert_eq!(serde_json::to_value(KeyView::of(None)).unwrap(), json!({ "saved": false, "mask": "" }));
-    }
-
     /// The names go to the window; the log would get only how many.
     #[test]
     fn mic_list_names_reach_the_window_but_not_the_log() {
@@ -977,16 +808,6 @@ mod tests {
         assert!(!shown.contains("Jane") && !shown.contains("USB"), "{shown}");
         let none = MicList { names: Vec::new(), default: None };
         assert_eq!(serde_json::to_value(none).unwrap(), json!({ "names": [], "default": null }));
-    }
-
-    #[test]
-    fn the_window_shows_the_keys_of_the_cleanup_connections() {
-        assert_eq!(key_name("soniox"), Err(CmdError::BadName));
-        assert_eq!(key_name("anthropic"), Ok(KeyName::Anthropic));
-        assert_eq!(key_name("openrouter"), Ok(KeyName::OpenRouter));
-        assert_eq!(key_name("groq"), Ok(KeyName::Groq));
-        assert_eq!(key_name("ollama"), Err(CmdError::BadName), "an id CUE does not list");
-        assert_eq!(key_name("openai"), Ok(KeyName::OpenAi));
     }
 
 

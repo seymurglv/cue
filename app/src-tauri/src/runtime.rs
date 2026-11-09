@@ -18,8 +18,6 @@
 //!   row with its own outcome; a retry resets the tokens, latencies and transcription path, the audio and the app
 //!   stay (`attempt`). After a failed translation "retry" refines the saved text again, and its row has no audio;
 //! - the last-dictation files (`last\`) change only on success (`files`); the last text is also kept in memory;
-//! - a prompt cache warm-up (refine's `warm_cache`, "Ask"'s `warm_ask_cache`) is paid for and gets a usage.csv row of
-//!   its own (`warmup`);
 //! - "Ask" (spec 2 §6–7): the context is taken at the chord, on the focus thread; the request streams in a task of its
 //!   own (`ask_task`, with a generation like the others); the answer view goes to the windows at once for a new turn,
 //!   an end or an opening, and at most every 50 ms while words stream (`state::ViewGate`); the flow hears once per
@@ -92,11 +90,11 @@ use cue_engines::EngineError;
 use cue_core::agents::AgentId;
 use cue_engines::agent;
 use cue_engines::ask as engine_ask;
-use cue_engines::claude::{self, Job, RefineResult};
+use cue_engines::prompt::{self, Job, RefineResult};
 use cue_engines::hub;
 use cue_engines::local;
 use cue_engines::local_llm::Generate;
-use cue_engines::keys::{self, KeyName};
+use cue_engines::keys;
 use cue_engines::stt::{self, Engine, SttOutput, SttSession};
 use cue_platform_win::cardplace::{self, CARD};
 use cue_platform_win::chord::HotkeyEvent;
@@ -118,11 +116,11 @@ use crate::ipc::{CardPlaceView, EntryView, SettingsView, Ui};
 use crate::lang::{self, Lang};
 use crate::paths::Paths;
 use crate::trayicon::TrayLook;
-use attempt::{Attempt, UsageLog, log_finished, needs_row, warmup_record};
+use attempt::{Attempt, UsageLog, log_finished, needs_row};
 use files::{LastFiles, Sound};
 use insert::{InsertJob, first_known_app, insert_app, known_app, one_line, pasted_text, trim_edges};
 use recordings::{AudioLimit, Recordings, Snapshot};
-use state::{CacheWarm, InsertWatch, LevelGate, MicGate, MicTold, ShownOnce, TaskSlot, Timers, ViewGate, ViewSend};
+use state::{InsertWatch, LevelGate, MicGate, MicTold, ShownOnce, TaskSlot, Timers, ViewGate, ViewSend};
 pub(crate) use model::Choice;
 use model::{ModelKeeper, ModelNews, Told};
 use tasks::{ask_panicked, guarded, refine_panicked, stt_panicked};
@@ -154,7 +152,7 @@ pub enum CoreEvent {
     /// The card window has subscribed to events.
     CardReady,
     Mic { id: DictationId, ev: MicEvent },
-    /// `task` is the task generation; `path` is how the audio was actually transcribed (for the price in usage.csv).
+    /// `task` is the task generation; `path` is how the audio was actually transcribed.
     SttDone { id: DictationId, task: u64, result: Result<SttOutput, EngineError>, path: SttPath },
     RefineDone { id: DictationId, task: u64, result: RefineResult },
     /// `at` is the moment of Ctrl+V (or of the "no field" decision): the latency is counted up to it.
@@ -182,10 +180,6 @@ pub enum CoreEvent {
     AnswerFlush,
     /// A source chip was clicked: open its page.
     AnswerSource(u32),
-    /// A cache warm-up got an answer: its tokens go to usage.csv, priced with the model it warmed.
-    Warmed { usage: claude::Usage, model: String },
-    /// Wake from sleep or unlock: the prompt caches' clocks may have skipped.
-    Wake,
     /// The agents found on this computer at startup, in `ORDER`, for a cleanup whose agent is not set yet.
     AgentsFound(Vec<AgentId>),
     /// The Drop was dragged to a new place: saved in settings.json.
@@ -354,8 +348,8 @@ pub struct Runtime {
     usage: UsageLog,
     /// "Ask": the focus query with the selection taken at the chord (spec 2 §6.1) and its answer once read; the Ctrl+C
     /// copy started at the end of the recording; what the first question was asked with (for "restore"); the open
-    /// conversation; its request in flight; its own prompt cache warm-up; how often the answer view goes out; whether
-    /// the flow has heard that the request's answer shows.
+    /// conversation; its request in flight; how often the answer view goes out; whether the flow has heard that the
+    /// request's answer shows.
     ask_query: Option<(DictationId, std::sync::mpsc::Receiver<FocusInfo>)>,
     /// Windows uploads copied text to the cloud clipboard by itself, as read at the chord: no Ctrl+C fallback then.
     ask_cloud: bool,
@@ -364,7 +358,6 @@ pub struct Runtime {
     ask_taken: ask::KeptTaken,
     conversation: Option<ask::Conversation>,
     ask_task: TaskSlot<JoinHandle<()>>,
-    ask_warm: CacheWarm,
     view_gate: ViewGate,
     ask_shown: ShownOnce,
     /// A request was dropped while its effects ran (`AbortAsk`): the view goes out once they all have, unless the
@@ -475,7 +468,6 @@ impl Runtime {
             ask_taken: ask::KeptTaken::default(),
             conversation: None,
             ask_task: TaskSlot::default(),
-            ask_warm: CacheWarm::default(),
             view_gate: ViewGate::default(),
             ask_shown: ShownOnce::default(),
             view_changed: false,
@@ -513,7 +505,7 @@ impl Runtime {
         self.llm.start(&self.tx, &self.http);
         self.ui.llms(&self.llm.view());
         self.find_agents();
-        forget_soniox_key();
+        forget_api_keys();
         self.key_habits();
         while let Some(ev) = rx.recv().await {
             // A crash in one event does not stop the core; the panic hook logs where it happened.
@@ -741,8 +733,6 @@ impl Runtime {
                 }
             }
             CoreEvent::AnswerSource(n) => self.open_source(n),
-            CoreEvent::Warmed { usage, model } => self.on_warmed(usage, &model),
-            CoreEvent::Wake => self.ask_warm.reset(),
             CoreEvent::AgentsFound(found) => self.on_agents_found(&found),
             CoreEvent::DropMoved(place) => {
                 self.settings.drop.position = place;
@@ -1470,13 +1460,8 @@ impl Runtime {
         self.note_app(&info.app);
         self.attempt.app = info.app;
         self.attempt.mode = self.flow.mode();
-        if self.flow.mode() == Mode::Ask {
-            if self.flow.answer_open() {
-                // A follow-up after a pause reads a warm cache too.
-                self.warm_ask_cache();
-            } else {
-                self.take_ask_context(id);
-            }
+        if self.flow.mode() == Mode::Ask && !self.flow.answer_open() {
+            self.take_ask_context(id);
         }
         self.warm_local();
         if let Some(old) = self.stream.take() {
@@ -1567,37 +1552,6 @@ impl Runtime {
             Vec::new()
         };
         local::warm(g, &self.settings.dictionary, &habits, &self.instructions.text());
-    }
-
-    /// Warms the "Ask" prompt cache at its chord when it may have expired (spec 2 §6.3): its own prefix — the tools and
-    /// the "Ask" instruction — with the thinking and effort of the request. Four minutes, like the refine cache.
-    fn warm_ask_cache(&mut self) {
-        let now = self.now();
-        if !self.settings.ask.enabled() || !self.ask_warm.due(now) {
-            return;
-        }
-        let Ok(Some(key)) = keys::lookup(KeyName::Anthropic) else { return };
-        let model = self.settings.ask.model().to_owned();
-        let search = self.ask_search();
-        let (http, tx) = (self.http.clone(), self.tx.clone());
-        tokio::spawn(async move {
-            if let Some(usage) = engine_ask::warm(&http, &key, &model, search).await {
-                let _ = tx.send(CoreEvent::Warmed { usage, model });
-            }
-        });
-    }
-
-    /// The warm-up's tokens are paid for: a usage.csv row of its own, priced with the model it warmed. The log gets the
-    /// token counts only.
-    fn on_warmed(&mut self, usage: claude::Usage, model: &str) {
-        tracing::info!(
-            model,
-            cache_write = usage.cache_creation_input_tokens,
-            cache_read = usage.cache_read_input_tokens,
-            "prompt cache warmed"
-        );
-        let rec = warmup_record(usage, utc_now(), &self.settings, model);
-        self.append_usage(rec);
     }
 
     /// The focused field (with the text before the caret), right after the second press, in parallel with
@@ -1770,8 +1724,8 @@ impl Runtime {
     }
 
     /// The context of an "Ask" question, at the chord (or when Alt picked "Ask"), while the focus and the selection are
-    /// where the user left them (spec 2 §6.1): on the focus thread, not to delay the Drop. Its prompt cache warms up
-    /// here too (§6.3). A new question forgets what the last one was asked with.
+    /// where the user left them (spec 2 §6.1): on the focus thread, not to delay the Drop. A new question forgets what
+    /// the last one was asked with.
     fn take_ask_context(&mut self, id: DictationId) {
         let (tx, rx) = std::sync::mpsc::channel();
         let focus = Arc::clone(&self.focus);
@@ -1785,7 +1739,6 @@ impl Runtime {
         self.ask_info = None;
         self.ask_copy = None;
         self.ask_taken.clear();
-        self.warm_ask_cache();
     }
 
     /// At the end of the recording: the selection read at the chord, and the Ctrl+C copy when the field could not say
@@ -1924,12 +1877,9 @@ impl Runtime {
         let core = self.tx.clone();
         let model = self.settings.ask.model().to_owned();
         let search = self.ask_search();
-        let key = keys::lookup(KeyName::Anthropic).unwrap_or_else(|e| {
-            tracing::warn!("Anthropic key: {e}");
-            None
-        });
+        // Task 9: Ask's own route replaces this. CUE holds no key, so Ask ends at once: "Ask: choose an AI".
+        let key: Option<String> = None;
         let now = self.now();
-        self.ask_warm.touched(now);
         if self.attempt.id == id {
             self.attempt.ask_started(now);
         }
@@ -2379,12 +2329,8 @@ impl Runtime {
     /// One usage.csv row, after the rows that could not be written before it.
     fn append_usage(&mut self, mut rec: UsageRecord) {
         rec.day = local_today();
-        let (path, settings) = (&self.paths.usage, &self.settings);
-        // Refine's model, or the one "Ask" answered with.
-        if self.usage.warn_no_price(&settings.pricing, &rec.refine_model) {
-            tracing::warn!("usage: no price for model {} in the settings, its tokens counted as 0", rec.refine_model);
-        }
-        if let Err(e) = self.usage.write(rec, |r| usage::append(path, r, &settings.pricing)) {
+        let path = &self.paths.usage;
+        if let Err(e) = self.usage.write(rec, |r| usage::append(path, r)) {
             tracing::warn!(
                 pending = self.usage.pending(),
                 dropped = self.usage.dropped(),
@@ -2723,7 +2669,7 @@ fn off_reason(s: &settings::RefineSettings) -> &'static str {
 
 /// The no-AI layer's text, as it is (`basics::tidy` already ran).
 fn no_ai(raw: &str) -> RefineResult {
-    RefineResult { text: raw.to_owned(), outcome: RefineOutcome::NoAi, usage: claude::Usage::default() }
+    RefineResult { text: raw.to_owned(), outcome: RefineOutcome::NoAi, usage: prompt::Usage::default() }
 }
 
 /// The local model is kept loaded on this computer, and beside the user's agent when it is the agent's fallback.
@@ -2982,14 +2928,19 @@ fn abort_stt_task(task: Option<Option<JoinHandle<()>>>) {
     }
 }
 
-/// The Soniox key of earlier versions is deleted from Windows Credential Manager: CUE does not use it any more. Every
-/// start asks; after the first there is none. The log gets whether one was deleted.
-fn forget_soniox_key() {
-    match keys::forget_soniox() {
-        Ok(true) => tracing::info!("the Soniox key of an earlier version was deleted"),
-        Ok(false) => {}
-        Err(e) => tracing::warn!("{e}"),
-    }
+/// The API keys an earlier version saved are deleted from Windows Credential Manager, on a blocking thread off the
+/// core: CUE holds no key. Every start asks; after the first there is none. The log gets the names deleted and those
+/// the store failed on, never a value.
+fn forget_api_keys() {
+    tokio::task::spawn_blocking(|| {
+        let gone = keys::forget_api_keys();
+        if !gone.deleted.is_empty() {
+            tracing::info!(deleted = ?gone.deleted, "API keys of an earlier version deleted");
+        }
+        for (name, why) in &gone.failed {
+            tracing::warn!(key = name, "API key of an earlier version not deleted: {why}");
+        }
+    });
 }
 
 #[cfg(test)]

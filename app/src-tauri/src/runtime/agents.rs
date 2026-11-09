@@ -19,7 +19,7 @@ use cue_core::refine::RefineContext;
 use cue_core::settings::{DictionarySettings, Fallback, RefineSettings, Where};
 use cue_engines::agent::opencode::{Server, fast_auto};
 use cue_engines::agent::{self, AgentClient, AgentFailure, Found, Login};
-use cue_engines::claude::{Job, RefineResult, Usage};
+use cue_engines::prompt::{Job, RefineResult, Usage};
 use cue_engines::local;
 
 use super::llm::LlmSlot;

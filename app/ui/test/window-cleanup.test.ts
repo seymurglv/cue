@@ -42,7 +42,6 @@ const small = (e: Element) => text(e.querySelector('.stx small'));
 beforeEach(() => {
   vi.useFakeTimers({ now: NOW });
   stub();
-  core.keyState.mockResolvedValue({ saved: true, mask: 'sk-…789' });
 });
 
 afterEach(() => {
@@ -58,7 +57,7 @@ describe('The Cleanup page: on this computer or in the cloud', () => {
     const rows = $$('.btray .sgrp > .srow');
     expect(rows).toHaveLength(1);
     expect(text(rows[0].querySelector('.stx b'))).toBe('Runs on');
-    expect(text(rows[0].querySelector('.stx small'))).toBe('Your key, fastest');
+    expect(text(rows[0].querySelector('.stx small'))).toBe('Your AI');
     expect(runs().map((b) => b.textContent)).toEqual(['This computer', 'Cloud']);
     expect(runs().map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'true']);
     expect($('.btray .pk')).toBeNull();

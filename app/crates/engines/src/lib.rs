@@ -1,17 +1,13 @@
 pub mod agent;
 pub mod ask;
-pub mod chat;
-pub mod check;
-pub mod claude;
 pub mod download;
 pub mod error;
-pub mod habit;
 pub mod hub;
 pub mod keys;
 pub mod local;
 pub mod local_llm;
-pub mod openrouter;
 pub mod parakeet;
+pub mod prompt;
 pub mod stt;
 #[cfg(test)]
 pub(crate) mod testing;

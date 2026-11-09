@@ -68,8 +68,6 @@ export interface Ctx {
   closeMenu(): void;
   /** A setting through the core; the page takes the settings it answers with (null — refused or no answer). */
   change(c: SettingChange): Promise<SettingsView | null>;
-  /** A key was saved or checked in the tray: the Habits section asks again whether the cleanup has one. */
-  keysChanged?(): void;
 }
 
 export interface PageOptions {
@@ -295,7 +293,7 @@ export class WindowPage implements Ctx {
     window.addEventListener('focus', () => {
       this.history.followDate();
       void this.numbers.load();
-      void this.habits.recheck();
+      this.habits.recheck();
       this.tray.regained();
     }, { signal });
     // The microphone stays open only while its settings page is shown; recordings stop and give back their URLs.
@@ -371,10 +369,6 @@ export class WindowPage implements Ctx {
       }
       return null;
     }
-  }
-
-  keysChanged(): void {
-    void this.habits.recheck();
   }
 
   menu(button: HTMLElement, items: MenuItem[], pick: (value: string) => void, note?: string, align?: MenuAlign, wide?: boolean): void {

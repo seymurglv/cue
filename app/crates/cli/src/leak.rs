@@ -1,16 +1,16 @@
 //! `cue-cli leak-scan <file or folder>...`: looks through files that are to leave this computer (the release
 //! program, the installer, the window pages) for anything private, and says where it is: the file, the byte offset and
-//! what kind of thing it is, never the thing itself. Any finding makes the exit code 1. A key, a setting, the history,
-//! the microphone list, git or a given path that cannot be read, or a given path with no files, makes it 2: a scan that
-//! does not know what to look for, or where, would pass blind. A crash prints where it happened, never its message
-//! (`main`).
+//! what kind of thing it is, never the thing itself. Any finding makes the exit code 1. The habits' secret, a setting,
+//! the history, the microphone list, git or a given path that cannot be read, or a given path with no files, makes it 2:
+//! a scan that does not know what to look for, or where, would pass blind. A crash prints where it happened, never its
+//! message (`main`).
 //!
 //! What it looks for:
 //! - patterns: a path into a Windows user profile (`C:\Users\<name>`, also with `/` or `\\`, URL-encoded, and
 //!   `/c/Users/<name>`), an email address, and an Anthropic or OpenRouter key (`sk-ant-` or `sk-or-` and 40 characters
 //!   more: the made-up keys of the tests are shorter);
-//! - exact matches with what this computer holds, read into memory for the scan only: the keys saved in Credential
-//!   Manager (the habits' hash secret among them), the history texts, questions and texts as heard of the last 31
+//! - exact matches with what this computer holds, read into memory for the scan only: the habits' hash secret in
+//!   Credential Manager (CUE holds no API key there), the history texts, questions and texts as heard of the last 31
 //!   days (12 characters or longer), the dictionary terms, the habits' examples, replaced words and short names, and
 //!   the microphone names (4 or longer), the Windows user name, computer name and profile path, the git user name and
 //!   email, and the private folders the repository's `.git/info/exclude` names (its folder lines, 4 characters or
@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use aho_corasick::AhoCorasick;
 use anyhow::{Context, Result, anyhow, bail};
 use cue_core::history;
-use cue_engines::keys::{self, KeyName};
+use cue_engines::keys;
 use regex::bytes::Regex;
 
 /// The copyright holder in NOTICE: the one name CUE publishes.
@@ -53,7 +53,7 @@ const COMMON_PROFILES: [&str; 6] =
 /// Findings printed for one file; the rest are counted.
 const MAX_SHOWN: usize = 50;
 
-/// What a finding is. Its text names the kind only: a saved key by its name, a dictionary term by its number in the
+/// What a finding is. Its text names the kind only: a dictionary term by its number in the
 /// settings file, a private folder by its number among the folder lines of `.git/info/exclude`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
@@ -63,7 +63,6 @@ pub enum Kind {
     KeyLike,
     ComputerName,
     PrivateFolder(usize),
-    SavedKey(&'static str),
     /// The habits' hash secret, as Credential Manager keeps it (64 hex digits).
     HabitSecret,
     HistoryText,
@@ -87,7 +86,6 @@ impl fmt::Display for Kind {
             Kind::KeyLike => f.write_str("an API key (sk-ant- or sk-or-)"),
             Kind::ComputerName => f.write_str("the computer name"),
             Kind::PrivateFolder(i) => write!(f, "private folder {} of .git/info/exclude", i + 1),
-            Kind::SavedKey(name) => write!(f, "the saved {name} key"),
             Kind::HabitSecret => f.write_str("the habits' secret"),
             Kind::HistoryText => f.write_str("a history text"),
             Kind::DictionaryTerm(i) => write!(f, "dictionary term {}", i + 1),
@@ -143,10 +141,9 @@ impl Private {
     pub fn summary(&self) -> String {
         let yes_no = |b: bool| if b { "yes" } else { "no" };
         format!(
-            "saved keys {}, habits' secret {}, history texts {}, dictionary terms {}, habit examples {}, habit words {}, \
+            "habits' secret {}, history texts {}, dictionary terms {}, habit examples {}, habit words {}, \
              microphone names {}, user name {}, computer name {}, profile path {}, git name {}, git email {}, private \
              folders {}",
-            self.count(|k| matches!(k, Kind::SavedKey(_))),
             yes_no(self.count(|k| *k == Kind::HabitSecret) > 0),
             self.count(|k| *k == Kind::HistoryText),
             self.count(|k| matches!(k, Kind::DictionaryTerm(_))),
@@ -189,18 +186,11 @@ impl Private {
     /// file's own parse error is left out, since it can quote a value.
     pub fn gather() -> Result<Private> {
         let mut private = Private { public_name: PUBLIC_NAME.to_owned(), ..Private::default() };
-        for name in KeyName::ALL {
-            match keys::lookup(name) {
-                Ok(Some(value)) => private.add(Kind::SavedKey(name.as_str()), &value, 1),
-                Ok(None) => {}
-                Err(e) => bail!("could not read the saved keys: {e}"),
-            }
-        }
         // The habits' hash secret, as the store keeps it (never made here); missing or malformed, there is none.
         match keys::kept_habit_secret() {
             Ok(Some(secret)) => private.add(Kind::HabitSecret, &secret.to_hex(), 1),
             Ok(None) => {}
-            Err(e) => bail!("could not read the saved keys: {e}"),
+            Err(e) => bail!("could not read the habits' secret: {e}"),
         }
 
         let local = cue_core::paths::local_app_data().context("LOCALAPPDATA is not set or is not an absolute path")?;
@@ -863,6 +853,16 @@ mod tests {
         assert_eq!(kinds(&hits).iter().filter(|k| **k == Kind::RandomString).count(), 2);
     }
 
+    /// CUE holds no API key, so nothing is read for one; an API-key-looking string is still a finding by its pattern.
+    #[test]
+    fn leak_scan_still_flags_api_key_patterns() {
+        let s = Scanner::new(&Private::default()).unwrap();
+        let parts = ["key ", &format!("sk-ant-api03-{} ", made_up(4, 48, BASE62)), &format!("sk-or-v1-{}", made_up(5, 64, HEX))];
+        let at = starts(&parts);
+        assert_eq!(offsets(&s.scan(parts.concat().as_bytes()), Kind::KeyLike), [at[1], at[2]]);
+        assert!(!Private::default().summary().contains("saved keys"), "no saved key is looked for");
+    }
+
     /// The folder lines of an exclude file name the private folders; the scan finds them in any case, as text and as
     /// UTF-16.
     #[test]
@@ -895,14 +895,14 @@ mod tests {
     #[test]
     fn private_texts_are_found_as_utf8_and_utf16_in_any_case() {
         let key = made_up(3, 40, BASE62);
-        let s = scanner(&[(Kind::SavedKey("soniox"), &key), (Kind::MicrophoneName, "Jane's AirPods")], None);
+        let s = scanner(&[(Kind::HabitSecret, &key), (Kind::MicrophoneName, "Jane's AirPods")], None);
         let mut file = vec![0u8, 1, 2];
         file.extend(key.to_ascii_uppercase().as_bytes());
         let wide_at = file.len();
         file.extend(utf16le(&key));
         file.extend(b"\0headset JANE'S AIRPODS");
         let hits = s.scan(&file);
-        assert_eq!(offsets(&hits, Kind::SavedKey("soniox")), [3, wide_at]);
+        assert_eq!(offsets(&hits, Kind::HabitSecret), [3, wide_at]);
         assert_eq!(offsets(&hits, Kind::MicrophoneName).len(), 1);
     }
 
@@ -1248,7 +1248,6 @@ mod tests {
     #[test]
     fn what_is_printed_holds_no_private_text() {
         let mut private = Private::default();
-        private.add(Kind::SavedKey("anthropic"), "made-up-secret-value", 1);
         private.add(Kind::HistoryText, "a made-up dictation text", MIN_HISTORY_CHARS);
         private.add(Kind::PrivateFolder(0), ".made-up-notes", MIN_NAME_CHARS);
         private.user_name = Some("jdoe".into());
@@ -1256,14 +1255,13 @@ mod tests {
         let shown = format!("{private:?} {}", private.summary());
         assert!(!shown.contains("made-up"), "{shown}");
         assert!(!shown.contains("jdoe") && !shown.to_lowercase().contains("desktop"), "{shown}");
-        assert!(shown.contains("saved keys 1, habits' secret no, history texts 1"), "{shown}");
+        assert!(shown.starts_with("habits' secret no, history texts 1"), "{shown}");
         assert!(shown.contains("computer name yes") && shown.contains("private folders 1"), "{shown}");
         private.add(Kind::HabitSecret, &"5c".repeat(32), 1);
         let shown = format!("{private:?}");
-        assert!(shown.contains("saved keys 1, habits' secret yes") && !shown.contains("5c5c"), "{shown}");
+        assert!(shown.starts_with("habits' secret yes") && !shown.contains("5c5c"), "{shown}");
         assert_eq!(Kind::HabitSecret.to_string(), "the habits' secret");
         assert_eq!(Kind::ComputerName.to_string(), "the computer name");
-        assert_eq!(Kind::SavedKey("soniox").to_string(), "the saved soniox key");
         assert_eq!(Kind::DictionaryTerm(2).to_string(), "dictionary term 3");
     }
 

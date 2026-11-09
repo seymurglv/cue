@@ -1,20 +1,17 @@
-//! The welcome window (spec 4a §1): hello, the key, the speech model, the microphone, a first dictation, done. It opens
-//! at a start when the cleanup's key is missing (Anthropic's, or OpenRouter's when the cleanup goes through OpenRouter) —
-//! the first start, or the key removed since — and with `--welcome`, also
-//! when a second launch brings it to the CUE already running. Like the main window (`main_window`) there is one at a
-//! time, created when opened and destroyed when closed, never built on the main thread. Windows draws its frame, in the
-//! Windows theme, with the close button alone; it takes the focus, so its first dictation is pasted into its own field.
+//! The welcome window (spec 4a §1): hello, the speech model, the microphone, a first dictation, done. It opens with
+//! `--welcome`, at a start and when a second launch brings it to the CUE already running; CUE holds no key, so a
+//! missing one opens nothing. Like the main window (`main_window`) there is one at a time, created when opened and
+//! destroyed when closed, never built on the main thread. Windows draws its frame, in the Windows theme, with the close
+//! button alone; it takes the focus, so its first dictation is pasted into its own field.
 //!
 //! While it is open the hotkey starts nothing except on its first dictation's step (`Input::WelcomeGate`): it is held
 //! from before the window is created and let go when the window is destroyed or could not be created (`Hold`); in
 //! between its page moves it with its steps (`commands::welcome_step`). A chord it holds brings it forward
 //! (`bring_forward`). Its microphone preview goes with it; the main window's stays.
-use cue_core::settings::{RefineSettings, Where};
 use std::ffi::OsStr;
 use std::sync::{Mutex, PoisonError};
 
 use cue_core::flow::Input;
-use cue_engines::keys::{self, KeyName};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -25,64 +22,23 @@ use crate::runtime::CoreEvent;
 /// Its size as the design draws it (logical px); it never changes.
 const WIDTH: f64 = 560.0;
 const HEIGHT: f64 = 430.0;
-/// The argument that opens it whatever the keys.
+/// The argument that opens it.
 const WELCOME_ARG: &str = "--welcome";
 
 /// The window is being created: a second open meanwhile creates no second one.
 static CREATING: Mutex<bool> = Mutex::new(false);
-
-/// Whether a key is in Windows Credential Manager: read there, with no network.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KeyPresence {
-    Saved,
-    Missing,
-    /// The store could not be read.
-    Unreadable,
-}
-
-/// The window opens when it is asked for (`forced`) or a key is missing. A store that could not be read is not a
-/// missing key: no window for that (the main window's keys show the failure).
-pub fn should_welcome(key: KeyPresence, forced: bool) -> bool {
-    forced || key == KeyPresence::Missing
-}
 
 /// `--welcome` among a launch's arguments; CUE takes no others.
 pub fn asks_welcome<S: AsRef<OsStr>>(args: impl IntoIterator<Item = S>) -> bool {
     args.into_iter().any(|a| a.as_ref() == WELCOME_ARG)
 }
 
-/// The key a start looks at: the one the cleanup's cloud connection needs; none on this computer.
-fn start_key(refine: &RefineSettings) -> Option<KeyName> {
-    match refine.where_ {
-        Where::Local | Where::Off => None,
-        // Task 13: the welcome step "Кто чистит текст" replaces this key check (a fresh install has no key, so the
-        // window still opens at the first start).
-        Where::Agent => KeyName::of_connection(refine.connection().id),
-    }
-}
-
-/// At startup: the window opens if the key of the cleanup's cloud connection is missing, or when `forced`
-/// (`--welcome`). The log gets whether the key is there, never a key.
-pub fn open_at_start(app: &AppHandle, refine: &RefineSettings, forced: bool) {
-    // On this computer the cleanup needs no key: the window opens only when asked for.
-    let name = start_key(refine);
-    let key = name.map_or(KeyPresence::Saved, presence);
-    let opens = should_welcome(key, forced);
-    tracing::info!(key = name.map(KeyName::as_str), presence = ?key, forced, opens, "welcome window at startup");
-    if opens {
+/// At startup: the window opens when asked for (`forced`, `--welcome`).
+// Task 13: the welcome step "Кто чистит текст" decides when a first start opens it.
+pub fn open_at_start(app: &AppHandle, forced: bool) {
+    tracing::info!(forced, "welcome window at startup");
+    if forced {
         open(app);
-    }
-}
-
-/// Whether `name`'s key is saved; the key itself is dropped at once.
-fn presence(name: KeyName) -> KeyPresence {
-    match keys::lookup(name) {
-        Ok(Some(_)) => KeyPresence::Saved,
-        Ok(None) => KeyPresence::Missing,
-        Err(_) => {
-            tracing::warn!(key = name.as_str(), "welcome window: the key store was not read");
-            KeyPresence::Unreadable
-        }
     }
 }
 
@@ -199,44 +155,8 @@ fn gate(core: &UnboundedSender<CoreEvent>, held: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use KeyPresence::{Missing, Saved, Unreadable};
     use std::ffi::OsString;
     use tokio::sync::mpsc::UnboundedReceiver;
-
-    #[test]
-    fn welcome_when_the_key_is_missing() {
-        assert!(should_welcome(Missing, false), "the first start");
-        assert!(!should_welcome(Saved, false));
-    }
-
-    /// A store that failed says nothing about the key: no window for that.
-    #[test]
-    fn store_error_is_not_a_missing_key() {
-        assert!(!should_welcome(Unreadable, false));
-    }
-
-    /// Over OpenRouter the OpenRouter key is the one the cleanup needs: no window at every start for a missing Anthropic
-    /// key the user does not use.
-    #[test]
-    fn the_key_looked_at_is_the_connection_s() {
-        let over = |id: &str| RefineSettings { connection: id.into(), ..RefineSettings::default() };
-        assert_eq!(start_key(&over("anthropic")), Some(KeyName::Anthropic));
-        assert_eq!(start_key(&over("openai")), Some(KeyName::OpenAi));
-    }
-
-    /// On this computer the cleanup needs no key: no window at a start for one.
-    #[test]
-    fn the_key_is_not_looked_at_on_this_computer() {
-        let local = RefineSettings { where_: Where::Local, ..RefineSettings::default() };
-        assert_eq!(start_key(&local), None);
-    }
-
-    #[test]
-    fn forced_welcome_opens_with_the_key() {
-        for anthropic in [Saved, Unreadable, Missing] {
-            assert!(should_welcome(anthropic, true), "{anthropic:?}");
-        }
-    }
 
     /// At startup from `std::env::args_os`, in a second launch from the argv the running CUE gets: the program first.
     #[test]

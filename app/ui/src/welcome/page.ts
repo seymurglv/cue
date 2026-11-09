@@ -1,24 +1,23 @@
-// The welcome window's page (spec 4a §1): one step at a time — Hello, Keys, Microphone, First dictation, Done — with
+// The welcome window's page (spec 4a §1): one step at a time — Hello, Model, Microphone, First dictation, Done — with
 // the step dots, Back and one main button at the bottom; a new step slides in from the side. Ported from the approved
 // design (stage 6, the welcome window only): Windows draws the frame, so the page draws none. The page draws nothing
 // until the core has told it the settings (the language is SettingsView.lang); the theme follows Windows.
 // The core holds the hotkey from the window's creation: the page holds it again on load (a reload starts from a known
 // state), lets it go on First dictation and holds it again when leaving that step. The microphone is open only while
-// the Microphone step is shown. A key typed into the Keys step goes to the core once and leaves the page.
+// the Microphone step is shown.
 import '../design/cue.css';
 import '../design/window.css';
 import './welcome.css';
 import '../design/cue.js';
 import '../design/drop.js';
 import * as api from '../window/api';
-import type { KeyName, LinkTarget, MicAccess, ModelState, SettingChange, SettingsView } from '../window/api';
+import type { LinkTarget, MicAccess, ModelState, SettingChange, SettingsView } from '../window/api';
 import { CUE } from '../designParts';
-import { KeyRows } from '../window/keys';
 import { MicRows } from '../window/mic';
 import { modelRow, stepModelRow } from '../window/model';
 import { Menus, codeOf, h, logFailed, relRect, type MenuItem } from '../window/page';
 import { TEXTS, pickLang, type Lang, type WinText } from '../window/text';
-import { STEPS, keysReady, stepPage, stepsFor, wordCount, type Step } from './steps';
+import { STEPS, stepPage, wordCount, type Step } from './steps';
 import { WELCOME_TEXTS, type WelcomeText } from './text';
 
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
@@ -59,18 +58,16 @@ function burst(host: HTMLElement, cx: number, cy: number, n = 30, dist = 90): vo
 }
 
 export class WelcomePage {
-  /** The key and microphone rows' texts (the settings tray's). */
+  /** The microphone rows' and the model block's texts (the settings tray's). */
   t: WinText = TEXTS.en;
   text: WelcomeText = WELCOME_TEXTS.en;
   lang: Lang = 'en';
   settings: SettingsView | null = null;
   /** The speech model's state, followed from `cue://model`. */
   model: ModelState | null = null;
-  readonly keys: KeyRows;
   readonly mic: MicRows;
   readonly reduced: () => boolean;
-  /** The steps for the settings (`stepsFor`). */
-  private steps: readonly Step[] = STEPS;
+  private readonly steps: readonly Step[] = STEPS;
   /** The step shown, by its place in `steps`. */
   at = 0;
   /** The words of the first dictation. */
@@ -97,7 +94,6 @@ export class WelcomePage {
     this.reduced = opts.reduced ?? (() => !!window.matchMedia?.(REDUCED_MOTION)?.matches);
     app.classList.add('app', 'ow');
     this.menus = new Menus(app);
-    this.keys = new KeyRows(this, () => this.shown('keys'), () => this.paintPrimary());
     this.mic = new MicRows(this, () => this.shown('mic'), () => this.redrawMic());
     const signal = this.off.signal;
     const dark = window.matchMedia?.(DARK);
@@ -108,15 +104,6 @@ export class WelcomePage {
     app.addEventListener('input', (e) => {
       const t = e.target as Element;
       if (t.matches('textarea[data-field]')) this.onTyped();
-      // A key typed and not checked yet holds Next (Next would drop it).
-      else if (t.matches('input[data-key]')) this.paintPrimary();
-    }, { signal });
-    app.addEventListener('keydown', (e) => {
-      const input = (e.target as Element).closest<HTMLInputElement>('input[data-key]');
-      if (input && e.key === 'Enter') {
-        e.preventDefault();
-        void this.keys.check(input.dataset.key as KeyName);
-      }
     }, { signal });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && this.menus.isOpen) {
@@ -154,7 +141,6 @@ export class WelcomePage {
       return null;
     });
     this.settings = view;
-    this.steps = stepsFor(view);
     this.lang = pickLang(view?.lang);
     this.t = TEXTS[this.lang];
     this.text = WELCOME_TEXTS[this.lang];
@@ -241,13 +227,10 @@ export class WelcomePage {
     this.enter(dir);
   }
 
-  /** The step shown ends: its timers and marks stop, a key typed and not saved is dropped, the microphone closes, the
-   *  hotkey is held again. */
+  /** The step shown ends: its timers and marks stop, the microphone closes, the hotkey is held again. */
   private leave(): void {
     for (const f of this.undo.splice(0)) f();
     this.menus.close();
-    const pg = this.current;
-    if (this.step === 'keys') pg?.querySelectorAll<HTMLInputElement>('input[data-key]').forEach((i) => (i.value = ''));
     if (this.step === 'mic') this.mic.stopPreview();
     if (this.step === 'try') api.welcomeStep(false).catch((e) => logFailed('holding the hotkey', e));
   }
@@ -261,7 +244,6 @@ export class WelcomePage {
     this.paintFoot();
     const pg = this.current!;
     if (step === 'hello') this.hello(pg);
-    else if (step === 'keys') void this.keys.readAll();
     else if (step === 'mic') this.lookAtMic();
     else if (step === 'try') {
       api.welcomeStep(true).catch((e) => logFailed('letting the hotkey go', e));
@@ -331,13 +313,13 @@ export class WelcomePage {
    *  so Back does not move. */
   private paintPrimary(): void {
     const x = this.text;
-    const label = { hello: x.start, keys: x.next, model: x.next, mic: this.blocked() ? x.next : x.micWorks, try: null, done: x.finish }[
+    const label = { hello: x.start, model: x.next, mic: this.blocked() ? x.next : x.micWorks, try: null, done: x.finish }[
       this.step
     ];
     const lbl = this.pri.querySelector<HTMLElement>('.lbl')!;
     if (label !== null && lbl.dataset.t !== label) CUE().setLabel(lbl, label);
     this.pri.classList.toggle('wait', this.step === 'try');
-    this.pri.disabled = this.step === 'try' || (this.step === 'keys' && !keysReady(this.keys));
+    this.pri.disabled = this.step === 'try';
   }
 
   private onClick(e: Event): void {
@@ -346,8 +328,7 @@ export class WelcomePage {
     if (t.closest('[data-pri]')) this.primary();
     else if (t.closest('[data-back]')) {
       if (this.at > 0 && this.step !== 'done') this.go(this.at - 1);
-    } else if ((b = t.closest<HTMLElement>('[data-check]'))) void this.keys.check(b.dataset.check as KeyName);
-    else if ((b = t.closest<HTMLElement>('[data-dd="mic"]'))) this.mic.menu(b);
+    } else if ((b = t.closest<HTMLElement>('[data-dd="mic"]'))) this.mic.menu(b);
     else if ((b = t.closest<HTMLElement>('[data-link]'))) {
       api.openLink(b.dataset.link as LinkTarget).catch((err) => logFailed('opening a link', err));
     }

@@ -6,7 +6,7 @@ use std::panic::AssertUnwindSafe;
 use cue_core::flow::RefineOutcome;
 use cue_engines::EngineError;
 use cue_engines::ask::{AskEnd, AskFailure, AskResult};
-use cue_engines::claude::RefineResult;
+use cue_engines::prompt::RefineResult;
 use futures_util::FutureExt;
 
 /// The result of `body`; on a panic, the result of `on_panic`. The panic hook logs where it happened; the panic

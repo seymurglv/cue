@@ -1,16 +1,89 @@
 //! "Ask" through Claude (spec 2 §6.2): the streaming request with the write_to_field tool and web search, the turns of the
-//! conversation, the parser of the event stream and what the model decided; the network part is `run` and `warm`. No
-//! text of the question, the answer, the selection or the sources reaches the log here.
+//! conversation, the parser of the event stream and what the model decided; the network part is `run`. No text of the
+//! question, the answer, the selection or the sources reaches the log here. CUE holds no key for it any more: the
+//! runtime ends a question at once (`ErrorCause::NeedAiAsk`) until Ask goes through the user's own AI.
+// Task 9: Ask's own route replaces the Anthropic request and its stream.
 use std::collections::HashSet;
 use std::time::Duration;
 
 use cue_core::ask as core_ask;
-use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::time::{timeout_at, Instant};
 
-use crate::claude::{self, messages_post, THINKING_HEADROOM};
-use crate::openrouter::Sse;
+const API_URL: &str = "https://api.anthropic.com/v1/messages";
+const API_VERSION: &str = "2026-10-21";
+
+/// `max_tokens` headroom for adaptive thinking: otherwise thinking eats the response budget and the answer is cut.
+pub(crate) const THINKING_HEADROOM: u32 = 2_048;
+
+/// A Messages API POST with the key and the API version.
+fn messages_post(http: &reqwest::Client, url: &str, key: &str) -> reqwest::RequestBuilder {
+    http.post(url)
+        .header("x-api-key", key)
+        .header("anthropic-version", API_VERSION)
+        .header("content-type", "application/json")
+}
+
+/// SSE stream parsing from byte chunks. Chunks may be cut anywhere — even mid UTF-8 character: a line is parsed whole.
+/// An event's `data:` fields are joined with `\n`, and an event ends with an empty line; comments (`:` at the start of
+/// a line) and other fields are skipped.
+#[derive(Debug, Default)]
+pub(crate) struct Sse {
+    line: Vec<u8>,
+    data: Option<String>,
+}
+
+impl Sse {
+    /// Data of the events this chunk completed.
+    pub(crate) fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+        let mut out = Vec::new();
+        for &b in bytes {
+            if b == b'\n' {
+                let line = std::mem::take(&mut self.line);
+                self.line_done(&line, &mut out);
+            } else {
+                self.line.push(b);
+            }
+        }
+        out
+    }
+
+    /// End of stream: an unfinished line and an event with no empty line after it.
+    pub(crate) fn finish(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        let line = std::mem::take(&mut self.line);
+        if !line.is_empty() {
+            self.line_done(&line, &mut out);
+        }
+        out.extend(self.data.take());
+        out
+    }
+
+    fn line_done(&mut self, line: &[u8], out: &mut Vec<String>) {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            out.extend(self.data.take());
+            return;
+        }
+        if line.starts_with(b":") {
+            return;
+        }
+        let line = String::from_utf8_lossy(line);
+        let (field, value) = match line.split_once(':') {
+            Some((field, value)) => (field, value.strip_prefix(' ').unwrap_or(value)),
+            None => (line.as_ref(), ""),
+        };
+        if field == "data" {
+            match &mut self.data {
+                Some(data) => {
+                    data.push('\n');
+                    data.push_str(value);
+                }
+                None => self.data = Some(value.to_owned()),
+            }
+        }
+    }
+}
 
 /// The web search tool (spec 2 §6.2): the basic `web_search_20250305`, called by the model directly — no filtering of
 /// the results in code, so no code execution step that can fail.
@@ -106,25 +179,6 @@ fn marked(messages: &[Value]) -> Value {
         block["cache_control"] = json!({ "type": "ephemeral" });
     }
     Value::Array(out)
-}
-
-/// `max_tokens` of the cache warm-up (spec 2 §6.3): no output is paid for. The first probe (§13.1) keeps it at 0 or, if the
-/// API refuses that, sets 1.
-pub const WARM_MAX_TOKENS: u32 = 0;
-
-/// The cache warm-up (spec 2 §6.3): the request's prefix — the same tools, instruction, thinking, effort and tool choice —
-/// with a one-character placeholder, no stream, no output. The mark stays only on the instruction: on the placeholder it
-/// would key the cache to it.
-pub fn warm_body(model: &str, search: Option<SearchTool>) -> Value {
-    let mut v = request_body(model, search, Thinking::DEFAULT, &[user_turn(".", None)]);
-    if let Some(o) = v.as_object_mut() {
-        o.remove("stream");
-    }
-    v["max_tokens"] = json!(WARM_MAX_TOKENS);
-    if let Some(block) = v["messages"][0]["content"][0].as_object_mut() {
-        block.remove("cache_control");
-    }
-    v
 }
 
 /// What a follow-up says about a write_to_field call of the previous turn that was shown, not written.
@@ -515,7 +569,7 @@ pub async fn run(
     messages: &[Value],
     on_step: impl FnMut(Step) + Send,
 ) -> AskResult {
-    run_at(claude::API_URL, http, key, model, search, thinking, messages, Limits::SPEC, on_step).await
+    run_at(API_URL, http, key, model, search, thinking, messages, Limits::SPEC, on_step).await
 }
 
 fn failed(why: AskFailure, content: Vec<Value>, usage: AskUsage) -> AskResult {
@@ -696,34 +750,6 @@ async fn rest(resp: &mut reqwest::Response) {
     while let Ok(Some(_)) = resp.chunk().await {}
 }
 
-/// A warm-up that has not answered in 5 s is of no use to this question.
-const WARM_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// One cache warm-up for "Ask" ([`warm_body`], spec 2 §6.3): the tokens paid for on HTTP 200; on any problem one log line
-/// with the reason and `None` — the question's own request then writes the cache.
-pub async fn warm(http: &reqwest::Client, key: &str, model: &str, search: Option<SearchTool>) -> Option<claude::Usage> {
-    warm_at(claude::API_URL, http, key, model, search).await
-}
-
-async fn warm_at(url: &str, http: &reqwest::Client, key: &str, model: &str, search: Option<SearchTool>) -> Option<claude::Usage> {
-    #[derive(Deserialize)]
-    struct WarmResp {
-        usage: claude::Usage,
-    }
-    let send = messages_post(http, url, key).timeout(WARM_TIMEOUT).json(&warm_body(model, search)).send().await;
-    let why = match send {
-        Err(e) if e.is_timeout() => "timeout".to_owned(),
-        Err(_) => "network".to_owned(),
-        Ok(r) if r.status().as_u16() != 200 => format!("HTTP {}", r.status().as_u16()),
-        Ok(r) => match r.json::<WarmResp>().await {
-            Ok(w) => return Some(w.usage),
-            Err(_) => "HTTP 200 response not parsed".to_owned(),
-        },
-    };
-    tracing::warn!("ask cache warm-up: {why}");
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,20 +830,64 @@ mod tests {
         assert!(v.get("thinking").is_none());
     }
 
-    /// The warm-up builds the prefix the real request reads (spec 2 §6.3): the same tools, instruction, thinking, effort
-    /// and tool choice; no stream, no output, the mark on the instruction only (a mark on the placeholder would key the
-    /// cache to it).
+    /// A whole stream: a comment, the events with their names, `[DONE]`.
+    fn sse_stream(nl: &str) -> String {
+        let events = [
+            ": keep-alive".to_owned(),
+            format!(r#"event: message_start{nl}data: {{"type":"message_start"}}"#),
+            r#"data: {"type":"content_block_delta","delta":{"text":"Привет,"}}"#.to_owned(),
+            ": keep-alive".to_owned(),
+            r#"data: {"type":"content_block_delta","delta":{"text":" как дела?"}}"#.to_owned(),
+            "data: [DONE]".to_owned(),
+        ];
+        events.iter().map(|e| format!("{e}{nl}{nl}")).collect()
+    }
+
+    fn sse_events() -> Vec<String> {
+        vec![
+            r#"{"type":"message_start"}"#.to_owned(),
+            r#"{"type":"content_block_delta","delta":{"text":"Привет,"}}"#.to_owned(),
+            r#"{"type":"content_block_delta","delta":{"text":" как дела?"}}"#.to_owned(),
+            "[DONE]".to_owned(),
+        ]
+    }
+
     #[test]
-    fn the_warm_up_has_the_prefix_and_nothing_else() {
-        let search = Some(SearchTool { max_uses: 2 });
-        let warm = warm_body("claude-haiku-5-5", search);
-        let real = request_body("claude-haiku-5-5", search, Thinking::DEFAULT, &[question()]);
-        for k in ["model", "system", "tools", "tool_choice", "thinking", "output_config"] {
-            assert_eq!(warm[k], real[k], "{k}");
+    fn sse_reads_data_and_skips_comments() {
+        let mut sse = Sse::default();
+        let mut got = sse.push(sse_stream("\n").as_bytes());
+        got.extend(sse.finish());
+        assert_eq!(got, sse_events());
+    }
+
+    #[test]
+    fn sse_split_anywhere_gives_same_events() {
+        // Every cut point — including the middle of a Cyrillic letter (two bytes each) and between `\r` and `\n`.
+        for nl in ["\n", "\r\n"] {
+            let bytes = sse_stream(nl).into_bytes();
+            for cut in 0..=bytes.len() {
+                let mut sse = Sse::default();
+                let mut got = sse.push(&bytes[..cut]);
+                got.extend(sse.push(&bytes[cut..]));
+                got.extend(sse.finish());
+                assert_eq!(got, sse_events(), "cut at byte {cut}, line break {nl:?}");
+            }
+            // Byte by byte.
+            let mut sse = Sse::default();
+            let mut got: Vec<String> = bytes.iter().flat_map(|b| sse.push(std::slice::from_ref(b))).collect();
+            got.extend(sse.finish());
+            assert_eq!(got, sse_events(), "byte by byte, line break {nl:?}");
         }
-        assert!(warm.get("stream").is_none());
-        assert_eq!(warm["max_tokens"], WARM_MAX_TOKENS);
-        assert_eq!(warm["messages"], json!([{ "role": "user", "content": [{ "type": "text", "text": "." }] }]));
+    }
+
+    #[test]
+    fn sse_multiline_data_other_fields_and_unterminated_tail() {
+        let mut sse = Sse::default();
+        let got = sse.push(b"event: message\nid: 7\ndata: a\ndata:b\nretry: 10\n\n:keep-alive\n\ndata: x");
+        assert_eq!(got, ["a\nb"], "data fields are joined with a line break, other fields are skipped");
+        assert_eq!(sse.finish(), ["x"], "the end of the stream completes both the unfinished line and the event");
+        assert!(sse.finish().is_empty());
+        assert!(Sse::default().push(b": keep-alive\n\n\n\n").is_empty(), "only comments, no events");
     }
 
     /// A write shown instead of written (spec 2 §6.2) left a call without its result: the follow-up answers it first.
@@ -1432,25 +1502,5 @@ mod tests {
         nothing.extend(end("end_turn", json!({ "output_tokens": 0 })));
         let (r, _, _, _) = ask_with(Some(KEY), FAST, move |_, _, _| stream(&nothing)).await;
         assert_eq!(r.end, AskEnd::Failed(AskFailure::Malformed));
-    }
-
-    #[tokio::test]
-    async fn the_warm_up_sends_its_body_and_returns_the_tokens() {
-        let ok = r#"{"id":"msg_1","type":"message","role":"assistant","content":[],"stop_reason":"max_tokens","usage":{"input_tokens":5,"cache_creation_input_tokens":1300,"cache_read_input_tokens":0,"output_tokens":0}}"#;
-        let api = fake_api(move |_, _, _| reply(200, ok)).await;
-        let http = reqwest::Client::builder().no_proxy().build().unwrap();
-        let url = format!("{}/v1/messages", api.base);
-        let usage = warm_at(&url, &http, KEY, "claude-haiku-5-5", None).await.expect("warmed");
-        assert_eq!(usage.cache_creation_input_tokens, 1_300);
-        let body: Value = serde_json::from_slice(&api.body(0)).unwrap();
-        assert_eq!(body, warm_body("claude-haiku-5-5", None));
-
-        let api = fake_api(|_, _, _| reply(400, r#"{"error":{"type":"invalid_request_error"}}"#)).await;
-        let url = format!("{}/v1/messages", api.base);
-        let (logs, _guard) = capture_logs();
-        assert_eq!(warm_at(&url, &http, KEY, "claude-haiku-5-5", None).await, None);
-        let lines: Vec<String> = logs.lock().unwrap().iter().filter(|l| l.contains("cue_engines::ask")).cloned().collect();
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("ask cache warm-up: HTTP 400"), "{lines:?}");
     }
 }

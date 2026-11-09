@@ -2,16 +2,15 @@
 // dictation, learned when a correction repeats. The heading with the count and the "Learn from me" switch; the hint;
 // one row per habit, the newest first — the rule, its example struck → green, where it holds and how many times, a
 // switch, and "Forget" on hover; "Forget all" at the bottom on a second press. With "Learn from me" off the rows are
-// muted; with no cleanup connected a line says habits need it. The core keeps the habits (`habits.list` in
+// muted; with the cleanup off (no AI) a line says habits need it. The core keeps the habits (`habits.list` in
 // settings.json) and changes them (`habitOn`, `habitForget`, `habitsForget`); the rows follow its answers and what it
 // sends by itself: a new one grows in with the highlight, a gone one folds away, one switched off is muted in place,
 // and one that widened (it takes the id of everywhere) changes in place.
 // Text goes into the page as text.
 import { CUE } from '../designParts';
-import * as api from './api';
 import type { HabitView } from './api';
 import { icon } from './icons';
-import { h, iconButton, logFailed, type Ctx } from './page';
+import { h, iconButton, type Ctx } from './page';
 import { CLEAR_ARMED_MS } from './settings';
 import { fill, plural } from './text';
 
@@ -30,8 +29,6 @@ export class HabitsView {
   private armed: ReturnType<typeof setTimeout> | null = null;
   /** Where the cleanup ran when the no-cleanup line was last checked. */
   private checked: string | null = null;
-  /** The latest check of the cleanup's key: an earlier one's answer, coming later, is dropped. */
-  private keyAsk = 0;
   /** The habits whose rows fold away while the core is asked to forget them: another press does nothing. */
   private readonly forgetting = new Set<string>();
   /** The habit each row shows now. */
@@ -128,33 +125,19 @@ export class HabitsView {
     for (const w of fresh) this.grow(w);
     this.empty.hidden = list.length > 0;
     this.more.hidden = list.length === 0;
-    // Where the cleanup runs: a change asks the key again.
+    // Where the cleanup runs: a change says again whether it is on.
     const conn = this.ctx.settings?.refineWhere ?? null;
     if (conn !== this.checked) {
       this.checked = conn;
-      void this.recheck();
+      this.recheck();
     }
   }
 
-  /** The line "Habits work when the cleanup is on": shown while the cleanup runs in the cloud with no key saved for
-   *  its connection (on this computer it needs none). Asked again when the window gets the focus back and when a key
-   *  changes. */
-  async recheck(): Promise<void> {
+  /** The line "Habits work when the cleanup is on": shown while the cleanup is off (no AI), which applies no habit.
+   *  Looked at again when the window gets the focus back. */
+  recheck(): void {
     if (!this.sec) return;
-    const ask = ++this.keyAsk;
-    const s = this.ctx.settings;
-    // Task 8: an agent needs no key; this check goes with the keys.
-    if (!s || s.refineWhere !== 'agent') {
-      this.noCleanup.hidden = true;
-      return;
-    }
-    let saved = true;
-    try {
-      saved = (await api.keyState('anthropic')).saved;
-    } catch (e) {
-      logFailed('reading the cleanup key', e);
-    }
-    if (ask === this.keyAsk) this.noCleanup.hidden = saved;
+    this.noCleanup.hidden = this.ctx.settings?.refineWhere !== 'off';
   }
 
   private row(x: HabitView): HTMLElement {

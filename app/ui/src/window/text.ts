@@ -1,11 +1,8 @@
 // The main window's texts in English and Russian. The language is the core's (SettingsView.lang): the window has no
 // language set before its script runs, so the page asks for the settings before it draws anything.
-import type { AudioKeep, Keep, KeyCheck, Mode, UiLanguage } from './api';
+import type { AudioKeep, Keep, Mode, UiLanguage } from './api';
 
 export type Lang = 'en' | 'ru';
-
-/** A key's state as its row shows it: the result of a check, saved but not checked, being checked. */
-export type KeyState = KeyCheck | 'saved' | 'checking';
 
 /** A word's forms by count: English one and many; Russian one (1, 21), few (2–4, 22–24) and many. */
 export type Forms = readonly [string, string] | readonly [string, string, string];
@@ -113,7 +110,6 @@ export interface WinText {
   back: string;
   /** settings.json was not read at startup. */
   unsaved: string;
-  keys: string;
   mic: string;
   translate: string;
   general: string;
@@ -170,12 +166,6 @@ export interface WinText {
   /** General's value: start at sign-in on, off. */
   generalOn: string;
   generalOff: string;
-  keyHint: string;
-  check: string;
-  keyStates: Record<KeyState, string>;
-  /** The keys row with none saved, and with one missing ({NAME}). */
-  noKeys: string;
-  noKey: string;
   micLabel: string;
   windowsMic: string;
   /** In the menu: the Windows microphone and its name. */
@@ -187,7 +177,6 @@ export interface WinText {
   micTestHint: string;
   translateTo: string;
   autostart: string;
-  keySavedMask: string;
   uiLanguage: string;
   uiLanguages: Record<UiLanguage, string>;
   /** The tray's History page: how long recordings are kept, never longer than the history. */
@@ -272,7 +261,6 @@ export const en: WinText = {
   close: 'Close · Esc',
   back: 'Back',
   unsaved: "settings.json wasn't read — changes last until CUE quits",
-  keys: 'Keys',
   model: 'Speech recognition',
   modelName: 'Parakeet Ultra',
   modelValue: {
@@ -313,7 +301,7 @@ export const en: WinText = {
     none: 'No Parakeet models for this search',
   },
   runsOn: 'Runs on',
-  runsHint: { local: 'Free, private', cloud: 'Your key, fastest' },
+  runsHint: { local: 'Free, private', cloud: 'Your AI' },
   runs: { local: 'This computer', cloud: 'Cloud' },
   cleanupNoteLocal: 'Free. The text never leaves this computer; the model runs on its processor.',
   cleanupValue: { notDownloaded: 'Model not downloaded', downloading: 'Downloading {PCT} %' },
@@ -333,20 +321,6 @@ export const en: WinText = {
   mic: 'Microphone',
   translate: 'Translation',
   general: 'General',
-  keyHint: 'Paste the key',
-  check: 'Check',
-  keyStates: {
-    works: 'Works',
-    badKey: 'Key error',
-    noBalance: 'No money on the account',
-    unchecked: "Couldn't check",
-    missing: 'No key',
-    store: "Couldn't check",
-    saved: 'Saved',
-    checking: 'Checking…',
-  },
-  noKeys: 'No keys',
-  noKey: 'No {NAME} key',
   micLabel: 'Microphone',
   windowsMic: 'As in Windows',
   windowsMicNamed: 'As in Windows ({NAME})',
@@ -356,7 +330,6 @@ export const en: WinText = {
   micTestHint: 'Say something',
   translateTo: 'Translate into',
   autostart: 'Start at sign-in',
-  keySavedMask: 'Key saved · {MASK}',
   uiLanguage: 'Interface language',
   uiLanguages: { auto: 'Auto', en: 'English', ru: 'Русский' },
   keepAudio: 'Keep recordings',
@@ -440,7 +413,6 @@ export const ru: WinText = {
   close: 'Закрыть · Esc',
   back: 'Назад',
   unsaved: 'settings.json не прочитан — изменения действуют до выхода',
-  keys: 'Ключи',
   model: 'Распознавание',
   modelName: 'Parakeet Ultra',
   modelValue: {
@@ -481,7 +453,7 @@ export const ru: WinText = {
     none: 'Нет моделей Parakeet по запросу',
   },
   runsOn: 'Где работает',
-  runsHint: { local: 'Бесплатно, приватно', cloud: 'Ваш ключ, быстрее всего' },
+  runsHint: { local: 'Бесплатно, приватно', cloud: 'Ваш AI' },
   runs: { local: 'Этот компьютер', cloud: 'Облако' },
   cleanupNoteLocal: 'Бесплатно. Текст не покидает этот компьютер; модель работает на его процессоре.',
   cleanupValue: { notDownloaded: 'Модель не скачана', downloading: 'Качается {PCT} %' },
@@ -501,20 +473,6 @@ export const ru: WinText = {
   mic: 'Микрофон',
   translate: 'Перевод',
   general: 'Общие',
-  keyHint: 'Вставьте ключ',
-  check: 'Проверить',
-  keyStates: {
-    works: 'Работает',
-    badKey: 'Ошибка ключа',
-    noBalance: 'На счёте нет денег',
-    unchecked: 'Не удалось проверить',
-    missing: 'Нет ключа',
-    store: 'Не удалось проверить',
-    saved: 'Сохранён',
-    checking: 'Проверяю…',
-  },
-  noKeys: 'Нет ключей',
-  noKey: 'Нет ключа {NAME}',
   micLabel: 'Микрофон',
   windowsMic: 'Как в Windows',
   windowsMicNamed: 'Как в Windows ({NAME})',
@@ -524,7 +482,6 @@ export const ru: WinText = {
   micTestHint: 'Скажите что-нибудь',
   translateTo: 'Переводить на',
   autostart: 'Запускать при входе',
-  keySavedMask: 'Ключ сохранён · {MASK}',
   uiLanguage: 'Язык интерфейса',
   uiLanguages: { auto: 'Авто', en: 'English', ru: 'Русский' },
   keepAudio: 'Хранить записи',

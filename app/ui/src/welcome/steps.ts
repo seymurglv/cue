@@ -1,36 +1,22 @@
 // The welcome window's steps in order, and what each one shows (spec 4a §1; the approved design's welcome window, stage
-// 6). The page (page.ts) moves between them and does what they do; Keys and Microphone show the settings tray's own
-// rows (window/keys.ts, window/mic.ts). Texts go in as text.
+// 6). The page (page.ts) moves between them and does what they do; Microphone shows the settings tray's own rows
+// (window/mic.ts). Texts go in as text.
 import { CUE } from '../designParts';
-import type { LinkTarget, ModelState, SettingsView } from '../window/api';
+import type { LinkTarget, ModelState } from '../window/api';
 import { icon } from '../window/icons';
-import { KEYS, type KeyRows } from '../window/keys';
 import type { MicRows } from '../window/mic';
 import { modelRow } from '../window/model';
 import { h } from '../window/page';
 import type { Lang, WinText } from '../window/text';
 import { doneTitle, type WelcomeText } from './text';
 
-export type Step = 'hello' | 'keys' | 'model' | 'mic' | 'try' | 'done';
-export const STEPS: readonly Step[] = ['hello', 'keys', 'model', 'mic', 'try', 'done'];
-
-/** The steps for these settings: with the cleanup on this computer there is no key to ask for. */
-export function stepsFor(view: SettingsView | null): readonly Step[] {
-  return view?.refineWhere === 'local' ? STEPS.filter((s) => s !== 'keys') : STEPS;
-}
+// Task 13: the step "Кто чистит текст" comes after Hello.
+export type Step = 'hello' | 'model' | 'mic' | 'try' | 'done';
+export const STEPS: readonly Step[] = ['hello', 'model', 'mic', 'try', 'done'];
 
 /** The Windows key's logo, as on the Drop's key hint. */
 const WIN_LOGO =
   '<svg viewBox="0 0 10 10" fill="currentColor" aria-hidden="true"><rect x="0" y="0" width="4.4" height="4.4"/><rect x="5.6" y="0" width="4.4" height="4.4"/><rect x="0" y="5.6" width="4.4" height="4.4"/><rect x="5.6" y="5.6" width="4.4" height="4.4"/></svg>';
-
-/** "Next" on Keys: both keys saved, neither refused by its check, being checked or found missing by it, and no key typed
- *  and not checked yet (Next would drop it; Check saves it). */
-export function keysReady(rows: KeyRows): boolean {
-  return !rows.typed() && KEYS.every((k) => {
-    const state = rows.state(k);
-    return rows.keys[k].saved && state !== 'badKey' && state !== 'noBalance' && state !== 'checking' && state !== 'missing';
-  });
-}
 
 /** The words of `text`: runs of letters and digits, with an apostrophe or a hyphen inside a word kept in it. */
 export function wordCount(text: string): number {
@@ -41,7 +27,6 @@ export function wordCount(text: string): number {
 export interface StepParts {
   readonly text: WelcomeText;
   readonly lang: Lang;
-  readonly keys: KeyRows;
   readonly mic: MicRows;
   /** The settings tray's texts (the model's block). */
   readonly t: WinText;
@@ -96,15 +81,6 @@ export function stepPage(step: Step, p: StepParts): HTMLElement {
     case 'hello':
       pg.append(bigMark(), h('div', 'oname', 'CUE'), h('div', 'ohd', x.helloTitle), h('div', 'op', x.helloText));
       break;
-    case 'keys': {
-      const rows = h('div', 'sgrp orows');
-      rows.append(...KEYS.map((k) => p.keys.row(k)));
-      const links = h('div', 'olinks');
-      links.append(`${x.keysWhere} `, link('anthropic', 'Anthropic Console'));
-      pg.append(h('div', 'ohd', x.steps.keys), h('div', 'op', x.keysText), rows, links, h('div', 'onote', x.price));
-      pg.append(h('div', 'onote', x.privacy));
-      break;
-    }
     case 'model': {
       const block = h('div', 'sgrp orows');
       block.append(modelRow(p.t, p.model));
