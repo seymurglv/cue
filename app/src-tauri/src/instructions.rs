@@ -483,15 +483,18 @@ mod tests {
         let d = Dir::new("burst");
         let p = d.paths();
         let mut i = Instructions::load_or_create(&p, "en", None);
-        wait();
+        // The last look is set by hand, not waited for: the test holds however slowly it runs.
+        let debounce_over = || Instant::now().checked_sub(DEBOUNCE + Duration::from_millis(1)).unwrap();
+        i.checked = debounce_over();
         assert_eq!(i.text(), BOLD_PROMPT, "looked at, nothing changed");
         for n in 1..=4 {
             std::fs::write(p.instructions(), "x".repeat(n)).unwrap();
             // Asked in the middle of the burst, before the debounce is over: nothing is read yet.
+            i.checked = Instant::now();
             assert_ne!(i.text(), "xxxx");
         }
         assert_eq!(i.reloads, 0);
-        wait();
+        i.checked = debounce_over();
         assert_eq!(i.text(), "xxxx");
         assert_eq!(i.text(), "xxxx");
         assert_eq!(i.reloads, 1);

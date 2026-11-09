@@ -17,7 +17,8 @@
 //! one of 16 before Today (no `words`, `day`). A file an earlier version started, its header not this version's, is
 //! migrated in place at the first record this version writes ([`migrate`]): its rows under [`HEADER`], the dollars gone,
 //! a row of 13 or 16 columns with an empty `words` and `day` (not known, as before), and the original kept as
-//! `usage-<day>.csv`; Today and the summary read the same numbers. A failed migration leaves the file as it was. A
+//! `usage-<day>.csv`; Today and the summary read the same numbers. A failed migration leaves the file as it was, and is
+//! not tried again until CUE starts again. A
 //! cache warm-up of an earlier version is a row of its own (`warmup`, outcome `discarded`), and `answered` (an "Ask"
 //! answer shown in full): neither is a dictation.
 //!
@@ -33,7 +34,8 @@ use crate::settings::SttEngineKind;
 use crate::ui::Mode;
 use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 /// How the attempt's audio was transcribed. Rows of earlier versions name Soniox's paths (`stream`, `stream+batch`,
 /// `batch`); they are read as text.
@@ -214,16 +216,20 @@ pub fn line(r: &UsageRecord) -> String {
 /// (no newline at the end of the file), the new one starts on a new line instead of gluing onto the fragment.
 /// Everything appended goes to disk in a single write. A file whose first line is not this version's [`HEADER`] (one an
 /// earlier version started, with its dollar columns) is migrated first ([`migrate`]); should that fail, the file is
-/// left as it was and the record goes after its rows, which the readers take at any width.
+/// left as it was and the record goes after its rows, which the readers take at any width. A failed migration is
+/// remembered until CUE quits: the next records go straight after the rows, without reading the whole file again
+/// each time.
 pub fn append(path: &Path, r: &UsageRecord) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    if !starts_with_header(path)? {
+    if !migration_failed(path) && !starts_with_header(path)? {
         // The record's local date names the backup; only digits and dashes go into a file name.
         let day = if r.day.is_empty() { r.ts.get(..10).unwrap_or_default() } else { r.day.as_str() };
         let day = if !day.is_empty() && day.bytes().all(|b| b.is_ascii_digit() || b == b'-') { day } else { "old" };
-        let _ = migrate(path, day);
+        if migrate(path, day).is_err() {
+            lock(&MIGRATION_FAILED).push(path.to_path_buf());
+        }
     }
     let mut f = std::fs::OpenOptions::new().read(true).append(true).create(true).open(path)?;
     let len = f.metadata()?.len();
@@ -242,6 +248,17 @@ pub fn append(path: &Path, r: &UsageRecord) -> std::io::Result<()> {
     out.push_str(&line(r));
     out.push('\n');
     f.write_all(out.as_bytes())
+}
+
+/// The files whose migration failed while CUE runs ([`append`]): not tried again until CUE starts again.
+static MIGRATION_FAILED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn migration_failed(path: &Path) -> bool {
+    lock(&MIGRATION_FAILED).iter().any(|p| p == path)
 }
 
 /// Whether the file at `path` starts with this version's [`HEADER`]; a missing or empty file has nothing to migrate.
@@ -973,6 +990,34 @@ mod tests {
         expected.extend(format!("{}\n", line(&r)).into_bytes());
         assert_eq!(std::fs::read(&path).unwrap(), expected);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A migration that failed is not tried again while CUE runs: the next record goes after the rows without the file
+    /// being read whole again, even once the file could be migrated.
+    #[test]
+    fn a_failed_migration_is_not_tried_again_this_run() {
+        let dir = tmp("migrate-once");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("usage.csv");
+        let old = earlier_file();
+        let mut bytes = old.clone().into_bytes();
+        bytes.extend(b"\xff\xfe\n");
+        std::fs::write(&path, &bytes).unwrap();
+        let r = rec_with("2026-11-01T11:00:00Z", Outcome::Inserted);
+        append(&path, &r).unwrap();
+        assert!(migration_failed(&path));
+        // The file is fixed meanwhile (a migration would now succeed and leave a backup): it is not tried again.
+        std::fs::write(&path, &old).unwrap();
+        append(&path, &r).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{old}{}\n", line(&r)));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no backup: not migrated again");
+        // Another file is migrated as before.
+        let other = dir.join("other.csv");
+        std::fs::write(&other, &old).unwrap();
+        append(&other, &r).unwrap();
+        assert_eq!(std::fs::read_to_string(&other).unwrap().lines().next(), Some(HEADER));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

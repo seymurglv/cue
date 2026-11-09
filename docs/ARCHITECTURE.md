@@ -19,9 +19,12 @@ machine, so it is tested without windows, a microphone, a model, a network or a 
   - `ui`: `UiState`, `UiPhase`, `Mode`, `ErrorCause`, `TrayKind`, `UiAction`, shared with TypeScript as JSON.
   - `refine`: the system prompt, the dictionary block, the user message, timeout and token budget, the sanity check,
     Markdown stripping, list tidying, and the join space before a paste.
-  - `agents`: the agents CUE can use (`AgentId`, `ORDER`: OpenCode, Codex; Grok parses but is not offered), their
-    default models and the names that mark a small fast model.
-  - `basics`: the no-AI layer (`tidy`: the dictionary and learned spellings, no "эм"/"ээ", tidy spaces).
+  - `agents`: the agents CUE can use (`AgentId`, `ORDER`: OpenCode, Codex; Grok parses but is not offered, and a
+    settings file naming it reads as naming none), Codex's models as its own `models_cache.json` lists them for the
+    user's account (`codex_models`, CUE's fixed list only when that file cannot be read) and the names that mark a
+    small fast model.
+  - `basics`: the no-AI layer (`tidy`: the dictionary and learned spellings, no "эм"/"ээ", a first "ну," / "well,"
+    only with its comma, one sentence mark where a filler stood as a sentence of its own, tidy spaces).
   - `llm`: the short list of local language models, a found model's manifest and the rules of what runs.
   - `instructions`: the standard text of the instructions file, in both interface languages, and its limits.
   - `translate`: the 60 languages a translation can go to, the translation direction, the instruction block, the
@@ -382,8 +385,10 @@ At its first start this version deletes the API keys of earlier versions, Soniox
 ### Refine (cleanup)
 
 - **Where it goes** (`runtime::route`, docs/specs/2026-11-08-no-keys-design.md). Every route first gets the text with
-  the no-AI layer done (`basics::tidy`: the dictionary and learned spellings, no "эм"/"ээ", tidy spaces), and that is
-  what goes in whenever no AI cleans it.
+  the no-AI layer done (`basics::tidy`: the dictionary and learned spellings, no "эм"/"ээ", a first "ну" or "well"
+  only when a comma follows it ("Ну, …", "Well, …"; "Well done" and "ну и ладно" stay), one sentence mark where a
+  filler stood as a sentence of its own ("Привет. Эм. Как дела?" → "Привет. Как дела?", while "..." and "?!" stay),
+  tidy spaces), and that is what goes in whenever no AI cleans it.
   - `Where::Off`, `Local` with no model chosen, or `Agent` with no agent set yet: `Route::Off`, the no-AI layer's text
     at once (`RefineOutcome::NoAi`, a normal "Done"; the log names the reason). A translation shows `needAiTranslate`.
   - `Where::Local`: the model in the slot (`local::refine`), or the raw text at once while none is ready, or a wait of
@@ -392,10 +397,14 @@ At its first start this version deletes the API keys of earlier versions, Soniox
     10 s + 1 s per 100 words for Codex and OpenCode alike (OpenCode took 5–8 s for a 165-word cleanup, past the
     cleanup's own 4 s), a translation a second more, plus 5 s on the agent's first request after CUE starts or after it
     rested: OpenCode's server let go, or 15 min without a request to Codex) counts from the moment it is asked, so
-    finding or starting OpenCode's server (`OpenCodeSlot::get_or_start`, off the core's thread) comes out of it. The
-    model is `refine.models[agent]`, else Codex's default (GPT-6 Luna), else OpenCode's "Быстрая · авто"
-    (`opencode::fast_auto` over the models its server lists, picked once per server) or its own default; OpenCode's
-    model goes in the request's JSON body only. Grok is not offered (the owner's decision of 09.11.2026: 6–9 s for a
+    finding or starting OpenCode's server (`OpenCodeSlot::get_or_start`, off the core's thread) comes out of it. Codex's
+    model is `refine.models.codex` while Codex's own list of the account's models still holds it, else the first that
+    list names, its default (`agents::listed_or_default`; a pick the account no longer has falls back with no error).
+    That list is `models_cache.json` in Codex's folder (`CODEX_HOME`, else `%USERPROFILE%\.codex`), which Codex keeps
+    itself: its models with `visibility` `list`, by `priority`, read when asked (no process, no network); CUE's fixed
+    list (GPT-6 Luna first) only when the file is missing or unreadable. OpenCode's model is `refine.models.opencode`,
+    else its "Быстрая · авто" (`opencode::fast_auto` over the models its server lists, picked once per server) or its
+    own default; OpenCode's model goes in the request's JSON body only. Grok is not offered (the owner's decision of 09.11.2026: 6–9 s for a
     short cleanup; its route was built and reverted).
   - **Marks** (`AgentMarks`, `MARK_FOR` = 5 min): Codex is asked `codex login status` (no text) before its first run and
     every 5 minutes after, since a Codex never signed in retries about 15 s and would read as a timeout; "Not logged in"
@@ -414,7 +423,14 @@ At its first start this version deletes the API keys of earlier versions, Soniox
     shown (`Refined`); in place of one that is signed out or missing, the text goes in and the Drop still says so
     (`RefineOutcome::Covered`). With this fallback the local model is kept loaded beside the agent (`llm_active`).
   - The Drop's words after the paste, without Retry, name the agent (`cue://cleanup-name`): `agentSignIn`
-    "<Agent>: войдите заново", `agentMissing` "<Agent> не найден", `agentSilent` "<Agent> не ответил".
+    "<Agent>: войдите заново", `agentMissing` "<Agent> не найден", `agentSilent` "<Agent> не ответил". Every failure
+    of a request that reached the agent or tried to (`agent::refine::outcome_of`) says one of them: besides a timeout,
+    a Codex run that exited with an error or gave no answer, Codex's usage or rate limit (its own words, "usage
+    limit", "rate limit", "out of credits", in its error events or stderr: `cli::rate_limited`, `RateLimited`, the
+    log's reason "rate limit"), OpenCode's server refusing (its model, an error of its own, a connection) or its folder
+    not empty (`server_cwd`) are all `RawAgent(Silent)`. Only a request the user cancelled is plain raw text, and only
+    an answer that came but failed a check (the sanity check, a lead-in, the translation's) is `RawFallback`, the
+    normal "Done".
   - At startup, and when the main window moves the cleanup to `Agent`, with no agent set: `agent::discover` off the
     core's thread, and the first found in `ORDER`
     (OpenCode, Codex) is written to settings.json; none found, the cleanup moves to this computer with nothing chosen.
@@ -470,7 +486,8 @@ At its first start this version deletes the API keys of earlier versions, Soniox
 - When the app is unknown (neither the query at the start of recording nor the one after the second press named it),
   the request carries `<app>unknown app</app>`.
 - The answer is used only when it is a complete `{"text": …}` object: a refusal, a timeout, an agent that failed or a
-  bad response all mean the no-AI layer's text is pasted (or the local fallback's), with the normal "Done". Explicit
+  bad response all mean the no-AI layer's text is pasted (or the local fallback's); a refusal or a bad response with
+  the normal "Done", while a timeout or a failure of the user's agent shows "<Agent> не ответил" after it. Explicit
   Markdown the speaker did not dictate is stripped, and stray commas and semicolons at the end of list items are
   removed.
 - **Sanity check** on what would be pasted: lengths are compared in characters without numbers (digits and number
@@ -1250,13 +1267,17 @@ again.
   and the translation's), the others and the found ones ("CUE не проверял", `ModelsView.found`) under "Другие", the
   Hugging Face search last; a model downloads only when pressed, and pressed again on its way it stops. Ваш AI lists
   OpenCode then Codex as `agents_get` finds them, each time the tray or the page opens: the core clears the agents'
-  marks, looks for each (OpenCode also by the server it announces), asks Codex `codex login status`, and lists
-  OpenCode's models when it cleans, through a server already running (`OpenCodeSlot::running`: the one in use or the
-  user's own; none is started for the page, and without one the drop-down offers "Быстрая · авто" alone); the page
-  says "Проверяем…" meanwhile. A sign-in a run found failed (`Mark::Expired`) still shows as "войдите заново" though
-  `login status` says "Logged in"; one only `login status` refused shows signed in once it says so. A found agent is chosen by its row; one not installed
-  has its install page (`agent_install_link`, by id). The chosen agent's model is a drop-down (OpenCode's hundreds with
-  a filter, "Быстрая · авто" first), then the fallback, "Почистить: <model>" offered only when the local model's file
+  marks, looks for each (OpenCode also by the server it announces), asks Codex `codex login status` (a "Logged in"
+  marks it checked, so the next dictation does not ask again), reads Codex's models from its own list of the account's
+  (`agents::codex_models`), and lists OpenCode's models when it cleans, through a server already running
+  (`OpenCodeSlot::running`: the one in use or the user's own; none is started for the page, none is waited for while a
+  dictation starts one, the lookup and the list bounded by `LIST_WAIT`, and without one the drop-down offers "Быстрая
+  · авто" alone); the page says "Проверяем…" meanwhile. A sign-in a run found failed (`Mark::Expired`) still shows as
+  "войдите заново" though `login status` says "Logged in"; one only `login status` refused shows signed in once it says
+  so. A found agent is chosen by its row; one not installed has its install page (`agent_install_link`, by id). The
+  chosen agent's model is a drop-down (OpenCode's hundreds with a filter, "Быстрая · авто" first; Codex's as its list
+  names them, a pick it no longer lists shown as its default; `settings_set` keeps a Codex pick only when that list
+  holds it), then the fallback, "Почистить: <model>" offered only when the local model's file
   is here. A move to Ваш AI with no agent set takes the first found; with none it stays there, nothing chosen. The
   first page's value is what cleans now, the local download in percent, or in amber an agent to sign in to again or
   not found.
@@ -1396,8 +1417,9 @@ characters, a translation code CUE does not know, a period that is not one of th
 
 `refine` (`RefineSettings`) holds `where` (`off`, `local` or `agent`; any other value reads as `agent`), `local` (the
 local model's id, written once it has loaded), `agent` (`opencode` or `codex`; absent until the first start has found
-one), `models` (per agent id, only a model other than the agent's default: Codex's listed ones, any OpenCode name of
-at most `MAX_MODEL_CHARS`), `fallback` (`raw` or `local`) and the sanity check's thresholds with `context_chars`.
+one; an agent no longer offered, `grok`, reads as absent, so the start takes the first agent found), `models` (per
+agent id, the user's pick: for Codex a model id (letters, digits, `.-_:/`, at most 64), asked only while Codex's list
+holds it; any OpenCode name of at most `MAX_MODEL_CHARS`; absent is the agent's default), `fallback` (`raw` or `local`) and the sanity check's thresholds with `context_chars`.
 The `runs`, `style`, `custom`, `connection`, `model`, `level` and `addresses` of earlier versions are read once and
 never written again (docs/specs/2026-11-08-no-keys-design.md, "Settings and migration"): `runs: local`, or a local
 server as the connection, becomes `where: local` with the same model (or the old recommended one), anything else
@@ -1450,7 +1472,8 @@ the first row this version writes (`usage::migrate`): every row is read by its o
 15-column header without its dollars (a row from before Today gets an empty `words` and `day`, read as not known, as
 before), the original is kept byte for byte as `usage-<day>.csv` (`-2`, `-3`… when taken), and the new file replaces
 `usage.csv`, so Today and `cue-cli usage` show the same numbers. If any step fails, `usage.csv` stays as it was and
-rows go after its old ones, which the readers read at any width. Latency runs from the second press to Ctrl+V (from Retry or Restore when used); the target for a
+rows go after its old ones, which the readers read at any width; the migration is not tried again until CUE starts
+again, so a row never costs a read of the whole file. Latency runs from the second press to Ctrl+V (from Retry or Restore when used); the target for a
 ~30-word phrase is 1.5 s or less. Rows that fail to write, for example while the file is open in Excel, wait in memory
 and go out before the next one. `cue-cli usage` sums a UTC month: dictations are `inserted` plus `no_field` rows (an
 `answered` row is not one), the audio, average latency over `inserted` rows only, a separate average for recordings of

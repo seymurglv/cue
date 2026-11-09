@@ -9,7 +9,8 @@ use crate::settings::DictionarySettings;
 
 /// Sounds that mean nothing, removed wherever they stand alone ("мм" after a number is millimetres, not a filler).
 const FILLERS: [&str; 10] = ["э", "ээ", "эээ", "эм", "мм", "ммм", "um", "uh", "erm", "hmm"];
-/// Removed only as the first word of the dictation.
+/// Removed only as the first word of the dictation, and only as a discourse marker: with a comma after it ("Ну, …",
+/// "Well, …"). Without one it is a word of the sentence ("Well done", "ну и ладно") and stays.
 const OPENERS: [&str; 2] = ["ну", "well"];
 
 /// `raw` with the learned words and the dictionary's spellings applied, fillers removed and spacing tidied. Text that
@@ -202,20 +203,28 @@ fn remove_fillers(text: &str, spellings: &[&str]) -> String {
     text
 }
 
-/// "ну" or "well" as the first word goes, with its comma; the next word takes the capital.
+/// "ну" or "well" as the first word, a comma after it, goes with its comma; the next word takes the capital. Without
+/// the comma the text stays as it is.
 fn remove_opener(text: &str, spellings: &[&str]) -> String {
     let lead = text.len() - text.trim_start().len();
     let Some(&(s, e)) = word_spans(text).first() else { return text.to_owned() };
     if s != lead || !OPENERS.contains(&text[s..e].to_lowercase().as_str()) {
         return text.to_owned();
     }
-    let rest = text[e..].trim_start();
-    let mut rest = rest.strip_prefix(',').unwrap_or(rest).to_owned();
+    let Some(rest) = text[e..].trim_start().strip_prefix(',') else { return text.to_owned() };
+    let mut rest = rest.to_owned();
     capitalize_from(&mut rest, 0, spellings);
     rest
 }
 
-/// No space before `, . ! ? : ;`, single spaces, no doubled commas, no space at the edges.
+/// A mark that ends a sentence.
+fn ends_sentence(c: char) -> bool {
+    matches!(c, '.' | '!' | '?')
+}
+
+/// No space before `, . ! ? : ;`, single spaces, no doubled commas, no space at the edges. A sentence mark that comes
+/// after another one with space between them (what a filler that stood as a sentence of its own leaves: "Привет. Эм.
+/// Как дела?") goes; marks written together ("...", "?!") stay.
 fn tidy_spacing(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut pending_space = false;
@@ -226,6 +235,9 @@ fn tidy_spacing(text: &str) -> String {
         }
         if c == ',' && out.ends_with(',') {
             pending_space = false;
+            continue;
+        }
+        if pending_space && ends_sentence(c) && out.ends_with(ends_sentence) {
             continue;
         }
         let closes = matches!(c, ',' | '.' | '!' | '?' | ':' | ';');
@@ -307,7 +319,51 @@ mod tests {
     #[test]
     fn nu_and_well_only_first_word() {
         let d = dict(&[], &[]);
-        check(&d, &[("Он ну пришёл", "Он ну пришёл"), ("It is well known", "It is well known")]);
+        check(&d, &[("Он ну пришёл", "Он ну пришёл"), ("It is well known", "It is well known"), ("Он, ну, пришёл", "Он, ну, пришёл")]);
+    }
+
+    /// "Ну" and "well" go only as a discourse marker, a comma after them; otherwise they are words of the sentence.
+    #[test]
+    fn nu_and_well_go_only_with_a_comma() {
+        let d = dict(&[], &[]);
+        check(
+            &d,
+            &[
+                ("Well done", "Well done"),
+                ("well done, team", "well done, team"),
+                ("Well, done.", "Done."),
+                ("well, I think so", "I think so"),
+                ("Well , I think so", "I think so"),
+                ("ну и ладно", "ну и ладно"),
+                ("Ну что, пойдём?", "Ну что, пойдём?"),
+                ("ну, и ладно", "И ладно"),
+                ("Ну , пойдём", "Пойдём"),
+                ("Ну", "Ну"),
+                ("Ну,", "Ну,"),
+            ],
+        );
+    }
+
+    /// A filler said as a sentence of its own leaves no second mark: "Привет. Эм. Как дела?" reads "Привет. Как
+    /// дела?". Marks written together stay.
+    #[test]
+    fn a_filler_sentence_leaves_one_mark() {
+        let d = dict(&[], &[]);
+        check(
+            &d,
+            &[
+                ("Привет. Эм. Как дела?", "Привет. Как дела?"),
+                ("Как дела? Эм. Хорошо.", "Как дела? Хорошо."),
+                ("Ok! Um! Go.", "Ok! Go."),
+                ("Well. Um. Next.", "Well. Next."),
+                ("Привет. Эм.", "Привет."),
+                ("Подожди... Эм... Ладно.", "Подожди... Ладно."),
+                ("Подожди...", "Подожди..."),
+                ("Что?! Правда?", "Что?! Правда?"),
+                ("Что?!", "Что?!"),
+                ("Привет . Как дела ?", "Привет. Как дела?"),
+            ],
+        );
     }
 
     #[test]
@@ -336,7 +392,7 @@ mod tests {
     #[test]
     fn capital_after_removed_first_word() {
         let d = dict(&[], &[]);
-        check(&d, &[("эм, привет", "Привет"), ("ну привет", "Привет"), ("um okay", "Okay"), ("и эм привет", "и привет")]);
+        check(&d, &[("эм, привет", "Привет"), ("ну, привет", "Привет"), ("um okay", "Okay"), ("и эм привет", "и привет")]);
     }
 
     #[test]
@@ -369,7 +425,7 @@ mod tests {
             &d,
             &[
                 ("эм iphone", "iPhone"),
-                ("ну iphone купил", "iPhone купил"),
+                ("ну, iphone купил", "iPhone купил"),
                 ("эм, эй пад", "iPad"),
                 ("Привет. Эм, iphone", "Привет. iPhone"),
             ],

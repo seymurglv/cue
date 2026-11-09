@@ -49,7 +49,7 @@ CUE holds no API key and bills you for nothing. Cleanup, translation and "Ask" g
 the main window's **Cleanup** page (Settings → Cleanup):
 
 - **Без ИИ (No AI).** CUE tidies the text itself and instantly: your dictionary and the spellings it learned from you,
-  no "эм" or "ээ", tidy spaces. Translation and "Ask" are not available (the Drop says "Перевод: выберите AI" or
+  no "эм" or "ээ", no opening "Ну," or "Well," (with its comma: "Well done" stays), tidy spaces. Translation and "Ask" are not available (the Drop says "Перевод: выберите AI" or
   "Спросить: выберите AI").
 - **Этот компьютер (This computer).** A small language model that CUE downloads from Hugging Face, only when you press
   it, and runs on the processor: free, and the text never leaves this computer. Three are on the list: **Qwen3 4B
@@ -67,8 +67,9 @@ the main window's **Cleanup** page (Settings → Cleanup):
 - **Ваш AI (Your AI).** An AI agent you already have installed and signed in to: **OpenCode** first (the default; it
   also finds OpenCode Desktop's own command-line program) and then **Codex**. CUE finds them, shows which are installed
   and signed in, and starts them in the background with no window, no tools, no web access and no file writes, with the
-  text on their standard input (never as an argument, never in a file). Each has a model drop-down: Codex's default is
-  GPT-6 Luna; OpenCode's is **Быстрая · авто** (fast, automatic), which takes the first of the models OpenCode lists
+  text on their standard input (never as an argument, never in a file). Each has a model drop-down: Codex's lists the
+  models your Codex account has, as Codex itself keeps them (its `models_cache.json`), with Codex's default first (a
+  model you picked that the account no longer has falls back to that default); OpenCode's is **Быстрая · авто** (fast, automatic), which takes the first of the models OpenCode lists
   whose name marks a small fast one (haiku, flash, mini, lite, luna, fast, small), else OpenCode's own default, and its
   hundreds of models have a filter. Whatever you signed in to inside OpenCode (an API key of your own, a provider's
   subscription) is your own setup with that provider; CUE does not look at it. **Claude Code and Gemini / Antigravity
@@ -234,7 +235,7 @@ from source.
 - **Safe fallbacks:** if the AI is slow, refused or the text looks wrong, the text is pasted after CUE's own tidy-up
   (or, if you chose it under **Если AI не ответил**, cleaned by the model on this computer when it is loaded), and a
   sign-in that expired or an agent that is not found is said on the Drop ("Codex: войдите заново", "OpenCode не
-  найден"). If recognition fails, the recording is kept and **Retry** recognizes it again; if the model did not
+  найден"), and so is an agent that failed, ran out of time or hit its usage limit ("Codex не ответил"). If recognition fails, the recording is kept and **Retry** recognizes it again; if the model did not
   download, **Retry** downloads the rest of it first.
 - **`Esc`** cancels; **Restore** (for 3.6 s) brings the dictation back, and asks again a question cancelled before its
   answer showed, with the same selection. **`Ctrl + Win + V`** pastes the last result again, a translation included.
@@ -500,10 +501,11 @@ history is neither written nor cleaned up until a period is chosen in the window
     `"agent"` (your OpenCode or Codex); case and surrounding spaces do not matter, and any other value reads as
     `agent`.
   - `agent`: `"opencode"` or `"codex"`. Absent, CUE writes the first one it finds at start (OpenCode, then Codex); with
-    none found, the cleanup moves to this computer with nothing chosen. A `"grok"` of a build that offered it parses
-    but is never run.
-  - `models`: the model picked for an agent, by agent id, kept only where it is not the agent's default. Example:
-    `"models": { "codex": "gpt-6.1-terra" }`. Absent for OpenCode means "Быстрая · авто". A name CUE does not accept
+    none found, the cleanup moves to this computer with nothing chosen. A `"grok"` of a build that offered it reads as
+    absent: CUE starts with the first agent it finds.
+  - `models`: the model picked for an agent, by agent id; absent is the agent's default. Example:
+    `"models": { "codex": "gpt-5.6-terra" }`. Codex is asked for it only while Codex's own list of your account's
+    models holds it, else for Codex's default. Absent for OpenCode means "Быстрая · авто". A name CUE does not accept
     reads as the default.
   - `local`: the local model's id (`llm--<owner>--<repository>--<quantization>`), written once it has loaded; absent,
     nothing is chosen and dictations are pasted after the tidy-up alone.
@@ -777,8 +779,8 @@ service) and does not tune the thresholds.
 - Text appears only after you finish. A long dictation is recognized in pieces while you speak, but nothing of it is
   shown until it is pasted.
 - Parakeet v2 recognizes no Russian: with it, every dictation comes out in Latin letters and reads as English.
-- The default models (Codex's GPT-6 Luna, OpenCode's "Быстрая · авто", which keeps Claude Haiku when your OpenCode
-  offers it) were chosen from published characteristics and a few live runs, not by comparing cleanups on many real
+- The default models (Codex's own default, GPT-6 Luna when this was written, and OpenCode's "Быстрая · авто", which
+  keeps Claude Haiku when your OpenCode offers it) were chosen from published characteristics and a few live runs, not by comparing cleanups on many real
   dictations.
 - An agent is slower than a direct call: OpenCode Desktop 2.2.5 took about 2 seconds for a short dictation and 5–8 for
   165 words, Codex 3–4 seconds, and each is allowed 10 seconds plus 1 per 100 words. When it does not answer in time
