@@ -168,7 +168,7 @@ impl Attempt {
         self.refine_at = Some((now, None));
     }
 
-    /// What the question has cost so far (`Step::Spent`, all its responses): an answer closed mid-stream still writes it
+    /// What the question has used so far (`Step::Spent`, or its end): an answer closed mid-way still writes it
     /// (spec 2 §10).
     pub fn ask_spent(&mut self, usage: AskUsage) {
         let mut total = self.asked_before;
@@ -238,7 +238,8 @@ impl Attempt {
             audio_ms: self.audio_ms(),
             stt_engine: s.stt.engine,
             stt_path: self.stt_path,
-            refine_model: if self.mode == Mode::Ask { s.ask.model().to_owned() } else { s.refine.usage_model() },
+            // "Ask" goes through the cleanup's AI and model.
+            refine_model: s.refine.usage_model(),
             input_tokens: self.refine.input_tokens,
             cache_read_tokens: self.refine.cache_read_input_tokens,
             cache_write_tokens: self.refine.cache_creation_input_tokens,
@@ -480,7 +481,7 @@ mod tests {
         a.first_words(12_500);
         a.ask_done(AskUsage { input_tokens: 300, output_tokens: 80, cache_read_tokens: 1_300, cache_write_tokens: 0, web_searches: 2 }, 13_000);
         let r = a.record(Outcome::Answered, "2026-10-28T10:00:00Z".into(), &s);
-        assert_eq!(r.refine_model, s.ask.model(), "the row names the model that answered, not refine's");
+        assert_eq!(r.refine_model, s.refine.usage_model(), "the row names the cleanup's AI, which answered");
         assert_eq!((r.input_tokens, r.output_tokens, r.cache_read_tokens, r.web_searches), (300, 80, 1_300, 2));
         assert_eq!(r.latency_ms, 1_900, "the second press to the first words");
         assert_eq!(r.mode, UsageMode::Ask);

@@ -7,7 +7,9 @@
 //! - [`cli`]: the flags that leave Codex and Grok no shell, no file reading and no network tool, and reading their
 //!   answers.
 //! - [`opencode`]: the user's own OpenCode server, or one CUE starts on 127.0.0.1, over loopback HTTP.
-//! - [`AgentClient`]: one answer from either; [`refine`]: a cleanup or a translation through it.
+//! - [`AgentClient`]: one answer from either; [`refine`]: a cleanup or a translation through it; [`ask`]: an "Ask"
+//!   question through it, or through the model on this computer.
+pub mod ask;
 pub mod cli;
 pub mod discover;
 pub mod opencode;
@@ -113,6 +115,22 @@ pub const CODEX_SCHEMA: &str = "codex-schema.json";
 /// The answer CUE asks Codex for, as every route asks for it.
 const ANSWER_SCHEMA: &str =
     r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}"#;
+/// The file that holds the shape of Codex's answer to an "Ask" question, in CUE's agent folder.
+pub const CODEX_ASK_SCHEMA: &str = "codex-ask-schema.json";
+/// An "Ask" answer (`cue_core::ask::AGENT_ASK_PROMPT`): the answer or the text for the field, whether it is one and
+/// whether it replaces the selection, and the pages it relies on. Every field required and none other, as Codex's
+/// structured output wants.
+pub const ASK_SCHEMA: &str = r#"{"type":"object","properties":{"answer":{"type":"string"},"write":{"type":"boolean"},"replace":{"type":"boolean"},"sources":{"type":"array","items":{"type":"object","properties":{"url":{"type":"string"},"title":{"type":"string"}},"required":["url","title"],"additionalProperties":false}}},"required":["answer","write","replace","sources"],"additionalProperties":false}"#;
+
+/// Which answer a Codex run is held to: its schema file and the schema it holds.
+#[derive(Clone, Copy)]
+struct Shape {
+    file: &'static str,
+    schema: &'static str,
+}
+
+const TEXT_SHAPE: Shape = Shape { file: CODEX_SCHEMA, schema: ANSWER_SCHEMA };
+const ASK_SHAPE: Shape = Shape { file: CODEX_ASK_SCHEMA, schema: ASK_SCHEMA };
 
 /// `<home>\codex-instructions-<the first 16 hex digits of the text's SHA-256>.md`: the file for `text`.
 pub fn codex_instructions(home: &Path, text: &str) -> PathBuf {
@@ -156,7 +174,10 @@ impl AgentClient {
         let text = match self {
             AgentClient::OpenCode(server) => return server.complete(model, p, timeout, on_text).await,
             AgentClient::Cli { found, home } => match found.id {
-                AgentId::Codex => codex(found, home, model, p, timeout).await?,
+                AgentId::Codex => {
+                    let out = codex(found, home, model, p, timeout, TEXT_SHAPE).await?;
+                    cli::codex_text(&out.stdout).filter(|t| !t.trim().is_empty()).ok_or(AgentFailure::Failed("no answer"))?
+                }
                 // grok 1.0.34 reads the prompt only from an argument or a file; its named pipe comes later.
                 AgentId::Grok => return Err(AgentFailure::Failed("grok needs a pipe")),
                 AgentId::OpenCode => return Err(AgentFailure::Failed("opencode is a server")),
@@ -166,6 +187,34 @@ impl AgentClient {
             on_text(&text);
         }
         Ok(text)
+    }
+
+    /// One "Ask" answer to `p` from `model` (empty: the agent's default), within `timeout`, as the JSON text the agent
+    /// wrote, with the web searches it ran. Codex searches only when `p.web_search` (live search, its only tool) and is
+    /// held to [`ASK_SCHEMA`]; OpenCode is asked with no tools at all, so it never searches.
+    pub async fn ask(&self, model: &str, p: &Prompt, timeout: Duration) -> Result<(String, u32), AgentFailure> {
+        match self {
+            AgentClient::OpenCode(server) => {
+                let quiet = Prompt { web_search: false, ..p.clone() };
+                Ok((server.complete(model, &quiet, timeout, None).await?, 0))
+            }
+            AgentClient::Cli { found, home } => match found.id {
+                AgentId::Codex => {
+                    let out = codex(found, home, model, p, timeout, ASK_SHAPE).await?;
+                    cli::codex_answer(&out.stdout, p.web_search)
+                        .filter(|(t, _)| !t.trim().is_empty())
+                        .ok_or(AgentFailure::Failed("no answer"))
+                }
+                AgentId::Grok => Err(AgentFailure::Failed("grok needs a pipe")),
+                AgentId::OpenCode => Err(AgentFailure::Failed("opencode is a server")),
+            },
+        }
+    }
+
+    /// Whether this client can search the web for "Ask": Codex can; OpenCode's API does not say whether a model has a
+    /// search tool, so CUE asks it with none.
+    pub fn searches(&self) -> bool {
+        matches!(self, AgentClient::Cli { found, .. } if found.id == AgentId::Codex)
     }
 }
 
@@ -207,20 +256,28 @@ impl Drop for CancelOnDrop {
     }
 }
 
-/// One `codex exec`: CUE's fixed instructions and the answer's schema in files beside its working folder, the rest of
-/// the request on stdin, run off the async threads. A run that failed is never read for an answer: a half-written last
-/// message is not a cleanup. Dropping the request (Esc) ends the run and every process it started.
-async fn codex(found: &Found, home: &Path, model: &str, p: &Prompt, timeout: Duration) -> Result<String, AgentFailure> {
+/// One `codex exec`: CUE's fixed instructions and the answer's schema (`shape`) in files beside its working folder, the
+/// rest of the request on stdin, run off the async threads; web search live only when `p.web_search`. A run that failed
+/// is never read for an answer: a half-written last message is not a cleanup. Dropping the request (Esc) ends the run
+/// and every process it started.
+async fn codex(
+    found: &Found,
+    home: &Path,
+    model: &str,
+    p: &Prompt,
+    timeout: Duration,
+    shape: Shape,
+) -> Result<process::Output, AgentFailure> {
     let instructions = codex_instructions(home, &p.system);
-    let schema = home.join(CODEX_SCHEMA);
+    let schema = home.join(shape.file);
     // Named after its text: a file that is there holds it.
     if !instructions.is_file() {
         write_whole(&instructions, &p.system)?;
     }
-    if !std::fs::read(&schema).is_ok_and(|held| held == ANSWER_SCHEMA.as_bytes()) {
-        write_whole(&schema, ANSWER_SCHEMA)?;
+    if !std::fs::read(&schema).is_ok_and(|held| held == shape.schema.as_bytes()) {
+        write_whole(&schema, shape.schema)?;
     }
-    let args = cli::codex_args(model, &instructions, &schema);
+    let args = cli::codex_args(model, &instructions, &schema, p.web_search);
     let (exe, stdin, cwd) = (found.exe.clone(), p.user.clone(), empty_cwd(home, AgentId::Codex)?);
     let cancel = Arc::new(AtomicBool::new(false));
     let _stop = CancelOnDrop(cancel.clone());
@@ -233,7 +290,7 @@ async fn codex(found: &Found, home: &Path, model: &str, p: &Prompt, timeout: Dur
     if out.status != Some(0) {
         return Err(AgentFailure::Failed("exit"));
     }
-    cli::codex_text(&out.stdout).filter(|t| !t.trim().is_empty()).ok_or(AgentFailure::Failed("no answer"))
+    Ok(out)
 }
 
 /// Writes `text` to `path` whole: under a temporary name in the same folder, then renamed into place, so a reader never

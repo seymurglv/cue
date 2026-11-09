@@ -80,6 +80,8 @@ export interface AnswerText {
   missed: string;
   refused: string;
   failed: string;
+  /** Under an answer given without web search (it is off, or the AI cannot search). */
+  noSearch: string;
 }
 
 export interface Dict {
@@ -183,6 +185,7 @@ export const en: Dict = {
     missed: "Couldn't make out the follow-up",
     refused: "Can't answer that",
     failed: "Couldn't get an answer",
+    noSearch: 'no web search',
   },
 };
 
@@ -276,6 +279,7 @@ export const ru: Dict = {
     missed: 'Не расслышал уточнение',
     refused: 'Не могу ответить на это',
     failed: 'Не удалось получить ответ',
+    noSearch: 'без поиска',
   },
 };
 

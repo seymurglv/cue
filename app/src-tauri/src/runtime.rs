@@ -75,7 +75,7 @@ use cue_core::ask::{AnswerPlace, AskContext, MAX_SELECTION_CHARS, SelectionKind,
 use cue_core::audio::{Silence, SilenceDetector};
 use cue_core::basics;
 use cue_core::corrections::{self, Offers};
-use cue_core::flow::{DictationId, Effect, Flow, InsertOutcome, Input, Outcome, PasteHow, RefineOutcome, SttError, TimerKind};
+use cue_core::flow::{AskError, DictationId, Effect, Flow, InsertOutcome, Input, Outcome, PasteHow, RefineOutcome, SttError, TimerKind};
 use cue_core::habits;
 use cue_core::history;
 use cue_core::model::{ModelState, ModelsView};
@@ -1858,51 +1858,64 @@ impl Runtime {
         }
     }
 
-    /// The web search of "Ask", if on and if the model takes one.
-    fn ask_search(&self) -> Option<engine_ask::SearchTool> {
-        let a = &self.settings.ask;
-        if a.web_search() { engine_ask::search_tool(a.max_searches()) } else { None }
-    }
-
-    /// The request of the conversation's last question, in a task of its own. The steps and the end come back as events
-    /// of this task's generation: a dropped or replaced request's never reach the conversation.
+    /// The request of the conversation's last question, in a task of its own, along the cleanup's route
+    /// (docs/specs/2026-11-08-no-keys-design.md, "Ask and translation"): the user's agent with the cleanup's model, or the
+    /// model on this computer; with no AI chosen it ends at once ("Ask: choose an AI"). The steps and the end come back as
+    /// events of this task's generation: a dropped or replaced request's never reach the conversation, and a dropped one
+    /// ends a running Codex.
     fn spawn_ask(&mut self, id: DictationId) {
         let Some(c) = self.conversation.as_ref() else { return };
-        let messages = c.request();
+        let turns = c.request();
         // The Ctrl+C copy of a first question, still on its way: the request task waits for it, never the core.
         let copy = match self.ask_copy.take() {
             Some((i, rx)) if i == id => c.sent_question().map(|q| (rx, q.to_owned(), c.taken.ctx.clone())),
             _ => None,
         };
         let core = self.tx.clone();
-        let model = self.settings.ask.model().to_owned();
-        let search = self.ask_search();
-        // Task 9: Ask's own route replaces this. CUE holds no key, so Ask ends at once: "Ask: choose an AI".
-        let key: Option<String> = None;
+        let search = self.settings.ask.web_search();
+        let to = match route(&self.settings.refine, &self.llm.slot()) {
+            Route::NotReady if self.llm.waking() => Route::Waking(self.llm.slot()),
+            to => to,
+        };
+        if matches!(to, Route::Off) {
+            tracing::info!(reason = off_reason(&self.settings.refine), "ask: no AI chosen");
+        }
         let now = self.now();
         if self.attempt.id == id {
             self.attempt.ask_started(now);
         }
         // Counts only: no text.
-        tracing::info!(turns = messages.len(), search = search.is_some(), copy = copy.is_some(), "ask: asking");
-        let (http, tx) = (self.http.clone(), self.tx.clone());
+        tracing::info!(turns = turns.len(), search, copy = copy.is_some(), "ask: asking");
+        let (s, agents, tx) = (self.settings.refine.clone(), self.agents.clone(), self.tx.clone());
         let old = self.ask_task.start(id, |task| {
             // The wait for the copy is not this request's: should Esc drop the request, the copy still reaches the core.
             let copy = copy.map(|(rx, question, ctx)| (wait_for_copy(rx, id, task, core), question, ctx));
             tokio::spawn(async move {
-                let mut messages = messages;
+                let mut turns = turns;
                 if let Some((copied, question, ctx)) = copy
                     && let Ok(Some(text)) = copied.await
                 {
-                    messages = vec![ask::first_turn(&question, &ask::with_copied(&ctx, &text))];
+                    turns = vec![ask::first_turn(&question, &ask::with_copied(&ctx, &text))];
                 }
                 let steps = tx.clone();
+                let on_step = move |step| {
+                    let _ = steps.send(CoreEvent::AskStep { id, task, step });
+                };
                 let body = async {
-                    let thinking = engine_ask::Thinking::DEFAULT;
-                    engine_ask::run(&http, key.as_deref(), &model, search, thinking, &messages, move |step| {
-                        let _ = steps.send(CoreEvent::AskStep { id, task, step });
-                    })
-                    .await
+                    let limits = engine_ask::Limits::SPEC;
+                    let here = match to {
+                        Route::Off => return engine_ask::AskResult::failed(engine_ask::AskFailure::NoAi),
+                        Route::Agent(a) => return agents.ask(a, &s, search, &turns, limits, on_step).await,
+                        Route::Local(g) => Some(g),
+                        Route::Waking(slot) => slot.wait(llm::LOAD_WAIT).await,
+                        Route::NotReady => None,
+                    };
+                    // Task 10: a model that only cleans (`llm::cleans_only`) ends here with "Ask: needs a model that
+                    // answers" (`NeedAnsweringModel`) instead of being asked.
+                    match here {
+                        Some(g) => agent::ask::run(agent::ask::AskRoute::Local(g), "", search, &turns, limits, on_step).await,
+                        None => engine_ask::AskResult::failed(engine_ask::AskFailure::Failed("local model not ready")),
+                    }
                 };
                 let result = guarded("ask", body, ask_panicked).await;
                 let _ = tx.send(CoreEvent::AskDone { id, task, result });
@@ -1976,6 +1989,10 @@ impl Runtime {
         }
         // Kinds and counts only.
         tracing::info!(heard = ?heard, searches = result.usage.web_searches, "ask: done");
+        // The Drop names the agent in its word ("Codex: sign in again"), as for a cleanup.
+        if let (ask::Heard::Failed(AskError::Agent(_)), Some(a)) = (heard, self.settings.refine.agent) {
+            self.ui.cleanup_name(a.name());
+        }
         if heard.shows() {
             if !opened {
                 self.open_answer();
@@ -3208,8 +3225,7 @@ mod tests {
     }
 
     fn ended(end: AskEnd) -> AskResult {
-        let content = vec![serde_json::json!({ "type": "text", "text": "x" })];
-        AskResult { end, content, usage: AskUsage::default() }
+        AskResult { end, text: "x".into(), usage: AskUsage::default() }
     }
 
     /// A question and its answer as streamed, then ended with `end`; `may_paste` — the window asked in is in front.
@@ -3262,7 +3278,7 @@ mod tests {
         assert_eq!(ask_entry(heard, &c, at("2026-10-31T07:30:00.123")), None);
 
         let mut c = asked_in("Notepad");
-        let failed = AskEnd::Failed(AskFailure::Network);
+        let failed = AskEnd::Failed(AskFailure::Timeout);
         let heard = turn(&mut c, "q", "Words already shown", failed, true);
         assert!(matches!(heard, ask::Heard::Failed(_)), "{heard:?}");
         assert_eq!(ask_entry(heard, &c, at("2026-10-31T07:30:00.123")), None);

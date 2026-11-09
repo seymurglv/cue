@@ -25,8 +25,9 @@ machine, so it is tested without windows, a microphone, a model, a network or a 
     of a translation, and where a long recording is cut into pieces.
   - `model`: the speech model's files (`Manifest`: a Hugging Face repository at a fixed commit, each file's size and
     SHA-256; `ULTRA`, the one CUE ships) and `ModelState`, the model's state as the windows show it.
-  - `ask`: the "Ask" instruction and user message, the selection limit, where a written text goes, the buttons of an
-    answer, its sources, the plain text for pasting, and `AnswerView`, the answer as the windows draw it.
+  - `ask`: the "Ask" instructions and user message, the conversation's turns and their text for an AI
+    (`AskTurn`, `agent_messages`), the selection limit, where a written text goes, the buttons of an answer, its
+    sources, the plain text for pasting, and `AnswerView`, the answer as the windows draw it.
   - `audio`: resampling to 16 kHz mono, voice level, the "microphone is silent" detector.
   - `history`: the history's day files (`Entry`, `append`, the pages, `search`, `find`, `prune` by the retention
     period, `clear`) and the names and deletions of its recordings folder (`audio_file`, `audio_snapshot`,
@@ -41,7 +42,7 @@ machine, so it is tested without windows, a microphone, a model, a network or a 
   recognition of a saved WAV), `parakeet` (the model: `mel`, the log-mel features; `vocab`, the vocabulary and the
   masks of one alphabet; `tdt`, TDT greedy decoding; `model`, the ONNX Runtime sessions and `Recognizer`), `download`
   (the model's files: resumed, checked, renamed), `claude` (refine and translation requests and responses, the cache
-  warm-up), `ask` (the streaming "Ask" request, its event parser and decision, `run` and its cache warm-up `warm`),
+  warm-up), `ask` (an "Ask" question's steps, end and deadlines; `agent::ask` asks the route),
   `keys` (Windows Credential Manager, and the deletion of the Soniox key of earlier versions), `check` (free key
   probes), `habit` (the rule request of a habit just learned), `error`. `openrouter` is the cleanup's OpenRouter
   connection (`refine`, `translate`: the same system blocks, checks and fallbacks as `claude`, each model's profile in
@@ -160,15 +161,15 @@ is not transcribed again. With no AI (`RefineOutcome::NoAi`) there is nothing to
 emits `Ask { id, question, follow_up }` and stays in Thinking (the Drop's three dots) until the answer has something to
 show. The runtime reports back with four inputs: `AskOpened` (the first real step: a search began, its results came,
 or the first words), `AskAnswered` (the answer is complete; a refusal, or a written text shown instead of written,
-too), `AskWrite { how }` (the model wrote text for the field and the runtime holds it; `PasteHow` is `AtCaret`,
-`Replace` or `Below`) and `AskFailed { error }` (`AskError::Key` or `Failed`). An answer that opens or ends moves the
+too), `AskWrite { how }` (the AI wrote text for the field and the runtime holds it; `PasteHow` is `AtCaret`,
+`Replace` or `Below`) and `AskFailed { error }` (`AskError::NeedAi`, `Agent(problem)` or `Failed`). An answer that opens or ends moves the
 flow to the `Answer` phase: the Drop rests (it looks idle), the answer shows in the tray or the card, `Esc` stays
 swallowed, and a chord records a follow-up. A write goes to `Inserting` at once with `AskPaste { id, how }` and ends
 the conversation (`CloseAnswer`); the answer's buttons (Insert, Insert below, Replace) do the same for an answer that
 is complete on screen, and Retry after a failure emits `AskAgain { id }`. `AbortAsk { id }` drops the request in
-flight. A `Key` failure closes the answer and shows the Drop's "Спросить: выберите AI" (`needAiAsk`) without Retry: until
-"Ask" follows the cleanup's route, its missing or refused Anthropic key means it has no AI; any other failure
-keeps the answer open with the error and Retry, and the question is kept.
+flight. `NeedAi` (no AI chosen) closes the answer and shows the Drop's "Спросить: выберите AI" (`needAiAsk`) without
+Retry, and `Agent` (the user's agent signed out or missing) closes it with the agent's word, as a cleanup's; any other
+failure keeps the answer open with the error and Retry, and the question is kept.
 
 - `asking` is the dictation whose request is in flight, and it can be an earlier one than the current dictation: a
   follow-up may be recorded while the answer it follows is still printing. Results are matched against it, so a late
@@ -502,8 +503,7 @@ At its first start this version deletes the Soniox key of earlier versions from 
 
 ### Cache warm-up
 
-The cleanup has none: it no longer goes to the Messages API, and an agent keeps its own caches. "Ask" has a prefix and a
-warm-up of its own (see Ask). On this computer the local model evaluates the cleanup's system part while the person
+The cleanup and "Ask" have none: neither goes to the Messages API, and an agent keeps its own caches. On this computer the local model evaluates the cleanup's system part while the person
 speaks (`local::warm`).
 
 ### Paste
@@ -705,9 +705,11 @@ words of its example, so `forms` holds no text the example does not. The `Debug`
 
 ## Ask
 
-"Ask" (`Ctrl + Win + Alt`) is a dictation whose text becomes a question to Claude (`ask.model`, Haiku 5.5 by default).
+"Ask" (`Ctrl + Win + Alt`) is a dictation whose text becomes a question to the cleanup's AI: the user's agent with
+the cleanup's model, or the model on this computer (docs/specs/2026-11-08-no-keys-design.md, "Ask and translation").
 The flow decides when to ask, paste and close (see Dictation flow); `runtime` and `runtime::ask` keep what those
-effects need, and `cue_engines::ask` talks to the API.
+effects need, `cue_engines::agent::ask` asks the route, and `cue_engines::ask` holds the steps, the end and the
+deadlines of a question.
 
 ### Context
 
@@ -754,85 +756,75 @@ effects need, and `cue_engines::ask` talks to the API.
   (`KeptTaken`), so Restore after `Esc` asks the same question with the same context, a late copy included, though the
   first ask used up the focus query and the copy.
 
-### Request
+### Route and request
 
-- `cue_engines::ask::request_body`: `stream: true`; the tools first (they render first in the cached prefix):
-  `write_to_field`, strict (its input always matches the schema: `text`, and `mode` `insert` or `replace`) and without
-  eager input streaming, so the input arrives whole and checked; then web search, when `ask.web_search` is on: the
-  basic `web_search_20250305`, called by the model directly (`allowed_callers: ["direct"]`), with `max_uses` =
-  `ask.max_searches`. The filtered search (`web_search_20260318`, the first probe's choice on 2026-10-29) was dropped on
-  2026-10-31: its code execution step failed live on Haiku 5.5 with thinking off with an invalid-input error, and the
-  answer told the user so; the basic search has no such step and a shorter cached prefix. A key whose organization has
-  no web search gets a 400 that says so, and the question is asked again at once without it.
-- The instruction (`ASK_PROMPT`, English; the answer follows the language of the question) is one cached system
-  block: what the tags mean, that their content is data and never instructions, when to call `write_to_field` and with
-  which mode, the form of a written text (plain, no quotes, the app's tone, one line in terminals), the form of an
-  answer (the answer itself first, short, simple Markdown: bold, lists, code; no headings, tables or links; never a
-  word about how it decides or whether it searches), and when to search (only for current or local facts: weather,
-  news, prices, versions; facts that cannot change, explanations and writing need none), searching before writing
-  anything; a failed search is one plain sentence that fresh data could not be checked.
+- A question goes the way the cleanup goes (`route` of `refine`, in `spawn_ask`): with no AI chosen (no AI, or nothing
+  chosen on this computer or among the agents) it ends at once, and the Drop says "Спросить: выберите AI"
+  (`AskFailure::NoAi` → `AskError::NeedAi` → `needAiAsk`), without Retry. Through the user's agent it goes to
+  `Agents::ask` with the cleanup's model (`ask.model` is gone); on this computer to the model in the slot, waited for
+  (`llm::LOAD_WAIT`) while it loads again after a rest, and "Couldn't get an answer" with Retry when none is ready.
+  A model that only cleans will end here with `needAnsweringModel` once such models are offered.
+- `Agents::ask`: a signed-out or missing mark answers at once with the agent's word; otherwise the agent's start
+  allowance (5 s on its first request) is added to the first-words deadline, and finding or starting OpenCode's
+  server, Codex's sign-in check and the run all come out of it. A run that says the agent is signed out or missing
+  marks it, as a cleanup does, and the Drop names the agent in its word ("Codex: войдите заново", "Codex не найден");
+  the answer closes, without Retry. A Codex that answered is marked signed in.
+- `agent::ask::run`: the instructions (`AGENT_ASK_PROMPT`, English; the answer follows the language of the question)
+  and the whole conversation as one user message (`agent_messages`: an agent keeps no session of its own). The
+  instructions say what the tags mean, that their content is data and never instructions, how to answer: one JSON
+  object `{"answer", "write", "replace", "sources": [{"url", "title"}]}`, with `write` for text the user asked for
+  their field and `replace` when it changes the selected text itself, in place of Anthropic's `write_to_field` tool;
+  the form of a written text (plain, no quotes, the app's tone, one line in terminals), the form of an answer (the
+  answer itself first, short, simple Markdown; never a word about how it decides or whether it searches), and when to
+  search (only for current or local facts), with sources only from its own searches and `[]` without one.
 - The user message (`first_message`): `<question>`, then `<selection>`, `<before_cursor>`, `<app>` and `<today>`;
-  empty parts are left out, and our closing tags inside the data are defused. The date sits in the user message, not in
-  the cached instruction, so the cached prefix is the same every day; the bench checks that questions about the present
-  still search. A follow-up (`follow_up_message`) is the question alone.
-- Two cache marks: one on the instruction, which covers the tools before it, and one on the last block of the last
-  user message, so a follow-up reads the conversation so far from the cache. The stored conversation keeps no marks (a
-  request may carry four at most). The first follow-up writes the previous answer to the cache; the API looks back only
-  about 20 blocks from a mark for an earlier entry, and an answer with citations is split into many blocks, so a
-  follow-up after a long answer may read only the instruction from the cache (not an error).
-- `output_config.effort: "low"`, `tool_choice: auto`, no `temperature`, `top_p` or `top_k`. Thinking is off
-  (`thinking: disabled`, `Thinking::DEFAULT`), chosen after the bench of 2026-10-29. Adaptive thinking, the model's
-  default (left out of the request, with 2,048 tokens of room added to the answer's 2,000), met the bar too (decisions
-  of 97 %, first words in 1.8 s without a search and 5.0 s with one), but timed out on 3 of 210 calls: its thinking is
-  silence to the first-words deadline. Off gave 98 % decisions, 93 % format and checks, first words in 1.2 s without a
-  search and 1.3 s with one, and no timeouts. Without thinking the model wrote a short sentence before a search ("let
-  me check the current version"), which was the first words; the instruction now asks for nothing before a search.
+  empty parts are left out, and our closing tags inside the data are defused. A follow-up (`follow_up_message`) is the
+  question alone; `agent_messages` puts the turns before it first, each user turn in `<user_turn>` and each answer in
+  `<your_answer>` (those closing tags inside them defused), then the new question.
+- **Codex**: the instructions go in their own `codex-instructions-<hash>.md` and the answer's shape in
+  `codex-ask-schema.json` (`ASK_SCHEMA`, every field required, nothing else), both in CUE's agent folder; the
+  conversation goes on stdin only. With `ask.web_search` on, `-c web_search=live` replaces `web_search=disabled` and
+  every other flag stays as for a cleanup, so live web search is its only tool; its `web_search` items are then
+  allowed in the events, and any other tool item still refuses the answer (`codex_answer`). Codex streams no deltas:
+  the answer appears whole. `Esc` drops the request, which ends Codex's process tree.
+- **OpenCode** is asked as for a cleanup, with no tools: its API does not say whether a model has a search tool, so
+  it never searches. **This computer**: the same instructions and message, the answer held to `ASK_GRAMMAR` (its
+  `sources` always empty); it never searches.
+- A question answered without web search (it is off, or the route cannot search) gets `Step::NoSearch` first, and the
+  answer says "без поиска" / "no web search" under it once it is shown whole (`TurnView::no_search`).
+- The deadlines (`Limits::SPEC`): through an agent the first words, which are the whole answer, within 15 s, 20 s with
+  web search, plus the start allowance; on this computer the whole answer's 30 s, since nothing shows before it is all
+  written.
 
-### Stream
+### Answer
 
-- `StreamState` turns one response's events into its content blocks as the API would return them whole (text with its
-  citations, tool calls with their input parsed, search results with their encrypted content, thinking with its
-  signature) and into `Step`s for the answer on screen: `Searching`, `Reading`, `TextStart`, `Text`, `Cite` (a search
-  result's URL and title; without a title, its site), `WriteStart`, and `Spent` (what the question has cost so far,
-  sent as the counts change). Events and deltas it does not know are skipped. The first words (`Step::is_first_words`)
-  are text that is not blank, or the start of a write.
-- The decision (`decide`): a refusal (`stop_reason: refusal`) wins over anything the stream already had; a
-  `write_to_field` call counts only complete and valid (not cut at `max_tokens`, a mode from the schema, some text);
-  otherwise any text is an answer; nothing to show is a `Malformed` failure.
-- `run`: a paused turn (`pause_turn`) is continued with its blocks and the same tools, at most 3 times and only while
-  the question's searches are fewer than `max_uses`, so a question runs at most `2 × max_searches − 1` searches. A
-  write cut at `max_tokens` (a long email) is asked again once with 4,000 more tokens of room, under deadlines of its
-  own from when the retry is sent. The deadlines: the first words within 8 s, or within 20 s once a search began; the
-  whole answer, continuations included, within 30 s. The rest of an answered response's body is read in the background
-  (5 s at most), so the connection can be reused.
-- Failures (`AskFailure`, one log line with the kind): no key; 401, 402 or 403, or a 400 about the credit balance (a
-  key problem: `AskError::Key`, the Drop's "Спросить: выберите AI" without Retry); 404, the model in `ask.model` does not
-  exist (`NoModel`, the log says to check `settings.json`); a timeout; the network; another HTTP status (429 and 5xx
-  too: a rate limit passes, so Retry may help, unlike a key problem); an `error` event in the stream (its type); a
-  stream against the protocol. Everything but a key problem shows "Couldn't get an answer" with Retry, under the words
-  already shown, which stay. A failure keeps what the question spent, the response that failed part-way included: the
-  API reports a response's searches only at its end, so until then each search the stream started counts
-  (`StreamState::usage`), and a question closed or cut after it searched still pays for the search; once the end
-  reports the count, that one is used (it leaves out a search the API deferred and never ran).
+- `finish` reads the reply: a code fence around it is taken off; a reply that is no JSON object at all is an answer as
+  it stands; a broken object, or an empty answer, is "Couldn't get an answer" with Retry. A write (`write: true`) is
+  `Step::WriteStart` (its first words) and `AskEnd::Write { text, replace }`; an answer is `TextStart`, `Text` and a
+  `Cite` for each source (without a title, its site). Sources count only after a search the route ran (one named
+  without a search is made up) and only web pages (`openable`).
+- Failures (`AskFailure`): no AI chosen; the agent missing or signed out (the Drop's word, no Retry); a timeout; any
+  other failure in a word (`exit`, `no answer`, `answer`, `empty`, `local model`). All but the first two show "Couldn't
+  get an answer" with Retry, under the words already shown. One log line each: the kind, never a text. `usage.csv`
+  gets the cleanup's model in `refine_model` and the searches Codex ran in `web_searches`; an agent's tokens are its
+  own.
 
 ### Conversation and the answer
 
 - `runtime::ask::Conversation` lives from the first question until `CloseAnswer`, and is then forgotten. It keeps the
-  answered exchanges, the question in flight, the sources (numbered in the order a URL is first cited,
-  across the conversation) and `AnswerView`, the answer as the windows draw it. A first question is asked with its
-  context; once an exchange has succeeded, a follow-up goes alone. The model's blocks go back as they came, except
-  a search the API never ran (it defers a search when the model also calls a client tool, and a follow-up that leaves
-  it unanswered is refused). A follow-up after a written text that was shown answers that call first, with a
-  `tool_result` saying the text was shown instead of written. A refusal and an empty turn never join the conversation,
-  and a failure keeps its question for Retry.
+  answered exchanges as `{"role", "text"}` turns (`AskTurn`: the user message as sent, the answer or the text it
+  wrote; a turn kept in Anthropic's content blocks by an earlier version still reads, its text blocks joined), the
+  question in flight, the sources (numbered in the order a URL is first cited, across the conversation) and
+  `AnswerView`, the answer as the windows draw it. A first question is asked with its context; once an exchange has
+  succeeded, a follow-up goes alone, and the whole conversation is sent with it as text. A refusal and an empty turn
+  never join the conversation, and a failure keeps its question for Retry.
 - The request runs in a task of its own (`ask_task`, with a generation, as transcription and refine do): the steps and
   the end come back as events of that generation, so a dropped or replaced request's never reach the conversation. The
   view goes to the windows (`cue://answer`) at once for a new turn, an end, an opening or a follow-up row, and at most
   every 50 ms while words stream (`ViewGate`); the flow hears `AskOpened` once per request (`ShownOnce`).
 - A turn's text is its text blocks (`Segment`s) joined as they came: a citation splits a block, and those parts run on.
-  Words before the turn's first search only say that it is going to search (Haiku without thinking writes such a
-  sentence before nearly every search, though the instruction asks for none): they go when the search starts, and the
-  search line takes their place. Words before a later search and words after it are two blocks with nothing between
+  Words before the turn's first search only say that it is going to search (a model may write such a sentence,
+  though the instructions ask for none): they go when the search starts, and the search line takes their place. Words before a later search and words after it are two blocks with nothing between
   them, so a block after a search (`after_search`) starts a paragraph, in the paste (`TurnView::text`) as on screen
   (`markedText`).
 - Where it opens (`open_answer`): in the card when the card window exists, the selection has a rectangle with a size,
@@ -870,15 +862,6 @@ effects need, and `cue_engines::ask` talks to the API.
 - A click on a source chip sends only its number (`answer_source`); the core opens the URL only when it is a web page
   (`openable`: `http` or `https` with a host, no spaces, control characters or quotes, 2,048 characters at most), with
   `ShellExecuteW` on a short thread of its own.
-
-### Cache warm-up of "Ask"
-
-At the "Ask" chord (and when Alt picks "Ask"), and at a follow-up's chord, when no "Ask" request or warm-up started in
-the last 4 minutes, the runtime sends `ask::warm`: the request's prefix (the same tools, instruction, thinking, effort
-and tool choice) with a one-character placeholder, no stream, `max_tokens: 0` (the probe found it accepted), and the
-cache mark on the instruction only. It has a 5 s timeout; a failure writes one log line, and the question's own request
-writes the cache. Its tokens get a `warmup` usage row priced with `ask.model`. The refine warm-up is not sent for
-"Ask", and after sleep both warm again on the next chord.
 
 ## The Drop and tray cards
 
@@ -1334,8 +1317,8 @@ subtag of a locale name (`ru-RU`, `zh-Hans-CN`), the aliases `nb`/`nn` → `no`,
 anything else (`auto`, an unknown code, a number) reads as nothing, that is the default, and a `translate` that is not
 an object reads as the default section. A `target` of `en` reads as nothing too, so the default is never written
 back, and the block is written only when one of its fields is set. The `ask` fields read the same way (`AskSettings`):
-`enabled` and `web_search` are turned off only by `false` (anything else reads as on), `model` is a trimmed non-empty
-string, `max_searches` a whole number from 1 to 10; any other value, and the default itself, reads as nothing, an `ask`
+`enabled` and `web_search` are turned off only by `false` (anything else reads as on), `model` (of earlier versions)
+is read past and never written, `max_searches` a whole number from 1 to 10 (kept, though no agent takes a limit); any other value, and the default itself, reads as nothing, an `ask`
 that is not an object reads as the default section, and the block is written only when a field differs from its
 default, so the file never becomes unreadable through it. Model names are settings, so a new model version needs no
 code change. `audio.device` is a trimmed string; a blank value or one that is not a string reads as nothing (the
@@ -1358,8 +1341,8 @@ price. A new row has `stt_engine` `parakeet` and `stt_path` `local`. Outcomes ar
 refusal too: nothing pasted). `mode` is `dictate`, `translate` or `ask` as the dictation's refine or question started
 (for an attempt that ends before that, the mode it was recording in: the attempt follows a `ModeToggle` or `ModeChange`
 the flow accepts). The Retry of a failed translation re-translates the saved text: a new row with no audio.
-`refine_model` is `RefineSettings::usage_model` (`local:<id>`, `agent:<agent>:<model>`, `off`), or `ask.model` for
-"Ask". `words` is how many words the attempt wrote (`usage::count_words` of the text of a dictation or translation; 0
+`refine_model` is `RefineSettings::usage_model` (`local:<id>`, `agent:<agent>:<model>`, `off`), for "Ask" too: it
+goes through the cleanup's AI. `words` is how many words the attempt wrote (`usage::count_words` of the text of a dictation or translation; 0
 for a question or one that wrote nothing) and `day` its local date.
 Rows of earlier versions are 13, 16 or 18 columns wide and carry the dollars they were priced at (`stt_usd`,
 `refine_usd`, `search_usd`), Soniox's paths and cache warm-up rows (`warmup`); they are read with the dollars passed
@@ -1374,11 +1357,9 @@ and go out before the next one. `cue-cli usage` sums a UTC month: dictations are
 `answered` row is not one), the audio, average latency over `inserted` rows only, a separate average for recordings of
 20 s or less, and the rows of each `mode` value, in the order they first appear.
 
-An `ask` row carries `ask.model` in `refine_model`, the tokens of all the question's requests (continuations, a widened
-write, and a request aborted by `Esc` before Restore asked again), and its searches in `web_searches`, priced in
-`search_usd` (searches × `pricing.web_search_usd`). What a question has spent reaches the attempt as the stream goes
-(`Step::Spent`), so an answer closed or aborted mid-stream, a failed one and one cut by a deadline still write their
-cost: the tokens reported so far, and every search the stream started. Its latency runs from the second press to the first words for an `answered` row (the target for the first words of
+An `ask` row carries the cleanup's AI in `refine_model` and the web searches Codex ran in `web_searches` (an agent's
+tokens are its own, so its token columns stay 0); what a question used reaches the attempt at its end, or as a route
+reports it (`Step::Spent`). Its latency runs from the second press to the first words for an `answered` row (the target for the first words of
 an answer without a search is 2.5 s), and to Ctrl+V for a written text. A follow-up is an attempt of its own, and so is
 the Retry of a failed question (no audio). An answer still printing when a follow-up starts waits aside (`answering`)
 and gets its own row when it ends. Pasting a complete answer with its button adds no row.

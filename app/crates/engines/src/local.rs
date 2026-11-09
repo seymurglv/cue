@@ -46,7 +46,7 @@ impl Drop for StopOnDrop {
 }
 
 /// The model's answer, asked on a blocking thread; dropping this future stops the model.
-async fn answer(llm: Arc<dyn Generate>, system: String, user: String, grammar: &'static str, deadline: Instant) -> Option<Result<String, EngineError>> {
+pub(crate) async fn answer(llm: Arc<dyn Generate>, system: String, user: String, grammar: &'static str, deadline: Instant) -> Option<Result<String, EngineError>> {
     let stop = Arc::new(AtomicBool::new(false));
     let _stop = StopOnDrop(stop.clone());
     tokio::task::spawn_blocking(move || llm.generate(&system, &user, grammar, deadline, &stop)).await.ok()

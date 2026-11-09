@@ -2,7 +2,6 @@
 //! no network and no new dependencies.
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -27,16 +26,8 @@ impl Seen {
 pub enum Reply {
     /// Status, body, extra header lines (`"retry-after: 0\r\n"` or empty).
     Send(u16, String, &'static str),
-    /// Promise a body and drop the connection: a network failure mid-response.
-    Cut,
-    /// Close the connection without replying: a network failure before the response.
-    Close,
     /// Never reply: the service hangs.
     Hang,
-    /// A stream (SSE), like a real service over HTTP/1.1: status, then the body in `transfer-encoding: chunked`
-    /// pieces — each piece a separate write, with a pause before each next one; after the same pause, the final
-    /// empty chunk, and the connection stays open for the next request.
-    Stream(u16, Vec<Vec<u8>>, Duration),
 }
 
 /// A plain reply: status and a JSON body.
@@ -126,35 +117,7 @@ where
                 "HTTP/1.1 {code} Fake\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{extra}\r\n{body}",
                 body.len()
             ),
-            Reply::Cut => {
-                let _ = rd.get_mut().write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n{\"id\"").await;
-                return; // the connection closes mid-word
-            }
-            Reply::Close => return,
             Reply::Hang => return std::future::pending().await,
-            Reply::Stream(code, pieces, gap) => {
-                // No Nagle delay: a piece goes out at once instead of waiting for the previous one's ACK.
-                let _ = rd.get_ref().set_nodelay(true);
-                let head = format!("HTTP/1.1 {code} Fake\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n");
-                let sock = rd.get_mut();
-                if sock.write_all(head.as_bytes()).await.is_err() {
-                    return;
-                }
-                for (i, piece) in pieces.iter().enumerate() {
-                    if i > 0 {
-                        tokio::time::sleep(gap).await;
-                    }
-                    let frame = [format!("{:x}\r\n", piece.len()).as_bytes(), piece, b"\r\n"].concat();
-                    if sock.write_all(&frame).await.is_err() || sock.flush().await.is_err() {
-                        return;
-                    }
-                }
-                tokio::time::sleep(gap).await;
-                if sock.write_all(b"0\r\n\r\n").await.is_err() {
-                    return;
-                }
-                continue;
-            }
         };
         if rd.get_mut().write_all(resp.as_bytes()).await.is_err() {
             return;

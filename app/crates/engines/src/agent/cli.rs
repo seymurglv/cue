@@ -32,10 +32,11 @@ const CODEX_TOOLS_OFF: [&str; 16] = [
 
 /// `codex exec` reading the prompt from stdin (`-`): no session files (`--ephemeral`), events as JSON lines, the
 /// read-only sandbox, none of the user's `config.toml` (so none of their MCP servers) or `.rules`, the shell and every
-/// other tool off, web search off, low reasoning. `instructions` replaces Codex's own long base instructions with CUE's
-/// fixed text (never anything of a dictation: that goes on stdin), and `schema` holds the answer to `{"text": …}`, the
-/// last message in the events; no file is written for the answer.
-pub fn codex_args(model: &str, instructions: &Path, schema: &Path) -> Vec<String> {
+/// other tool off, low reasoning. Web search is off, and live only for an "Ask" question with `web_search` on: the
+/// only tool Codex then has. `instructions` replaces Codex's own long base instructions with CUE's fixed text (never
+/// anything of a dictation or a question: that goes on stdin), and `schema` holds the shape of the answer (`{"text":
+/// …}`, or Ask's), the last message in the events; no file is written for the answer.
+pub fn codex_args(model: &str, instructions: &Path, schema: &Path, web_search: bool) -> Vec<String> {
     let mut args: Vec<String> = [
         "exec",
         "--ephemeral",
@@ -56,7 +57,7 @@ pub fn codex_args(model: &str, instructions: &Path, schema: &Path) -> Vec<String
     // Bare words: Codex takes a value that is not TOML as the literal string (no quotes to survive cmd.exe), and a
     // Windows path with forward slashes is not TOML.
     for setting in [
-        "web_search=disabled".to_string(),
+        (if web_search { "web_search=live" } else { "web_search=disabled" }).to_string(),
         "model_reasoning_effort=low".to_string(),
         format!("model_instructions_file={}", slashed(instructions)),
     ] {
@@ -123,12 +124,25 @@ const CODEX_QUIET_ITEMS: [&str; 4] = ["agent_message", "reasoning", "todo_list",
 /// Codex's last message, when the turn did not fail. `None` as well when any tool ran (a command, a file change, an
 /// MCP call, a web search): with CUE's flags none can, so such an answer is not trusted.
 pub fn codex_text(stdout: &str) -> Option<String> {
-    let mut text = None;
+    codex_answer(stdout, false).map(|(text, _)| text)
+}
+
+/// [`codex_text`] for an "Ask" question, with the web searches it ran. With `web_search` (Codex was given live web
+/// search) a `web_search` item is allowed; any other tool item still refuses the answer, as does a search Codex was
+/// never given.
+pub fn codex_answer(stdout: &str, web_search: bool) -> Option<(String, u32)> {
+    let (mut text, mut searches) = (None, 0u32);
     for e in events(stdout) {
         match e["type"].as_str() {
             Some("turn.failed") => return None,
             Some("item.started" | "item.updated" | "item.completed") => {
                 let kind = e["item"]["type"].as_str().unwrap_or_default();
+                if kind == "web_search" && web_search {
+                    if e["type"] == "item.completed" {
+                        searches = searches.saturating_add(1);
+                    }
+                    continue;
+                }
                 if !CODEX_QUIET_ITEMS.contains(&kind) {
                     return None;
                 }
@@ -139,7 +153,7 @@ pub fn codex_text(stdout: &str) -> Option<String> {
             _ => {}
         }
     }
-    text
+    text.map(|t| (t, searches))
 }
 
 /// Grok's answer: the `text` of its JSON object, only when the turn ended on its own (`stopReason` `end_turn`). grok
@@ -237,7 +251,7 @@ mod tests {
     const SCHEMA: &str = r"C:\Users\Ann\AppData\Local\CUE\agent\codex-schema.json";
 
     fn codex(model: &str) -> Vec<String> {
-        codex_args(model, Path::new(INSTRUCTIONS), Path::new(SCHEMA))
+        codex_args(model, Path::new(INSTRUCTIONS), Path::new(SCHEMA), false)
     }
 
     #[test]
@@ -372,6 +386,55 @@ mod tests {
     #[test]
     fn codex_text_refuses_an_answer_after_a_tool_ran() {
         assert_eq!(codex_text(CODEX_RAN_COMMAND), None);
+    }
+
+    /// "Ask" with web search on: live search replaces `disabled`, and every other flag stays as it is; off, the
+    /// arguments are the cleanup's own.
+    #[test]
+    fn codex_searches_when_asked() {
+        let search = codex_args("gpt-6-luna", Path::new(INSTRUCTIONS), Path::new(SCHEMA), true);
+        assert!(has_pair(&search, "-c", "web_search=live"), "{search:?}");
+        assert!(!has_pair(&search, "-c", "web_search=disabled"));
+        let quiet = codex("gpt-6-luna");
+        assert!(has_pair(&quiet, "-c", "web_search=disabled"));
+        let differ: Vec<(&String, &String)> = search.iter().zip(&quiet).filter(|(a, b)| a != b).collect();
+        assert_eq!(differ.len(), 1, "only the search setting changes: {differ:?}");
+        assert_eq!(search.len(), quiet.len());
+        for never in ["--search", "--full-auto"] {
+            assert!(!search.iter().any(|a| a == never), "{never} in {search:?}");
+        }
+        no_text_in(&search);
+    }
+
+    fn item(kind: &str, extra: serde_json::Value) -> String {
+        let mut item = serde_json::json!({ "id": "item_1", "type": kind });
+        if let (Some(o), Some(more)) = (item.as_object_mut(), extra.as_object()) {
+            o.extend(more.clone());
+        }
+        let started = serde_json::json!({ "type": "item.started", "item": item });
+        let completed = serde_json::json!({ "type": "item.completed", "item": item });
+        format!("{started}\n{completed}\n")
+    }
+
+    /// A searched answer: its web searches are allowed only when Codex was given search, and any other tool still
+    /// refuses the answer.
+    #[test]
+    fn codex_search_allows_only_web_search_items() {
+        let answer = format!(
+            "{}{}{}",
+            item("web_search", serde_json::json!({ "query": "rust latest version" })),
+            item("web_search", serde_json::json!({ "query": "rust 1.95" })),
+            item("agent_message", serde_json::json!({ "text": "{\"answer\": \"1.95\"}" })),
+        );
+        assert_eq!(codex_answer(&answer, true), Some(("{\"answer\": \"1.95\"}".to_string(), 2)));
+        assert_eq!(codex_answer(&answer, false), None, "a search Codex was never given");
+        assert_eq!(codex_text(&answer), None);
+        for tool in ["command_execution", "file_change", "mcp_tool_call"] {
+            let ran = format!("{answer}{}", item(tool, serde_json::json!({})));
+            assert_eq!(codex_answer(&ran, true), None, "{tool} with search on");
+        }
+        assert_eq!(codex_answer(CODEX_RAN_COMMAND, true), None);
+        assert_eq!(codex_answer(CODEX_ANSWER, true), Some(("{\"text\": \"Hello world.\"}".to_string(), 0)));
     }
 
     #[test]

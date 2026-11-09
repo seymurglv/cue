@@ -13,7 +13,9 @@ export type AnswerAction = 'insert' | 'below' | 'replace' | 'copy';
 /** The core's answer (cue_core::ask::AnswerView: the same names). `after_search` — a search came between this text block
  *  and the words before it (sent only when true). */
 export interface Segment { text: string; cites: number[]; after_search?: boolean }
-export interface Turn { question: string; step: ThinkStep | null; segments: Segment[]; state: TurnState }
+/** `no_search` — answered without web search (it is off, or the AI cannot search): the answer says so (sent only when
+ *  true). */
+export interface Turn { question: string; step: ThinkStep | null; segments: Segment[]; state: TurnState; no_search?: boolean }
 export interface Source { n: number; site: string; title: string }
 export interface Answer {
   place: AnswerPlace;
@@ -95,6 +97,8 @@ interface Item {
   state: TurnState;
   cites: number[];
   chips: boolean;
+  /** Answered without web search: "no web search" goes under it with its sources. */
+  noSearch: boolean;
 }
 
 export class AnswerView {
@@ -266,7 +270,7 @@ export class AnswerView {
     }
     const body = doc.createElement('div');
     el.appendChild(body);
-    return { el, uq, question, body, text: '', words: [], shown: 0, state: 'pending', cites: [], chips: false };
+    return { el, uq, question, body, text: '', words: [], shown: 0, state: 'pending', cites: [], chips: false, noSearch: false };
   }
 
   private syncItem(it: Item, turn: Turn) {
@@ -277,6 +281,7 @@ export class AnswerView {
     }
     it.state = turn.state;
     it.cites = [...new Set(turn.segments.flatMap((s) => s.cites))];
+    it.noSearch = !!turn.no_search;
     if (turn.state === 'refused') return this.note(it, this.t.answer.refused);
     const text = markedText(turn.segments);
     if (turn.state === 'failed') return this.failed(it, text);
@@ -337,7 +342,8 @@ export class AnswerView {
     it.shown = it.words.length;
   }
 
-  /** The sources under a turn, once it is complete and shown whole (spec 2 §7): chips one after another (CSS, 80 ms). */
+  /** The sources under a turn, once it is complete and shown whole (spec 2 §7): chips one after another (CSS, 80 ms);
+   *  an answer without web search says so there instead. */
   private chips(it: Item) {
     if (it.chips || it.state !== 'done' || !it.words.length || it.shown < it.words.length) return;
     it.chips = true;
@@ -364,6 +370,13 @@ export class AnswerView {
       });
       it.body.appendChild(src);
       // The sources come into view like the words before them.
+      this.toEnd();
+    }
+    if (it.noSearch) {
+      const nos = doc.createElement('div');
+      nos.className = 'nos';
+      nos.textContent = this.t.answer.noSearch;
+      it.body.appendChild(nos);
       this.toEnd();
     }
     for (const c of it.body.querySelectorAll<HTMLElement>('.cite')) {

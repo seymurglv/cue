@@ -33,7 +33,7 @@ pub fn refine_panicked(raw: String) -> RefineResult {
 
 /// "Ask" crashed: for the flow this is a failure with Retry.
 pub fn ask_panicked() -> AskResult {
-    AskResult { end: AskEnd::Failed(AskFailure::Network), content: Vec::new(), usage: Default::default() }
+    AskResult { end: AskEnd::Failed(AskFailure::Failed("crashed")), text: String::new(), usage: Default::default() }
 }
 
 #[cfg(test)]
@@ -81,6 +81,6 @@ mod tests {
 
     #[test]
     fn panicked_ask_is_a_failure_with_retry() {
-        assert!(matches!(ask_panicked().end, AskEnd::Failed(f) if !f.is_key()));
+        assert!(matches!(ask_panicked().end, AskEnd::Failed(AskFailure::Failed(_))));
     }
 }

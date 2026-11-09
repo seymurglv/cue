@@ -56,6 +56,15 @@ char ::= [^"\\\x7F\x00-\x1F] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [
 ws ::= [ \t\n]{0,20}
 "#;
 
+/// GBNF for an "Ask" answer on this computer: `answer`, `write` and `replace`, and `sources` always empty, since the
+/// model here never searches.
+pub const ASK_GRAMMAR: &str = r#"root ::= "{" ws "\"answer\"" ws ":" ws string ws "," ws "\"write\"" ws ":" ws bool ws "," ws "\"replace\"" ws ":" ws bool ws "," ws "\"sources\"" ws ":" ws "[" ws "]" ws "}"
+bool ::= "true" | "false"
+string ::= "\"" char* "\""
+char ::= [^"\\\x7F\x00-\x1F] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F])
+ws ::= [ \t\n]{0,20}
+"#;
+
 /// How many tokens `next` shares from its start with `kept`, the tokens already evaluated in the context: those stay,
 /// the rest is evaluated again. The system part of a prompt (CUE's rules, the dictionary, the habits) comes first, so a
 /// dictation pays only for its own words while the system part stays the same, and for all of it once it changes.

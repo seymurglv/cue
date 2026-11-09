@@ -1,7 +1,7 @@
 //! The user's own AI on the dictation path (docs/specs/2026-11-08-no-keys-design.md, "Your AI"): which client a
-//! cleanup or a translation goes to, the model it asks for, whether it is the agent's first request (the start
-//! allowance), the marks that let a dictation skip an agent known to be signed out or missing, and the local fallback
-//! the user may choose for when the AI does not answer.
+//! cleanup, a translation or an "Ask" question goes to, the model it asks for, whether it is the agent's first request
+//! (the start allowance), the marks that let a dictation skip an agent known to be signed out or missing, and the local
+//! fallback the user may choose for when the AI does not answer.
 //!
 //! - Codex is asked `codex login status` (no text) before its first run and every [`MARK_FOR`] after, since a Codex
 //!   never signed in retries for about 15 s and would read as a timeout; an expired sign-in, which that check does not
@@ -14,11 +14,15 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use cue_core::agents::{AgentId, ORDER};
+use cue_core::ask::AskTurn;
 use cue_core::flow::{AgentProblem, RefineOutcome};
 use cue_core::refine::RefineContext;
 use cue_core::settings::{DictionarySettings, Fallback, RefineSettings, Where};
 use cue_engines::agent::opencode::{Server, fast_auto};
+use cue_engines::agent::ask::{self as agent_ask, AskRoute};
+use cue_engines::agent::refine::START_ALLOWANCE_MS;
 use cue_engines::agent::{self, AgentClient, AgentFailure, Found, Login};
+use cue_engines::ask::{AskEnd, AskFailure, AskResult, Limits, Step};
 use cue_engines::prompt::{Job, RefineResult, Usage};
 use cue_engines::local;
 
@@ -166,6 +170,49 @@ impl Agents {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         let r = agent::refine::run(&client, &model, raw, ctx, dict, s, instructions, job, left).await;
         self.note(id, r.outcome);
+        r
+    }
+
+    /// An "Ask" question (`turns`) through agent `id`, with the cleanup's model and the agent's start allowance on its
+    /// first request: finding or starting OpenCode's server and Codex's sign-in check come out of the first-words
+    /// deadline. A mark held answers at once with the agent's word; a run that says the agent is signed out or missing
+    /// marks it, as a cleanup does.
+    pub async fn ask(
+        &self,
+        id: AgentId,
+        s: &RefineSettings,
+        web_search: bool,
+        turns: &[AskTurn],
+        limits: Limits,
+        on_step: impl FnMut(Step) + Send,
+    ) -> AskResult {
+        if let Some(p) = self.marks.problem(id) {
+            tracing::info!(agent = id.id(), "ask: the agent is not asked (marked)");
+            return AskResult::failed(AskFailure::Agent(p));
+        }
+        let allowance = if self.first(id) { Duration::from_millis(START_ALLOWANCE_MS) } else { Duration::ZERO };
+        let limits = limits.later_by(allowance);
+        let wait = self.budget.unwrap_or_else(|| {
+            let searching = web_search && id == AgentId::Codex;
+            agent_ask::wait_for(limits, false, searching)
+        });
+        let deadline = tokio::time::Instant::now() + wait;
+        let asked = async {
+            let client = match self.client(id, deadline).await {
+                Ok(c) => c,
+                Err(f) => return AskResult::failed(agent_ask::failure(f)),
+            };
+            let model = self.model(&client, s, deadline).await;
+            agent_ask::run(AskRoute::Agent(client), &model, web_search, turns, limits, on_step).await
+        };
+        // Whatever the setup took comes out of the same deadline.
+        let r = tokio::time::timeout_at(deadline, asked).await.unwrap_or_else(|_| AskResult::failed(AskFailure::Timeout));
+        match r.end {
+            AskEnd::Failed(AskFailure::Agent(AgentProblem::SignedOut)) => self.marks.set(id, Mark::SignedOut),
+            AskEnd::Failed(AskFailure::Agent(AgentProblem::Missing)) => self.marks.set(id, Mark::Missing),
+            AskEnd::Answer | AskEnd::Write { .. } if id == AgentId::Codex => self.marks.set(id, Mark::Checked),
+            _ => {}
+        }
         r
     }
 
@@ -532,6 +579,43 @@ mod tests {
         // The local model answered in the language spoken: no translation, the agent's result stays.
         let r = fallback(silent(), Fallback::Local, &slot, Job::Translate("en")).await;
         assert_eq!(r.outcome, RefineOutcome::RawAgent(AgentProblem::Silent));
+    }
+
+    /// "Ask" through a Codex that is not there ends with its word and marks it; the next question ends at once.
+    #[tokio::test]
+    async fn ask_through_a_missing_agent_ends_with_its_word() {
+        let dir = temp_dir("ask-missing");
+        let a = agents(&dir, None, None);
+        let turns = vec![AskTurn::user("<question>q</question>")];
+        let s = RefineSettings::default();
+        let r = a.ask(AgentId::Codex, &s, true, &turns, Limits::SPEC, |_| {}).await;
+        assert_eq!(r.end, AskEnd::Failed(AskFailure::Agent(AgentProblem::Missing)));
+        assert_eq!(a.marks.problem(AgentId::Codex), Some(AgentProblem::Missing));
+        let mut steps = Vec::new();
+        let r = a.ask(AgentId::Codex, &s, true, &turns, Limits::SPEC, |st| steps.push(st)).await;
+        assert_eq!(r.end, AskEnd::Failed(AskFailure::Agent(AgentProblem::Missing)));
+        assert!(steps.is_empty(), "the mark answered: nothing was asked");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// "Ask" through Codex: its answer comes back, with search when asked, and Codex is marked signed in.
+    #[tokio::test]
+    async fn ask_through_codex_answers_and_marks_it_signed_in() {
+        let dir = temp_dir("ask-codex");
+        let out = dir.join("out.jsonl");
+        let text = r#"{"answer":"Чайник.","write":false,"replace":false,"sources":[]}"#;
+        let answer = serde_json::json!({"type": "item.completed", "item": {"id": "0", "type": "agent_message", "text": text}});
+        std::fs::write(&out, format!("{answer}\n")).unwrap();
+        let exe = shim(&dir, "Logged in using ChatGPT", 0, &format!("type \"{}\"", out.display()));
+        let a = agents(&dir, Some(exe), None);
+        let turns = vec![AskTurn::user("<question>что такое HTTP 418</question>")];
+        let mut steps = Vec::new();
+        let r = a.ask(AgentId::Codex, &RefineSettings::default(), true, &turns, Limits::SPEC, |st| steps.push(st)).await;
+        assert_eq!((r.end, r.text.as_str()), (AskEnd::Answer, "Чайник."));
+        assert!(!steps.contains(&Step::NoSearch), "Codex searches when asked: {steps:?}");
+        assert!(a.marks.checked(AgentId::Codex));
+        assert_eq!(runs(&dir), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -236,6 +236,24 @@ describe('The "Ask" answer', () => {
     expect(opened).toEqual([1]);
   });
 
+  it('an answer without web search says so under it, once it is shown whole; one with search does not', () => {
+    view.update(answer({ turns: [done('A teapot.', { no_search: true })] }));
+    expect(root.querySelector('.nos')).toBeNull();
+    revealAll();
+    expect(root.querySelector('.nos')?.textContent).toBe('no web search');
+    expect(root.querySelectorAll('.nos')).toHaveLength(1);
+    // A follow-up answered with search: its turn says nothing.
+    view.update(answer({ turns: [done('A teapot.', { no_search: true }), done('Rust 1.95.')] }));
+    revealAll();
+    expect(root.querySelectorAll('.nos')).toHaveLength(1);
+    // In Russian.
+    root.replaceChildren();
+    view = make(ru);
+    view.update(answer({ turns: [done('Чайник.', { no_search: true })] }));
+    revealAll();
+    expect(root.querySelector('.nos')?.textContent).toBe('без поиска');
+  });
+
   it('a follow-up shows its question; the earlier answer is shown whole', () => {
     const first = done('a b c d e');
     view.update(answer({ turns: [first] }));

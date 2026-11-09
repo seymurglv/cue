@@ -95,11 +95,12 @@ pub enum PasteHow {
     Below,
 }
 
-/// How an "Ask" request failed: a key, balance or limit problem the user has to fix, or anything else (the network, a
-/// timeout, the service), which Retry may help (spec 2 §8).
+/// How an "Ask" request failed: no AI is chosen (no AI, or nothing chosen), the user's AI needs them (not installed,
+/// signed out), or anything else (a timeout, the AI's own failure), which Retry may help (spec 2 §8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AskError {
-    Key,
+    NeedAi,
+    Agent(AgentProblem),
     Failed,
 }
 
@@ -490,16 +491,19 @@ impl Flow {
                 self.asking = None;
                 fx.push(Effect::Finished { id, outcome: Outcome::Failed });
                 match error {
-                    // Retry would fail the same way: the Drop's "Ask: choose an AI" (until Ask follows the cleanup's
-                    // route, CUE holds no key for it: it ends at once); the answer closes, and a follow-up
-                    // under way goes with it (spec 2 §8).
-                    // Task 9: raised by Ask's own route.
-                    AskError::Key => {
+                    // Retry would fail the same way: the Drop's "Ask: choose an AI", or the agent's word ("Codex: sign
+                    // in again", "Codex not found"); the answer closes, and a follow-up under way goes with it (spec 2
+                    // §8).
+                    AskError::NeedAi | AskError::Agent(_) => {
                         if self.follow_up_under_way(id) {
                             self.drop_pending_follow_up(&mut fx);
                         }
                         self.end_conversation(&mut fx);
-                        self.phase = Phase::Error { cause: ErrorCause::NeedAiAsk, retry: false };
+                        let cause = match error {
+                            AskError::Agent(p) => agent_cause(p),
+                            _ => ErrorCause::NeedAiAsk,
+                        };
+                        self.phase = Phase::Error { cause, retry: false };
                         self.push_ui(&mut fx);
                     }
                     AskError::Failed => {
@@ -639,8 +643,9 @@ impl Flow {
         self.held = None;
     }
 
-    /// The follow-up under way goes without a trace — the conversation it belongs to ended (a key problem of the answer it
-    /// follows): its recording, its transcription or its waiting question. The caller shows what comes next.
+    /// The follow-up under way goes without a trace — the conversation it belongs to ended (no AI, or the AI needs the
+    /// user, for the answer it follows): its recording, its transcription or its waiting question. The caller shows what
+    /// comes next.
     fn drop_pending_follow_up(&mut self, fx: &mut Vec<Effect>) {
         self.held = None;
         match self.phase {
@@ -1215,8 +1220,8 @@ mod tests {
         fx.iter().filter_map(|e| if let E::Ui(s) = e { Some(s.clone()) } else { None }).collect()
     }
 
-    /// The Drop's "Ask: choose an AI" after an "Ask" request whose key is missing or refused, without Retry.
-    fn claude_key_error() -> UiState {
+    /// The Drop's "Ask: choose an AI" after an "Ask" request with no AI chosen, without Retry.
+    fn need_ai_error() -> UiState {
         UiState { phase: UiPhase::Error, error: Some(ErrorCause::NeedAiAsk), retry: false, paused: false, mode: Mode::Ask }
     }
 
@@ -2637,26 +2642,26 @@ mod tests {
     }
 
     #[test]
-    fn a_key_problem_while_a_follow_up_records_drops_it_too() {
+    fn no_ai_while_a_follow_up_records_drops_it_too() {
         let mut f = Flow::new(2, false);
         let first = answer_open(&mut f, 0);
         let id = follow_up(&mut f, 7_000);
-        let fx = f.handle(I::AskFailed { id: first, error: AskError::Key }, 8_000);
+        let fx = f.handle(I::AskFailed { id: first, error: AskError::NeedAi }, 8_000);
         assert!(has(&fx, &E::Finished { id: first, outcome: Outcome::Failed }));
         assert!(has(&fx, &E::StopMic { id, keep: false }) && has(&fx, &E::Finished { id, outcome: Outcome::Discarded }));
         assert!(has(&fx, &E::CloseAnswer));
-        assert_eq!(uis(&fx), vec![claude_key_error()], "straight to the error, no answer in between");
+        assert_eq!(uis(&fx), vec![need_ai_error()], "straight to the error, no answer in between");
         assert!(!f.answer_open());
     }
 
-    /// A key problem while the follow-up is transcribed or waits for the answer it follows: it goes too.
+    /// No AI while the follow-up is transcribed or waits for the answer it follows: it goes too.
     #[test]
-    fn a_key_problem_while_a_follow_up_is_transcribed_or_waits_drops_it_too() {
+    fn no_ai_while_a_follow_up_is_transcribed_or_waits_drops_it_too() {
         let mut f = Flow::new(2, false);
         let first = answer_open(&mut f, 0);
         let id = follow_up(&mut f, 7_000);
         f.handle(I::ChordDown(Mode::Dictate), 9_000);
-        let fx = f.handle(I::AskFailed { id: first, error: AskError::Key }, 9_100);
+        let fx = f.handle(I::AskFailed { id: first, error: AskError::NeedAi }, 9_100);
         assert_eq!(
             fx,
             vec![
@@ -2664,7 +2669,7 @@ mod tests {
                 E::AbortStt { id },
                 E::Finished { id, outcome: Outcome::Discarded },
                 E::CloseAnswer,
-                E::Ui(claude_key_error()),
+                E::Ui(need_ai_error()),
             ]
         );
         assert!(f.handle(I::SttFinal { id, text: "а подробнее".into() }, 9_300).is_empty(), "its transcription was aborted");
@@ -2674,14 +2679,14 @@ mod tests {
         let id = follow_up(&mut f, 7_000);
         f.handle(I::ChordDown(Mode::Dictate), 9_000);
         f.handle(I::SttFinal { id, text: "а подробнее".into() }, 9_300);
-        let fx = f.handle(I::AskFailed { id: first, error: AskError::Key }, 9_500);
+        let fx = f.handle(I::AskFailed { id: first, error: AskError::NeedAi }, 9_500);
         assert_eq!(
             fx,
             vec![
                 E::Finished { id: first, outcome: Outcome::Failed },
                 E::Finished { id, outcome: Outcome::Discarded },
                 E::CloseAnswer,
-                E::Ui(claude_key_error()),
+                E::Ui(need_ai_error()),
             ],
             "the waiting question never goes"
         );
@@ -2807,14 +2812,28 @@ mod tests {
     }
 
     #[test]
-    fn a_key_problem_closes_the_answer_and_shows_the_key_error() {
+    fn no_ai_closes_the_answer_and_says_choose_an_ai() {
         let mut f = Flow::new(2, false);
         let id = answer_open(&mut f, 0);
-        let fx = f.handle(I::AskFailed { id, error: AskError::Key }, 6_500);
+        let fx = f.handle(I::AskFailed { id, error: AskError::NeedAi }, 6_500);
         assert!(has(&fx, &E::Finished { id, outcome: Outcome::Failed }) && has(&fx, &E::CloseAnswer));
         let ui = last_ui(&fx).unwrap();
         assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::NeedAiAsk), false));
         assert!(!f.answer_open());
+    }
+
+    /// The user's agent is signed out or missing: the answer closes and the Drop says the agent's word, without Retry.
+    #[test]
+    fn an_agent_problem_closes_the_answer_and_shows_the_agents_word() {
+        for (p, cause) in [(AgentProblem::SignedOut, ErrorCause::AgentSignIn), (AgentProblem::Missing, ErrorCause::AgentMissing)] {
+            let mut f = Flow::new(2, false);
+            let id = answer_open(&mut f, 0);
+            let fx = f.handle(I::AskFailed { id, error: AskError::Agent(p) }, 6_500);
+            assert!(has(&fx, &E::Finished { id, outcome: Outcome::Failed }) && has(&fx, &E::CloseAnswer));
+            let ui = last_ui(&fx).unwrap();
+            assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(cause), false));
+            assert!(!f.answer_open());
+        }
     }
 
     #[test]
@@ -3419,7 +3438,7 @@ mod tests {
                     7 => I::AskOpened { id },
                     8 => I::AskAnswered { id },
                     9 => I::AskWrite { id, how: hows[next(3) as usize] },
-                    10 => I::AskFailed { id, error: if next(3) == 0 { AskError::Key } else { AskError::Failed } },
+                    10 => I::AskFailed { id, error: [AskError::NeedAi, AskError::Agent(AgentProblem::SignedOut), AskError::Failed, AskError::Failed][next(4) as usize] },
                     11 => I::Inserted { id, outcome: if next(2) == 0 { InsertOutcome::Pasted } else { InsertOutcome::NoField } },
                     12 => [I::ModeToggle, I::PasteLast, I::TogglePause, I::MicDead][next(4) as usize].clone(),
                     13 => [I::ChordAborted, I::SessionLocked, I::MicFailed { heard: true }, I::MicFailed { heard: false }]

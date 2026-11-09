@@ -477,15 +477,13 @@ pub struct AskSettings {
     /// "Ask" as a whole (a paid feature later); on by default.
     #[serde(deserialize_with = "off_or_nothing", skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    /// Web search in answers ($0.01 a search); on by default.
+    /// Web search in answers, when the user's AI can search; on by default.
     #[serde(deserialize_with = "off_or_nothing", skip_serializing_if = "Option::is_none")]
     pub web_search: Option<bool>,
     #[serde(deserialize_with = "searches_or_nothing", skip_serializing_if = "Option::is_none")]
     pub max_searches: Option<u32>,
 }
 
-// Task 9: goes with the cloud Ask path.
-const DEFAULT_ASK_MODEL: &str = "claude-haiku-5-5";
 const DEFAULT_MAX_SEARCHES: u32 = 2;
 /// More searches a question than this is a typo: each one costs money.
 const MAX_SEARCHES_LIMIT: u32 = 10;
@@ -497,10 +495,6 @@ impl AskSettings {
 
     pub fn web_search(&self) -> bool {
         self.web_search.unwrap_or(true)
-    }
-
-    pub fn model(&self) -> &str {
-        DEFAULT_ASK_MODEL
     }
 
     pub fn max_searches(&self) -> u32 {
