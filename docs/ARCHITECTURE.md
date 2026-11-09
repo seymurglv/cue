@@ -4,9 +4,11 @@ CUE is a Tauri 2 app: a Rust core that runs in the background and makes every de
 Drop with its tray cards, the "Ask" card at the selection, the main window with the history and the settings, and the
 welcome window of the first start) rendered by WebView2. The Drop and the card only draw the state the core sends and
 report button clicks back; the main window reads the history and changes the settings through commands, the welcome
-window saves the key and picks the microphone the same way, and the core stays the only one that writes the history and
-the settings. Speech is recognized on this computer by a speech model the core downloads once and keeps loaded (see
-Recognition); the network is needed only for that download and for Anthropic. The dictation logic is a pure state
+window chooses who cleans the text and picks the microphone the same way, and the core stays the only one that writes
+the history and the settings. CUE holds no API key. Speech is recognized on this computer by a speech model the core
+downloads once and keeps loaded (see Recognition); cleanup, translation and "Ask" go through nobody (CUE's own tidy-up),
+a language model on this computer, or the user's own AI agent, OpenCode or Codex (see Refine). The network is needed
+only for the model downloads, and by the agent, on its own account. The dictation logic is a pure state
 machine, so it is tested without windows, a microphone, a model, a network or a real clock.
 
 ## Crates
@@ -17,8 +19,11 @@ machine, so it is tested without windows, a microphone, a model, a network or a 
   - `ui`: `UiState`, `UiPhase`, `Mode`, `ErrorCause`, `TrayKind`, `UiAction`, shared with TypeScript as JSON.
   - `refine`: the system prompt, the dictionary block, the user message, timeout and token budget, the sanity check,
     Markdown stripping, list tidying, and the join space before a paste.
-  - `connections`: the cleanup's ten connections (the Messages API, OpenRouter, eight OpenAI-compatible services, two of
-    them local servers) with their models (the first recommended), prices, and what each service needs in a request.
+  - `agents`: the agents CUE can use (`AgentId`, `ORDER`: OpenCode, Codex; Grok parses but is not offered), their
+    default models and the names that mark a small fast model.
+  - `basics`: the no-AI layer (`tidy`: the dictionary and learned spellings, no "эм"/"ээ", tidy spaces).
+  - `llm`: the short list of local language models, a found model's manifest and the rules of what runs.
+  - `instructions`: the standard text of the instructions file, in both interface languages, and its limits.
   - `translate`: the 60 languages a translation can go to, the translation direction, the instruction block, the
     timeout and the translation check.
   - `speech`: the rules of recognition: the alphabet of a dictation, a leak of the other alphabet, the speech language
@@ -36,19 +41,20 @@ machine, so it is tested without windows, a microphone, a model, a network or a 
     becomes the corrected span (`Watch`), and the one suggestion the Drop offers (`Offers`).
   - `habits`: the corrections that repeat (see Habits): the kinds and their forms (`Form`, `correction`), the counts, the
     habits and the rule's request and template (`Habits`, `Habit`, `Draft`), and the check of a result (`marks`).
-  - `settings` (with `SettingChange`, one change from the main window), `usage` (CSV rows, costs, monthly summary),
-    `paths`.
+  - `settings` (with `SettingChange`, one change from the main window), `usage` (CSV rows, monthly summary; words and
+    time, no money), `stats` (Today's numbers), `paths`.
 - **`cue-engines`** (`app/crates/engines`): `stt` (the session facade over the model on this computer, and Retry's
   recognition of a saved WAV), `parakeet` (the model: `mel`, the log-mel features; `vocab`, the vocabulary and the
   masks of one alphabet; `tdt`, TDT greedy decoding; `model`, the ONNX Runtime sessions and `Recognizer`), `download`
-  (the model's files: resumed, checked, renamed), `claude` (refine and translation requests and responses, the cache
-  warm-up), `ask` (an "Ask" question's steps, end and deadlines; `agent::ask` asks the route),
-  `keys` (Windows Credential Manager, and the deletion of the Soniox key of earlier versions), `check` (free key
-  probes), `habit` (the rule request of a habit just learned), `error`. `openrouter` is the cleanup's OpenRouter
-  connection (`refine`, `translate`: the same system blocks, checks and fallbacks as `claude`, each model's profile in
-  `model_profile`) and holds the server-sent-events reader that "Ask", `chat` and the `refine_compare` example use too;
-  `chat` is the cleanup over any other OpenAI-compatible service (OpenAI, Gemini, DeepSeek, Mistral, Groq, xAI, Ollama,
-  LM Studio), each service's needs read from `cue_core::connections`.
+  (the model's files: resumed, checked, renamed), `hub` (Hugging Face's search and the pinning of a found model),
+  `local` and `local_llm` (the language model on this computer through llama.cpp: the cleanup, a translation, a habit's
+  rule, an "Ask" answer, under a grammar), `prompt` (what every route shares: the system text, the `{"text": …}`
+  answer and the checks it passes, `settle`), `agent` (the user's AI: `discover` finds it, `process` runs a CLI with no
+  window and ends its process tree, `cli` holds Codex's flags and reads its events, `opencode` talks to OpenCode's
+  server over loopback, `refine` is a cleanup or a translation through an agent with its budget, `ask` an "Ask"
+  question), `ask` (an "Ask" question's steps, end and deadlines), `keys` (Windows Credential Manager: the habits'
+  secret, and the deletion of the API keys earlier versions saved), `habit` (the rule request of a habit just
+  learned), `error`; `bin/fake_agent` is the stand-in agent the tests run.
 - **`cue-platform-win`** (`app/crates/platform-win`): `hook` and `chord` (keyboard, and the mouse while a Shift that
   switched the mode is held), `input` (`SendInput`, modifier state), `clipboard` (paste, and the `Ctrl + C` fallback
   of "Ask"), `focus` (UI Automation: the field, the text before the caret, the selection; and the window under the
@@ -67,10 +73,11 @@ machine, so it is tested without windows, a microphone, a model, a network or a 
   (the card window), `strings.ts`, `window.html` with `window/` (the main window: `page.ts`, `history.ts`, `said.ts`
   (how an entry was said, and its player), `habits.ts` (the Habits section), `settings.ts`, `text.ts`, `icons.ts`,
   `api.ts`, and `model.ts`, `mic.ts` and `cleanup.ts`, the speech model's block, the microphone rows and the Cleanup
-  page the welcome window shares), `welcome.html` with `welcome/` (`page.ts`, `steps.ts`, `text.ts`, `welcome.css`), and `design/` (Drop,
+  page the welcome window shares, with `models.ts` (its This-computer list) and `instructions.ts`, the Instructions
+  page), `welcome.html` with `welcome/` (`page.ts`, `steps.ts`, `text.ts`, `welcome.css`), and `design/` (Drop,
   tray card, answer and animation code, styles including the main and welcome windows' `window.css`, the Bebas Neue and
   Montserrat ExtraBold fonts).
-- **`cue-cli`** (`app/crates/cli`: keys, usage and `leak-scan`, see Installer and release build) and **`cue-bench`**
+- **`cue-cli`** (`app/crates/cli`: usage, `leak-scan` and `pin-llm`, see Installer and release build) and **`cue-bench`**
   (`bench`): developer tools. `scripts/build-release.ps1` builds the installer.
 
 ## Threads
@@ -145,28 +152,28 @@ raw text, a question as a failure with Retry, paste as "no field".
 dictation in the mode the chord picked. `ModeToggle` (a fresh Shift press) swaps dictation and translation ("Ask"
 becomes a translation) while starting or recording, whether the chord is still held or was tapped (then only a Shift on
 its own, see below): people often tap the chord and decide on a translation only while speaking, and a second Shift
-takes a slip back. A translation goes back to the mode it was switched from (`toggled_from`: "Ask" too; a recording
-that started as a translation becomes a dictation; Alt picking "Ask" forgets it), so every toggle is undone by the next
-one, and a toggle the hook takes back restores a question as well. `ModeChange(mode)` (Alt, for "Ask") counts only while the starting chord is still held (in hold mode
-too). Once the finishing press has moved the flow to thinking, neither
-changes the mode, and neither does anything outside a recording. The mode reaches the Drop in `UiState` and the
-runtime in `Refine { mode }` and `RefineAgain { mode }`; every path into Idle resets it to `Dictate`. A translation
-that comes back as anything but a refined, non-empty text is never pasted: the attempt ends as `failed`, and the flow
-shows the `translate` error (the agent's word, `agentSignIn`, `agentMissing` or `agentSilent`, when the user's AI is
-the cause) with Retry. That Retry emits `RefineAgain` with the saved transcript: the text is translated again, the audio
-is not transcribed again. With no AI (`RefineOutcome::NoAi`) there is nothing to translate with: `needAiTranslate`
-("Перевод: выберите AI"), nothing pasted, no Retry.
+takes a slip back. A translation goes back to the mode it was switched from (`toggled_from`: "Ask" too; a recording that
+started as a translation becomes a dictation; Alt picking "Ask" forgets it), so every toggle is undone by the next one,
+and a toggle the hook takes back restores a question as well. `ModeChange(mode)` (Alt, for "Ask") counts only while the
+starting chord is still held (in hold mode too). Once the finishing press has moved the flow to thinking, neither
+changes the mode, and neither does anything outside a recording. The mode reaches the Drop in `UiState` and the runtime
+in `Refine { mode }` and `RefineAgain { mode }`; every path into Idle resets it to `Dictate`. A translation that comes
+back as anything but a refined, non-empty text is never pasted: the attempt ends as `failed`, and the flow shows the
+`translate` error (the agent's word, `agentSignIn`, `agentMissing` or `agentSilent`, when the user's AI is the cause)
+with Retry. That Retry emits `RefineAgain` with the saved transcript: the text is translated again, the audio is not
+transcribed again. With no AI (`RefineOutcome::NoAi`) there is nothing to translate with: `needAiTranslate` ("Перевод:
+выберите AI"), nothing pasted, no Retry.
 
 **"Ask" in the flow.** A question is recorded and transcribed like a dictation; then, instead of `Refine`, the flow
 emits `Ask { id, question, follow_up }` and stays in Thinking (the Drop's three dots) until the answer has something to
-show. The runtime reports back with four inputs: `AskOpened` (the first real step: a search began, its results came,
-or the first words), `AskAnswered` (the answer is complete; a refusal, or a written text shown instead of written,
-too), `AskWrite { how }` (the AI wrote text for the field and the runtime holds it; `PasteHow` is `AtCaret`,
-`Replace` or `Below`) and `AskFailed { error }` (`AskError::NeedAi`, `Agent(problem)` or `Failed`). An answer that opens or ends moves the
-flow to the `Answer` phase: the Drop rests (it looks idle), the answer shows in the tray or the card, `Esc` stays
-swallowed, and a chord records a follow-up. A write goes to `Inserting` at once with `AskPaste { id, how }` and ends
-the conversation (`CloseAnswer`); the answer's buttons (Insert, Insert below, Replace) do the same for an answer that
-is complete on screen, and Retry after a failure emits `AskAgain { id }`. `AbortAsk { id }` drops the request in
+show. The runtime reports back with four inputs: `AskOpened` (the first real step: a search began, its results came, or
+the first words), `AskAnswered` (the answer is complete; a refusal, or a written text shown instead of written, too),
+`AskWrite { how }` (the AI wrote text for the field and the runtime holds it; `PasteHow` is `AtCaret`, `Replace` or
+`Below`) and `AskFailed { error }` (`AskError::NeedAi`, `Agent(problem)` or `Failed`). An answer that opens or ends
+moves the flow to the `Answer` phase: the Drop rests (it looks idle), the answer shows in the tray or the card, `Esc`
+stays swallowed, and a chord records a follow-up. A write goes to `Inserting` at once with `AskPaste { id, how }` and
+ends the conversation (`CloseAnswer`); the answer's buttons (Insert, Insert below, Replace) do the same for an answer
+that is complete on screen, and Retry after a failure emits `AskAgain { id }`. `AbortAsk { id }` drops the request in
 flight. `NeedAi` (no AI chosen) closes the answer and shows the Drop's "Спросить: выберите AI" (`needAiAsk`) without
 Retry, and `Agent` (the user's agent signed out or missing) closes it with the agent's word, as a cleanup's; any other
 failure keeps the answer open with the error and Retry, and the question is kept.
@@ -369,8 +376,8 @@ The folder is `%LOCALAPPDATA%\CUE\models\parakeet-ultra-int8\` (`paths::model_di
 - The log gets the state's changes, the bytes and seconds of a download, the load time, how many files a check
   deleted, and an error's text; never dictation text.
 
-At its first start this version deletes the Soniox key of earlier versions from Credential Manager
-(`keys::forget_soniox`, asked at every start, a no-op after the first); the log says when one was deleted.
+At its first start this version deletes the API keys of earlier versions, Soniox's included, from Credential Manager
+(`keys::forget_api_keys`, asked at every start, a no-op after the first; see Logging and privacy rules).
 
 ### Refine (cleanup)
 
@@ -383,12 +390,13 @@ At its first start this version deletes the Soniox key of earlier versions from 
     at most `LOAD_WAIT` for the model loading again after a rest.
   - `Where::Agent`: the agent in `refine.agent` through `runtime::agents::Agents`. Its budget (`agent::refine::budget`:
     10 s + 1 s per 100 words for Codex and OpenCode alike (OpenCode took 5–8 s for a 165-word cleanup, past the
-    cleanup's own 4 s), a translation a second more, plus 5 s on the
-    agent's first request after CUE starts or after it rested: OpenCode's server let go, or 15 min without a request
-    to Codex) counts from the moment it is asked, so finding or starting OpenCode's server (`OpenCodeSlot::get_or_start`,
-    off the core's thread) comes out of it. The model is `refine.models[agent]`, else Codex's default (GPT-6 Luna), else
-    OpenCode's "Быстрая · авто" (`opencode::fast_auto` over the models its server lists, picked once per server) or its
-    own default; OpenCode's model goes in the request's JSON body only. Grok is not routed yet.
+    cleanup's own 4 s), a translation a second more, plus 5 s on the agent's first request after CUE starts or after it
+    rested: OpenCode's server let go, or 15 min without a request to Codex) counts from the moment it is asked, so
+    finding or starting OpenCode's server (`OpenCodeSlot::get_or_start`, off the core's thread) comes out of it. The
+    model is `refine.models[agent]`, else Codex's default (GPT-6 Luna), else OpenCode's "Быстрая · авто"
+    (`opencode::fast_auto` over the models its server lists, picked once per server) or its own default; OpenCode's
+    model goes in the request's JSON body only. Grok is not offered (the owner's decision of 09.11.2026: 6–9 s for a
+    short cleanup; its route was built and reverted).
   - **Marks** (`AgentMarks`, `MARK_FOR` = 5 min): Codex is asked `codex login status` (no text) before its first run and
     every 5 minutes after, since a Codex never signed in retries about 15 s and would read as a timeout; "Not logged in"
     marks it signed out. An expired sign-in, which that command does not tell, is marked from the run's own error
@@ -428,48 +436,49 @@ At its first start this version deletes the Soniox key of earlier versions from 
     translated "Plan for tomorrow:" passes). A rate limit or a used-up free allowance
     (`ProviderRequestError`, `reason: "rate_limit"`) is `AgentFailure::RateLimited`: the agent did not answer
     (`RawAgent(Silent)`, "не ответил"; the local fallback cleans as for any silence), the log's reason "rate limit".
-- The cloud request described below (the Messages API, OpenRouter, the OpenAI-compatible services) is no longer reached
-  by a dictation; it stays in `cue_engines` until the keys go. Right after the second press the runtime asks
-  `cue-focus` for the focused app and up to `refine.context_chars` characters before the caret, in parallel with
-  transcription. Password fields are never read; the app name comes from the executable's file description, never the
-  window title.
-- The request: the system prompt as a cached block, a user message with `<app>`, `<before_cursor>` and `<transcript>`
-  tags (closing tags inside the data are defused), effort `low`, thinking disabled where the model allows it, and a
-  JSON schema that forces `{"text": …}`. Timeout: 3 s plus 1 s per 100 words. A timeout, a network failure or an
-  overloaded service (HTTP 500, 502, 503, 504, 529) is asked once more with twice the time; the raw text is pasted
-  only when that request fails too. Key, limit and balance refusals are not asked again.
-- The user's dictionary (`dictionary.terms`) goes in a second system block after the unchanged prompt: a short rule
-  (write a listed name exactly as listed when the speech clearly means it, even if the transcript spells it
-  differently, splits it or mixes alphabets; add none the user did not say and change no other word because of the
-  list) and the terms, one per line. The cache mark sits on the last system block, so the cached prefix covers the
-  prompt and the list together; editing the list costs one cache write. Entries are trimmed, and empty, multi-line,
-  overlong (over 60 characters) and repeated ones are dropped, at most 200 kept. With no usable term the request is
-  byte for byte the one without a dictionary. Recognition never gets the terms: the model takes no vocabulary.
+- Right after the second press the runtime asks `cue-focus` for the focused app and up to `refine.context_chars`
+  characters before the caret, in parallel with transcription. Password fields are never read; the app name comes from
+  the executable's file description, never the window title.
+- **The request**, the same on every route (`prompt::system_texts`, `refine::user_message`): the system text is CUE's
+  prompt, the dictionary block, for a cleanup the habits block, then the job's own block (the instructions file's text,
+  or the translation's instruction), joined into one text. The user message carries `<app>`, `<before_cursor>` and
+  `<transcript>` tags (closing tags inside the data are defused). The answer must be a `{"text": …}` object: Codex is
+  held to it by `--output-schema`, the local model by a grammar, and OpenCode's plain-text or fenced reply is read
+  through the same check (`refine::held_to_schema`). Nothing is cached or warmed up ahead of time: an agent keeps its
+  own caches. The budgets are in "Where it goes"; on this computer a piece of a dictation gets 20 s + 400 ms a word.
+- The user's dictionary (`dictionary.terms`) is the second block after the unchanged prompt: a short rule (write a
+  listed name exactly as listed when the speech clearly means it, even if the transcript spells it differently, splits
+  it or mixes alphabets; add none the user did not say and change no other word because of the list) and the terms,
+  one per line. Entries are trimmed, and empty, multi-line, overlong (over 60 characters) and repeated ones are
+  dropped, at most 200 kept. With no usable term there is no block. Recognition never gets the terms: the model takes
+  no vocabulary.
 - The cleanup's style block is the text of `%APPDATA%\CUE\instructions\instructions.md` as it stands
-  (`claude::system_blocks`, `Job::Rewrite`), kept by `instructions::Instructions`. CUE writes the file when missing:
+  (`prompt::system_texts`, `Job::Rewrite`), kept by `instructions::Instructions`. CUE writes the file when missing:
   the standard text in the interface language (`cue_core::instructions::standard`: `refine::BOLD_PROMPT` in English,
-  `BOLD_PROMPT_RU` in Russian), or the old custom style's text once. The runtime asks for the text at every cleanup and
-  warm-up, and the Instructions page while it is shown (`instructions_get`, every 1.5 s); the file is looked at most
-  every 300 ms, read again when its modified time or length changed (the version used until then is kept as
+  `BOLD_PROMPT_RU` in Russian), or the old custom style's text once. The runtime asks for the text at every cleanup,
+  and the Instructions page while it is shown (`instructions_get`, every 1.5 s); the file is looked at most every
+  300 ms, read again when its modified time or length changed (the version used until then is kept as
   `instructions.prev.md`), cut at 2 000 characters, and an empty, deleted or non-text file means the standard text. The
   protocol (output format, the dictionary and habits blocks, the translation) stays in code. `AGENTS.md` beside the
-  file is CUE's own, rewritten when its first line `<!-- CUE <version> -->` is older than the app. The folder holds only
-  these files, so an AI opened in it sees nothing else of CUE's; an earlier build kept them beside settings.json, and
-  they move into it once at startup without losing anything: a rename that fails is a copy (the original stays, and
-  the next start, finding the same text in both, keeps one); with two different `instructions.md` the newer stays in
-  use and the other is kept as `instructions.old-<date>.md` (copied first, then removed; a taken name gets `-2`, never
-  overwritten), an old previous copy likewise as `instructions.prev.old-<date>.md`; one that can be neither moved nor
-  copied is read where it is, and no standard text is written in its place. CUE's old `AGENTS.md` goes.
+  file is CUE's own, rewritten when its first line `<!-- CUE <version> -->` is older than the app. The folder holds
+  only these files, so an AI opened in it sees nothing else of CUE's; an earlier build kept them beside settings.json,
+  and they move into it once at startup without losing anything: a rename that fails is a copy (the original stays,
+  and the next start, finding the same text in both, keeps one); with two different `instructions.md` the newer stays
+  in use and the other is kept as `instructions.old-<date>.md` (copied first, then removed; a taken name gets `-2`,
+  never overwritten), an old previous copy likewise as `instructions.prev.old-<date>.md`; one that can be neither
+  moved nor copied is read where it is, and no standard text is written in its place. CUE's old `AGENTS.md` goes.
 - When the app is unknown (neither the query at the start of recording nor the one after the second press named it),
   the request carries `<app>unknown app</app>`.
-- The answer is used only when it is a complete `{"text": …}` object: a refusal, `max_tokens`, a timeout, a network
-  error or a bad response all mean the raw transcript is pasted with the normal "Done". Explicit Markdown the speaker
-  did not dictate is stripped, and stray commas and semicolons at the end of list items are removed.
+- The answer is used only when it is a complete `{"text": …}` object: a refusal, a timeout, an agent that failed or a
+  bad response all mean the no-AI layer's text is pasted (or the local fallback's), with the normal "Done". Explicit
+  Markdown the speaker did not dictate is stripped, and stray commas and semicolons at the end of list items are
+  removed.
 - **Sanity check** on what would be pasted: lengths are compared in characters without numbers (digits and number
   words), and only for transcripts of at least four words with two or more that are not numbers; the ratio must stay
-  within `min_ratio`…`max_ratio` (0.35–1.25). At least `min_overlap` (70 %) of the result's non-number words must
-  appear in the transcript; words of `dictionary.terms` count as appearing, so a name fixed in a short phrase
-  ("открой гитхаб" → "Открой GitHub.") is not taken for an invention. An empty result always fails. A failed check pastes the raw transcript.
+  within `min_ratio`…`max_ratio` (0.35–1.25). At least `min_overlap` (70 %) of the result's non-number words must appear
+  in the transcript; words of `dictionary.terms` count as appearing, so a name fixed in a short phrase ("открой гитхаб"
+  → "Открой GitHub.") is not taken for an invention. An empty result always fails. A failed check pastes the text as
+  said (after the no-AI layer, or the local fallback's cleanup).
 - The user's AI signed out, missing or silent pastes the no-AI layer's text (or the local fallback's) and then shows the
   agent's word without Retry (see "Where it goes").
 
@@ -484,14 +493,12 @@ At its first start this version deletes the Soniox key of earlier versions from 
   Settings example: `"translate": { "target": "en", "home": "ru", "speech": "auto" }` sends Russian speech to English
   and English speech to Russian. Speech outside the pair counts as the pair's language of its alphabet: German speech
   reads as English there and goes to Russian, unless `translate.speech` says `de`.
-- **Request** (`claude::Job::Translate(code)`, `request_body_for`). The refine request as is, plus one more system block
-  after the cache mark (`translate::instruction`): clean up the transcript by the rules above, then write the whole
-  result in the target language (its English name), which replaces the rules to keep the spoken language and never
-  translate; keep the meaning, the tone and the formatting rules (plain text, the list rules, one line in terminals);
-  dictionary terms, product names and code stay as written. The cached prefix is the one plain dictation uses, so a
-  translation never writes a cache of its own, and a request without a translation is byte for byte what it was.
-  `max_tokens` doubles (another alphabet may take more tokens), up to 16 000. Timeout: 4 s plus 1 s per 100 words,
-  a second more than a cleanup.
+- **Request** (`prompt::Job::Translate(code)`). The refine request as is, with the job's block
+  (`translate::instruction`) in place of the instructions: clean up the transcript by the rules above, then write the
+  whole result in the target language (its English name), which replaces the rules to keep the spoken language and
+  never translate; keep the meaning, the tone and the formatting rules (plain text, the list rules, one line in
+  terminals); dictionary terms, product names and code stay as written. The habits block is left out. Timeout: a
+  second more than a cleanup's (`agent::refine::budget`).
 - **Check** (`translation_ok`), instead of the sanity check, on the text after Markdown stripping and list tidying.
   The result has letters or digits. From 20 letters of speech, its length is 0.35–2.8 times the speech's, counted in
   letters, each weighted by its script (a Han character counts as 3 Latin letters, a Hangul one as 2, a kana as 1.5),
@@ -521,7 +528,7 @@ At its first start this version deletes the Soniox key of earlier versions from 
   A translation made only of target-script words the speech already has fails ("сделай git push" → "Git push."), and so
   does a large round number said in one word and written in many digits ("миллиард" → "1 000 000 000"): both safely,
   with Retry. A short question answered with a bare number ("какой год" → "2026") passes.
-- **Failure.** A network error, a timeout, a refusal, `max_tokens`, a response off the schema or a failed check pastes
+- **Failure.** A timeout, a refusal, an agent that failed, a response off the schema or a failed check pastes
   nothing: the flow shows "Couldn't translate" with Retry, which translates the saved transcript again. The user's AI
   signed out, missing or silent shows the agent's word with Retry instead; no AI shows "Перевод: выберите AI" without
   Retry. The log gets one line with the reason and the outcome, and the target code when a translation starts; never
@@ -529,8 +536,8 @@ At its first start this version deletes the Soniox key of earlier versions from 
 
 ### Cache warm-up
 
-The cleanup and "Ask" have none: neither goes to the Messages API, and an agent keeps its own caches. On this computer the local model evaluates the cleanup's system part while the person
-speaks (`local::warm`).
+None for a cleanup, a translation or "Ask" through an agent: nothing is sent ahead of time, and an agent keeps its own
+caches. On this computer the local model evaluates the cleanup's system part while the person speaks (`local::warm`).
 
 ### Paste
 
@@ -621,20 +628,20 @@ the correction watch's end: the path from there to a card, and on to a result:
    (`stored_app`: the executable's file description). `on_corrected` offers the dictionary candidate as before and then
    `count_habits`; a dictation whose app is not known, and a translation, are not counted.
 2. `habits::correction` reads the pair into `Found` forms (`Form`: `EndMark`, `FirstLetter`, `Replacement`, `Digits`,
-   `Dash`, each with its detail) over `corrections::runs`, the alignment `candidates` also uses, split out so that a
-   run the dictionary cuts is still whole for habits. A correction shares no form with a paste that has no word in
-   common, one end mark swapped for another is neither an end mark nor a first letter, and a replacement longer than
-   `MAX_EXAMPLE_CHARS` (40) is no form. The correction's example is the changed words with their neighbours, cut to
-   40 characters on each side. A form is counted by its hash under this installation's secret
-   (`Form::hash(&Secret)`: HMAC-SHA-256 of its kind and detail, written out over `sha2`, the first 8 bytes; a habit's
-   id, `habits::id_of`, is FNV-1a over its forms' hashes and its app, none for every app, so the same forms make one
-   habit per app). The secret (`habits::Secret`, 32 random bytes) is kept in Credential Manager
-   (`keys::habit_secret`, the entry `habits-secret`); `Runtime::run` sets it before the first event (`key_habits`).
-   A missing or malformed one is made anew and goes through `Habits::rekey`: `seen` and `declined` go, the ids are
-   made again. Under the secret kept, `Habits::reid` makes again any id made otherwise (a settings.json restored or
-   brought over; a set counted under the old id follows it), and the file is written when one changed. A store that cannot be read is left alone (`keys::secret_from` neither makes nor writes): the session
-   has no secret. It never reaches settings.json (`#[serde(skip)]`) or a log (`Secret(..)`), and without one nothing
-   is counted or declined (`Habits::forget` only removes the habit).
+   `Dash`, each with its detail) over `corrections::runs`, the alignment `candidates` also uses, split out so that a run
+   the dictionary cuts is still whole for habits. A correction shares no form with a paste that has no word in common,
+   one end mark swapped for another is neither an end mark nor a first letter, and a replacement longer than
+   `MAX_EXAMPLE_CHARS` (40) is no form. The correction's example is the changed words with their neighbours, cut to 40
+   characters on each side. A form is counted by its hash under this installation's secret (`Form::hash(&Secret)`:
+   HMAC-SHA-256 of its kind and detail, written out over `sha2`, the first 8 bytes; a habit's id, `habits::id_of`, is
+   FNV-1a over its forms' hashes and its app, none for every app, so the same forms make one habit per app). The secret
+   (`habits::Secret`, 32 random bytes) is kept in Credential Manager (`keys::habit_secret`, the entry `habits-secret`);
+   `Runtime::run` sets it before the first event (`key_habits`). A missing or malformed one is made anew and goes
+   through `Habits::rekey`: `seen` and `declined` go, the ids are made again. Under the secret kept, `Habits::reid`
+   makes again any id made otherwise (a settings.json restored or brought over; a set counted under the old id follows
+   it), and the file is written when one changed. A store that cannot be read is left alone (`keys::secret_from` neither
+   makes nor writes): the session has no secret. It never reaches settings.json (`#[serde(skip)]`) or a log
+   (`Secret(..)`), and without one nothing is counted or declined (`Habits::forget` only removes the habit).
 3. `Habits::count` keeps `seen`, a count by app and hash with the day it last grew (30 days, `MAX_SEEN` 300), once per
    form per dictation; a hash in `declined` is skipped. A form already in a habit of the app, or of every app, grows
    that habit's `n`. A habit of another app whose forms all came together in the correction counts once for this app,
@@ -644,34 +651,33 @@ the correction watch's end: the path from there to a card, and on to a result:
    into it (their counts added), its set's and its forms' counts go in every app (none follows the new id), and
    `send_settings` redraws the section without a card. `Counted::widened` pairs each id that went with the new one:
    `follow` moves the open card and the waiting ones to it, and `habits.ts` keeps the row of an app's habit gone with
-   the same example for the habit of every app that took its place, so the row changes in place. A habit's form alone in another app counts for that app as any form does. The other forms that reach three
-   together become one `Draft`, with the example and `n`.
+   the same example for the habit of every app that took its place, so the row changes in place. A habit's form alone in
+   another app counts for that app as any form does. The other forms that reach three together become one `Draft`, with
+   the example and `n`.
 4. `ask_rule` numbers the draft as found (`next_notice`), keeps it in `drafts` and, when the cleanup runs on this
    computer with its model in the slot, asks that model (`local::rule`). On an agent route the rule is always CUE's
-   template: the 5 s wait would expire on most agent runs, and no agent is run for a rule; with no AI, the template
-   too.
+   template: the 5 s wait would expire on most agent runs, and no agent is run for a rule; with no AI, the template too.
    `habits::rule_messages` builds it: instructions that name the interface language, and a user message that holds the
    kind(s), the example and the app, nothing else. The answer is a `{rule, short}` object (`read_rule` accepts a rule of
    at most `MAX_RULE_CHARS` (80) on one line, and a short name of at most `MAX_SHORT_CHARS`). On an agent route, with no
    AI, with the local model not in its slot, or on an error, an answer that cannot be used, or no answer within
-   `RULE_WAIT_MS` (5 s), `habits::template` writes the rule and the short name from the kinds; a scoped habit's rule starts with the app. The request is not a
-   usage row, and its log line says why it fell back, never the answer.
+   `RULE_WAIT_MS` (5 s), `habits::template` writes the rule and the short name from the kinds; a scoped habit's rule
+   starts with the app. The request is not a usage row, and its log line says why it fell back, never the answer.
 5. `CoreEvent::HabitRule` reaches `on_habit_rule`, which drops the draft if "Learn from me" went off meanwhile, else
    `Habits::learn` (the habit goes first in `list`, past `MAX_HABITS` the oldest go; its id is `id_of` its forms and
-   app),
-   saves the settings, logs "habit learned" with the kinds, `n` and whether the cleanup wrote the rule, and sends the
-   main window `cue://settings`. Its card is queued in `habit_cards`. Two drafts of the same forms in one app (the
-   second reached three while the first waited for its rule) make one habit: when the second's rule comes, `learn`
-   finds the first's id and adds the second's count to it, with no second card (the runtime reads `Learned.merged`,
-   also in the log line; `Learned.was` keeps that habit as it was); a draft whose forms' habit widened meanwhile adds
-   to that habit of every app the same way. A habit of another app is never added to: the draft makes its own app's
-   habit, with its own id. `learn` (`adopt` keeps only its `habit`) also takes out the habits holding an opposite of the draft's forms
-   (`Form::opposite`: an end mark removed and added, lower case and a capital, a replacement and its reverse) in its app
-   or in every app, not declined; when one of them held everywhere, the new habit does too and the opposites of every
-   app go with it. They come back in `Learned.replaced`, kept on the card (`HabitCard`); one whose own card still
-   waits is swapped by `carry` for what that card would bring back (`was`, then its `replaced`), and that card goes,
-   so the new card takes back both changes. A habit with an opposite habit in some app never widens
-   (`Habits::opposed`). A merged draft that also replaced habits still gets a card.
+   app), saves the settings, logs "habit learned" with the kinds, `n` and whether the cleanup wrote the rule, and sends
+   the main window `cue://settings`. Its card is queued in `habit_cards`. Two drafts of the same forms in one app (the
+   second reached three while the first waited for its rule) make one habit: when the second's rule comes, `learn` finds
+   the first's id and adds the second's count to it, with no second card (the runtime reads `Learned.merged`, also in
+   the log line; `Learned.was` keeps that habit as it was); a draft whose forms' habit widened meanwhile adds to that
+   habit of every app the same way. A habit of another app is never added to: the draft makes its own app's habit, with
+   its own id. `learn` (`adopt` keeps only its `habit`) also takes out the habits holding an opposite of the draft's
+   forms (`Form::opposite`: an end mark removed and added, lower case and a capital, a replacement and its reverse) in
+   its app or in every app, not declined; when one of them held everywhere, the new habit does too and the opposites of
+   every app go with it. They come back in `Learned.replaced`, kept on the card (`HabitCard`); one whose own card still
+   waits is swapped by `carry` for what that card would bring back (`was`, then its `replaced`), and that card goes, so
+   the new card takes back both changes. A habit with an opposite habit in some app never widens (`Habits::opposed`). A
+   merged draft that also replaced habits still gets a card.
 6. `show_notice` opens what waits when the Drop is at rest (`at_rest`, as for a dictionary suggestion), one notice at a
    time: `first_notice` compares the suggestion's number (`offer_found`) with the first card's, so the one found first
    goes first, and a card waits while the suggestion's capsule is open or shows "undo" (a missed suggestion's dot does
@@ -681,35 +687,34 @@ the correction watch's end: the path from there to a card, and on to a result:
    after 7 s, and pauses at the mouse like the others. `trayAction` on it goes to `undo_habit` (`HabitCard::undo`): a
    card that learned a habit calls `Habits::revert(id, replaced, true)`, so the habit goes, its hashes join `declined`,
    and the replaced habits come back as they were; a merged card learned no habit, so it calls `take_back` (the habit
-   its draft added to comes back as `was`, with the replaced ones) and declines nothing. The Undo wins: a habit learned or widened since that
-   goes back on one brought back, in its app or where either holds everywhere, is removed (not declined) and returned,
-   and its card, if one waits, is dropped. `hold_tray` keeps the Drop busy for the done label ("Removed", or "Restored"
-   on `habitChanged`) until the card has folded (`TRAY_DONE_MS`, then `TrayDone`), so nothing opens over it. A card
-   whose habit was forgotten from the main window meanwhile is skipped. "Learn from me" turned off drops the drafts and
-   the cards waiting, and reverts a change waiting for its card without declining (`HabitCard::take_back`:
-   `Habits::revert(id, replaced, false)`, the newest first; a merged habit comes back as `was`); a card already open
-   stays until it closes. A habit widened while its card is open: the card keeps the rule it opened with (the one with
-   the app), while the section shows the new one. The drafts and the cards waiting live in memory only. Quitting CUE
-   loses a draft, and the counts that went into it are not given back, so that correction is counted from zero again; it
-   loses a card not yet shown too, and its habit stays in the list unannounced.
+   its draft added to comes back as `was`, with the replaced ones) and declines nothing. The Undo wins: a habit learned
+   or widened since that goes back on one brought back, in its app or where either holds everywhere, is removed (not
+   declined) and returned, and its card, if one waits, is dropped. `hold_tray` keeps the Drop busy for the done label
+   ("Removed", or "Restored" on `habitChanged`) until the card has folded (`TRAY_DONE_MS`, then `TrayDone`), so nothing
+   opens over it. A card whose habit was forgotten from the main window meanwhile is skipped. "Learn from me" turned off
+   drops the drafts and the cards waiting, and reverts a change waiting for its card without declining
+   (`HabitCard::take_back`: `Habits::revert(id, replaced, false)`, the newest first; a merged habit comes back as
+   `was`); a card already open stays until it closes. A habit widened while its card is open: the card keeps the rule it
+   opened with (the one with the app), while the section shows the new one. The drafts and the cards waiting live in
+   memory only. Quitting CUE loses a draft, and the counts that went into it are not given back, so that correction is
+   counted from zero again; it loses a card not yet shown too, and its habit stays in the list unannounced.
 
 The other `SettingChange`s are `HabitOn { id, on }` and `HabitsForget`, which empties `seen`, `list` and `declined`
 together (a form at two would otherwise become a habit at the next correction), each answered with the settings.
 `SettingsView.habits` lists the habits for the section (id, rule, example, the app's name, `n`, on); `habits.ts` draws
-the section, with the line for no cleanup connected (the chosen connection is a cloud one with no saved key, checked
-when the section is drawn, when the connection changes and when the window gets the focus back).
+the section, with the line "habits work when the cleanup is on" while the cleanup is off (`refine.where` is `off`,
+checked when the section is drawn and when the setting changes).
 
 The request side. Where the cleanup request is built (`Runtime::refine`), `habits_for` allows habits only for a
 dictation with "Learn from me" on and a Clean or Rewrite job: a translation and "Ask" take none. `Habits::for_app` takes
 the habits that are on and belong to the dictation's app or to every app (an unknown app gets the latter),
 `RefineContext::with_habits` carries their rules and their replacements' new words (`said`), and `refine::habits_prompt`
-writes the rules as a block of one rule per line under a short intro, a rule over `MAX_RULE_CHARS` skipped. The Messages
-API (`claude::system_blocks`) and the other connections put the block after the cache mark, behind the dictionary block
-and before the style's block: it changes with the app, so the cached prefix stays the one every dictation reads. With no
-habit the request is the one without the block, byte for byte. The answer's sanity check (`claude::settle` →
-`decide_with` → `sanity_ok_with`) counts the `said` words as said, as it does the dictionary's terms, for that answer
-only: a short phrase whose greeting a habit replaced ("здравствуйте анна" → "Добрый день, Анна!", 1 word of 3 said) is
-otherwise rejected and the raw text pasted. Nothing goes into the dictionary, and a translation's check takes none.
+writes the rules as a block of one rule per line under a short intro, a rule over `MAX_RULE_CHARS` skipped.
+`prompt::system_texts` puts the block behind the dictionary block and before the style's block. With no habit the
+request is the one without the block, byte for byte. The answer's sanity check (`prompt::settle` → `decide_with` →
+`sanity_ok_with`) counts the `said` words as said, as it does the dictionary's terms, for that answer only: a short
+phrase whose greeting a habit replaced ("здравствуйте анна" → "Добрый день, Анна!", 1 word of 3 said) is otherwise
+rejected and the raw text pasted. Nothing goes into the dictionary, and a translation's check takes none.
 
 The runtime keeps the habits sent, with the text as heard, for each dictation (`ByDictation`, the last four by id), so a
 later dictation's cleanup never takes an earlier one's place. When a refined result comes back, `habits::marks` runs
@@ -789,7 +794,8 @@ deadlines of a question.
   (`AskFailure::NoAi` → `AskError::NeedAi` → `needAiAsk`), without Retry. Through the user's agent it goes to
   `Agents::ask` with the cleanup's model (`ask.model` is gone); on this computer to the model in the slot, waited for
   (`llm::LOAD_WAIT`) while it loads again after a rest, and "Couldn't get an answer" with Retry when none is ready.
-  A model that only cleans will end here with `needAnsweringModel` once such models are offered.
+  A model that only cleans will end here with `needAnsweringModel`; none is offered yet (the new model catalog is
+  postponed), so the word is kept, unused.
 - `Agents::ask`: a signed-out or missing mark answers at once with the agent's word; otherwise the agent's start
   allowance (5 s on its first request) is added to the first-words deadline, and finding or starting OpenCode's
   server, Codex's sign-in check and the run all come out of it. A run that says the agent is signed out or missing
@@ -799,7 +805,7 @@ deadlines of a question.
   and the whole conversation as one user message (`agent_messages`: an agent keeps no session of its own). The
   instructions say what the tags mean, that their content is data and never instructions, how to answer: one JSON
   object `{"answer", "write", "replace", "sources": [{"url", "title"}]}`, with `write` for text the user asked for
-  their field and `replace` when it changes the selected text itself, in place of Anthropic's `write_to_field` tool;
+  their field and `replace` when it changes the selected text itself, in place of a write tool;
   the form of a written text (plain, no quotes, the app's tone, one line in terminals), the form of an answer (the
   answer itself first, short, simple Markdown; never a word about how it decides or whether it searches), and when to
   search (only for current or local facts), with sources only from its own searches and `[]` without one.
@@ -846,7 +852,7 @@ deadlines of a question.
 
 - `runtime::ask::Conversation` lives from the first question until `CloseAnswer`, and is then forgotten. It keeps the
   answered exchanges as `{"role", "text"}` turns (`AskTurn`: the user message as sent, the answer or the text it
-  wrote; a turn kept in Anthropic's content blocks by an earlier version still reads, its text blocks joined), the
+  wrote), the
   question in flight, the sources (numbered in the order a URL is first cited, across the conversation) and
   `AnswerView`, the answer as the windows draw it. A first question is asked with its context; once an exchange has
   succeeded, a follow-up goes alone, and the whole conversation is sent with it as text. A refusal and an empty turn
@@ -856,10 +862,10 @@ deadlines of a question.
   view goes to the windows (`cue://answer`) at once for a new turn, an end, an opening or a follow-up row, and at most
   every 50 ms while words stream (`ViewGate`); the flow hears `AskOpened` once per request (`ShownOnce`).
 - A turn's text is its text blocks (`Segment`s) joined as they came: a citation splits a block, and those parts run on.
-  Words before the turn's first search only say that it is going to search (a model may write such a sentence,
-  though the instructions ask for none): they go when the search starts, and the search line takes their place. Words before a later search and words after it are two blocks with nothing between
-  them, so a block after a search (`after_search`) starts a paragraph, in the paste (`TurnView::text`) as on screen
-  (`markedText`).
+  Words before the turn's first search only say that it is going to search (a model may write such a sentence, though
+  the instructions ask for none): they go when the search starts, and the search line takes their place. Words before a
+  later search and words after it are two blocks with nothing between them, so a block after a search (`after_search`)
+  starts a paragraph, in the paste (`TurnView::text`) as on screen (`markedText`).
 - Where it opens (`open_answer`): in the card when the card window exists, the selection has a rectangle with a size,
   and `cardplace::card_place` finds room for it on the selection's monitor; otherwise in the tray from the Drop. The log
   gets the place only.
@@ -1132,7 +1138,11 @@ the card's `core:default` (`default.json`) does not cover them. The commands:
   new history entry, and when it comes back to the front;
 - `model_get` (the speech model's `ModelState`, answered by the core within 3 s) and `model_retry` (the download goes
   on from where it stopped, then the model loads; the new state comes as `cue://model`);
-- `key_state`, `key_set`, `key_check` (Anthropic only: any other name is `badName`);
+- `agents_get` (the agents CUE found, with their sign-in and models; it never starts OpenCode's server),
+  `agent_install_link`, `llms_get`, `llms_search`, `llm_choose`, `llm_delete` (the local language models; the
+  `models_*` and `model_choose` commands are the speech models'), and `instructions_get`, `instructions_set`,
+  `instructions_reset`, `instructions_copy`, `instructions_open` (see Settings tray). No command reads, sets or checks
+  a key;
 - `mic_list`, `mic_preview`, `mic_access`;
 - the welcome window's `welcome_step`, `welcome_close`, `open_link` (see Welcome window).
 
@@ -1364,7 +1374,7 @@ second click of a double click). The menu:
 Only one CUE runs (`tauri_plugin_single_instance`): a second launch hands its arguments to the one running and
 exits, and only `--welcome` does anything there, opening the welcome window or bringing it forward. An installed CUE
 and a build of the repository are one app to Windows (the identifier `app.cue.dictation`): they share that single
-instance, the data folders, the keys, the WebView profile and the Run value, so while one runs, launching the other
+instance, the data folders, the secret, the WebView profile and the Run value, so while one runs, launching the other
 reaches the one running.
 
 ## Settings
@@ -1384,8 +1394,17 @@ recordings when they are turned off), and a new microphone is
 opened by the next recording. The value already set, or one the settings refuse (a microphone name of more than 200
 characters, a translation code CUE does not know, a period that is not one of the five), changes and writes nothing.
 
-Default prices are not written to the file, so price fixes in code reach existing installs; once any price is edited,
-the whole block is written. `ui.language` (`auto`, `en`, `ru`, in any case and with spaces trimmed; any other value
+`refine` (`RefineSettings`) holds `where` (`off`, `local` or `agent`; any other value reads as `agent`), `local` (the
+local model's id, written once it has loaded), `agent` (`opencode` or `codex`; absent until the first start has found
+one), `models` (per agent id, only a model other than the agent's default: Codex's listed ones, any OpenCode name of
+at most `MAX_MODEL_CHARS`), `fallback` (`raw` or `local`) and the sanity check's thresholds with `context_chars`.
+The `runs`, `style`, `custom`, `connection`, `model`, `level` and `addresses` of earlier versions are read once and
+never written again (docs/specs/2026-11-08-no-keys-design.md, "Settings and migration"): `runs: local`, or a local
+server as the connection, becomes `where: local` with the same model (or the old recommended one), anything else
+`where: agent` with the first agent found at start, or `local` with nothing chosen when none is found; `models` keeps
+only an agent's entries; a custom style's text goes into `instructions.md` and stays in the file as `style` and
+`custom` until the runtime has seen that file written, so a failed first write never loses it. There is no price
+anywhere: the `pricing` of earlier versions is read past and dropped at the next write. `ui.language` (`auto`, `en`, `ru`, in any case and with spaces trimmed; any other value
 reads as `auto`) is likewise written only when it is not `auto`, `drop.position` (`bottom`, `top`, `left`, `right`, in
 any case and with spaces trimmed; any other value, or a `drop` that is not an object, reads as `bottom`) only when it
 is not `bottom`, and `dictionary` only when its list is not empty. `dictionary.terms` is kept as written; a value that
@@ -1478,10 +1497,10 @@ data" box removes the WebView data (`%LOCALAPPDATA%\app.cue.dictation`) and the 
 
 `cue-cli leak-scan <file or folder>...` looks through what is to leave the computer for anything private and prints
 the file, the byte offset and the kind of each finding, never the finding. It reads what to look for into memory: the
-saved keys, the history texts, questions and texts as heard of the last 31 days, the dictionary terms, the microphone
+habits' secret in Credential Manager, the history texts, questions and texts as heard of the last 31 days, the dictionary terms, the microphone
 names (the pinned one and every one Windows lists), the Windows user name, computer name and profile path (also with
 `/`, `\\` or URL-encoded), the git name and email, and the private folders that the repository's `.git/info/exclude`
-names. Patterns add any user profile path, email addresses, `sk-ant-` / `sk-or-` keys, and recordings anywhere in a
+names. Patterns add any user profile path, email addresses, `sk-ant-` / `sk-or-` key shapes (CUE holds none; a leak would be foreign), and recordings anywhere in a
 file (an installer stores its members as they are): an Ogg page whose first packet is `OpusHead`, and `RIFF`, `WAVE`
 and a format chunk that reads as one (a program's table of those names is none). Text files also get a check for long
 random-looking strings, joined across `-` and `_`, and across `+` and `/` from 32 characters on, with hashes of known
@@ -1533,52 +1552,32 @@ icon and path `!define`s); makensis stores none of them.
 - The history's text and its recordings go to the main window alone: its commands read the files, and new entries come
   over its own channel (see Main window). The microphone names of the "Another microphone" card go to the Drop alone,
   and the main and welcome windows get the device list.
-- Sound never leaves this computer: recognition runs on it, Retry included, and only text goes to Anthropic. The
-  model's download from Hugging Face carries no key and nothing of the user's. The last dictation (`last\`), the
+- Sound never leaves this computer: recognition runs on it, Retry included, and only text goes to the user's
+  agent, if one cleans. The model's download from Hugging Face carries no key and nothing of the user's. The last dictation (`last\`), the
   history (`history\`, with its recordings in `history\audio`) and bench recordings stay on this computer only.
 
 ## Bench
 
-`cue-bench run` reads recordings saved by the app (`%LOCALAPPDATA%\CUE\bench\recordings`, a WAV plus a JSON with the
+`cue-bench run` reads recordings saved by the app (`%LOCALAPPDATA%\CUEench
+ecordings`, a WAV plus a JSON with the
 app name) and compares the speech models on this computer: every folder in `%LOCALAPPDATA%\CUE\models\` that
 `Recognizer::load` accepts is one engine, named by its folder, the app's `parakeet-ultra-int8` first and the rest by
 name (another export with the same file names, such as NVIDIA's own v3 from `istupakov/parakeet-tdt-0.6b-v3-onnx`,
 goes next to it). A folder that does not load (a partial download, another export, a processor ONNX Runtime cannot
 run on) is skipped with a console line, and with no model at all the bench says where to put one. Each model is
 loaded once before the run and recognizes every whole recording in turn, on a blocking thread, the way the app does
-(the pieces and the alphabet mask included); its latency is the model's own recognition time, its cost $0, and the
-console line says when the other alphabet was masked out. When recognition starts, the connection to Anthropic is
-warmed up as the app does on the second press. The text of `parakeet-ultra-int8` (or, if it failed or is not
-there, of the first model that succeeded) is refined with the Anthropic model picked for the cleanup and every Claude model in the price list. It uses
-the app's own code paths and `dictionary.terms`, so the request, sanity check and timeouts match. One warm-up call per
-model is excluded from the report but counted in spend. A `--max-usd` budget stops new paid calls; `Ctrl+C` finishes
-the step under way (a recognition cannot be interrupted, and a refine request under way is already paid for) and
+(the pieces and the alphabet mask included); its latency is the model's own recognition time, and the console line says
+when the other alphabet was masked out. `Ctrl+C` finishes the step under way (a recognition cannot be interrupted) and
 leaves that recording out; a second one exits at once. `results.json` and `report.html` are rewritten after each
-recording in `%LOCALAPPDATA%\CUE\bench\runs\<timestamp>`. The report is a single HTML page with blind A/B pairs for
-recognition and for refine, scores, latency and cost per dictation, and saves the answers as `choices.json`; runs from
-before the local models keep their cloud prices. The bench decides between Ultra and v3 on real recordings before a
-release: if Ultra comes out worse, the pinned files in `cue_core::model` change to v3 and nothing else does.
+recording in `%LOCALAPPDATA%\CUEench
+uns\<timestamp>`. The report is a single HTML page with blind A/B pairs for
+recognition, scores and latency per dictation, and saves the answers as `choices.json`; a report rebuilt from a run of
+an earlier version still shows that run's cleanup pairs and costs. The bench decides between Ultra and v3 on real
+recordings before a release: if Ultra comes out worse, the pinned files in `cue_core::model` change to v3 and nothing
+else does.
 
-`refine_compare` (an example in `cue-engines`) works on text instead of recordings: a phrase file
-(`{id, app, raw, before_cursor?, to?}`) goes through OpenRouter models and the direct Haiku path with the app's prompt,
-context and checks, sequentially, under a `--max-usd` budget. A phrase with `to` is translated, on the direct path
-only (`claude::translate`, the translation check, the 4 s timeout); OpenRouter models skip it, and the skip is listed
-in `out.json`. `out.json` holds every call (the outcome, `to`, and the text that would be pasted, or the raw transcript
-when the outcome is not `refined`) and per-model medians, p90 and cost; the console gets only ids and numbers. A
-translation that fails its check counts as `raw_fallback`, where the app pastes nothing and says "Couldn't translate";
-on the direct path the model's own answer is not kept.
-
-`ask_compare` (an example in `cue-engines`) is the bench of "Ask": a phrase file
-(`{id, question, app, selection?, before_cursor?, then?, expect, mode?}`) is asked the way the app asks it
-(`first_message` with today's date, `ask::run` with its deadlines and continuations, web search of 2 searches a request
-unless `--no-search`, thinking as `--thinking adaptive|off` says, the app's default otherwise), one call at a time over
-`--runs` rounds, under a `--max-usd` budget. A phrase's `then` is a follow-up asked after the first answer, and the
-follow-up is what is scored. `out.json` holds every call (the decision, the mode of a write, its text or the answer's
-Markdown, the first words, the total time, the searches, whether text came before the first search, the cost) and a
-summary: right decisions and modes, the median
-first words of warm calls with and without a search (the very first call, with an empty cache, is left out), and the
-cost. `out.json` is written before the first call, so a path that cannot be written stops the run before anything is
-paid, and again after every call, so a run cut short keeps its results; a `--model` without a default price is refused,
-since the budget would count its tokens as $0. The console gets only ids, kinds and numbers. The phrase set and the
-scoring script (format and content checks) live outside the repository. The run of 2026-10-29 (Haiku 5.5, 30 phrases, 5
-runs) decided 99 % right, with the first words of warm calls in 1.7 s without a search and 5.8 s with one, for $0.19.
+The bench no longer compares cleanups: CUE holds no key, so no phase calls a cloud service, and the `refine_compare`,
+`ask_compare`, `refine_probe`, `ask_probe` and `warm_probe` examples are gone. Agents are checked by the tests with a
+stand-in program (`bin/fake_agent`) and by the recorded outputs of the real ones in
+`app/crates/engines/tests/fixtures/agents`, whose README says what was run, when and what it showed. A bench phase over
+the agents can be added later if the owner wants one.

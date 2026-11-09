@@ -1,4 +1,4 @@
-# Branch `optimize`, the settings redesign and the no-AI layer (parked)
+# Branch `optimize`, the settings redesign and the no-AI layer (carried into `no-keys`)
 
 State on 05.11.2026, parked by the owner ("we'll continue after some time"):
 
@@ -23,3 +23,9 @@ State on 05.11.2026, parked by the owner ("we'll continue after some time"):
 
 The owner wants an optimized, simple product before the public release. When work resumes, start from the no-AI
 design approval and the settings spec rewrite. **Ask before spending API money on measurements.**
+
+State 09.11.2026: the work resumed as branch `no-keys` (cut from `optimize`, so its rests and Drop changes are there).
+The settings redesign became the Cleanup page of `docs/specs/2026-11-08-no-keys-design.md`: not "AI in the cloud with a
+key" or a local model, but **Без ИИ · Этот компьютер · Ваш AI** with no key anywhere; the "Set up with an AI agent"
+button became "Изменить с AI" on the Instructions page. The no-AI layer (option A, exact matches only) is built and runs
+before every route. Gemma stays rejected as a default. See [no-keys.md](no-keys.md).

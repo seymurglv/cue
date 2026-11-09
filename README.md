@@ -3,9 +3,9 @@
 CUE is a voice-dictation app for Windows 11. Press `Ctrl + Win`, speak, press the keys again (or hold them while you
 speak), and the text appears at the caret in whatever app you are typing in: fillers and false starts removed,
 punctuation added, your own words kept, in Russian or English. Speech is recognized on your computer by a speech model
-CUE downloads once (Parakeet Ultra), and the text is tidied up by a language model: by default Claude, from Anthropic,
-with your own key or one of seven other cloud connections, or, free, by a small model CUE downloads and runs on
-your computer. Add
+CUE downloads once (Parakeet Ultra), and the text is tidied up by whoever you choose: the AI you already have (OpenCode
+or Codex, signed in by you), a small model CUE downloads and runs on your computer, or nobody (CUE's own tidy-up
+alone). CUE holds no API key. Add
 `Shift` and the text comes out translated; add `Alt` instead and ask a question out loud, and the answer appears next
 to your work. CUE runs quietly in the background: a small indicator at the bottom of the screen (the Drop) shows what
 it is doing, and an icon next to the clock opens the main window, with the history of everything CUE wrote and the
@@ -29,13 +29,12 @@ Download the installer, `CUE_<version>_x64-setup.exe`, from the latest release:
    upgrade runs first, makes the next install a first one. You can turn Start at sign-in off in the menu of the icon
    next to the clock, or in the main window's General settings.
 
-On its first start, and on every start while the key of the cleanup's connection is missing (Anthropic's, unless you
-chose another in the settings), CUE opens a welcome window: Hello, Key, Model, Microphone, First dictation and Done.
-Its Key step asks for the Anthropic key, which "Ask" always uses; the key of another connection goes into the main
-window's **Cleanup** settings. With the cleanup on this computer no key is needed: the welcome window has no Key step
-and does not open by itself. While it is open, `Ctrl + Win` works only at the First dictation step; at the others
-it brings the window forward. If you close it before the key is saved, it comes back at the next start. To open it
-again at any time, even while CUE is running, press `Win + R` and run `"%LOCALAPPDATA%\Programs\CUE\cue.exe" --welcome`.
+On its first start CUE opens a welcome window: Hello, **Кто чистит текст** (who cleans the text), Model, Microphone,
+First dictation and Done. Its cleanup step is the main window's Cleanup page: **Без ИИ** (No AI), **Этот компьютер**
+(This computer) or **Ваш AI** (Your AI), and it picks for you, without downloading anything: OpenCode when it finds it,
+else Codex, else this computer with nothing chosen yet. No key is asked anywhere. While the window is open, `Ctrl + Win`
+works only at the First dictation step; at the others it brings the window forward. To open it again at any time, even
+while CUE is running, press `Win + R` and run `"%LOCALAPPDATA%\Programs\CUE\cue.exe" --welcome`.
 
 At the same first start CUE downloads its speech model, Parakeet Ultra, about 670 MB, from Hugging Face into
 `%LOCALAPPDATA%\CUE\models`, in the background. The Model step shows its progress and moves on by itself when it is
@@ -45,92 +44,97 @@ settings, or the Drop). After that, recognition needs no network. Another speech
 **Speech recognition** settings (see Features). The model needs a processor with AVX2 (2013 and later); on one without
 it, the Drop says "Processor not supported".
 
-## Keys
+## Who cleans the text
 
-CUE uses your own account at the services it talks to, which bill you directly for what you use:
+CUE holds no API key and bills you for nothing. Cleanup, translation and "Ask" go through one of three things, chosen on
+the main window's **Cleanup** page (Settings → Cleanup):
 
-- **Anthropic** cleans the text up and translates it, by default with Claude Haiku 5.5, and answers your questions
-  with Claude whatever the cleanup goes through. Sign in at the [Anthropic Console](https://console.anthropic.com),
-  set up billing and create an API key.
-- Instead of Anthropic, the main window's **Cleanup** settings can send the cleanup and translation through another
-  connection, each with a recommended model, chosen until you pick another. In the cloud, each with a key of its own:
-  OpenRouter, OpenAI, Google Gemini, DeepSeek, Mistral, Groq and xAI (their models are listed in
-  [API keys](#api-keys)).
-- Or, with no key and no account, **Runs on: This computer** in the Cleanup settings: CUE downloads a small language
-  model from Hugging Face and runs it on the processor, free, the text never leaving this computer. Three are on its
-  list: **Qwen3 4B Instruct** (recommended, 2.5 GB), **Gemma 4 E2B** (3.1 GB) and **Qwen3 1.7B** (1.1 GB, the fastest);
-  others can be found with **Search Hugging Face** (one GGUF file of up to 6 GB). A processor is slower than the cloud:
-  on the computer CUE is built on (8 performance cores), Qwen3 4B takes 3–8 seconds for a short dictation and about
-  half a minute for each minute of speech; a laptop takes two or three times longer. The model reads CUE's
-  instructions while you speak and runs on the processor's performance cores, leaving the rest to other programs. A
+- **Без ИИ (No AI).** CUE tidies the text itself and instantly: your dictionary and the spellings it learned from you,
+  no "эм" or "ээ", tidy spaces. Translation and "Ask" are not available (the Drop says "Перевод: выберите AI" or
+  "Спросить: выберите AI").
+- **Этот компьютер (This computer).** A small language model that CUE downloads from Hugging Face, only when you press
+  it, and runs on the processor: free, and the text never leaves this computer. Three are on the list: **Qwen3 4B
+  Instruct** (recommended, 2.5 GB), **Gemma 4 E2B** (3.1 GB) and **Qwen3 1.7B** (1.1 GB, the fastest); others can be
+  found with **Search Hugging Face** (one GGUF file of up to 6 GB), marked "CUE не проверял" (not checked by CUE). A
+  processor is slower than an agent: on the computer CUE is built on (8 performance cores), Qwen3 4B takes 3–8 seconds
+  for a short dictation and about half a minute for each minute of speech; a laptop takes two or three times longer. A
   long dictation is cleaned in pieces of about 80 words, ending where sentences end, each with the text before it as
   context, so there is no limit on its length; Esc while it is cleaned cancels it. Qwen3 1.7B often leaves the text as
-  recognized, and only Qwen3 4B translates. Until the model has downloaded and loaded, dictations are pasted as
-  recognized. The model is in memory only while the cleanup runs on this computer: with **Cloud** none is loaded.
-  Downloaded models are listed on the Cleanup page either way and can be deleted there, the one in use too (until
-  another is chosen, dictations are then pasted as recognized). Ollama and LM Studio are no longer used.
+  recognized, and only Qwen3 4B translates. "Ask" through it answers without a web search and says so. Until the model
+  has downloaded and loaded, dictations are pasted with the tidy-up alone. The model is in memory only while this
+  computer cleans: it is let go after 15 minutes without a dictation, when the session locks and when the computer
+  sleeps, and the next cleanup waits for it to load again. Downloaded models are listed on the page and can be deleted
+  there, the one in use too.
+- **Ваш AI (Your AI).** An AI agent you already have installed and signed in to: **OpenCode** first (the default; it
+  also finds OpenCode Desktop's own command-line program) and then **Codex**. CUE finds them, shows which are installed
+  and signed in, and starts them in the background with no window, no tools, no web access and no file writes, with the
+  text on their standard input (never as an argument, never in a file). Each has a model drop-down: Codex's default is
+  GPT-6 Luna; OpenCode's is **Быстрая · авто** (fast, automatic), which takes the first of the models OpenCode lists
+  whose name marks a small fast one (haiku, flash, mini, lite, luna, fast, small), else OpenCode's own default, and its
+  hundreds of models have a filter. Whatever you signed in to inside OpenCode (an API key of your own, a provider's
+  subscription) is your own setup with that provider; CUE does not look at it. **Claude Code and Gemini / Antigravity
+  are not offered**: their makers do not allow another app to drive a user's subscription. **Grok** was built and left
+  out: it needs 6–9 seconds for a short cleanup. Where the text goes is where your agent is set up to send it.
+  Measured on the computer CUE is built on: OpenCode Desktop 2.2.5 takes about 2 seconds for a short dictation and 5–8
+  for 165 words; Codex 3–4 seconds. **If the AI did not answer** (the same page): paste as said (the default, after
+  CUE's tidy-up) or clean with the model on this computer, offered once one is downloaded and used only when it is
+  loaded at that moment.
 
-Speech recognition runs on your computer and costs nothing. Earlier versions of CUE also used Soniox, with a key of
-its own: this version does not, and deletes that key from Windows Credential Manager at its first start.
+Under the choice sits **Ваши инструкции** (Your instructions) for the AI and the model on this computer: one plain file
+of style rules that you edit on the page or with your AI (see Features). Speech recognition runs on your computer and
+costs nothing. Earlier versions of CUE also used Soniox, Anthropic and seven other cloud connections with keys of their
+own: this version uses none, and at its first start deletes those keys from Windows Credential Manager. An upgrade keeps
+what you had: a cleanup that ran on this computer still does; one that went through a cloud connection moves to the
+first agent CUE finds, or to this computer with nothing chosen (the Cleanup row says "Не выбрано" until you pick), and a
+custom style's text becomes your instructions file.
 
-Paste the Anthropic key into the welcome window, or any cloud connection's key into the main window's **Cleanup**
-settings, and press **Check**: it saves the key and sends a free test request. Keys are kept in Windows Credential
-Manager, each under its connection's id; CUE's windows show only a mask of them.
-
-Dictation and translation cost about $0.0001 a dictation with the default cleanup model, Claude Haiku 5.5: under $1 a
-month for an hour of speech a day in dictations of about 13 seconds, cache warm-ups included. Claude Sonnet 5.5 costs
-about 15 to 20 times as much. All of it is the cleanup. Other services bill at their own prices, which the Cleanup
-settings' list of models shows per million tokens; a model on this computer costs nothing. Questions asked with
-`Ctrl + Win + Alt` cost more, and each web search one of them runs adds $0.01. CUE writes down what every dictation and
-question cost, on your computer only (`usage.csv`, see [Costs](#costs)).
+CUE has no prices and no balance: any money is between you and your agent's provider. Usage keeps words and time
+(`usage.csv`, see [Costs](#costs)).
 
 ## Privacy
 
 - **Sound stays on this computer.** Each dictation, translation and question is recognized here, by the speech model;
   no recording is sent anywhere, **Retry** included.
-- **The cleanup's connection** receives the text: what the model recognized, the app name and up to 500 characters
-  before the caret. That is Anthropic by default, or the service you chose in the Cleanup settings; with the cleanup
-  on this computer the text stays here, and so do translations and habits' rules.
-- **Anthropic** receives your questions to "Ask", with the text you selected, whatever the cleanup goes through.
-  Nothing is read from password fields.
+- **The text goes where you chose.** With **Ваш AI**, your agent receives what the speech model recognized, the app name
+  and up to 500 characters before the caret, and the agent sends them on to wherever you set it up: CUE cannot say where
+  that is. With **Этот компьютер** or **Без ИИ** the text stays here, and so do translations and habits' rules.
+- **"Ask" follows the same choice**: your question and the text you selected go to your agent or to the model on this
+  computer. Nothing is read from password fields.
 - **Your corrections stay on this computer.** With **Learn from me** on (it is by default), CUE reads the field it
   pasted into for up to a minute after each dictation or translation, to notice a word you corrected. The text stays in
   memory: nothing of it is written to disk, to the log or sent anywhere. A word goes into the dictionary only when you
-  press **+** on the Drop; from then on the cleanup's connection gets it with the dictionary, with how it was heard.
+  press **+** on the Drop; from then on the cleanup gets it with the dictionary, with how it was heard.
   When you correct the same thing a few times, CUE keeps it as a habit: the words around the correction (at most 40
   characters before and after it) are the only text of a correction it writes to disk. What it counts on the way is
-  kept by a hash made with a random secret of this computer, which Windows Credential Manager keeps beside the keys
-  (never in `settings.json`), so a copy of the file does not tell which words were counted. The cleanup's connection
-  receives the words around the correction once, with the kind of the correction and the app's name, to word the
-  habit's rule; it already received that text when you dictated it. From then on the rule goes with every cleanup
-  request of a dictation in that app, or in every app once the habit holds everywhere. Password fields, CUE's own
+  kept by a hash made with a random secret of this computer, which Windows Credential Manager keeps (never in
+  `settings.json`), so a copy of the file does not tell which words were counted. From then on the rule goes with every
+  cleanup of a dictation in that app, or in every app once the habit holds everywhere. The rule's wording is CUE's own
+  template, or the model on this computer's when one cleans: an agent is never asked for it. Password fields, CUE's own
   windows and "Ask" answers are never read.
 - The microphone is open only while CUE records, and while a window shows its level for you to check it.
 - Your history, with the recordings of what you said for the period you choose, settings, logs and the copy of your
-  last dictation stay on this computer. CUE has no telemetry: it connects only to the cleanup's connection, to
-  Anthropic for "Ask", and to Hugging Face to download speech models and the cleanup's local models (a plain download
-  of fixed files: nothing of yours goes with it) and to search them when you type in a model list's search. The installer sends nothing.
+  last dictation stay on this computer. CUE has no telemetry: it connects to Hugging Face to download speech models and
+  the local models (a plain download of fixed files: nothing of yours goes with it) and to search them when you type in
+  a model list's search; it talks to OpenCode's local server on this computer, and to nothing else itself. The installer
+  sends nothing.
 
-Each service has its own policy on how long it keeps what it receives. Every detail is in
-[Privacy in detail](#privacy-in-detail).
+Every detail is in [Privacy in detail](#privacy-in-detail).
 
 ## Uninstall
 
 Quit CUE from the menu of its icon next to the clock, then open Windows **Settings → Apps → Installed apps**, find
 **CUE** and choose **Uninstall**. This removes the program, its Start menu entry, its desktop shortcut and Start at
-sign-in. Your history, settings, speech models and keys stay, so installing CUE again picks up where you left off. The
+sign-in. Your history, settings and speech models stay, so installing CUE again picks up where you left off. The
 uninstaller's **Delete the application data** box removes only the cache of CUE's windows (the last folder below) and
 the installer's registry key (the last line). To remove everything:
 
-- the folder `%LOCALAPPDATA%\CUE`: the history and its recordings, the last dictation, the logs, the cost records and
-  the speech models (`models`, about 670 MB each);
-- the folder `%APPDATA%\CUE`: the settings;
+- the folder `%LOCALAPPDATA%\CUE`: the history and its recordings, the last dictation, the logs, the usage records and
+  the speech and language models (`models`, about 670 MB each for speech);
+- the folder `%APPDATA%\CUE`: the settings and your instructions (`instructions\`);
 - the folder `%LOCALAPPDATA%\app.cue.dictation`: the cache of CUE's windows;
-- the keys: in **Control Panel → Credential Manager → Windows Credentials**, remove under Generic Credentials each
-  one named after a connection: `anthropic.CUE`, and those of the others you saved a key for, `openrouter.CUE`,
-  `openai.CUE`, `gemini.CUE`, `deepseek.CUE`, `mistral.CUE`, `groq.CUE` and `xai.CUE` (the `soniox.CUE` of earlier
-  versions is already gone: CUE deletes it at its first start), and `habits-secret.CUE`, the secret the habits' counts
-  are hashed with;
+- the secret: in **Control Panel → Credential Manager → Windows Credentials**, under Generic Credentials, remove
+  `habits-secret.CUE`, the secret the habits' counts are hashed with (CUE holds no API key; the keys that earlier
+  versions saved are deleted at the first start of this one);
 - the registry key `HKEY_CURRENT_USER\Software\seymurglv`, named after CUE's publisher, where the installer remembers
   the folder CUE was installed in and whether Start at sign-in was on: in Registry Editor.
 
@@ -154,13 +158,15 @@ from source.
   `Alt` picks "Ask" only together with `Ctrl + Win` held, pressed before them or while they are still down; after a
   tap it changes nothing. `Ctrl + Win` with `Shift` and `Alt` together is the Office key: CUE leaves it to Windows, and
   `Ctrl + Win + Alt` too when "Ask" is off (`ask.enabled`).
-- **Ask** (`Ctrl + Win + Alt`). Ask out loud and the answer appears in words, in the language you asked in:
+- **Ask** (`Ctrl + Win + Alt`). Ask out loud and the answer appears in words, in the language you asked in. It goes
+  through the same choice as the cleanup: your AI (OpenCode or Codex) or the model on this computer; with **Без ИИ**
+  it is not available (the Drop says "Спросить: выберите AI"):
   - With nothing selected it opens in a panel that grows out of the Drop, toward the middle of the screen. With text
     selected it opens in a card next to the selection, its arrow pointing at the text; when CUE cannot tell where the
     selection is on screen, or there is no room for the card, it opens in the panel instead.
-  - The answer opens with its first real step: a web search starting, its sources coming in, or the first words. Until
-    then the Drop shows that it is thinking. Answers from a web search number their sources, and a chip under the
-    answer opens each one in your browser.
+  - The answer opens when it has something to show: through an agent or the local model it appears whole, since the
+    reply is read once complete. Until then the Drop shows that it is thinking. Answers from a web search number their
+    sources, and a chip under the answer opens each one in your browser.
   - The buttons depend on what was selected: **Insert below**, **Replace** and **Copy** for text you can edit (no
     **Replace** for a selection of more than 8,000 characters, which reaches the model as its start and its end); only
     **Copy** for text you cannot (a received message, a web page); **Insert** and **Copy** with nothing selected. They
@@ -177,17 +183,20 @@ from source.
     selection of more than 8,000 characters, a text that comes while a follow-up is on its way or while CUE is paused,
     and one that comes once the window you asked in is no longer in front are shown in the answer instead, with its
     buttons (only **Copy** for text you cannot edit).
-  - A question about the present ("the latest version of…", "the exchange rate today") makes the model search the web
-    first (`ask.web_search`); facts that do not change, explanations and writing need no search.
-- **Translation** (`Ctrl + Win + Shift`). Speech that is not in your target language (`translate.target`, English
-  by default) is translated into it; speech in the target language goes to your home language (`translate.home`, by
-  default the Windows display language). The speech language is told by its alphabet: the language of the pair
-  written in Cyrillic or in Latin letters, whichever your sentence is in, so "Открой Telegram" counts as Russian
+  - A question about the present ("the latest version of…", "the exchange rate today") makes the AI search the web
+    (`ask.web_search`), but only through **Codex**; OpenCode and the model on this
+    computer never search, and the answer then says "без поиска" (no web search) under it. Facts that do not change,
+    explanations and writing need no search.
+- **Translation** (`Ctrl + Win + Shift`). Speech that is not in your target language (`translate.target`, English by
+  default) is translated into it; speech in the target language goes to your home language (`translate.home`, by default
+  the Windows display language). The speech language is told by its alphabet: the language of the pair written in
+  Cyrillic or in Latin letters, whichever your sentence is in, so "Открой Telegram" counts as Russian
   (`translate.speech` fixes it instead). The cleanup of dictation applies too (fillers, lists, numbers, one line in
-  terminals), and names from `dictionary.terms`, product names and code are kept as written; a self-correction,
-  though, can come back turned around (see Known limitations). If the translation fails (no network, a timeout, or an
-  answer that does not look like a translation), nothing is pasted: the Drop shows "Couldn't translate", and **Retry**
-  translates the saved text again.
+  terminals), and names from `dictionary.terms`, product names and code are kept as written; a self-correction, though,
+  can come back turned around (see Known limitations). If the translation fails (the agent did not answer in time, or
+  gave an answer that does not look like a translation), nothing is pasted: the Drop shows "Couldn't translate", and
+  **Retry** translates the saved text again. It follows the cleanup's choice, so with **Без ИИ** it is not available
+  ("Перевод: выберите AI"); an agent that is signed out or not found is named on the Drop instead.
 - **Text at the caret in any app**, pasted through the clipboard. Your previous clipboard content comes back about
   half a second later, and dictated text is kept out of Windows clipboard history and the cloud clipboard.
 - **Speech recognized on this computer** by Parakeet Ultra, Moondream's post-trained version of NVIDIA's Parakeet TDT
@@ -209,15 +218,24 @@ from source.
   ("запусти cargo test в Visual Studio Code", "call Марисоль"); when the model writes part of a Russian sentence in
   English (or the other way round), CUE recognizes it again in the dictation's own alphabet.
 - **Cleanup:** fillers, stutters and abandoned starts are removed, "Wednesday, no, Thursday" becomes "Thursday",
-  punctuation and paragraphs are added, lists go on separate lines, numbers are written as digits. The Default style,
-  CUE's own, also makes the text read as written rather than spoken: colloquial forms take their standard spelling
-  ("нету" → "нет"), words that only fill the speech go ("в принципе", "basically"), and a clumsy or repeated phrase is
-  reworded, while the meaning, every fact and request, your person and tone stay, names and terms stay as said, and
-  nothing is added. The Custom style puts your own instructions (up to 2,000 characters) in place of CUE's: they win
-  where they differ from its rules, and blank ones clean up as Default. The style does not change a translation. The
-  tone adapts to the target app; in terminals the result always stays on one line, so nothing runs by itself.
-- **Safe fallbacks:** if cleanup is slow, refused or looks wrong, or there is no network, the raw transcript is pasted
-  instead. If recognition fails, the recording is kept and **Retry** recognizes it again; if the model did not
+  punctuation and paragraphs are added, lists go on separate lines, numbers are written as digits. With **Без ИИ** CUE
+  alone writes the dictionary's spellings and the learned ones, drops "эм" and "ээ" and tidies spaces. With an AI or a
+  model on this computer, the standard instructions also make the text read as written rather than spoken: colloquial
+  forms take their standard spelling ("нету" → "нет"), words that only fill the speech go ("в принципе",
+  "basically"), and a clumsy or repeated phrase is reworded, while the meaning, every fact and request, your person and
+  tone stay, names and terms stay as said, and nothing is added. **Ваши инструкции** (Cleanup page, the last row) is
+  one plain file, `%APPDATA%\CUE\instructions\instructions.md`, with exactly those style rules (the first 2,000
+  characters are used): edit it in the box on the page, or press **Изменить с AI** to open your agent in that folder
+  with the task already given (or copy the task for any AI). CUE takes a saved change at the next dictation and shows
+  "было → стало" on your last dictation; an edit in the box is never replaced by a file an AI saved meanwhile, and the
+  page asks which to keep. **Вернуть стандартные** restores the standard text. The fixed protocol (the output format,
+  the dictionary, habits, the translation) stays in CUE and is not in the file. The instructions do not change a
+  translation. The tone adapts to the target app; in terminals the result always stays on one line, so nothing runs by
+  itself.
+- **Safe fallbacks:** if the AI is slow, refused or the text looks wrong, the text is pasted after CUE's own tidy-up
+  (or, if you chose it under **Если AI не ответил**, cleaned by the model on this computer when it is loaded), and a
+  sign-in that expired or an agent that is not found is said on the Drop ("Codex: войдите заново", "OpenCode не
+  найден"). If recognition fails, the recording is kept and **Retry** recognizes it again; if the model did not
   download, **Retry** downloads the rest of it first.
 - **`Esc`** cancels; **Restore** (for 3.6 s) brings the dictation back, and asks again a question cancelled before its
   answer showed, with the same selection. **`Ctrl + Win + V`** pastes the last result again, a translation included.
@@ -243,31 +261,30 @@ from source.
     one longer than 60 characters is refused); the cross on a chip, shown on hover, removes it. The cleanup uses the
     change from the next dictation on. A word added from a suggestion (see "Words from your corrections") has a green
     book, and its hint says how CUE heard it.
-  - **History:** every result of CUE, newest first, with its time, mode and app: dictations, translations, "Ask"
-    answers (the question and the answer) and texts "Ask" wrote into a field; a translation and "Ask" show their mode
-    as a small icon, a plain dictation none. The list stays short: today shows its latest 7 rows and the rest under
-    **N more today**; every earlier day is one line under **Earlier** (its name, its two most used apps and how many
-    entries it has) that opens in place, and older days come with **Show earlier**. Three or more entries in a row from one app, each within 10 minutes of the one before, make
-    a stack: its newest entry on top, the app and the count on a chip that opens it. A click on an entry (or `Enter`)
-    shows how you said it: a dictation as it was recognized, the words CUE removed struck out and the ones it added or
-    changed in green; a translation's speech; an "Ask" question; and its recording, with play and pause, while it is
-    kept. Every entry opens to its whole text: one from before CUE kept how it was said says *not kept*, and a
-    dictation CUE wrote just as it was heard says so. A recording plays only when you press it, and
-    pauses when CUE starts recording. The search, out of the magnifier, looks through the texts, the questions and how
-    they were said; an entry found only in how it was said opens by itself. Hover over a row for **Copy** and **Paste
-    again**: the text goes into the window right under the main window (usually the one you were in before opening
-    it), or into the clipboard when there is none. `Ctrl + Win + V`, a paste with an answer's button, a refusal and a
-    failure add no entry, and **Paste again** does not change the last result.
+  - **History:** every result of CUE, newest first, with its time, mode and app: dictations, translations, "Ask" answers
+    (the question and the answer) and texts "Ask" wrote into a field; a translation and "Ask" show their mode as a small
+    icon, a plain dictation none. The list stays short: today shows its latest 7 rows and the rest under **N more
+    today**; every earlier day is one line under **Earlier** (its name, its two most used apps and how many entries it
+    has) that opens in place, and older days come with **Show earlier**. Three or more entries in a row from one app,
+    each within 10 minutes of the one before, make a stack: its newest entry on top, the app and the count on a chip
+    that opens it. A click on an entry (or `Enter`) shows how you said it: a dictation as it was recognized, the words
+    CUE removed struck out and the ones it added or changed in green; a translation's speech; an "Ask" question; and its
+    recording, with play and pause, while it is kept. Every entry opens to its whole text: one from before CUE kept how
+    it was said says *not kept*, and a dictation CUE wrote just as it was heard says so. A recording plays only when you
+    press it, and pauses when CUE starts recording. The search, out of the magnifier, looks through the texts, the
+    questions and how they were said; an entry found only in how it was said opens by itself. Hover over a row for
+    **Copy** and **Paste again**: the text goes into the window right under the main window (usually the one you were in
+    before opening it), or into the clipboard when there is none. `Ctrl + Win + V`, a paste with an answer's button, a
+    refusal and a failure add no entry, and **Paste again** does not change the last result.
   - **Settings** (the gear): a tray whose first page lists six pages, each with its value. **Speech recognition**
     (the model in use and its state: Ready, Downloading with its percent, its megabytes and a bar, or Did not download
     with **Retry**, which goes on from where the download stopped; the model's row opens the Model page, see "A choice
-    of speech models"), **Cleanup** (the style, Default or Custom with a field for your instructions; **Runs on**, This
-    computer or Cloud; on this computer, the list of local models as the Model page lists speech models, the
-    recommended one marked, with **Search Hugging Face**; in the cloud, the connection, a card that opens the list of
-    eight, each with a lamp that is green once its key is saved, its key with **Check**, which saves it and sends a
-    free test request, the window showing only its mask, and the model, each with its price per million tokens, the
-    recommended one marked; its value on the first page is This computer or the connection's name, in amber "Model not
-    downloaded", the download's percent, or "No *name* key" when the chosen cloud connection has none), **Microphone** (As in Windows, or a device of
+    of speech models"), **Чистка текста** (Без ИИ · Этот компьютер · Ваш AI; on this computer, the list of
+    local models as the Model page lists speech models, the recommended one marked, with **Search Hugging Face**;
+    with your AI, OpenCode and Codex as CUE found them (installed, signed in), the chosen agent's model, and what to
+    do if it does not answer; then **Ваши инструкции**; its value on the first page names what cleans now, `OpenCode ·
+    <model>`, `Codex · GPT-6 Luna`, the local model, "Без ИИ" or "Не выбрано", the download's percent, or in amber
+    "<Agent>: войдите заново" or "<Agent> не найден"), **Microphone** (As in Windows, or a device of
     your own, with a live level), **Languages** (the interface language, and the target language of
     `Ctrl + Win + Shift`, any of the 60), **History** (**Keep history**: Forever, A year, A month (the default), A week
     or Don't keep, older days deleted on their own; **Keep recordings**: A day, A week (the default), A month or Don't
@@ -293,21 +310,19 @@ from source.
   the habit goes into the cleanup of that app's dictations, to write the text your way (translations and "Ask" take
   none). When all of a habit's corrections come together in one dictation three times in another app, the habit holds in
   every app: its row says so, and no card opens. One of them alone there counts for that app, and can become that app's
-  own habit. The same correction learned in two apps makes two habits, one in each; once it holds in every app, they
-  are one. When you go back on a habit in its app three times (the full stop it takes off added again, the capital
-  back, the old words back), the habit changes: the old one goes, the new one is learned, and a "Habit changed" card
-  says the new rule; its **Undo** brings the old habit back as it was and never learns the new one (when the
-  correction only added to a habit already kept, **Undo** brings that habit back as it was, too, and forgets
-  nothing). A habit of every app
+  own habit. The same correction learned in two apps makes two habits, one in each; once it holds in every app, they are
+  one. When you go back on a habit in its app three times (the full stop it takes off added again, the capital back, the
+  old words back), the habit changes: the old one goes, the new one is learned, and a "Habit changed" card says the new
+  rule; its **Undo** brings the old habit back as it was and never learns the new one (when the correction only added to
+  a habit already kept, **Undo** brings that habit back as it was, too, and forgets nothing). A habit of every app
   changes the same way, from three times in any one app, and the change holds everywhere. Two opposite habits never live
   together, so a habit with an opposite in some app does not spread to every app. The section lists the habits, the
   newest first, each with its rule, the example, the app, how many times it was corrected and a switch; **Forget** shows
   on hover, and **Forget all** (a second press confirms it) forgets them all and what was counted. With **Learn from
   me**, whose switch sits in the section's heading, turned off, the rows are muted and nothing is learned or applied;
-  with no cleanup connected (the chosen connection is a cloud one with no key), a line says that habits work when the
-  cleanup is on. In the History, an entry lists a habit whose effect the cleanup brought (its text shows it, and what
-  you said did not) under how you said it, as a chip with the habit's short name ("без точки"); a habit forgotten later
-  keeps its chip as it was.
+  with **Без ИИ** chosen, a line says that habits work when the cleanup is on. In the History, an entry lists a habit
+  whose effect the cleanup brought (its text shows it, and what you said did not) under how you said it, as a chip with
+  the habit's short name ("без точки"); a habit forgotten later keeps its chip as it was.
 - **A pinned microphone.** A microphone chosen in the settings stays CUE's even when Windows changes its default (a
   headset plugged in, say). When it is not connected, CUE records from the Windows microphone, and a card says so once:
   "*name* not found — recording from *name*".
@@ -316,15 +331,14 @@ from source.
 - **Interface language:** English, or Russian when the Windows display language is Russian; the main window's Languages
   settings (or `ui.language` in `settings.json`) can fix it to either, and the tray menu, the Drop and the main window
   switch at once.
-- **Usage accounting:** every dictation's cost is recorded locally, with its mode; `cue-cli usage` shows a monthly
-  summary.
+- **Usage accounting:** every dictation's words and time are recorded locally, with its mode (no money: CUE pays for
+  nothing); `cue-cli usage` shows a monthly summary.
 - **Comparison bench** (a developer tool): runs your saved recordings through every speech model in CUE's models
-  folder and through several Claude models, and builds a blind A/B report. A second one (`ask_compare`) asks a set of
-  questions the way "Ask" does and measures its decisions, speed and cost.
+  folder and builds a blind A/B report. It does not compare cleanups: CUE holds no key to call a cloud service.
 
 Not in this version: changing the hotkeys, text appearing while you speak, speech models other than Parakeet TDT in
 int8 ONNX, recognition on the graphics card, a vocabulary for speech recognition itself (the dictionary guides only
-the cleanup, see Settings), "Ask" through a service other than Anthropic, macOS.
+the cleanup, see Settings), agents other than OpenCode and Codex (Claude Code is never offered), macOS.
 
 ## Requirements for building
 
@@ -335,50 +349,39 @@ the cleanup, see Settings), "Ask" through a service other than Anthropic, macOS.
 - Microsoft Edge WebView2 Runtime (included with Windows 11).
 - Node.js 24 or newer, with npm (`"node": ">=24"` in `app/package.json`).
 - A processor with AVX2, for the speech model.
-- An Anthropic API key (for "Ask" and the benches, and for the cleanup by default), or another connection's key or a
-  local server for the cleanup alone. The tests need none.
+- Nothing else: the tests and the benches need no key, network or agent.
 
 The first build downloads ONNX Runtime's prebuilt library, which the `ort` crate links into the program, into
 `%LOCALAPPDATA%\ort.pyke.io`, once.
 
-## API keys
+## Your AI: how CUE runs an agent
 
-Keys live in Windows Credential Manager under the service name `CUE`, each under its connection's id (`anthropic`,
-`openrouter`, `openai`, `gemini`, `deepseek`, `mistral`, `groq`, `xai`; Credential Manager shows them as
-`anthropic.CUE` and so on). Beside them, `habits-secret` (`habits-secret.CUE`) keeps the random secret the habits'
-counts are hashed with (see [Privacy in detail](#privacy-in-detail)); CUE makes it itself. They are never written to
-files, never printed in full and never logged. Enter a key once
-in the main window (Settings → Cleanup: choose the connection, paste the key and press **Check**), the Anthropic key
-also in the welcome window, or with the command-line tool (input is hidden):
+CUE holds no key and no login token; the agent is the user's own, signed in by the user. Each agent runs with its own
+empty working folder under `%LOCALAPPDATA%\CUE\agent\`, no window, and the text on its standard input (never as a
+command-line argument and never in a temp file), with every tool, shell, file write and web access of the agent turned
+off (an agent that cannot be stripped is not offered). The output is held to a `{"text": …}` object, and the result goes
+through the same checks as any cleanup (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)); a failed check pastes the
+text as said.
 
-```powershell
-cargo run -p cue-cli -- keys set anthropic   # or openrouter, openai, gemini, deepseek, mistral, groq, xai
-cargo run -p cue-cli -- keys show            # masked values, e.g. sk-ant…f3a9
-cargo run -p cue-cli -- keys check           # a free test request per key
-```
-
-The test request is Anthropic's and OpenRouter's own check, and for the other services a request for their list of
-models (10 s): it works, the key is refused, or it could not be checked. A local server is checked the same way without
-a key, within 3 s. The cleanup's connections and their models (the first of each is the recommended one, the default
-until another is picked; prices in USD per million input / output tokens, as CUE counts them):
-
-| Id | Connection | Models |
-|---|---|---|
-| `anthropic` | Anthropic (the default) | Claude Haiku 5.5 `claude-haiku-5-5` $0.10 / $0.50; Claude Sonnet 5.5 `claude-sonnet-5-5` $2 / $10 |
-| `openrouter` | OpenRouter | Claude Haiku 5.5 `anthropic/claude-haiku-5.5` $0.10 / $0.50; Claude Sonnet 5.5 `anthropic/claude-sonnet-5.5` $2 / $10; GPT-6 Luna `openai/gpt-6-luna` $0.10 / $0.50 |
-| `openai` | OpenAI | GPT-6 Luna `gpt-6-luna` $0.10 / $0.50; GPT-6.1 Terra `gpt-6.1-terra` $1 / $5 |
-| `gemini` | Google Gemini | Gemini 3.1 Flash-Lite `gemini-3.1-flash-lite` $0.25 / $1.50; Gemini 3.5 Flash-Lite `gemini-3.5-flash-lite` $0.30 / $2.50 |
-| `deepseek` | DeepSeek | DeepSeek Flash `deepseek-flash` $0.30 / $1.20 |
-| `mistral` | Mistral | Mistral Small 4 `mistral-small-2603` $0.15 / $0.60; Ministral 8B `ministral-8b-2512` $0.15 / $0.15 |
-| `groq` | Groq | gpt-oss 120B `openai/gpt-oss-120b` $0.15 / $0.60; gpt-oss 20B `openai/gpt-oss-20b` $0.075 / $0.30 |
-| `xai` | xAI | Grok 4.3 `grok-4.3` $1.25 / $2.50 |
-
-Anthropic gets the Messages API request it always had: Claude Haiku 5.5 at effort `medium` with thinking off, Claude
-Sonnet 5.5 at effort `low`. Every other connection gets one OpenAI-compatible Chat Completions request, with the key as
-a bearer token (none for a local server), reasoning turned down as far as the service allows, and an answer held to
-the same `{"text": …}` form. A missing, refused or unfunded key, a limit, no network, a timeout or an unusable answer
-pastes the raw text, as before. `refine_compare` (see Repository layout) still compares cleanup models through
-OpenRouter's key, and the direct path through Anthropic's.
+- **OpenCode** (the default). Found as `opencode` on `PATH` or in its usual folders, else as OpenCode Desktop's own
+  command-line program (`%APPDATA%\ai.opencode.desktop\cli\<version>-<arch>\opencode-cli.exe`), else by a server it
+  announces on this computer in its state file (loopback only; CUE then uses that server and never starts one). With no
+  server running CUE starts `opencode serve` on `127.0.0.1` in a folder of its own, and stops it after 15 minutes
+  without a dictation, on lock, on sleep and when CUE quits; a server CUE did not start is never stopped by CUE. A
+  cleanup is one request without tools or a session, so dictations do not pile up in OpenCode's history. OpenCode
+  keeps the one folder CUE uses as a project of its own.
+- **Codex.** `codex exec` in a read-only sandbox, no session files, your own user config ignored, `-m <model>`, its
+  reasoning turned down. CUE asks `codex login status` before the first run and every 5 minutes, since a Codex never
+  signed in retries for about 15 seconds before it fails.
+- **Time allowed:** 10 seconds plus 1 second per 100 words (a translation a second more), plus 5 seconds on the first
+  request after CUE starts or the agent has rested; "Ask" waits 15 seconds for its answer, 20 with a web search.
+  Past it the Drop says "<Agent> не ответил" (or CUE cleans with the model on this computer, if you chose that). Esc
+  ends a running agent with its whole process tree.
+- **Not signed in, or not found:** the text is pasted after CUE's own tidy-up at once, and the Drop says
+  "<Agent>: войдите заново" or "<Agent> не найден". Opening the Cleanup page looks at the agents again.
+- **Not offered:** Claude Code and Gemini / Antigravity (their makers do not allow another app to drive a user's
+  subscription; use Claude inside OpenCode with a key of your own, configured in OpenCode) and Grok (built, then left
+  out on 09.11.2026: 6–9 seconds for a short cleanup).
 
 ## Build and run
 
@@ -437,16 +440,16 @@ installer is compressed, so the scan cannot read inside it, and a few bytes of i
 email address by chance: before it leaves this computer, unpack it by hand and scan what it holds.
 
 `leak-scan` looks for paths into a user profile (also URL-encoded), the Windows user name and computer name, email
-addresses and API keys, for exact copies of the keys saved in Credential Manager, the history of the last 31 days, the
-dictionary terms, the habits' examples (`before` and `after`), the words of their replacements and the short names the
-cleanup wrote (not the rules, nor a short name the template wrote: those are mostly CUE's own words), the microphone
+addresses and API keys (by their look), for the habits' secret in Credential Manager, the history of the last 31 days,
+the dictionary terms, the habits' examples (`before` and `after`), the words of their replacements and the short names
+the cleanup wrote (not the rules, nor a short name the template wrote: those are mostly CUE's own words), the microphone
 names, the git name and email and the private folders that `.git/info/exclude` names (its lines ending with `/`), for
 recordings (Ogg Opus and WAV, also stored inside an installer), and, in text files, for long random-looking strings. It
 prints the file, the offset and the kind of each finding, never the finding itself. It exits with 1 when it found
-anything, and with 2 when it could not read what to look for (a key, the settings, the history, the microphone list,
-git) or a given path, or a given path holds no file. The installer script that Tauri writes for the build
-(`target\dist\release\nsis\x64\installer.nsi`) names files of this computer in its `File`, `!include`, icon and path
-`!define` lines: makensis reads them and stores none of those paths, which the scan of the uncompressed installer
+anything, and with 2 when it could not read what to look for (the habits' secret, the settings, the history, the
+microphone list, git) or a given path, or a given path holds no file. The installer script that Tauri writes for the
+build (`target\dist\release\nsis\x64\installer.nsi`) names files of this computer in its `File`, `!include`, icon and
+path `!define` lines: makensis reads them and stores none of those paths, which the scan of the uncompressed installer
 confirms.
 
 Tests and lints:
@@ -457,7 +460,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cd app; npm test; npm run build
 ```
 
-The tests need no microphone, network, API keys or speech model (network code, the model's download included, is
+The tests need no microphone, network, agent or speech model (network code, the model's download included, is
 tested against a local fake server). Three ignored tests in `cue-engines` check the real model: run them with
 `cargo test -p cue-engines -- --ignored` and `CUE_MODEL_DIR` set to a model folder (one of them also takes a
 recording in `CUE_TEST_WAV`, and the log-mel one the export's reference preprocessor `nemo128.onnx` in `CUE_NEMO128`).
@@ -474,8 +477,8 @@ history is neither written nor cleaned up until a period is chosen in the window
 {
   "stt": { "engine": "parakeet", "model": "parakeet-ultra-int8" },
   "refine": {
-    "connection": "anthropic",
-    "style": "default",
+    "where": "agent",
+    "fallback": "raw",
     "context_chars": 500,
     "min_ratio": 0.35,
     "max_ratio": 1.25,
@@ -493,26 +496,27 @@ history is neither written nor cleaned up until a period is chosen in the window
   `parakeet-v3-int8`, `parakeet-v2-int8`, or `hf--<owner>--<repository>` (lower case) for a model found on Hugging
   Face, whose folder keeps its `manifest.json`. The Model page writes it once the new model has loaded. An id CUE
   cannot find reads as Parakeet Ultra.
-- `refine`: the cleanup and translation.
-  - `connection` (default `anthropic`): one of the ids in [API keys](#api-keys); case and surrounding spaces do not
-    matter, and any other value reads as `anthropic`.
-  - `models`: the model picked for a connection, by connection id, kept only where it is not the recommended one.
-    Example: `"models": { "anthropic": "claude-sonnet-5-5" }`. A model CUE does not list for that connection reads as
-    the recommended one.
-  - `runs` (default `cloud`): `"cloud"`, through `connection`, or `"local"`, a model on this computer. A `connection`
-    of `ollama` or `lmstudio` (earlier versions) reads as `local`; their `addresses` are read past and not written
-    again.
+- `refine`: the cleanup, translation and "Ask".
+  - `where` (default `agent`): `"off"` (no AI: CUE's own tidy-up only), `"local"` (a model on this computer) or
+    `"agent"` (your OpenCode or Codex); case and surrounding spaces do not matter, and any other value reads as
+    `agent`.
+  - `agent`: `"opencode"` or `"codex"`. Absent, CUE writes the first one it finds at start (OpenCode, then Codex); with
+    none found, the cleanup moves to this computer with nothing chosen. A `"grok"` of a build that offered it parses
+    but is never run.
+  - `models`: the model picked for an agent, by agent id, kept only where it is not the agent's default. Example:
+    `"models": { "codex": "gpt-6.1-terra" }`. Absent for OpenCode means "Быстрая · авто". A name CUE does not accept
+    reads as the default.
   - `local`: the local model's id (`llm--<owner>--<repository>--<quantization>`), written once it has loaded; absent,
-    the recommended one, Qwen3 4B Instruct.
-  - `style`: `"default"`, CUE's own cleanup, or `"custom"`, your instructions in `custom`. Case and surrounding spaces
-    do not matter; any other value, the `"careful"` and `"bold"` of earlier versions included, reads as `"default"`.
-  - `custom`: the instructions of the Custom style, kept only when not empty; the main window takes up to 2,000
-    characters and trims them. Blank instructions clean up as Default.
+    nothing is chosen and dictations are pasted after the tidy-up alone.
+  - `fallback` (default `raw`): what to do when the AI did not answer: `"raw"`, paste as said (after the tidy-up), or
+    `"local"`, clean with the local model when it is loaded at that moment.
   - `context_chars`: how much text before the caret is sent as context, for cleanup and for "Ask" alike (0 turns it
     off). `min_ratio`, `max_ratio`, `min_overlap`: the sanity check (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
 
-  The `model` and `level` of earlier versions are ignored and dropped the next time CUE writes the file, so a file that
-  named Sonnet cleans up with the default, Claude Haiku 5.5, until another model is picked.
+  The `connection`, `runs`, `style`, `custom`, `model`, `level` and `addresses` of earlier versions are read once, to
+  move your choice (see "Who cleans the text"), and never written again; a `custom` text becomes
+  `%APPDATA%\CUE\instructions\instructions.md` and stays in the file until that file has been written. The
+  instructions themselves are that file, not a setting.
 - `hold_hints_left`: how many more times the "Press and release" card appears after a held chord.
 - `bench.save_recordings`: copy each successful dictation's audio and app name for the bench.
 - `ui.language`: the language of the tray menu, the Drop, the "Ask" card and the main window. `"auto"` (the default)
@@ -541,10 +545,10 @@ history is neither written nor cleaned up until a period is chosen in the window
   file only when it is not `"bottom"`. Example: `"drop": { "position": "right" }`.
 - `dictionary.terms`: names and terms you often say, written as they should appear; the main window's Dictionary edits
   the same list. Example:
-  `"dictionary": { "terms": ["Parakeet", "Claude Haiku", "GitHub"] }`. When the transcript clearly means one of them
+  `"dictionary": { "terms": ["Parakeet", "OpenCode", "GitHub"] }`. When the transcript clearly means one of them
   but spells it differently, splits it or mixes alphabets (`Пара kit`, `гитхаб`, `git hub`), the cleanup writes it as
-  listed. The list affects only the cleanup, whichever connection it goes through, where it rides along with the
-  system prompt (cached, with Anthropic) and costs almost nothing; the speech model takes no vocabulary. Entries are
+  listed. The list affects only the cleanup, whichever route it goes through, where it rides along with the
+  instructions and costs almost nothing; the speech model takes no vocabulary. Entries are
   trimmed; empty ones, ones with a line break, ones longer than 60 characters and exact repeats (case-sensitive) are
   skipped, and only the first 200 are used. A value that is not a list reads as an empty list. The block is kept in
   the file only when the list is not empty.
@@ -585,26 +589,16 @@ history is neither written nor cleaned up until a period is chosen in the window
   An unknown code reads as the default, and defaults are not written to the file. Example for a Russian speaker who
   writes to German colleagues: `"translate": { "target": "de", "home": "ru" }`. Russian speech is pasted in German,
   German speech in Russian; speech in Latin letters counts as German there, English included.
-- `ask`: the "Ask" mode.
+- `ask`: the "Ask" mode. It uses the cleanup's AI and model.
   - `enabled` (default `true`): `false` turns "Ask" off, and `Ctrl + Win + Alt` then goes to Windows as is.
-  - `web_search` (default `true`): `false` answers without searching the web.
-  - `model` (default `claude-haiku-5-5`): the Claude model that answers; keep it in the `pricing.claude` list, or its
-    cost is counted as 0. A model name that does not exist makes every question fail (the log says to check
-    `settings.json`).
-  - `max_searches` (default `2`): web searches a request may run, a whole number from 1 to 10. A question that pauses
-    after a search is continued and may search again, so it runs at most `2 × max_searches − 1` searches (3 by
-    default).
+  - `web_search` (default `true`): `false` answers without searching the web. Only Codex can search; with another
+    route the answer says "без поиска".
+  - `max_searches` (default `2`): a whole number from 1 to 10, kept for a later route; no agent takes a limit now.
 
-  Only `false` turns a switch off; any other wrong value (an empty or non-string model, `0`, `11` or `"3"` searches, a
-  section that is not an object) reads as the default, and defaults are not written to the file. Example:
-  `"ask": { "model": "claude-sonnet-5-5", "max_searches": 3 }`.
-- `pricing` (not written unless you change it): a `claude` list of
-  `{model, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok}` in USD. Defaults: Haiku 5.5
-  $0.10 / $0.50, Sonnet 5.5 $2 / $10, Opus 5.5 $4 / $20 per million input / output tokens, and every model of the
-  cleanup's connections at the price in [API keys](#api-keys), under the id `usage.csv` gives it (OpenRouter's as it
-  is, `anthropic/claude-haiku-5.5`; another service's after its connection, `openai:gpt-6-luna`), its cache reads at a
-  tenth of its input price. A cache write costs 1.25 × the input price. A model on this computer has no price.
-  `web_search_usd` ($0.01) prices one web search of "Ask". Recognition on this computer has no price.
+  Only `false` turns a switch off; any other wrong value (`0`, `11` or `"3"` searches, a section that is not an object)
+  reads as the default, and defaults are not written to the file. The `model` of earlier versions is read past and
+  never written again.
+- `pricing` of earlier versions is read past and dropped the next time CUE writes the file: CUE has no prices.
 
 Start at sign-in is not a setting: it is the Windows `Run` registry entry, toggled from the tray menu or the main
 window's General settings.
@@ -620,9 +614,11 @@ Everything else lives in `%LOCALAPPDATA%\CUE`:
 | `history\YYYY-MM-DD.jsonl` | The history the main window shows: one file per local day, one line of JSON per result (its time, mode, app and text, for "Ask" the question, and for a dictation or a translation the text as it was recognized, `raw`). Days older than `history.keep` are deleted on their own, and **Clear history** deletes them all. |
 | `history\audio\` | The recordings of the history's entries, one Ogg Opus file per entry (speech at 16 kbit/s, about 6 MB an hour), named by the entry's id. Older than `history.audio` (and never older than the history) they are deleted on their own; **Clear history**, Don't keep and the history turned off delete them all. A clear first renames the folder `audio.cleared-<n>`, then deletes it. |
 | `logs\cue.log.YYYY-MM-DD` | Daily log: events, per-stage timings, error kinds. No dictation text, no questions, answers or selected text, no history, no microphone names, no audio, no keys. Kept 7 days and 10 MB at most. **Open log** in the tray menu opens this folder. |
-| `usage.csv` | One row per attempt: time (UTC), audio length, recognition engine and path, cost, model, tokens, latency, outcome, mode, web searches, how many words it wrote and its local date. A cache warm-up gets a row of its own. No text. |
+| `usage.csv` | One row per attempt: time (UTC), audio length, recognition engine and path, who cleaned (`refine_model`), tokens (0 for an agent), latency, outcome, mode, web searches, how many words it wrote and its local date. No money, no text. |
 | `models\parakeet-ultra-int8\` | The default speech model, about 670 MB: `encoder-model.int8.onnx`, `decoder_joint-model.int8.onnx` and `vocab.txt`, downloaded once from a fixed commit of the Hugging Face repository `Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx`. Each file comes as `<name>.part`, resumes from where it stopped, and is renamed only once its SHA-256 matches the one in CUE's code; a file that does not match is deleted and downloaded again. |
 | `models\<id>\` | Every other model chosen on the Model page, the same three files downloaded the same way: `parakeet-v3-int8` and `parakeet-v2-int8` (`istupakov/parakeet-tdt-0.6b-v3-onnx` and `…-v2-onnx`, pinned in CUE's code like Ultra), and `hf--<owner>--<repository>` for a model found on Hugging Face, with its `manifest.json`: the repository, the commit it was pinned at and each file's size and SHA-256. A folder without a readable manifest is not CUE's: it is never shown or deleted. **Delete** on the Model page removes a model's folder. |
+| `models\llm--<owner>--<repository>--<quantization>\` | A language model for the cleanup on this computer, one GGUF file downloaded when you press it, with its `manifest.json` (the commit it was pinned at, its size and SHA-256). |
+| `agent\<agent>\` | The empty working folder each agent runs in (OpenCode's is the one folder CUE's own OpenCode server runs in, and OpenCode keeps it as a project). Nothing of yours is in it. |
 | `bench\recordings\` | Recordings for the bench, only when `bench.save_recordings` is `true`. |
 | `bench\runs\<timestamp>\` | Bench runs: `results.json` and `report.html`. |
 
@@ -631,143 +627,97 @@ WebView2 keeps the browser profile of CUE's windows (cache and storage) separate
 
 ## Costs
 
+CUE has no prices and no balance: it holds no key and pays for nothing. What an agent costs you is between you and the
+agent's provider (a subscription, or the key you set up in OpenCode); a model on this computer and the tidy-up are free.
+CUE keeps the words and the time:
+
 ```powershell
 cargo run -p cue-cli -- usage            # current month (UTC)
 cargo run -p cue-cli -- usage 2026-10
 ```
 
-The summary shows the number of dictations, minutes of audio, transcription cost (0 for recognition on this computer;
-rows written by earlier versions keep the Soniox cost they were written with) and refine cost, the cost per dictation
-and per hour of audio, the average latency from the second key press to the paste (overall and for recordings of
-20 s or less), web search when there was some, and the rows and dollars of each mode. Prices come from
-`settings.json`. A Retry is a second attempt, whose cleanup is paid again, and gets its own row; the Retry of a
-failed translation translates the saved text again, so its row has no audio.
+The summary shows the number of dictations, minutes of audio, the average latency from the second key press to the
+paste (overall and for recordings of 20 s or less) and the rows of each mode. A Retry is a second attempt and gets its
+own row; the Retry of a failed translation translates the saved text again, so its row has no audio.
 
-New rows have `stt_engine` `parakeet`, `stt_path` `local` and `stt_usd` 0; the columns stay as they were.
-`refine_model` names the cleanup's model as the price list does: Anthropic's and OpenRouter's ids as they are
-(`claude-haiku-5-5`, `anthropic/claude-haiku-5.5`), another service's after its connection (`openai:gpt-6-luna`), and
-a model on this computer after `local:` (`local:llm--unsloth--qwen3-4b-instruct-2507-gguf--q4_k_m`, at $0). The
-columns `mode`, `web_searches` and `search_usd` came with the modes, and `words` and `day` with Today. `mode` is
-`dictate`, `translate`, `ask` or `warmup`; `words` is how many words a dictation or translation wrote (0 for anything
-else) and `day` the local date.
-- An `ask` row is one question: its audio, the tokens of `ask.model` (in the `refine_model` and token columns) and its
-  web searches at $0.01 each (`web_searches`, `search_usd`). An answer you close while it is still printing is paid
-  for as far as it came, its web searches included, and so is a question cancelled with `Esc`. Each follow-up gets a row of its own, and so does
-  the Retry of a failed question (without audio). Pasting an answer with its button adds no row: the answer was counted
-  when it was complete. A shown answer has the outcome `answered`, and its latency runs from the second key press to
-  the first words; a text written into the field is `inserted` (or `no_field`), with the latency to the paste.
-- A `warmup` row is a cache warm-up (see Privacy in detail), of the cleanup (only when it goes through Anthropic) or of
-  "Ask" (then with `ask.model`): paid tokens, no audio, outcome `discarded`; it counts in the cost, not as a dictation.
-
-Rows written before these columns existed read as dictation, and the header of an existing file is not rewritten: it
-keeps the 13 old names while new rows have 16 fields.
+New rows have `stt_engine` `parakeet`, `stt_path` `local` and 15 columns: no dollars. `refine_model` says who cleaned:
+`local:<model id>`, `agent:<agent>:<model>` (`auto` for OpenCode's "Быстрая · авто") or `off`. `mode` is `dictate`,
+`translate` or `ask`; `words` is how many words a dictation or translation wrote (0 for anything else) and `day` the
+local date. Rows written by earlier versions carry dollars and `warmup` rows: they are read with those passed over, and
+a file an earlier version started is rewritten in place at the first row of this one under the new header, the original
+kept beside it as `usage-<day>.csv`.
+- An `ask` row is one question: its audio, the cleanup's AI in `refine_model`, and the web searches Codex ran
+  (`web_searches`). An agent's tokens are its own, so the token columns stay 0. An answer you close while it is still
+  coming, and a question cancelled with `Esc`, still write what they used. Each follow-up gets a row of its own, and so
+  does the Retry of a failed question (without audio). Pasting an answer with its button adds no row. A shown answer has
+  the outcome `answered`, and its latency runs from the second key press to the answer; a text written into the field
+  is `inserted` (or `no_field`), with the latency to the paste.
 
 `usage.csv` is comma-separated. In Excel with a locale whose list separator is not a comma (Russian, for example), do not
 open the file directly; use **Data → From Text/CSV** and choose the comma delimiter.
 
 ## Comparison bench
 
-The bench compares speech models and cleanup models on your own speech and shows how the sanity check behaves on
-it. It does not tune the thresholds.
+The bench compares speech models on your own speech. It does not compare cleanups (CUE holds no key to call a cloud
+service) and does not tune the thresholds.
 
 1. Set `"bench": { "save_recordings": true }` in `settings.json`, restart CUE and dictate as usual.
 2. Put the speech models to compare in `%LOCALAPPDATA%\CUE\models\`, one folder each: `parakeet-ultra-int8`, the
    default model, is there once CUE has downloaded it, and so is every model downloaded on the Model page (NVIDIA's own
    v3 and v2, models found on Hugging Face); another export with the same file names (`encoder-model.int8.onnx`,
    `decoder_joint-model.int8.onnx`, `vocab.txt`) can go next to them in a folder of its own.
-3. Run it (needs the Anthropic key):
+3. Run it:
 
    ```powershell
-   cargo run -p cue-bench -- run [--limit N] [--max-usd X]
+   cargo run -p cue-bench -- run [--limit N]
    ```
 
    Every folder that loads is one speech model, named by its folder; a folder that does not load (a partial download,
    another export) is skipped with a console line. Each model is loaded once and recognizes every recording in turn,
-   as the app does; its time is the model's own recognition time, its cost is $0, and its console line says when the
-   other alphabet was masked out (see One language a dictation in docs/ARCHITECTURE.md). The text of
-   `parakeet-ultra-int8` (or of the first model that succeeded, without it) is then cleaned through Anthropic by the
-   Claude model picked for the Anthropic connection (`refine.models`, Claude Haiku 5.5 by default) and every Claude
-   model in the `pricing.claude` list, with the same request (including `dictionary.terms`), sanity check and timeout
-   as the app. `--max-usd` (default $1) stops new paid calls once reached. The first `Ctrl+C` finishes the step
-   under way and stops; a second one exits at once. Results are saved after every recording.
-4. Open `report.html` from the run folder. It shows blind A/B pairs for recognition and for refine, then the scores,
-   latency and cost per dictation. **Save choices** downloads your answers as `choices.json`.
+   as the app does; its time is the model's own recognition time, and its console line says when the other alphabet
+   was masked out (see One language a dictation in docs/ARCHITECTURE.md). The first `Ctrl+C` finishes the step under
+   way and stops; a second one exits at once. Results are saved after every recording.
+4. Open `report.html` from the run folder. It shows blind A/B pairs for recognition, then the scores and latency per
+   dictation (a run of an earlier version still shows its cleanup pairs and costs). **Save choices** downloads your
+   answers as `choices.json`.
 
 `cargo run -p cue-bench -- report <run folder>` rebuilds `report.html` from `results.json`.
 
-### The "Ask" bench
-
-`ask_compare` (an example in `cue-engines`; needs the Anthropic key, and it is paid) asks a file of questions the way
-the app asks them: the same instruction, tools, web search (2 searches a request), deadlines and continuations, with
-today's date. It writes every call and a summary to `out.json`, before the first call and again after every call, so a
-run cut short keeps what it paid for; the console gets only ids and numbers.
-
-```powershell
-cargo run -p cue-engines --example ask_compare -- phrases.json out.json [--runs 5] [--max-usd 1.00]
-```
-
-`phrases.json` is an array of questions with their context:
-
-```json
-[
-  {"id": "q-capital", "question": "столица австралии", "app": "Telegram Desktop", "expect": "answer"},
-  {"id": "w-punct", "question": "расставь знаки препинания", "app": "Telegram Desktop",
-   "selection": "привет как дела", "expect": "write", "mode": "replace"},
-  {"id": "f-tcp", "question": "чем tcp отличается от udp", "then": "а что быстрее", "app": "Google Chrome",
-   "expect": "answer"}
-]
-```
-
-`selection` and `before_cursor` are optional context; `then` is a follow-up asked after the first answer, and the
-follow-up is what is scored; `expect` is `answer` or `write`, and `mode` (`replace` or `insert`, for a write only) is
-the mode the write should take. Each run asks every question once, one at a time; the very first call (an empty prompt
-cache) is left out of the medians. The summary counts the right decisions and modes, the median time to the first
-words with and without a search, and the cost; the run stops once more than `--max-usd` is spent. `--model` asks
-another model (`claude-haiku-5-5` by default; one without a default price is refused, since the budget could not count
-it), `--no-search` asks without web search, and `--thinking adaptive` sends the request with the model's adaptive
-thinking, to compare with the app's default (`--thinking off`). An answer's text and first words are the ones the app
-shows: the words the model wrote before its first web search go when it starts. Each call in `out.json` also says
-whether the model wrote such words (`text_before_search`) and the error codes of searches that failed (`search_errors`).
-
 ## Privacy in detail
 
-- **Speech recognition** runs on this computer: no sound leaves it, while you record, on Retry or ever. The network
-  is needed only to download a model once, from Hugging Face (`huggingface.co`, files of a fixed commit; the request
-  carries no key and nothing of yours), and for the cleanup and "Ask". The Model page's search sends Hugging Face the
-  words typed into it (from two letters on), and choosing a model it found asks Hugging Face for that repository's
-  list of files; nothing else of yours goes with either.
-- **The cleanup's connection** (Anthropic by default, or the one chosen in the Cleanup settings) receives the
-  transcript, the app name, up to `refine.context_chars` (500) characters of text before the caret, your
-  `dictionary.terms` (for a word added from a correction, also how it was heard, `dictionary.learned`), the rules of the
-  habits that are on for the dictation's app (see Habits below) and, with the Custom style, your instructions. Nothing
-  is read from password fields, and the window title is never sent. A translation goes in the same kind of request to
-  the same connection, with the target language added. Through OpenRouter, CUE first asks for providers that do not
-  store requests for training, and only when none of them can take the request, for any provider. With the cleanup on
-  this computer none of this is sent: the local model gets the same request, and the text stays here.
-- **Anthropic, when the cleanup goes through it**: while you record, CUE also sends an empty `HEAD` request without a
-  key to open the connection early, so cleanup starts faster. When a dictation starts four minutes or more after the
-  last cleanup, CUE sends a cache warm-up: the cleanup request with your dictionary (as the cleanup gets it) and a
-  one-character placeholder instead of a transcript, without the app name or any text before the caret, so the first
-  cleanup after a pause reads the prompt from Anthropic's cache. Over the other connections there is neither.
-- **"Ask"** always goes to Anthropic, whatever the cleanup's connection. It sends the question (as it was
-  recognized), the selected text (up to 8,000 characters: a longer selection goes as its start and its end), up to
-  `refine.context_chars` (500) characters before the caret, the app name and today's local date; a follow-up sends
-  only its question, with the conversation so far. With web search on, Anthropic searches the web for what the model
-  asks it to. Nothing is read from password fields. When the "Ask" chord starts, and on a follow-up, four minutes or
-  more after the last "Ask" request or warm-up, CUE sends a cache warm-up of the "Ask" instruction with a
-  one-character placeholder, nothing of yours. The conversation lives only while the answer is open.
+- **Speech recognition** runs on this computer: no sound leaves it, while you record, on Retry or ever. The network is
+  needed only to download a model once, from Hugging Face (`huggingface.co`, files of a fixed commit; the request
+  carries no key and nothing of yours); an agent you chose may use the network on its own account. The Model page's
+  search sends Hugging Face the words typed into it (from two letters on), and choosing a model it found asks Hugging
+  Face for that repository's list of files; nothing else of yours goes with either.
+- **The AI you chose** receives the transcript, the app name, up to `refine.context_chars` (500) characters of text
+  before the caret, your `dictionary.terms` (for a word added from a correction, also how it was heard,
+  `dictionary.learned`), the rules of the habits that are on for the dictation's app (see Habits below) and your
+  instructions file. Nothing is read from password fields, and the window title is never sent. A translation goes in
+  the same kind of request, with the target language added. CUE sends it to the agent's program or, for OpenCode, to
+  its server on this computer (`127.0.0.1`, never through a system proxy), on the agent's standard input; where the
+  agent sends it next is your setup with its provider (an API key of your own, a subscription) and CUE does not look
+  at it. CUE sends nothing to any cloud service by itself, and sends no warm-up or empty request ahead of time. With
+  the cleanup on this computer none of this leaves it: the local model gets the same request. With **Без ИИ** nothing
+  is sent anywhere.
+- **"Ask"** goes the same way as the cleanup: to your agent or to the model on this computer, and it is not available
+  with **Без ИИ**. It sends the question (as it was recognized), the selected text (up to 8,000 characters: a longer
+  selection goes as its start and its end), up to `refine.context_chars` (500) characters before the caret, the app
+  name and today's local date; a follow-up sends the whole conversation again as text, since the agent keeps no
+  session. With web search on and Codex as the agent, Codex searches the web for what the model asks it to. Nothing is
+  read from password fields. The conversation lives only while the answer is open.
 - **The `Ctrl + C` fallback of "Ask".** When the app does not tell CUE what is selected, CUE presses `Ctrl + C` in that
   window once the recording ends (never in a terminal CUE knows, nor in another window than the one you asked in), reads
-  the selection from the clipboard and puts your clipboard back as it was. It never does while Windows syncs copied
-  text to your other devices by itself (Settings → System → Clipboard: clipboard history across your devices, with
-  "Automatically sync text that I copy"): the app's copy would be uploaded at once, so the selection then reads as
-  none. CUE reads that setting from the registry at each "Ask" chord and logs only whether it is on. Only a copy made by that app counts (or one
-  with no owner, as some apps copy), and a copy that is the same text as your clipboard already held counts as nothing
-  selected. The app's copy reaches the Windows clipboard history (Win+V) before CUE can mark it, so CUE then tries to
-  remove it from there; in the live check on 2026-10-29 Windows refused, so the copy may stay in Win+V (see Known
-  limitations). CUE's own writes (each paste, and your clipboard put back) carry the marks that keep them out of the
-  history and the cloud clipboard, but the app's copy carries none: with clipboard sync set to manual, it can be sent
-  to your other devices from Win+V by hand for as long as it stays there.
+  the selection from the clipboard and puts your clipboard back as it was. It never does while Windows syncs copied text
+  to your other devices by itself (Settings → System → Clipboard: clipboard history across your devices, with
+  "Automatically sync text that I copy"): the app's copy would be uploaded at once, so the selection then reads as none.
+  CUE reads that setting from the registry at each "Ask" chord and logs only whether it is on. Only a copy made by that
+  app counts (or one with no owner, as some apps copy), and a copy that is the same text as your clipboard already held
+  counts as nothing selected. The app's copy reaches the Windows clipboard history (Win+V) before CUE can mark it, so
+  CUE then tries to remove it from there; in the live check on 2026-10-29 Windows refused, so the copy may stay in Win+V
+  (see Known limitations). CUE's own writes (each paste, and your clipboard put back) carry the marks that keep them out
+  of the history and the cloud clipboard, but the app's copy carries none: with clipboard sync set to manual, it can be
+  sent to your other devices from Win+V by hand for as long as it stays there.
 - **Learn from me.** While it is on, after a dictation or a translation was pasted with `Ctrl + V` into a field that
   gives its text to Windows (UI Automation), CUE reads that one field every 0.4 s, for 60 s at most. It stops when the
   text has not changed for 2.5 s after a change, when the field empties (the message was sent), when the field can no
@@ -778,37 +728,34 @@ whether the model wrote such words (`text_before_search`) and the error codes of
   it from the Dictionary, takes it out again with how it was heard.
 - **Habits.** A dictation's correction is also read for habits, in memory, and counted by hash: `settings.json` keeps
   the app's name, the hash of the kind of correction, a number and a day, no text. The hash is made with a random secret
-  of this installation (32 bytes, an HMAC), kept in Windows Credential Manager under `habits-secret` beside the keys,
-  never in `settings.json` or the log. When it is missing or malformed, CUE makes a new one at start and drops the
-  counts and the declined corrections (their hashes no longer match); the habits keep working. When Credential Manager
-  cannot be read, the secret kept there is left alone and nothing is counted until the next start. When a correction
-  reaches three in an app, the habit keeps in `settings.json` its rule, its short name and an example: the words around
-  the correction, at most 40 characters on each side, which is the only text of a correction written to disk. The
-  cleanup's connection receives that example once to word the rule, in a short request with the kind of the correction,
-  the example and the app's name, nothing else; it is not written to `usage.csv`. Through OpenRouter it goes only to
-  providers that do not store requests for training, and when none can take it, the rule comes from a template. It is
-  not sent at all without a cleanup connection that can be asked (a cloud one with no key): the rule then comes from the
-  template too, as it does when the answer does not come in 5 s. The rules of the habits that are on go with every
-  cleanup request of a dictation in their app, and those of every app with all, as one line each; translations and "Ask"
-  get none. The log gets "habit forms counted" and "habit learned" with the kinds and numbers, no text. **Learn from
-  me** turned off stops all of it: no field is read, nothing is counted or learned, and no habit goes into a request.
-  **Forget** and **Forget all**, or **Undo** on the card, remove a habit with its example.
+  of this installation (32 bytes, an HMAC), kept in Windows Credential Manager under `habits-secret`, never in
+  `settings.json` or the log. When it is missing or malformed, CUE makes a new one at start and drops the counts and
+  the declined corrections (their hashes no longer match); the habits keep working. When Credential Manager cannot be
+  read, the secret kept there is left alone and nothing is counted until the next start. When a correction reaches
+  three in an app, the habit keeps in `settings.json` its rule, its short name and an example: the words around the
+  correction, at most 40 characters on each side, which is the only text of a correction written to disk. The rule is
+  worded by the model on this computer when one is loaded and cleaning, in a short request with the kind of the
+  correction, the example and the app's name, nothing else, and otherwise by CUE's own template; **an agent is never
+  asked for it**. The rules of the habits that are on go with every cleanup of a dictation in their app, and those of
+  every app with all, as one line each; translations and "Ask" get none. The log gets "habit forms counted" and "habit
+  learned" with the kinds and numbers, no text. **Learn from me** turned off stops all of it: no field is read,
+  nothing is counted or learned, and no habit goes into a request. **Forget** and **Forget all**, or **Undo** on the
+  card, remove a habit with its example.
 - **Inside CUE:** the Drop and the card windows get the text of the question and the answer, the card's short quote of
   the selection (40 characters at most), and the titles and sites of the sources, to draw them; never the addresses. A
   click on a source asks the core to open it, and the core opens only `http` and `https` pages, in the default browser.
   The history's text goes to the main window alone. The welcome window cannot read the history, and of the settings
-  it changes only the microphone; the Drop and the card cannot read the history, the settings or the keys. A key
-  pasted in the main window or the welcome window goes straight to Credential Manager, and the window gets back only
-  its mask.
+  it changes only the microphone and where the cleanup runs; the Drop and the card cannot read the history or the
+  settings, and the instructions are the main window's alone.
 - The microphone is open only while CUE is recording, and while the main window's Microphone settings or the welcome
   window's Microphone step show its level (only the level reaches that window; that audio is never kept).
 - **Stays on this computer:** every sound CUE records, the history with its recordings, the last dictation's audio and
   text, recordings saved for the bench, the speech models, settings, logs and usage rows. Logs and `usage.csv` never
-  contain dictation text, questions, answers, selected text, sources, the history, microphone names, your Custom
+  contain dictation text, questions, answers, selected text, sources, the history, microphone names, your
   instructions or a local server's address (only their length, or whether the server answered), nor any sound:
   a recording's line has its length and size alone; a crash records only the thread and code location, not the panic
   message. A recording reaches the main window alone, as the bytes of its file, and plays there from memory.
-- Check the data-retention policy of each service you use for the text it receives.
+- Check the data-retention policy of the provider behind the agent you use for the text it receives.
 
 ## Known limitations
 
@@ -831,10 +778,17 @@ whether the model wrote such words (`text_before_search`) and the error codes of
 - Text appears only after you finish. A long dictation is recognized in pieces while you speak, but nothing of it is
   shown until it is pasted.
 - Parakeet v2 recognizes no Russian: with it, every dictation comes out in Latin letters and reads as English.
-- The recommended models of the connections were chosen from the services' documentation, not by comparing their
-  cleanup on real dictations.
-- "Ask" goes through Anthropic alone, so it needs the Anthropic key even when the cleanup goes through another
-  connection, and the welcome window's Key step asks for that key whichever connection is chosen.
+- The default models (Codex's GPT-6 Luna, OpenCode's "Быстрая · авто", which keeps Claude Haiku when your OpenCode
+  offers it) were chosen from published characteristics and a few live runs, not by comparing cleanups on many real
+  dictations.
+- An agent is slower than a direct call: OpenCode Desktop 2.2.5 took about 2 seconds for a short dictation and 5–8 for
+  165 words, Codex 3–4 seconds, and each is allowed 10 seconds plus 1 per 100 words. When it does not answer in time
+  the text is pasted as said.
+- "Ask" through OpenCode or the model on this computer never searches the web; only Codex does. A follow-up sends the
+  whole conversation again, so a long one is slower.
+- Translation and "Ask" are not available with **Без ИИ**.
+- CUE lists OpenCode's models only from a server that is already running; without one the model drop-down offers
+  "Быстрая · авто" alone, and CUE does not start a server just to look.
 - A dictation is Russian or English. When both alphabets hold whole sentences (at least two of each language's little
   words: "the", "to", «и», «что»…), the one with fewer letters is taken for a slip of the model, and the dictation is
   recognized again without it, so a sentence said in the other language on purpose comes out spelled in the main
@@ -858,11 +812,8 @@ whether the model wrote such words (`text_before_search`) and the error codes of
   whole computer is not read, and with the user setting still on, the fallback stays off.
 - A selection of more than 8,000 characters reaches "Ask" as its first and last 4,000: it is never replaced (no
   **Replace** button, and a change of it is shown with **Copy**), and an answer about it sees only those parts.
-- Thinking is off for "Ask" (chosen after the bench: 98 % right decisions, 93 % format and checks, the first words in
-  1.2 s without a web search and 1.3 s with one, no timeouts). Before a web search the model often writes a short
-  sentence, such as "let me check": it can show for a moment, and goes when the search starts. Now and then it
-  answers a question about something current (the latest version of a program, say) from what it knows, without
-  searching: 1 run in 10 on the bench, and once in the live check. Such an answer can be out of date.
+- Now and then Codex answers a question about something current (the latest version of a program, say) from what it
+  knows, without searching, and the answer then says "без поиска". Such an answer can be out of date.
 - Editors that copy the current line on `Ctrl + C` with nothing selected (VS Code does by default) could hand that line
   to "Ask" as the selection when they do not report the selection themselves. None is listed yet (`COPIES_LINE` in
   `selection.rs`): VS Code was not available to check.
@@ -871,8 +822,8 @@ whether the model wrote such words (`text_before_search`) and the error codes of
 - **Insert below** moves the caret with the Right arrow, which ends the selection at its end in most editors; where
   Right behaves differently with a selection, the text lands at the caret instead. When the Right arrow cannot be sent,
   the text stays in the clipboard and the "Nowhere to paste" card offers Copy.
-- When web search fails or is not available to your key, the model answers from what it knows, which may be out of
-  date. A key without web search is asked again without it, at once.
+- When web search fails or Codex has none, the model answers from what it knows, which may be out of date; the answer
+  says "без поиска".
 - The `Ctrl + C` fallback stays out of the terminals listed above, by app name, executable or window class. In a
   terminal outside that list that does not report its selection, a question asked there would press `Ctrl + C`, which
   stops the program running in it.
@@ -889,33 +840,33 @@ LICENSE, NOTICE           Apache License 2.0, and the copyright notice
 app/
   package.json            front-end tooling: Vite, TypeScript, Vitest, Tauri CLI
   crates/core/            cue-core: dictation state machine, settings, refine, translation and "Ask" rules, the
-                          cleanup's connections and their models, the speech rules (one language a dictation, long
-                          recordings cut), the speech models (the short list, a found model's manifest, whether a
+                          no-AI layer, the agents CUE can use and their models, the instructions file's standard
+                          text, the speech rules (one language a dictation, long recordings cut), the speech models
+                          and the local language models (the short list, a found model's manifest, whether a
                           repository runs), audio helpers, usage, the history files
   crates/engines/         cue-engines: speech recognition on this computer (Parakeet: log-mel, TDT decoding, ONNX
-                          Runtime), the models' download and Hugging Face's search, refine and translation through
-                          Anthropic, OpenRouter and the OpenAI-compatible services, "Ask", API keys and checks
+                          Runtime), the models' download and Hugging Face's search, the local language model
+                          (llama.cpp), the agents (OpenCode, Codex: finding them, running them, reading their
+                          answers), "Ask", and Credential Manager for the habits' secret alone
   crates/platform-win/    cue-platform-win: keyboard hook (and a mouse hook while a Shift that switched the mode is
                           held), clipboard paste and copy, focus and selection via UI Automation, microphone (a
                           pinned one by its name), Drop window styles and placement, card placement, sleep and lock
                           events, the Ogg Opus encoding of the history's recordings
-  crates/cli/             cue-cli: API keys, monthly usage and the leak scan of a build
+  crates/cli/             cue-cli: monthly usage, the leak scan of a build and pinning a language model
   src-tauri/              the cue app: runtime, Drop, card, main and welcome windows, the main and welcome windows'
                           commands, tray icon, logging; nsis/ holds the installer's script and hooks
   ui/                     the Drop, its tray cards, the "Ask" answer and card, the main window (history and
                           settings) and the welcome window: TypeScript + Vite, no framework
-bench/                    cue-bench: comparison bench
+bench/                    cue-bench: speech-model comparison bench
 docs/ARCHITECTURE.md      how CUE works inside
 scripts/build-release.ps1 the installer build
 ```
 
 `app/crates/platform-win/examples` and `app/crates/engines/examples` hold small probes for checking the keyboard
-hook, microphone, focus, paste, sleep events, the Drop's z-order (`zorder_probe`, run while CUE is running), refine
-and its cache warm-up on a real machine (`cargo run -p <crate> --example <name>`). `refine_compare` (in
-`cue-engines`) runs a phrase file of your own through cleanup models with the app's prompt and checks; a phrase with
-`"to": "en"` is translated on the app's own path instead (see the example's header). `ask_compare` is the "Ask" bench
-(see above); `ask_probe` checks web search and the cache warm-up of "Ask", and `selection_probe` (in `cue-platform-win`)
-prints what CUE reads of the selection in an app and what the `Ctrl + C` fallback does there, never the text.
+hook, microphone, focus, paste, sleep events, the Drop's z-order (`zorder_probe`, run while CUE is running) and speech
+recognition on a real machine (`cargo run -p <crate> --example <name>`). `selection_probe` (in `cue-platform-win`)
+prints what CUE reads of the selection in an app and what the `Ctrl + C` fallback does there, never the text. No
+example calls a cloud service: CUE holds no key. `docs/specs` holds the spec and plan of every piece of work.
 
 ## License
 

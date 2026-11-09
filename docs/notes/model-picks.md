@@ -12,3 +12,9 @@ own input format.
 two checkpoints (the measurement table; the caption variants) for the owner. macOS comes after this
 ([macos.md](macos.md)). Note: [optimize-and-settings.md](optimize-and-settings.md) later rejected Gemma for the
 redesign; reconcile before starting.
+
+09.11.2026: the spec of `no-keys` took this idea over as its Task 10 (a catalog of cleanup-1, RuadaptQwen3 4B and S1
+Mini, recommendations by the user's languages, a speed record per model), and the owner **postponed it again**: "не хочу
+добавлять какие-либо модели сейчас по дефолту". Nothing of it is written; the This-computer list shows today's three
+models. The moved test `cleanup_only_local_model_ends_with_need_answering_model` and the `spawn_ask` seam wait with it.
+When the owner says to start: run the plan's Task 10, and reconcile with this note's rulings. See [no-keys.md](no-keys.md).
