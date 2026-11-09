@@ -393,6 +393,7 @@ export class WindowPage implements Ctx {
     }, { signal });
     // The microphone stays open only while its settings page is shown; recordings stop and give back their URLs.
     window.addEventListener('pagehide', () => {
+      this.tray.pageGone();
       this.tray.stopPreview();
       this.history.release();
     }, { signal });
@@ -436,6 +437,8 @@ export class WindowPage implements Ctx {
     // The cleanup's local list, the same way.
     api.onLlms((v) => this.tray.setLlms(v)).catch((e) => logFailed('following the language models', e));
     api.llmsGet().then((v) => this.tray.setLlms(v), (e) => logFailed('reading the language models', e));
+    // The instructions read again, and the last dictation before and after.
+    api.onInstructions((v) => this.tray.setInstructions(v)).catch((e) => logFailed('following the instructions', e));
     // A recording CUE starts must not take in a recording of the history playing aloud.
     api.onCoreState((s) => {
       if (s.phase === 'start' || s.phase === 'listen') this.history.recordingStarts();
@@ -446,6 +449,7 @@ export class WindowPage implements Ctx {
   /** Listeners off (the page is gone); the microphone preview ends, recordings stop. */
   dispose(): void {
     this.off.abort();
+    this.tray.pageGone();
     this.numbers.dispose();
     this.tray.stopPreview();
     this.history.release();

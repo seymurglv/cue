@@ -182,6 +182,36 @@ export interface WinText {
     fallbackNone: string;
     notes: { opencode: string; codex: string; local: string; off: string; noneLocal: string; noneAgent: string };
     value: { off: string; none: string; signIn: string; missing: string; notDownloaded: string };
+    /** The row that opens the Instructions page, and its line: standard, the user's own, the file broken. */
+    instructions: string;
+    insLine: { standard: string; edited: string; broken: string };
+  };
+  /** The Instructions page (docs/specs/2026-11-08-no-keys-design.md, "Instructions page"): the state's title and line
+   *  ("just now" after a change), the broken file, restore, the text box's name; "Edit with AI", its menu ({NAME} — the
+   *  agent) and what each did; the before and after ({APP} — the app); the footer ({PATH} — the file). */
+  ins: {
+    title: string;
+    standard: string;
+    edited: string;
+    standardLine: string;
+    justNow: string;
+    broken: string;
+    reset: string;
+    box: string;
+    withAi: string;
+    open: string;
+    openLine: string;
+    copy: string;
+    copyLine: string;
+    opened: string;
+    copied: string;
+    openedCopied: string;
+    notOpened: string;
+    notSaved: string;
+    before: string;
+    beforeNoApp: string;
+    after: string;
+    foot: string;
   };
   /** Languages: its title and its value ({UI} — the interface language, {TO} — the translation's). */
   languages: string;
@@ -366,6 +396,32 @@ export const en: WinText = {
       noneAgent: 'Until an AI is chosen, text goes in without AI.',
     },
     value: { off: 'No AI', none: 'Not chosen', signIn: '{NAME}: sign in again', missing: '{NAME} not found', notDownloaded: 'Model not downloaded' },
+    instructions: 'Your instructions',
+    insLine: { standard: 'Standard · you can adjust them with AI', edited: 'Changed by you', broken: "The file can't be read: the standard ones work" },
+  },
+  ins: {
+    title: 'Your instructions',
+    standard: "CUE's standard",
+    edited: 'Changed by you',
+    standardLine: 'Used by your AI and by the model on this computer',
+    justNow: 'Just now',
+    broken: "The file is empty or can't be read: the standard ones work",
+    reset: 'Restore standard',
+    box: 'Instructions',
+    withAi: 'Edit with AI',
+    open: 'Open in {NAME}',
+    openLine: '{NAME} starts in the instructions folder and asks what to change',
+    copy: 'Copy the task',
+    copyLine: 'For any AI: paste it and say what to change',
+    opened: '{NAME} is open. When the AI saves the file, CUE takes it by itself.',
+    copied: 'Task copied. When the AI saves the file, CUE takes it by itself.',
+    openedCopied: '{NAME} is open, the task copied: paste it there.',
+    notOpened: "{NAME} didn't open",
+    notSaved: "The file couldn't be saved",
+    before: 'Last dictation in {APP}, before',
+    beforeNoApp: 'Last dictation, before',
+    after: 'After',
+    foot: 'File: {PATH}. Beside it, AGENTS.md says what an AI may change and what not. Edit right here or with any AI.',
   },
   languages: 'Languages',
   languagesValue: '{UI} · into {TO}',
@@ -547,6 +603,32 @@ export const ru: WinText = {
       noneAgent: 'Пока AI не выбран, текст вставляется без ИИ.',
     },
     value: { off: 'Без ИИ', none: 'Не выбрано', signIn: '{NAME}: войдите заново', missing: '{NAME} не найден', notDownloaded: 'Модель не скачана' },
+    instructions: 'Ваши инструкции',
+    insLine: { standard: 'Стандартные · можно поправить через AI', edited: 'Изменены вами', broken: 'Файл не читается: работают стандартные' },
+  },
+  ins: {
+    title: 'Ваши инструкции',
+    standard: 'Стандартные CUE',
+    edited: 'Изменены вами',
+    standardLine: 'Работают для AI и для модели на компьютере',
+    justNow: 'Только что',
+    broken: 'Файл пустой или не читается: работают стандартные',
+    reset: 'Вернуть стандартные',
+    box: 'Инструкции',
+    withAi: 'Изменить с AI',
+    open: 'Открыть в {NAME}',
+    openLine: 'Запустит {NAME} в папке инструкций, он спросит, что поменять',
+    copy: 'Скопировать задание',
+    copyLine: 'Для любого AI: вставьте и скажите, что поменять',
+    opened: '{NAME} открыт. Когда AI сохранит файл, CUE подхватит его сам.',
+    copied: 'Задание скопировано. Когда AI сохранит файл, CUE подхватит его сам.',
+    openedCopied: '{NAME} открыт, задание скопировано: вставьте его туда.',
+    notOpened: 'Не удалось открыть {NAME}',
+    notSaved: 'Не удалось сохранить файл',
+    before: 'Последняя диктовка в {APP}, было',
+    beforeNoApp: 'Последняя диктовка, было',
+    after: 'Стало',
+    foot: 'Файл: {PATH}. Рядом лежит AGENTS.md: что AI можно менять, а что нет. Правьте прямо здесь или через любой AI.',
   },
   languages: 'Языки',
   languagesValue: '{UI} · на {TO}',

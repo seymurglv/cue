@@ -100,6 +100,7 @@ export const feeds: {
   models: (m: api.ModelsView) => void;
   llms: (m: api.ModelsView) => void;
   settings: (v: api.SettingsView) => void;
+  instructions: (v: api.InstructionsNews) => void;
 } = {
   entry: () => {},
   level: () => {},
@@ -109,7 +110,17 @@ export const feeds: {
   models: () => {},
   llms: () => {},
   settings: () => {},
+  instructions: () => {},
 };
+
+/** The standard instructions as the core reads them (English), and where the file is. */
+export const STANDARD_INSTRUCTIONS = 'Bold editing: remove filler words and fix the speech.';
+export const INSTRUCTIONS_PATH = 'C:\\Users\\Ann\\AppData\\Roaming\\CUE\\instructions\\instructions.md';
+
+/** The instructions as `instructions_get` answers: the standard ones by default. */
+export function instructions(over: Partial<api.InstructionsView> = {}): api.InstructionsView {
+  return { text: STANDARD_INSTRUCTIONS, edited: false, broken: false, path: INSTRUCTIONS_PATH, ...over };
+}
 
 /** Answers of a core that holds `settings` and changes them as asked. */
 export function stub(settings: api.SettingsView = view()): void {
@@ -203,6 +214,22 @@ export function stub(settings: api.SettingsView = view()): void {
   core.welcomeStep.mockResolvedValue(undefined);
   core.welcomeClose.mockResolvedValue(undefined);
   core.openLink.mockResolvedValue(undefined);
+  // The instructions as the core keeps them: saved as sent, restored to the standard ones.
+  let ins = instructions();
+  core.instructionsGet.mockImplementation(async () => ins);
+  core.instructionsSet.mockImplementation(async (text) => {
+    ins = instructions({ text, edited: text !== STANDARD_INSTRUCTIONS });
+    return ins;
+  });
+  core.instructionsReset.mockImplementation(async () => {
+    ins = instructions();
+    return ins;
+  });
+  core.instructionsCopy.mockResolvedValue(undefined);
+  core.instructionsOpen.mockResolvedValue('withTask');
+  core.onInstructions.mockImplementation(async (cb) => {
+    feeds.instructions = cb;
+  });
 }
 
 /** Promises and zero-delay timers run out. */

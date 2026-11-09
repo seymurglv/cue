@@ -184,6 +184,15 @@ pub fn search(dir: &Path, query: &str, limit: usize) -> Vec<Day> {
     days
 }
 
+/// The newest dictation with its text as heard (`raw`): the Instructions page cleans it again to show before and after.
+/// Translations, "Ask" and entries of earlier versions are passed over.
+pub fn last_dictation(dir: &Path) -> Option<Entry> {
+    dates(dir)
+        .unwrap_or_default()
+        .iter()
+        .find_map(|date| read_day(dir, date).into_iter().find(|e| e.mode == Mode::Dictation && e.raw.is_some()))
+}
+
 /// The entry with this id. The day its id starts with is looked at first, then the other days, newest first.
 pub fn find(dir: &Path, id: &str) -> Option<Entry> {
     let mut dates = dates(dir).unwrap_or_default();
@@ -495,6 +504,29 @@ mod tests {
             std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         names.sort();
         names
+    }
+
+    /// The Instructions page's before and after: the newest dictation with its text as heard; a translation, an "Ask"
+    /// and an entry of an earlier version (no `raw`) are passed over, on its day and the days before.
+    #[test]
+    fn last_dictation_is_the_newest_heard_one() {
+        let dir = tmp("last-dictation");
+        assert_eq!(last_dictation(&dir), None, "no history yet");
+        add(
+            &dir,
+            &[
+                heard("2026-10-29T09:00:00.000", "Older.", "older"),
+                heard("2026-10-30T08:00:00.000", "Send the file.", "send the file"),
+                Entry { raw: Some("bonjour".into()), ..entry("2026-10-31T07:00:00.000", Mode::Translation, "Hello.") },
+                ask("2026-10-31T07:30:00.000", "what time is it", "half past seven"),
+                entry("2026-10-31T08:00:00.000", Mode::Dictation, "an earlier version's"),
+            ],
+        );
+        let last = last_dictation(&dir).unwrap();
+        assert_eq!((last.text.as_str(), last.raw.as_deref()), ("Send the file.", Some("send the file")));
+        add(&dir, &[heard("2026-10-31T09:00:00.000", "Newest.", "newest")]);
+        assert_eq!(last_dictation(&dir).unwrap().text, "Newest.");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

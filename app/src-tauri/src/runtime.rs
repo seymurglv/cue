@@ -111,10 +111,11 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
 use crate::card_window::Card;
-use crate::instructions::Instructions;
+use crate::instructions::{Instructions, InstructionsNews, InstructionsView, Sample};
 use crate::ipc::{CardPlaceView, EntryView, SettingsView, Ui};
 use crate::lang::{self, Lang};
 use crate::paths::Paths;
+use crate::terminal::{self, Opened};
 use crate::trayicon::TrayLook;
 use attempt::{Attempt, UsageLog, log_finished, needs_row};
 use files::{LastFiles, Sound};
@@ -195,6 +196,17 @@ pub enum CoreEvent {
     Settings { cmd: SettingsCmd, reply: tokio::sync::oneshot::Sender<SettingsView> },
     /// "Clear history" in the main window: every day of the history goes, with every recording.
     HistoryClear,
+    /// The Instructions page reads the instructions: a file saved since the last look is read again first, and the page
+    /// hears it (`cue://instructions`) with the before and after that follows.
+    InstructionsGet(tokio::sync::oneshot::Sender<InstructionsView>),
+    /// The page saved its text (`Some`) or restored the standard ones (`None`); the answer is the instructions as they
+    /// are now, `None` when the file could not be written.
+    InstructionsSet { text: Option<String>, reply: tokio::sync::oneshot::Sender<Option<InstructionsView>> },
+    /// "Скопировать задание": the task for any AI, with the instructions' folder, into the clipboard.
+    InstructionsCopy,
+    /// "Открыть в <agent>": the agent in a new terminal in the instructions' folder, the task as its first message; the
+    /// answer is how it opened, `None` when it could not.
+    InstructionsOpen { agent: AgentId, reply: tokio::sync::oneshot::Sender<Option<Opened>> },
     /// A step of a speech model's download or load, or of pinning a found one.
     Model(ModelNews),
     /// A window asks for the speech model's state.
@@ -269,6 +281,9 @@ pub struct Runtime {
     paths: Paths,
     /// The cleanup's instructions file (`instructions.md`): what every cleanup request gets as its style block.
     instructions: Instructions,
+    /// The Instructions page's before and after on the last dictation, cleaned again after the file was read again; a
+    /// newer reading replaces it.
+    sample_task: Option<JoinHandle<()>>,
     history: HistoryLog,
     /// One client for the whole app (refine, batch transcription, warm-up): a shared connection pool.
     http: reqwest::Client,
@@ -420,6 +435,7 @@ impl Runtime {
             lang,
             paths,
             instructions,
+            sample_task: None,
             history,
             http: reqwest::Client::new(),
             focus: Arc::new(FocusWorker::spawn()),
@@ -844,11 +860,95 @@ impl Runtime {
                 let _ = reply.send(SettingsView::of(&self.settings, self.lang, self.can_save_settings));
             }
             CoreEvent::HistoryClear => self.history.clear(),
+            CoreEvent::InstructionsGet(reply) => {
+                if self.instructions.reload_if_changed() {
+                    self.instructions_read_again();
+                }
+                let _ = reply.send(self.instructions.view(&self.paths));
+            }
+            CoreEvent::InstructionsSet { text, reply } => {
+                let saved = match &text {
+                    Some(t) => self.instructions.set(t),
+                    None => self.instructions.reset(self.lang.code()),
+                };
+                match saved {
+                    Ok(()) => {
+                        let chars = text.as_ref().map(|t| t.chars().count());
+                        tracing::info!(restored = text.is_none(), ?chars, "instructions: saved from the page");
+                        self.instructions_read_again();
+                        let _ = reply.send(Some(self.instructions.view(&self.paths)));
+                    }
+                    Err(e) => {
+                        tracing::warn!("instructions: not saved from the page: {e}");
+                        let _ = reply.send(None);
+                    }
+                }
+            }
+            CoreEvent::InstructionsCopy => {
+                let folder = self.paths.instructions_dir();
+                let text = cue_core::instructions::task_with_folder(self.lang.code(), &folder.to_string_lossy());
+                tracing::info!("instructions: the task copied");
+                self.send_job(InsertJob::Leave { id: None, text }, None);
+            }
+            CoreEvent::InstructionsOpen { agent, reply } => {
+                let (dir, task, tx) = (self.paths.instructions_dir(), cue_core::instructions::task(self.lang.code()), self.tx.clone());
+                tokio::task::spawn_blocking(move || {
+                    let opened = open_agent(agent, &dir, &task);
+                    if opened == Some(Opened::TaskCopied) {
+                        let _ = tx.send(CoreEvent::InstructionsCopy);
+                    }
+                    let _ = reply.send(opened);
+                });
+            }
             CoreEvent::HistoryText { text, target } => match history_job(text, target) {
                 HistoryJob::Paste { text, target } => self.dispatch_insert(text, None, Some(target), None),
                 HistoryJob::Leave(job) => self.send_job(job, None),
             },
         }
+    }
+
+    /// The instructions were read again (saved from the page, or by the user or an AI): the main window hears them at
+    /// once, and the last dictation is cleaned again with them for its before and after.
+    fn instructions_read_again(&mut self) {
+        self.ui.instructions(&InstructionsNews::of(self.instructions.view(&self.paths), None));
+        self.start_sample();
+    }
+
+    /// The last dictation of the history cleaned once more on the route the cleanup takes now, off the core's thread:
+    /// never with no AI or a local model not loaded (it is not woken), through an agent only as `Agents::sample` allows
+    /// (no OpenCode server started for it, none marked signed out or missing). Nothing goes to the history or usage.csv;
+    /// the text goes to the main window alone, the log gets only that it was shown.
+    fn start_sample(&mut self) {
+        if let Some(old) = self.sample_task.take() {
+            old.abort();
+        }
+        let to = match route(&self.settings.refine, &self.llm.slot()) {
+            to @ (Route::Agent(_) | Route::Local(_)) => to,
+            _ => {
+                tracing::info!(reason = off_reason(&self.settings.refine), "instructions: no before and after on this route");
+                return;
+            }
+        };
+        let (s, dict, agents, ui) = (self.settings.refine.clone(), self.settings.dictionary.clone(), self.agents.clone(), self.ui.clone());
+        let (dir, instructions) = (self.paths.history.clone(), self.instructions.text().into_owned());
+        let view = self.instructions.view(&self.paths);
+        self.sample_task = Some(tokio::spawn(async move {
+            let Ok(Some(entry)) = tokio::task::spawn_blocking(move || history::last_dictation(&dir)).await else { return };
+            let raw = basics::tidy(entry.raw.as_deref().unwrap_or_default(), &dict);
+            let ctx = RefineContext::new(entry.app.clone(), None, s.context_chars);
+            let after = match to {
+                Route::Agent(a) => agents.sample(a, &raw, &ctx, &dict, &s, &instructions).await,
+                Route::Local(g) => {
+                    let r = local::refine(g, &raw, &ctx, &dict, &s, &instructions).await;
+                    (r.outcome == RefineOutcome::Refined).then_some(r.text)
+                }
+                _ => None,
+            };
+            let Some(after) = after else { return };
+            tracing::info!("instructions: before and after shown on the last dictation");
+            let app = known_app(&entry.app).unwrap_or_default().to_owned();
+            ui.instructions(&InstructionsNews::of(view, Some(Sample { app, before: entry.text, after })));
+        }));
     }
 
     /// A setting changed in the main window (spec 3 §3): the core's copy takes it and the file is written
@@ -2941,6 +3041,21 @@ pub(crate) fn open_url(url: &str) -> Result<(), String> {
     // Above 32 — done; 32 or less — an error code.
     let code = r.0 as isize;
     if code > 32 { Ok(()) } else { Err(format!("ShellExecute {code}")) }
+}
+
+/// "Открыть в <agent>": agent `agent` (OpenCode or Codex) found on this computer and opened in a terminal in `dir`, the
+/// instructions' folder, with `task` (`terminal::open`). `None` when it is not installed here or did not start.
+fn open_agent(agent: AgentId, dir: &Path, task: &str) -> Option<Opened> {
+    let Some(exe) = agent::discover::program(agent) else {
+        tracing::info!(agent = agent.id(), "instructions: the agent to open is not installed");
+        return None;
+    };
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        tracing::warn!("instructions: folder not created: {e}");
+    }
+    terminal::open(agent, &exe, dir, task)
+        .inspect_err(|e| tracing::warn!(agent = agent.id(), "instructions: the agent did not open: {e}"))
+        .ok()
 }
 
 /// JSON of a bench recording. If the app is unknown, `"app": null`, not the "unknown" placeholder.

@@ -445,14 +445,18 @@ At its first start this version deletes the Soniox key of earlier versions from 
   prompt and the list together; editing the list costs one cache write. Entries are trimmed, and empty, multi-line,
   overlong (over 60 characters) and repeated ones are dropped, at most 200 kept. With no usable term the request is
   byte for byte the one without a dictionary. Recognition never gets the terms: the model takes no vocabulary.
-- The cleanup's style block is the text of `%APPDATA%\CUE\instructions.md` as it stands (`claude::system_blocks`,
-  `Job::Rewrite`), kept by `instructions::Instructions`. CUE writes the file when missing: the standard text in the
-  interface language (`cue_core::instructions::standard`: `refine::BOLD_PROMPT` in English, `BOLD_PROMPT_RU` in Russian),
-  or the old custom style's text once. The runtime asks for the text at every cleanup and warm-up; the file is looked at
-  most every 300 ms, read again when its modified time or length changed (the version used until then is kept as
+- The cleanup's style block is the text of `%APPDATA%\CUE\instructions\instructions.md` as it stands
+  (`claude::system_blocks`, `Job::Rewrite`), kept by `instructions::Instructions`. CUE writes the file when missing:
+  the standard text in the interface language (`cue_core::instructions::standard`: `refine::BOLD_PROMPT` in English,
+  `BOLD_PROMPT_RU` in Russian), or the old custom style's text once. The runtime asks for the text at every cleanup and
+  warm-up, and the Instructions page while it is shown (`instructions_get`, every 1.5 s); the file is looked at most
+  every 300 ms, read again when its modified time or length changed (the version used until then is kept as
   `instructions.prev.md`), cut at 2 000 characters, and an empty, deleted or non-text file means the standard text. The
   protocol (output format, the dictionary and habits blocks, the translation) stays in code. `AGENTS.md` beside the
-  file is CUE's own, rewritten when its first line `<!-- CUE <version> -->` is older than the app.
+  file is CUE's own, rewritten when its first line `<!-- CUE <version> -->` is older than the app. The folder holds only
+  these three files, so an AI opened in it sees nothing else of CUE's; an earlier build kept them beside settings.json,
+  and they move into it once at startup (never over a file there; with two `instructions.md`, the newer stays in use
+  and the other becomes `instructions.prev.md`; CUE's old `AGENTS.md` goes).
 - When the app is unknown (neither the query at the start of recording nor the one after the second press named it),
   the request carries `<app>unknown app</app>`.
 - The answer is used only when it is a complete `{"text": …}` object: a refusal, `max_tokens`, a timeout, a network
@@ -1241,6 +1245,25 @@ again.
   is here. A move to Ваш AI with no agent set takes the first found; with none it stays there, nothing chosen. The
   first page's value is what cleans now, the local download in percent, or in amber an agent to sign in to again or
   not found.
+- **Your instructions** (`window/instructions.ts`, docs/specs/2026-11-08-no-keys-design.md, "Instructions page"): the
+  Cleanup page's last row before its footer (not on Без ИИ), its line "Стандартные · можно поправить через AI",
+  "Изменены вами", or in amber with "!" a broken file, opens a page one level under Cleanup. On top whose they are
+  (CUE's standard, the user's own, with "Вернуть стандартные" → `instructions_reset`; a broken file in amber); the
+  file's text in a box (`instructions_get`), saved when the box or the page is left, never while typing
+  (`instructions_set`, at most 20 000 characters); "Изменить с AI" and its menu: "Открыть в <agent>" (the agent chosen
+  for the cleanup when found, else the first found; `instructions_open`, `terminal.rs`: Windows Terminal's `wt -w new
+  -d <folder>` when it is here, else the agent in a console window of its own; Codex `-C <folder> <task>`, OpenCode
+  `--prompt <task> <folder>`; an argument a console or Windows Terminal would misread is never sent, the agent then
+  opens without the task and the core puts it in the clipboard) and "Скопировать задание" (`instructions_copy`: the
+  task with its folder, into the clipboard by the insert thread, as the history's Copy); the path and AGENTS.md at the
+  foot. While the page is shown it asks `instructions_get` every 1.5 s, which reads a file saved since; each reading
+  goes to the main window alone as `cue://instructions` (the box takes the new text unless the user is typing in it,
+  "Только что"), and the core cleans the last dictation of the history (`history::last_dictation`, its text as heard,
+  tidied as a dictation is) once more on the route the cleanup takes now, off its thread (`start_sample`; a newer
+  reading replaces it): through a loaded local model, or an agent through `Agents::sample` (never a marked one, never
+  an OpenCode server started for it: `OpenCodeSlot::running` only); none with no AI or a model not loaded. The result
+  comes as a second `cue://instructions` with `sample` (the app, before, after) and goes to neither the history nor
+  usage.csv; the log says only that it was shown.
 - **Microphone**: As in Windows or one of the devices `mic_list` names (with the one Windows uses by default), saved
   as `audio.device` and used from the next recording on (see Recording). A pinned one that is not connected shows as
   such, by the same match as `mic::pick`. While the page is shown, `mic_preview` sends the level of the chosen
@@ -1470,9 +1493,11 @@ icon and path `!define`s); makensis stores none of them.
   open; for the speech model, its state changes, the bytes and seconds of a download, the load time, the files a
   check deleted, each recognition's audio length, time and whether the other alphabet was masked out; for the
   correction watch, whether a correction was found, the length of
-  its span and the number of candidates. Never logged: dictation text, text before the caret, translations,
-  dictionary terms and the words learned, the text of a field read after a paste, questions, answers, selected text,
-  written texts, history entries, microphone names, the addresses
+  its span and the number of candidates; for the instructions, that they were saved from the page (and how many
+  characters), moved into their folder, copied as a task, or that an agent opened for them (the agent, the terminal,
+  whether with the task), and that a before and after was shown. Never logged: dictation text, text before the caret,
+  translations, dictionary terms and the words learned, the text of a field read after a paste, questions, answers,
+  selected text, written texts, history entries, the instructions' text and the task, microphone names, the addresses
   and titles of sources, where the selection is on screen, audio, API keys, response bodies. `Effect` and `Input` are
   never logged with `{:?}`, since their `Debug` prints text.
 - WebSocket handshake tracing is switched off by a fixed filter, since it would include the `Authorization` header.

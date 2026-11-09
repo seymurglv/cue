@@ -332,6 +332,14 @@ impl Ui {
         }
     }
 
+    /// The instructions read again, and later the last dictation cleaned again with them: to the main window alone,
+    /// since both are the user's text.
+    pub fn instructions(&self, v: &crate::instructions::InstructionsNews) {
+        if let Err(e) = self.app.emit_to(MAIN_LABEL, "cue://instructions", v) {
+            tracing::debug!("main window: event cue://instructions not sent: {e}");
+        }
+    }
+
     /// The pinned microphone that is not there and the one recording instead (spec 3 §3), just before their card: to
     /// the Drop, which draws it.
     pub fn mic_names(&self, wanted: &str, used: &str) {

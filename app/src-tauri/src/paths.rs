@@ -43,23 +43,29 @@ impl Paths {
     }
 
     /// `%APPDATA%\CUE`, the folder of settings.json.
-    fn config_dir(&self) -> &Path {
+    pub fn config_dir(&self) -> &Path {
         self.settings.parent().unwrap_or_else(|| Path::new("."))
+    }
+
+    /// The instructions' own folder, `%APPDATA%\CUE\instructions`: it holds only their files, so an AI opened in it
+    /// ("Изменить с AI") sees nothing else of CUE's.
+    pub fn instructions_dir(&self) -> PathBuf {
+        self.config_dir().join("instructions")
     }
 
     /// The cleanup's instructions, which the user or an AI edits (`cue_core::instructions`).
     pub fn instructions(&self) -> PathBuf {
-        self.config_dir().join("instructions.md")
+        self.instructions_dir().join("instructions.md")
     }
 
     /// The version of the instructions CUE used before the last change.
     pub fn instructions_prev(&self) -> PathBuf {
-        self.config_dir().join("instructions.prev.md")
+        self.instructions_dir().join("instructions.prev.md")
     }
 
     /// CUE's note to an AI that edits the instructions; CUE owns it.
     pub fn agents_md(&self) -> PathBuf {
-        self.config_dir().join("AGENTS.md")
+        self.instructions_dir().join("AGENTS.md")
     }
 
     /// The working folder of the agents CUE asks (`%LOCALAPPDATA%\CUE\agent`); created empty by whoever runs one.
@@ -99,11 +105,14 @@ mod tests {
     }
 
     #[test]
-    fn instructions_files_live_beside_settings() {
+    fn instructions_files_live_in_their_own_folder() {
         let p = Paths::new(Path::new(r"C:\U\AppData\Roaming"), Path::new(r"C:\U\AppData\Local"));
-        assert_eq!(p.instructions(), Path::new(r"C:\U\AppData\Roaming\CUE\instructions.md"));
-        assert_eq!(p.instructions_prev(), Path::new(r"C:\U\AppData\Roaming\CUE\instructions.prev.md"));
-        assert_eq!(p.agents_md(), Path::new(r"C:\U\AppData\Roaming\CUE\AGENTS.md"));
+        assert_eq!(p.instructions_dir(), Path::new(r"C:\U\AppData\Roaming\CUE\instructions"));
+        assert_eq!(p.instructions(), Path::new(r"C:\U\AppData\Roaming\CUE\instructions\instructions.md"));
+        assert_eq!(p.instructions_prev(), Path::new(r"C:\U\AppData\Roaming\CUE\instructions\instructions.prev.md"));
+        assert_eq!(p.agents_md(), Path::new(r"C:\U\AppData\Roaming\CUE\instructions\AGENTS.md"));
+        // settings.json is not in it.
+        assert_eq!(p.config_dir(), Path::new(r"C:\U\AppData\Roaming\CUE"));
         assert_eq!(p.agent_dir(), Path::new(r"C:\U\AppData\Local\CUE\agent"));
     }
 

@@ -493,3 +493,50 @@ describe('The Cleanup page: No AI, This computer or Your AI on top', () => {
     expect(foot()).toBe('Text goes wherever OpenCode is set up to send it: your provider, your key or subscription. CUE holds no keys.');
   });
 });
+
+describe('The Cleanup page: Your instructions', () => {
+  const insRow = () => $<HTMLElement>('.btray [data-sub="instructions"]');
+
+  it('instructions_row_opens_the_page_and_hides_on_no_ai', async () => {
+    core.agentsGet.mockResolvedValue(both());
+    stub(view({ refineWhere: 'agent', refineAgent: 'codex' }));
+    core.agentsGet.mockResolvedValue(both());
+    page = await mount();
+    await cleanup();
+    // Before the footer, with its line from the core.
+    const row = insRow()!;
+    expect(text(row.querySelector('.stx b'))).toBe('Your instructions');
+    expect(small(row)).toBe('Standard · you can adjust them with AI');
+    expect(row.nextElementSibling?.classList.contains('tft') || row.parentElement?.nextElementSibling?.classList.contains('tft')).toBe(true);
+    // The user's own: said so.
+    core.instructionsGet.mockResolvedValue({ text: 'Keep it short.', edited: true, broken: false, path: 'x' });
+    click($('.btray [data-tback]'));
+    await settle();
+    click($('.btray [data-sub="cleanup"]'));
+    await settle();
+    expect(small(insRow())).toBe('Changed by you');
+    // A broken file: amber.
+    core.instructionsGet.mockResolvedValue({ text: 'x', edited: false, broken: true, path: 'x' });
+    click($('.btray [data-tback]'));
+    await settle();
+    click($('.btray [data-sub="cleanup"]'));
+    await settle();
+    expect(insRow()!.querySelector('.stx small')!.classList.contains('warn')).toBe(true);
+    // It opens the Instructions page, and back goes to Cleanup.
+    click(insRow());
+    await settle();
+    expect(text($('.btray .tph .lbl'))).toBe('Your instructions');
+    expect($('.btray textarea.pta')).not.toBeNull();
+    click($('.btray [data-tback]'));
+    await settle();
+    expect(text($('.btray .tph .lbl'))).toBe('Cleanup');
+    // No AI: no instructions are used, so no row.
+    click(where().find((b) => b.dataset.v === 'off')!);
+    await settle();
+    expect(insRow()).toBeNull();
+    // This computer: the row is there.
+    click(where().find((b) => b.dataset.v === 'local')!);
+    await settle();
+    expect(insRow()).not.toBeNull();
+  });
+});

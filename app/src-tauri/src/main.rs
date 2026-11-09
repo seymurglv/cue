@@ -11,6 +11,7 @@ mod main_window;
 mod micpreview;
 mod paths;
 mod runtime;
+mod terminal;
 mod tray;
 mod trayicon;
 mod webview_health;
@@ -94,7 +95,12 @@ fn main() {
             commands::welcome_close,
             commands::open_link,
             commands::agents_get,
-            commands::agent_install_link
+            commands::agent_install_link,
+            commands::instructions_get,
+            commands::instructions_set,
+            commands::instructions_reset,
+            commands::instructions_copy,
+            commands::instructions_open
         ])
         .setup(move |app| {
             // We log the reason ourselves: Tauri turns a `setup` error into a panic, and the panic hook does not

@@ -206,7 +206,7 @@ impl Agents {
         let first = self.first(id);
         let budget = self.budget.unwrap_or_else(|| agent::refine::budget(id, raw, first, job));
         let deadline = tokio::time::Instant::now() + budget;
-        let client = match self.client(id, deadline).await {
+        let client = match self.client(id, deadline, true).await {
             Ok(c) => c,
             Err(f) => {
                 let r = agent::refine::failed(id, raw, f);
@@ -219,6 +219,39 @@ impl Agents {
         let r = agent::refine::run(&client, &model, raw, ctx, dict, s, instructions, job, left).await;
         self.note(id, r.outcome, true);
         r
+    }
+
+    /// The Instructions page's before and after: `raw` cleaned once through agent `id` with `instructions`, as a
+    /// dictation's cleanup is, within the agent's budget with its start allowance. Never through an OpenCode server
+    /// started for it (with none running, OpenCode is not asked), and never while a mark says the agent needs a sign-in
+    /// or is not installed. `None` when it was not asked or did not clean. The text never reaches the log.
+    pub async fn sample(
+        &self,
+        id: AgentId,
+        raw: &str,
+        ctx: &RefineContext,
+        dict: &DictionarySettings,
+        s: &RefineSettings,
+        instructions: &str,
+    ) -> Option<String> {
+        if self.marks.problem(id).is_some() {
+            tracing::info!(agent = id.id(), "instructions: the sample is not asked (marked)");
+            return None;
+        }
+        let budget = self.budget.unwrap_or_else(|| agent::refine::budget(id, raw, true, Job::Rewrite));
+        let deadline = tokio::time::Instant::now() + budget;
+        let client = match self.client(id, deadline, false).await {
+            Ok(c) => c,
+            Err(f) => {
+                tracing::info!(agent = id.id(), reason = ?f, "instructions: the sample is not asked");
+                return None;
+            }
+        };
+        let model = self.model(&client, s, deadline).await;
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let r = agent::refine::run(&client, &model, raw, ctx, dict, s, instructions, Job::Rewrite, left).await;
+        self.note(id, r.outcome, true);
+        (r.outcome == RefineOutcome::Refined).then_some(r.text)
     }
 
     /// An "Ask" question (`turns`) through agent `id`, with the cleanup's model and the agent's start allowance on its
@@ -248,7 +281,7 @@ impl Agents {
         // The question reached the agent (its client was had): a sign-in failure is then the run's own.
         let ran = std::sync::atomic::AtomicBool::new(false);
         let asked = async {
-            let client = match self.client(id, deadline).await {
+            let client = match self.client(id, deadline, true).await {
                 Ok(c) => c,
                 Err(f) => return AskResult::failed(agent_ask::failure(f)),
             };
@@ -279,13 +312,15 @@ impl Agents {
         }
     }
 
-    /// The client for agent `id`, by `deadline`: OpenCode's server (found or started off the core's thread), or Codex
-    /// once its sign-in is known not to be missing.
-    async fn client(&self, id: AgentId, deadline: tokio::time::Instant) -> Result<AgentClient, AgentFailure> {
+    /// The client for agent `id`, by `deadline`: OpenCode's server (found, or started off the core's thread when
+    /// `start`; without it a server already running or none), or Codex once its sign-in is known not to be missing.
+    async fn client(&self, id: AgentId, deadline: tokio::time::Instant, start: bool) -> Result<AgentClient, AgentFailure> {
         match id {
             AgentId::OpenCode => {
                 let slot = self.opencode.clone();
-                let start = tokio::task::spawn_blocking(move || slot.get_or_start());
+                let start = tokio::task::spawn_blocking(move || {
+                    if start { slot.get_or_start() } else { slot.running().ok_or(AgentFailure::Failed("no server running")) }
+                });
                 match tokio::time::timeout_at(deadline, start).await {
                     Ok(Ok(server)) => server.map(AgentClient::OpenCode),
                     Ok(Err(_)) => Err(AgentFailure::Failed("join")),
@@ -757,6 +792,51 @@ mod tests {
         lock(&a.used).insert(AgentId::Codex, Instant::now() - REST_AFTER - Duration::from_secs(1));
         assert!(a.first(AgentId::Codex), "after a rest it starts again");
         assert!(a.first(AgentId::OpenCode), "no OpenCode server held yet");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    async fn sample_of(a: &Agents, id: AgentId) -> Option<String> {
+        let s = RefineSettings::default();
+        a.sample(id, RAW, &RefineContext::default(), &Default::default(), &s, "Пиши коротко.").await
+    }
+
+    /// The Instructions page's before and after: Codex cleans the last dictation once; a mark that says it needs a
+    /// sign-in or is not installed leaves it unasked.
+    #[tokio::test]
+    async fn the_sample_asks_codex_unless_it_is_marked() {
+        let dir = temp_dir("sample");
+        let out = dir.join("out.jsonl");
+        let answer = serde_json::json!({"type": "item.completed", "item": {"id": "0", "type": "agent_message", "text": "{\"text\": \"Завтра в десять созвон.\"}"}});
+        std::fs::write(&out, format!("{answer}\n")).unwrap();
+        let exe = shim(&dir, "Logged in using ChatGPT", 0, &format!("type \"{}\"", out.display()));
+        let a = agents(&dir, Some(exe), None);
+        assert_eq!(sample_of(&a, AgentId::Codex).await.as_deref(), Some("Завтра в десять созвон."));
+        assert_eq!(runs(&dir), 1);
+        for mark in [Mark::SignedOut, Mark::Expired, Mark::Missing] {
+            a.marks.set(AgentId::Codex, mark);
+            assert_eq!(sample_of(&a, AgentId::Codex).await, None, "{mark:?}");
+        }
+        assert_eq!(runs(&dir), 1, "a marked agent is not asked");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The sample never starts OpenCode's server: with none running OpenCode is not asked.
+    #[tokio::test]
+    async fn the_sample_never_starts_opencode() {
+        let dir = temp_dir("sample-no-start");
+        let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = starts.clone();
+        let slot = OpenCodeSlot::with(
+            Box::new(|| None),
+            Box::new(move || {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(AgentFailure::NotInstalled)
+            }),
+            REST_AFTER,
+        );
+        let a = Agents::with(dir.join("agent"), slot, Box::new(|_| None), Box::new(|| true), None);
+        assert_eq!(sample_of(&a, AgentId::OpenCode).await, None);
+        assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 0, "a server was started for the sample");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

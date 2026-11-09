@@ -14,6 +14,7 @@
 use std::path::Path;
 use std::time::Duration;
 
+use cue_core::agents::{AgentId, ORDER};
 use cue_core::flow::Input;
 use cue_core::history;
 use cue_core::model::{ModelState, ModelsView};
@@ -25,6 +26,8 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, State, WebviewWindow};
 use tauri_plugin_autostart::ManagerExt;
 
+use crate::instructions::InstructionsView;
+use crate::terminal::Opened;
 use crate::ipc::{CoreTx, DayView, EntryView, HistoryFeed, MAIN_LABEL, PageView, SettingsView, WELCOME_LABEL};
 use crate::micpreview;
 use crate::paths::Paths;
@@ -607,6 +610,82 @@ pub async fn agent_install_link(window: WebviewWindow, id: String) -> Result<(),
     open_named(url, id)
 }
 
+/// The Instructions page's instructions (docs/specs/2026-11-08-no-keys-design.md, "Instructions page"): the file as it
+/// is, whether it is the user's own, whether it is broken, and where it is. The page asks again while it is shown: a
+/// file saved since (by the user or an AI) is read again then, and `cue://instructions` brings the before and after.
+#[tauri::command]
+pub async fn instructions_get(window: WebviewWindow, core: State<'_, CoreTx>) -> Result<InstructionsView, CmdError> {
+    guard(&window, "instructions_get")?;
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    send(&core, CoreEvent::InstructionsGet(reply))?;
+    match tokio::time::timeout(CORE_WAIT, answer).await {
+        Ok(Ok(view)) => Ok(view),
+        _ => Err(CmdError::Core),
+    }
+}
+
+/// The page's text saved as the instructions (the version used until now kept as `instructions.prev.md`). `Failed` —
+/// the file could not be written; `BadValue` — longer than [`MAX_SET_CHARS`].
+#[tauri::command]
+pub async fn instructions_set(window: WebviewWindow, text: String, core: State<'_, CoreTx>) -> Result<InstructionsView, CmdError> {
+    guard(&window, "instructions_set")?;
+    settable(&text)?;
+    save_instructions(&core, Some(text)).await
+}
+
+/// "Вернуть стандартные": the standard instructions in the interface language saved.
+#[tauri::command]
+pub async fn instructions_reset(window: WebviewWindow, core: State<'_, CoreTx>) -> Result<InstructionsView, CmdError> {
+    guard(&window, "instructions_reset")?;
+    save_instructions(&core, None).await
+}
+
+/// "Скопировать задание": the task for any AI, naming the instructions' folder, put in the clipboard by the core (as the
+/// history's "Copy" is).
+#[tauri::command]
+pub fn instructions_copy(window: WebviewWindow, core: State<'_, CoreTx>) -> Result<(), CmdError> {
+    guard(&window, "instructions_copy")?;
+    send(&core, CoreEvent::InstructionsCopy)
+}
+
+/// "Открыть в <agent>": OpenCode or Codex, by id, started in a new terminal (Windows Terminal when it is here, else a
+/// console) in the instructions' folder, with the task as its first message (`terminal`). `taskCopied` — it opened
+/// without the task, which is in the clipboard; `NotFound` — not installed here, or it did not start.
+#[tauri::command]
+pub async fn instructions_open(window: WebviewWindow, agent: String, core: State<'_, CoreTx>) -> Result<Opened, CmdError> {
+    guard(&window, "instructions_open")?;
+    let agent = offered_agent(&agent)?;
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    send(&core, CoreEvent::InstructionsOpen { agent, reply })?;
+    match tokio::time::timeout(AGENTS_WAIT, answer).await {
+        Ok(Ok(Some(opened))) => Ok(opened),
+        Ok(Ok(None)) => Err(CmdError::NotFound),
+        _ => Err(CmdError::Core),
+    }
+}
+
+/// The page's longest text: far above the 2 000 characters the cleanup uses, which the file may exceed.
+const MAX_SET_CHARS: usize = 20_000;
+
+fn settable(text: &str) -> Result<(), CmdError> {
+    if text.chars().count() > MAX_SET_CHARS { Err(CmdError::BadValue) } else { Ok(()) }
+}
+
+/// An agent "Изменить с AI" may open, by its id: those CUE offers (OpenCode, Codex), nothing else.
+fn offered_agent(id: &str) -> Result<AgentId, CmdError> {
+    ORDER.iter().copied().find(|a| a.id() == id).ok_or(CmdError::BadValue)
+}
+
+async fn save_instructions(core: &CoreTx, text: Option<String>) -> Result<InstructionsView, CmdError> {
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    send(core, CoreEvent::InstructionsSet { text, reply })?;
+    match tokio::time::timeout(CORE_WAIT, answer).await {
+        Ok(Ok(Some(view))) => Ok(view),
+        Ok(Ok(None)) => Err(CmdError::Failed),
+        _ => Err(CmdError::Core),
+    }
+}
+
 /// `url`, one of CUE's own addresses, opened from a short thread of its own, so the shell never holds a command; the
 /// log names it by `name`.
 fn open_named(url: &'static str, name: String) -> Result<(), CmdError> {
@@ -640,7 +719,12 @@ mod tests {
     use serde_json::json;
 
     /// Every command a window's page calls (`main`'s handler list, but for the Drop's and the card's own).
-    const COMMANDS: [&str; 30] = [
+    const COMMANDS: [&str; 35] = [
+        "instructions_get",
+        "instructions_set",
+        "instructions_reset",
+        "instructions_copy",
+        "instructions_open",
         "agents_get",
         "agent_install_link",
         "settings_get",
@@ -806,6 +890,53 @@ mod tests {
         for command in ["agents_get", "agent_install_link"] {
             assert_eq!(guard_label(MAIN_LABEL, command), Ok(()));
             assert_eq!(guard_label(WELCOME_LABEL, command), Err(CmdError::NotMain));
+        }
+    }
+
+    /// The Instructions page's commands answer the main window alone: the instructions are the user's text.
+    #[test]
+    fn instructions_commands_answer_the_main_window_alone() {
+        for command in ["instructions_get", "instructions_set", "instructions_reset", "instructions_copy", "instructions_open"] {
+            assert!(COMMANDS.contains(&command), "{command}");
+            assert_eq!(guard_label(MAIN_LABEL, command), Ok(()));
+            for label in [WELCOME_LABEL, "drop", "card"] {
+                assert_eq!(guard_label(label, command), Err(CmdError::NotMain), "{label} {command}");
+            }
+        }
+    }
+
+    /// "Открыть в <agent>" opens OpenCode or Codex, named by id: nothing else, a path least of all.
+    #[test]
+    fn instructions_open_takes_only_the_offered_agents() {
+        assert_eq!(offered_agent("opencode"), Ok(AgentId::OpenCode));
+        assert_eq!(offered_agent("codex"), Ok(AgentId::Codex));
+        for other in ["grok", "claude", "OpenCode", " codex", r"C:\npm\codex.cmd", "calc.exe", ""] {
+            assert_eq!(offered_agent(other), Err(CmdError::BadValue), "{other:?}");
+        }
+        assert_eq!(serde_json::to_value(Opened::WithTask).unwrap(), json!("withTask"));
+        assert_eq!(serde_json::to_value(Opened::TaskCopied).unwrap(), json!("taskCopied"));
+    }
+
+    /// The page saves what the user typed, up to a limit far above what the cleanup uses.
+    #[test]
+    fn instructions_set_refuses_an_overlong_text() {
+        assert!(settable("Пиши коротко.").is_ok());
+        assert!(settable(&"я".repeat(MAX_SET_CHARS)).is_ok());
+        assert_eq!(settable(&"я".repeat(MAX_SET_CHARS + 1)), Err(CmdError::BadValue));
+    }
+
+    /// The task an AI gets asks it to have the user look at the Instructions page, which is the check; it names no
+    /// command-line tool, and the copied one names the folder.
+    #[test]
+    fn task_asks_to_check_the_page_not_a_cli() {
+        let folder = r"C:\Users\Ann\AppData\Roaming\CUE\instructions";
+        let ru = cue_core::instructions::task_with_folder("ru", folder);
+        let en = cue_core::instructions::task_with_folder("en", folder);
+        assert!(ru.contains("«Ваши инструкции»") && ru.contains("как было и как стало"), "{ru}");
+        assert!(en.contains("Instructions page") && en.contains("before and after"), "{en}");
+        for t in [&ru, &en] {
+            assert!(!t.contains("cue-cli") && !t.contains(" test"), "{t}");
+            assert!(t.ends_with(folder));
         }
     }
 

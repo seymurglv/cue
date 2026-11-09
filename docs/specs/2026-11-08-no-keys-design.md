@@ -110,26 +110,33 @@ line under the row, as the speech model's row does today. When the chosen agent 
 
 ### Instructions page (Ваши инструкции)
 
-- The instructions are one file, `%APPDATA%\CUE\instructions.md`, shown in a text box on the page and editable there.
+- The instructions are one file, `%APPDATA%\CUE\instructions\instructions.md`, shown in a text box on the page and
+  editable there. Its folder holds only the instructions' files (`instructions.md`, `instructions.prev.md`, `AGENTS.md`),
+  so an agent opened in it sees nothing else of CUE's (settings.json and the dictionary stay in `%APPDATA%\CUE\`); an
+  earlier build's files beside settings.json move into it once at startup **(controller's ruling, 09.11.2026)**.
   It holds only CUE's style rules in plain words — today's `BOLD_PROMPT`, or the user's `refine.custom` text. The fixed
   protocol stays in code and is never in the file: `SYSTEM_PROMPT` (output format, never answering the text, the context
   tags), the dictionary and habits blocks, the translate instruction. No placeholders in the file.
 - The default file is written in the interface language (Russian or English) **(my call)**; both texts live in code, so
   "Вернуть стандартные" (restore the standard ones) rewrites it.
 - **"Изменить с AI"** opens a small menu:
-  - "Открыть в <agent>": starts the chosen agent (OpenCode, else Codex, else Grok) interactively in a new terminal window
-    in `%APPDATA%\CUE\`, with a first message that is the task below.
-  - "Скопировать задание": copies the task for any AI.
+  - "Открыть в <agent>": starts the agent chosen for the cleanup (else the first found: OpenCode, then Codex; Grok is
+    not offered) interactively in a new terminal window in `%APPDATA%\CUE\instructions\`, with a first message that is
+    the task below (`codex -C <folder> <task>`, `opencode-cli --prompt <task> <folder>`). Not found here, the menu offers
+    the copy alone.
+  - "Скопировать задание": copies the task for any AI, with the folder it is about.
   - The task (Russian or English): edit only `instructions.md`; read `AGENTS.md` first; ask the user what to change;
     after saving, ask the user to look at CUE's Instructions page, which shows before and after on their last
     dictation; never touch keys, sign-ins or other CUE settings.
-- `%APPDATA%\CUE\AGENTS.md`: written by CUE when missing or older than CUE's version **(my call: CUE owns it)**. It says
-  what the file is for, what the agent may change (style rules), what not (the protocol is not in the file anyway;
-  settings.json, Credential Manager, the history), and how to test.
-- CUE watches the file and takes a saved change at the next dictation (debounced 300 ms). The page shows "Изменены вами
-  · только что" and "было → стало" on the last dictation of the history (re-cleaned once with the new instructions on
-  the current route; skipped on Без ИИ). An empty or unreadable file means the standard instructions, with an amber line
-  on the page.
+- `%APPDATA%\CUE\instructions\AGENTS.md`: written by CUE when missing or older than CUE's version **(my call: CUE owns
+  it)**. It says what the file is for, what the agent may change (style rules), what not (the protocol is not in the
+  file anyway; nothing outside the folder: CUE's settings, Credential Manager, the history), and how to test.
+- CUE watches the file and takes a saved change at the next dictation (debounced 300 ms); while the page is shown it
+  looks every 1.5 s. The page shows "Изменены вами · только что" and "было → стало" on the last dictation of the history
+  (re-cleaned once with the new instructions on the current route, off the core's thread, written to neither the history
+  nor usage.csv; skipped on Без ИИ, with a local model not loaded, with an agent marked signed out or missing, and with
+  OpenCode when no server of its runs: none is started for it). An empty or unreadable file means the standard
+  instructions, with an amber line on the page.
 - CUE keeps the previous version as `instructions.prev.md` each time the file changes. There is no `cue-cli
   instructions test` **(my call, after the builder check)**: `cue-cli` is not in the installer and would load a second
   model; the page's before/after on the last dictation is the check, for the user and for the agent.

@@ -1,5 +1,6 @@
 //! The cleanup's instructions (spec "no keys", Instructions page): CUE's style rules in plain words, kept in one file,
-//! `%APPDATA%\CUE\instructions.md`, that the user or an AI edits. The fixed protocol (output format, never answering
+//! `%APPDATA%\CUE\instructions\instructions.md`, that the user or an AI edits. The folder holds only the instructions'
+//! files, so an AI opened in it sees nothing else of CUE's. The fixed protocol (output format, never answering
 //! the text, the dictionary and habits blocks, the translate instruction) stays in code and is never in the file.
 //! The standard texts, the `AGENTS.md` CUE writes beside the file and the task handed to an AI live here; reading and
 //! writing the file is the app's (`instructions` in the app crate).
@@ -38,6 +39,13 @@ the check. Do not touch keys, sign-ins or any other CUE setting."
     }
 }
 
+/// The task copied for any AI ("Скопировать задание"): [`task`], then the folder it is about, since that AI may be opened
+/// anywhere.
+pub fn task_with_folder(lang: &str, folder: &str) -> String {
+    let label = if lang == "ru" { "Папка" } else { "Folder" };
+    format!("{}\n\n{label}: {folder}", task(lang))
+}
+
 /// `AGENTS.md`, which CUE owns and rewrites when its version is newer. Its first line, `<!-- CUE <version> -->`, is what
 /// decides "older" ([`agents_md_version`]).
 pub fn agents_md(lang: &str, version: &str) -> String {
@@ -56,8 +64,8 @@ CUE чистит диктовки: убирает слова-паразиты, �
 
 ## Что нельзя менять
 
-`settings.json`, Диспетчер учётных данных Windows (ключи и входы), историю диктовок и этот `AGENTS.md`: CUE перепишет \
-его сам.
+Ничего вне этой папки: настройки CUE, Диспетчер учётных данных Windows (ключи и входы), историю диктовок. И этот \
+`AGENTS.md`: CUE перепишет его сам.
 
 ## Как проверить
 
@@ -80,8 +88,8 @@ CUE itself and are not needed in the file.
 
 ## What you may not change
 
-`settings.json`, the Windows Credential Manager (keys and sign-ins), the dictation history and this `AGENTS.md`, \
-which CUE rewrites by itself.
+Nothing outside this folder: CUE's settings, the Windows Credential Manager (keys and sign-ins), the dictation \
+history. Nor this `AGENTS.md`, which CUE rewrites by itself.
 
 ## How to check
 
@@ -135,6 +143,37 @@ mod tests {
             assert!(ru.contains(needed), "{needed}");
         }
         assert!(!en.contains("cue-cli") && !ru.contains("cue-cli"));
+    }
+
+    /// The copied task goes to an AI opened anywhere: it names the folder, and asks for the page, never a CLI.
+    #[test]
+    fn copied_task_names_the_folder() {
+        let folder = r"C:\Users\Ann\AppData\Roaming\CUE\instructions";
+        for lang in ["ru", "en"] {
+            let copied = task_with_folder(lang, folder);
+            assert!(copied.starts_with(&task(lang)), "{lang}");
+            assert!(copied.ends_with(folder), "{lang}");
+            assert!(!copied.contains("cue-cli"), "{lang}");
+        }
+        assert!(task_with_folder("ru", folder).contains("Папка: "));
+        assert!(task_with_folder("en", folder).contains("Folder: "));
+    }
+
+    /// The task is one line with no double quote or percent sign: it goes to an agent as its first message on a
+    /// command line (`terminal`).
+    #[test]
+    fn task_is_one_line_without_quotes() {
+        for lang in ["ru", "en"] {
+            let t = task(lang);
+            assert!(!t.contains(['\n', '\r', '"', '%']), "{lang}");
+        }
+    }
+
+    /// AGENTS.md says the folder holds only the instructions, and that nothing outside it is the agent's.
+    #[test]
+    fn agents_md_keeps_the_agent_in_the_folder() {
+        assert!(agents_md("ru", "1").contains("вне этой папки"));
+        assert!(agents_md("en", "1").contains("outside this folder"));
     }
 
     #[test]

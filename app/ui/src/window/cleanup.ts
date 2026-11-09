@@ -9,6 +9,8 @@
 //   page opens; meanwhile the rows say "Checking…" and the page works). A found agent is chosen by its row; one not
 //   installed is pale, with its install page's button. Under the chosen one: its model (OpenCode's hundreds with a
 //   filter, "Быстрая · авто" first; remembered per agent) and what is pasted when the AI does not answer.
+// Under the part's list, but for Без ИИ: "Ваши инструкции", opening the Instructions page (instructions.ts), its line
+// saying whether they are the standard ones, the user's own, or a broken file (amber).
 // The first page's Cleanup value comes from here too (`value`): what cleans now, the local model's download in percent,
 // and in amber an agent to sign in to again or not found.
 // The page is drawn again where it stands when a setting or the agents change (`paint`); only a move to another part
@@ -17,6 +19,7 @@ import * as api from './api';
 import type { AgentView, Where } from './api';
 import { icon } from './icons';
 import { percent } from './model';
+import { InstructionsPage, bang } from './instructions';
 import { ModelsPage, joined, llmSource } from './models';
 import { dropDown, h, logFailed, segment, srow, syncSeg, type Ctx, type MenuItem } from './page';
 import { fill } from './text';
@@ -45,6 +48,8 @@ export interface CleanupValue {
 
 export class CleanupPage {
   private readonly llms: ModelsPage;
+  /** The Instructions page, one level under this one; its state gives the "Ваши инструкции" row its line. */
+  readonly instructions: InstructionsPage;
   /** The agents as `agents_get` last said (null — not heard yet). */
   private agents: AgentView[] | null = null;
   /** An `agents_get` is on its way. */
@@ -56,6 +61,7 @@ export class CleanupPage {
   private agentBox: HTMLElement | null = null;
   private modelBox: HTMLElement | null = null;
   private foot: HTMLElement | null = null;
+  private insRow: HTMLElement | null = null;
 
   /** `resized` — the page's height changed (the tray follows it); `valueChanged` — the first page's value may have. */
   constructor(
@@ -64,6 +70,7 @@ export class CleanupPage {
     private readonly valueChanged: () => void,
   ) {
     this.llms = new ModelsPage(ctx, resized, llmSource(ctx));
+    this.instructions = new InstructionsPage(ctx, resized, () => this.paintInstructions(), () => this.agents);
   }
 
   private get where(): Where {
@@ -79,6 +86,7 @@ export class CleanupPage {
 
   /** The agents looked at again (the tray or this page opened, the cleanup moved to "Ваш AI", another agent chosen). */
   refresh(): void {
+    this.instructions.refresh();
     const seq = ++this.seq;
     this.looking = true;
     api.agentsGet().then(
@@ -102,7 +110,7 @@ export class CleanupPage {
   left(): void {
     this.llms.stop();
     this.drawn = null;
-    this.agentBox = this.modelBox = this.foot = null;
+    this.agentBox = this.modelBox = this.foot = this.insRow = null;
   }
 
   /** The page's rows: the three parts, the part's list, the note. A move to another part eases the list in. */
@@ -126,6 +134,8 @@ export class CleanupPage {
       this.modelBox = h('div', 'sgrp');
       body.push(this.agentBox, this.modelBox);
     }
+    this.insRow = null;
+    if (where !== 'off') body.push(this.instructionsRow());
     this.foot = h('div', 'tft');
     const moved = this.drawn !== null && this.drawn !== where;
     this.drawn = where;
@@ -165,6 +175,33 @@ export class CleanupPage {
       for (const b of seg.querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.v === now));
       syncSeg(seg);
     });
+  }
+
+  /* ---------- Ваши инструкции ---------- */
+
+  /** The row that opens the Instructions page (the tray opens it by its `data-sub`), its line from the core. */
+  private instructionsRow(): HTMLElement {
+    const g = h('div', 'sgrp');
+    const { row } = srow(this.ctx.t.cl.instructions, null);
+    row.dataset.sub = 'instructions';
+    row.classList.add('insrow');
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
+    row.querySelector('.sc')!.innerHTML = icon('chev');
+    this.insRow = row;
+    this.paintInstructions();
+    g.append(row);
+    return g;
+  }
+
+  /** The row's line as the instructions are now. */
+  private paintInstructions(): void {
+    const small = this.insRow?.querySelector<HTMLElement>('.stx small');
+    if (!small) return;
+    const l = this.instructions.line();
+    small.replaceChildren(...(l.warn ? [bang()] : []), l.text);
+    small.hidden = !l.text;
+    small.classList.toggle('warn', l.warn);
   }
 
   /* ---------- Ваш AI ---------- */

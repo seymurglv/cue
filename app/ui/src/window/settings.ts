@@ -31,11 +31,14 @@ import { languageName } from './text';
 
 export { matchMic } from './mic';
 
-type Sub = 'model' | 'models' | 'cleanup' | 'mic' | 'languages' | 'history' | 'general';
-const SUBS: readonly Exclude<Sub, 'models'>[] = ['model', 'cleanup', 'mic', 'languages', 'history', 'general'];
-/** The page a page goes back to: the Model page is Speech recognition's; the rest are the first page's. */
-const PARENT: Partial<Record<Sub, Sub>> = { models: 'model' };
-const SUB_ICON: Record<Exclude<Sub, 'models'>, IconName> = {
+type Sub = 'model' | 'models' | 'cleanup' | 'instructions' | 'mic' | 'languages' | 'history' | 'general';
+/** The first page's sections; the Model page and the Instructions page are one level deeper. */
+type Top = Exclude<Sub, 'models' | 'instructions'>;
+const SUBS: readonly Top[] = ['model', 'cleanup', 'mic', 'languages', 'history', 'general'];
+/** The page a page goes back to: the Model page is Speech recognition's, the Instructions page Cleanup's; the rest are
+ *  the first page's. */
+const PARENT: Partial<Record<Sub, Sub>> = { models: 'model', instructions: 'cleanup' };
+const SUB_ICON: Record<Top, IconName> = {
   model: 'wave',
   cleanup: 'lines',
   mic: 'micOn',
@@ -95,6 +98,11 @@ export class SettingsTray {
     this.cleanup.setLlms(view);
   }
 
+  /** The instructions read again (`cue://instructions`): the Instructions page and the Cleanup row follow. */
+  setInstructions(news: api.InstructionsNews): void {
+    this.cleanup.instructions.news(news);
+  }
+
   /** The Model page's list and the model in use: the page shown follows it, and Speech recognition names the model. */
   setModels(view: api.ModelsView): void {
     this.models.set(view);
@@ -146,10 +154,11 @@ export class SettingsTray {
     this.current = null;
     el.addEventListener('click', (e) => this.onClick(e));
     el.addEventListener('keydown', (e) => {
-      // The model row is a button of its own: Enter or Space opens the Model page.
-      if ((e.key === 'Enter' || e.key === ' ') && (e.target as Element).matches('.mrow[data-sub]')) {
+      // The model row and the instructions row are buttons of their own: Enter or Space opens their page.
+      const row = e.target as HTMLElement;
+      if ((e.key === 'Enter' || e.key === ' ') && row.matches('.srow[data-sub]')) {
         e.preventDefault();
-        this.go('models');
+        this.go(row.dataset.sub as Sub);
       }
     });
     if (!this.isOpen) return;
@@ -191,7 +200,7 @@ export class SettingsTray {
     this.isOpen = false;
     if (this.sub === 'mic') this.stopPreview();
     if (this.sub === 'models') this.models.stop();
-    if (this.sub === 'cleanup') this.cleanup.left();
+    this.leaveCleanup();
     this.sub = null;
     this.ctx.closeMenu();
     this.swapped();
@@ -363,9 +372,20 @@ export class SettingsTray {
     this.el?.classList.remove('swap');
   }
 
+  /** The Cleanup page or the Instructions page is left: a search stops, an edit not saved is saved. */
+  private leaveCleanup(): void {
+    if (this.sub === 'cleanup') this.cleanup.left();
+    if (this.sub === 'instructions') this.cleanup.instructions.left();
+  }
+
+  /** The window's page goes away: an edit of the instructions not saved yet is saved. */
+  pageGone(): void {
+    if (this.sub === 'instructions') this.cleanup.instructions.left();
+  }
+
   private go(sub: Sub): void {
     if (this.sub === 'models') this.models.stop();
-    if (this.sub === 'cleanup') this.cleanup.left();
+    this.leaveCleanup();
     this.sub = sub;
     this.show(sub, 1);
     if (sub === 'mic') {
@@ -375,13 +395,15 @@ export class SettingsTray {
       void this.readAutostart();
     } else if (sub === 'cleanup') {
       this.cleanup.refresh();
+    } else if (sub === 'instructions') {
+      this.cleanup.instructions.shown();
     }
   }
 
   private back(): void {
     if (this.sub === 'mic') this.stopPreview();
     if (this.sub === 'models') this.models.stop();
-    if (this.sub === 'cleanup') this.cleanup.left();
+    this.leaveCleanup();
     this.ctx.closeMenu();
     const parent = this.sub ? PARENT[this.sub] ?? null : null;
     this.sub = parent;
@@ -446,6 +468,10 @@ export class SettingsTray {
       pg.append(...this.models.rows());
       return pg;
     }
+    if (sub === 'instructions') {
+      pg.append(...this.cleanup.instructions.rows());
+      return pg;
+    }
     const g = wrap('sgrp');
     pg.append(g);
     if (sub === 'model') {
@@ -463,11 +489,12 @@ export class SettingsTray {
 
   private title(sub: Sub): string {
     const t = this.ctx.t;
-    return { model: t.model, models: t.models.title, cleanup: t.cleanup, mic: t.mic, languages: t.languages, history: t.history, general: t.general }[sub];
+    const titles = { model: t.model, models: t.models.title, cleanup: t.cleanup, instructions: t.ins.title, mic: t.mic };
+    return { ...titles, languages: t.languages, history: t.history, general: t.general }[sub];
   }
 
   /** A section's value on the first page. */
-  private value(sub: Exclude<Sub, 'models'>): string {
+  private value(sub: Top): string {
     const t = this.ctx.t;
     const s = this.ctx.settings;
     switch (sub) {

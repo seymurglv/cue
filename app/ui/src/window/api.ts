@@ -281,6 +281,46 @@ export const agentsGet = () => invoke<AgentView[]>('agents_get');
 /** The agent's install page in the browser, by its id (CUE holds the address). */
 export const agentInstallLink = (id: string) => invoke<void>('agent_install_link', { id });
 
+/** The cleanup's instructions as the Instructions page shows them (`instructions_get`): the file as it is (the standard
+ *  text in use while it is broken), whether they are the user's own (`edited`), whether the file is empty or unreadable
+ *  (`broken`), and the file's full path. */
+export interface InstructionsView {
+  text: string;
+  edited: boolean;
+  broken: boolean;
+  path: string;
+}
+/** The last dictation cleaned again with the new instructions: the app it went to (empty when not known), the text as it
+ *  was pasted, the text the new instructions give. */
+export interface InstructionsSample {
+  app: string;
+  before: string;
+  after: string;
+}
+/** `cue://instructions`: the instructions read again (saved here, or by the user or an AI), then once more with the
+ *  before and after on the last dictation (`sample`; never with no AI, a model not loaded, an agent to sign in to). */
+export interface InstructionsNews {
+  text: string;
+  edited: boolean;
+  broken: boolean;
+  sample: InstructionsSample | null;
+}
+/** How "Открыть в <agent>" went: with the task as its first message, or without it (the task is in the clipboard). */
+export type Opened = 'withTask' | 'taskCopied';
+/** The instructions; a file saved since is read again first (ask again while the page is shown). */
+export const instructionsGet = () => invoke<InstructionsView>('instructions_get');
+/** The page's text saved as the instructions; fails `failed` when the file cannot be written. */
+export const instructionsSet = (text: string) => invoke<InstructionsView>('instructions_set', { text });
+/** "Вернуть стандартные". */
+export const instructionsReset = () => invoke<InstructionsView>('instructions_reset');
+/** The task for any AI, with the instructions' folder, into the clipboard. */
+export const instructionsCopy = () => invoke<void>('instructions_copy');
+/** The agent (`opencode` or `codex`) opened in a new terminal in the instructions' folder; `notFound` when it did not. */
+export const instructionsOpen = (agent: string) => invoke<Opened>('instructions_open', { agent });
+export async function onInstructions(cb: (v: InstructionsNews) => void): Promise<void> {
+  await getCurrentWebviewWindow().listen<InstructionsNews>('cue://instructions', (e) => cb(e.payload));
+}
+
 /** What the core is doing, as every window hears it: `start` and `listen` — a recording is on. */
 export type CorePhase = 'idle' | 'start' | 'listen' | 'think' | 'done' | 'empty' | 'cancel' | 'error' | 'answer';
 /** The core's state (`cue://state`, the one the Drop draws): its phase, and whether CUE is paused. No text in it. */

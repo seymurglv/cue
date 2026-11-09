@@ -452,6 +452,34 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .mdl.off{cursor:default}
 .mdl.off .stx b{color:var(--muted)}
 .btn2.lnk{padding:0 10px}
+/* the Cleanup page's "Your instructions" row opens the Instructions page (the chevron at its end, as the model row's);
+   the Instructions page (the approved mockup's "Ваши инструкции"): the file's text in a box with a thin ring, darker
+   when focused; "Edit with AI" the one filled button, its menu a plate under it whose items have a line each; the last
+   dictation before (struck through, muted) and after; an error in amber ink with "!"; the path in a mono face. */
+.insrow{cursor:pointer}
+.insrow .sc>svg{width:12px;height:12px;color:var(--muted)}
+.ipg{display:flex;flex-direction:column}
+.pta{display:block;width:100%;min-height:150px;margin:2px 0 4px;padding:10px 12px;border:0;outline:0;resize:vertical;border-radius:12px;background:transparent;box-shadow:inset 0 0 0 1px var(--faint);font:inherit;font-size:12px;line-height:1.45;color:var(--text);scrollbar-width:thin}
+.pta:focus{box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--text) 45%,transparent)}
+.acts{display:flex;flex-wrap:wrap;gap:8px;padding:6px 0 4px}
+.acts .btn2{padding:0 12px}
+.btn2.pri{background:var(--text);color:var(--bg)}
+.btn2.pri:hover{background:color-mix(in srgb,var(--text) 85%,var(--bg))}
+.app .btn2.pri:focus-visible{background:color-mix(in srgb,var(--text) 80%,var(--bg))}
+.pmenu{display:flex;flex-direction:column;margin:2px 0 6px;padding:4px;border-radius:12px;background:color-mix(in srgb,var(--text) 5%,transparent)}
+.pmenu button{display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:7px 10px;border-radius:8px;text-align:left}
+.pmenu button:is(:hover,:focus-visible){outline:0;background:color-mix(in srgb,var(--text) 6%,transparent)}
+.pmenu b{font-weight:500;font-size:13px}
+.pmenu small{font-size:11px;color:color-mix(in srgb,var(--text) 62%,transparent)}
+.idone{padding:2px 0 4px;font-size:11px;line-height:1.4;color:var(--muted)}
+.idone.warn,.ihead small.warn{color:var(--warn-ink)}
+.bang{font-weight:700;margin-right:4px}
+.cmpr{display:flex;flex-direction:column;gap:6px;padding:4px 0}
+.cmpr div{font-size:12px;line-height:1.4}
+.cmpr s{color:var(--muted)}
+.cmpr small{display:block;font-size:11px;color:var(--muted)}
+.path{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;font-size:11px}
+.app .insrow:focus-visible{outline:0;box-shadow:0 0 0 4px color-mix(in srgb,var(--text) 8%,transparent);border-radius:6px;background:color-mix(in srgb,var(--text) 8%,transparent)}
 /* the keyboard's focus on every other control: the same soft plate as on the icon buttons (one step darker where the
    control has a fill of its own) and dark text, never the system's ring; a plate wider than a bare text button is a
    spread shadow, so nothing moves. The ringed capsules (drop-downs) darken their ring, as the fields do. */
