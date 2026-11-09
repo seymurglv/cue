@@ -1,7 +1,7 @@
 //! The main window's commands (spec 3 §2–3), and the welcome window's (spec 4a §1). Each one answers the main window,
 //! and the welcome window only those its steps need (`guard`): the Drop and the card draw a model's answer, and no page
-//! of theirs may read the history or change a setting; the welcome window never reads the history, and of the settings
-//! changes the microphone alone. An error is a short code, never text.
+//! of theirs may read the history or change a setting; the welcome window never reads the history or the instructions,
+//! and of the settings changes the microphone and where the cleanup runs alone. An error is a short code, never text.
 //!
 //! The history is read here, off the async threads; only the core writes it, and its new entries come over the main
 //! window's own channel (`history_subscribe`). An entry's recording is read by its id alone, checked to be an entry
@@ -10,7 +10,8 @@
 //! menu, whose check follows within 5 s. The microphones are listed as Windows names them, and a preview sends the page
 //! that started it a microphone's level alone (`micpreview`). The welcome window opens its links by name, never by an
 //! address of its page's (`open_link`), and so does the Cleanup page's install button (`agent_install_link`). The
-//! Cleanup page's agents are looked at by the core, off its thread (`agents_get`).
+//! Cleanup page's agents, in the main window and in the welcome window's step "Кто чистит текст", are looked at by the
+//! core, off its thread (`agents_get`).
 use std::path::Path;
 use std::time::Duration;
 
@@ -49,10 +50,17 @@ const EARLIER_DAYS: usize = 7;
 const SEARCH_LIMIT: usize = 200;
 /// How long "Paste again" waits for the window under the main one to come in front.
 const BRING_TIMEOUT: Duration = Duration::from_millis(500);
-/// The commands the welcome window's page may call: what its steps need — the language, the speech model, the
-/// microphone (of the settings it changes the microphone alone: `may_change`) — and its own (`WELCOME_ONLY`).
-const WELCOME_COMMANDS: [&str; 10] = [
+/// The commands the welcome window's page may call: what its steps need — the language, the cleanup's agents and local
+/// models ("Кто чистит текст", the Cleanup page without its instructions), the speech model, the microphone (of the
+/// settings it changes the microphone and the cleanup alone: `may_change`) — and its own (`WELCOME_ONLY`).
+const WELCOME_COMMANDS: [&str; 16] = [
     "settings_get",
+    "agents_get",
+    "agent_install_link",
+    "llms_get",
+    "llms_search",
+    "llm_choose",
+    "llm_delete",
     "model_get",
     "model_retry",
     "settings_set",
@@ -142,9 +150,11 @@ fn guard_label(label: &str, command: &str) -> Result<(), CmdError> {
     if answered { Ok(()) } else { Err(CmdError::NotMain) }
 }
 
-/// The main window changes any setting; the welcome window, the microphone alone.
+/// The main window changes any setting; the welcome window, the microphone and where the cleanup runs alone.
 fn may_change(label: &str, change: &SettingChange) -> bool {
-    label == MAIN_LABEL || (label == WELCOME_LABEL && matches!(change, SettingChange::MicDevice(_)))
+    use SettingChange::{MicDevice, RefineAgent, RefineAgentModel, RefineFallback, RefineWhere};
+    let welcome = matches!(change, MicDevice(_) | RefineWhere(_) | RefineAgent(_) | RefineAgentModel { .. } | RefineFallback(_));
+    label == MAIN_LABEL || (label == WELCOME_LABEL && welcome)
 }
 
 /// The speech model's state (spec "Local speech recognition"): ready, downloading with its bytes, failed.
@@ -785,19 +795,21 @@ mod tests {
         assert_eq!(serde_json::to_value(access).unwrap(), json!(["allowed", "denied"]));
     }
 
-    /// The welcome window gets what its steps need — the language, the speech model, the microphone — and its own
-    /// commands, never the history or start at sign-in; its own are no other window's. No window has a key command.
+    /// The welcome window gets what its steps need — the language, the cleanup's agents and local models, the speech
+    /// model, the microphone — and its own commands, never the history, the instructions or start at sign-in; its own
+    /// are no other window's. No window has a key command.
     #[test]
     fn welcome_label_may_call_only_its_commands() {
         let settings_and_model = ["settings_get", "settings_set", "model_get", "model_retry"];
+        let cleanup = ["agents_get", "agent_install_link", "llms_get", "llms_search", "llm_choose", "llm_delete"];
         let microphone = ["mic_list", "mic_preview", "mic_access"];
         let own = ["welcome_step", "welcome_close", "open_link"];
         for command in COMMANDS {
-            let welcome = [&settings_and_model[..], &microphone, &own].iter().any(|its| its.contains(&command));
+            let welcome = [&settings_and_model[..], &cleanup, &microphone, &own].iter().any(|its| its.contains(&command));
             assert_eq!(guard_label(WELCOME_LABEL, command).is_ok(), welcome, "{command}");
             assert_eq!(guard_label(MAIN_LABEL, command).is_ok(), !own.contains(&command), "{command}");
         }
-        for command in ["history_page", "history_subscribe", "history_paste", "autostart_set", "drop_action", ""] {
+        for command in ["history_page", "history_subscribe", "history_paste", "autostart_set", "drop_action", "models_get", "instructions_get", ""] {
             assert_eq!(guard_label(WELCOME_LABEL, command), Err(CmdError::NotMain), "{command:?}");
         }
         for gone in ["key_state", "key_set", "key_check"] {
@@ -840,14 +852,18 @@ mod tests {
         assert_eq!(serde_json::to_value(CmdError::NotFound).unwrap(), json!("notFound"));
     }
 
-    /// Of the settings, as its page sends a change, the welcome window changes the microphone alone; the main window,
-    /// any.
+    /// Of the settings, as its page sends a change, the welcome window changes the microphone and where the cleanup
+    /// runs (its step "Кто чистит текст"); the main window, any.
     #[test]
-    fn welcome_may_set_only_the_microphone() {
+    fn welcome_may_set_only_the_microphone_and_the_cleanup() {
         let change = |v: serde_json::Value| serde_json::from_value::<SettingChange>(v).unwrap();
-        let mic = [
+        let welcome = [
             change(json!({ "kind": "micDevice", "value": "USB Microphone" })),
             change(json!({ "kind": "micDevice", "value": null })),
+            change(json!({ "kind": "refineWhere", "value": "local" })),
+            change(json!({ "kind": "refineAgent", "value": "opencode" })),
+            change(json!({ "kind": "refineAgentModel", "value": { "agent": "codex", "model": "gpt-6-sol" } })),
+            change(json!({ "kind": "refineFallback", "value": "local" })),
         ];
         let others = [
             change(json!({ "kind": "historyKeep", "value": "off" })),
@@ -855,15 +871,17 @@ mod tests {
             change(json!({ "kind": "historyAudio", "value": "day" })),
             change(json!({ "kind": "translateTarget", "value": "de" })),
             change(json!({ "kind": "uiLanguage", "value": "ru" })),
+            change(json!({ "kind": "dictAdd", "value": "Kubernetes" })),
+            change(json!({ "kind": "learn", "value": false })),
         ];
-        for c in &mic {
+        for c in &welcome {
             assert!(may_change(WELCOME_LABEL, c) && may_change(MAIN_LABEL, c));
         }
         for (i, c) in others.iter().enumerate() {
             assert!(!may_change(WELCOME_LABEL, c), "change {i}");
             assert!(may_change(MAIN_LABEL, c), "change {i}");
         }
-        assert!(mic.iter().chain(&others).all(|c| !may_change("drop", c)));
+        assert!(welcome.iter().chain(&others).all(|c| !may_change("drop", c)));
     }
 
     /// The page names a link, CUE has the address — the Windows microphone settings; nothing else opens, an address
@@ -889,7 +907,8 @@ mod tests {
     }
 
     /// The Cleanup page's install buttons open the agent's own page, named by the agent's id: OpenCode's download page
-    /// and Codex's; nothing for Grok (not offered), an address, or anything else. Only the main window asks.
+    /// and Codex's; nothing for Grok (not offered), an address, or anything else. The main window and the welcome
+    /// window's step "Кто чистит текст" ask, no other.
     #[test]
     fn agent_install_link_opens_only_the_offered_agents_pages() {
         assert_eq!(install_link("opencode"), Some("https://opencode.ai/download"));
@@ -899,7 +918,10 @@ mod tests {
         }
         for command in ["agents_get", "agent_install_link"] {
             assert_eq!(guard_label(MAIN_LABEL, command), Ok(()));
-            assert_eq!(guard_label(WELCOME_LABEL, command), Err(CmdError::NotMain));
+            assert_eq!(guard_label(WELCOME_LABEL, command), Ok(()));
+            for label in ["drop", "card"] {
+                assert_eq!(guard_label(label, command), Err(CmdError::NotMain), "{label} {command}");
+            }
         }
     }
 

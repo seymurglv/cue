@@ -4,7 +4,7 @@ import { fill, type Lang } from '../window/text';
 import type { Step } from './steps';
 
 export interface WelcomeText {
-  /** The steps' names: the dots' tooltips, and the headings of Model, Microphone and First dictation. */
+  /** The steps' names: the dots' tooltips, and the headings of all but Hello and Done. */
   steps: Record<Step, string>;
   back: string;
   start: string;
@@ -36,7 +36,7 @@ export interface WelcomeText {
 }
 
 export const en: WelcomeText = {
-  steps: { hello: 'Hello', model: 'Model', mic: 'Microphone', try: 'First dictation', done: 'Done' },
+  steps: { hello: 'Hello', cleanup: 'Who cleans the text', model: 'Model', mic: 'Microphone', try: 'First dictation', done: 'Done' },
   back: 'Back',
   start: 'Start',
   next: 'Next',
@@ -62,7 +62,7 @@ export const en: WelcomeText = {
 };
 
 export const ru: WelcomeText = {
-  steps: { hello: 'Привет', model: 'Модель', mic: 'Микрофон', try: 'Первая диктовка', done: 'Готово' },
+  steps: { hello: 'Привет', cleanup: 'Кто чистит текст', model: 'Модель', mic: 'Микрофон', try: 'Первая диктовка', done: 'Готово' },
   back: 'Назад',
   start: 'Начать',
   next: 'Дальше',

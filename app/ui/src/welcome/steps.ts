@@ -1,8 +1,9 @@
 // The welcome window's steps in order, and what each one shows (spec 4a §1; the approved design's welcome window, stage
-// 6). The page (page.ts) moves between them and does what they do; Microphone shows the settings tray's own rows
-// (window/mic.ts). Texts go in as text.
+// 6). The page (page.ts) moves between them and does what they do; "Кто чистит текст" shows the Cleanup page
+// (window/cleanup.ts, docs/specs/2026-11-08-no-keys-design.md, "First run and the welcome window") and Microphone the
+// settings tray's own rows (window/mic.ts). Texts go in as text.
 import { CUE } from '../designParts';
-import type { LinkTarget, ModelState } from '../window/api';
+import type { AgentView, LinkTarget, ModelState, SettingChange, SettingsView } from '../window/api';
 import { icon } from '../window/icons';
 import type { MicRows } from '../window/mic';
 import { modelRow } from '../window/model';
@@ -10,9 +11,26 @@ import { h } from '../window/page';
 import type { Lang, WinText } from '../window/text';
 import { doneTitle, type WelcomeText } from './text';
 
-// Task 13: the step "Кто чистит текст" comes after Hello.
-export type Step = 'hello' | 'model' | 'mic' | 'try' | 'done';
-export const STEPS: readonly Step[] = ['hello', 'model', 'mic', 'try', 'done'];
+export type Step = 'hello' | 'cleanup' | 'model' | 'mic' | 'try' | 'done';
+export const STEPS: readonly Step[] = ['hello', 'cleanup', 'model', 'mic', 'try', 'done'];
+
+/** The agents in the order the default takes them (the Cleanup page's order). */
+const ORDER: readonly string[] = ['opencode', 'codex'];
+
+/** What "Кто чистит текст" chooses by itself once the agents are known, when nothing is chosen yet (the agent route
+ *  with no agent, or this computer with no model): "Ваш AI" with the first agent found (OpenCode, then Codex); none
+ *  found, "Этот компьютер" with nothing chosen, so its recommended model leads the list and nothing downloads. A choice
+ *  already made, "Без ИИ" among them, stays. */
+export function cleanupDefault(s: SettingsView, agents: readonly AgentView[]): SettingChange[] {
+  const unchosen = (s.refineWhere === 'agent' && !s.refineAgent) || (s.refineWhere === 'local' && !s.refineLocal);
+  if (!unchosen) return [];
+  const found = ORDER.find((id) => agents.some((a) => a.id === id && a.found));
+  if (!found) return s.refineWhere === 'local' ? [] : [{ kind: 'refineWhere', value: 'local' }];
+  // The agent first: the agent route never stands with none, so the core does not look for one itself.
+  const changes: SettingChange[] = [{ kind: 'refineAgent', value: found }];
+  if (s.refineWhere !== 'agent') changes.push({ kind: 'refineWhere', value: 'agent' });
+  return changes;
+}
 
 /** The Windows key's logo, as on the Drop's key hint. */
 const WIN_LOGO =
@@ -34,6 +52,8 @@ export interface StepParts {
   readonly model: ModelState | null;
   /** The words of the first dictation. */
   readonly words: number;
+  /** The Cleanup page's rows, as the step starts. */
+  readonly cleanup: { rows(): HTMLElement[] };
 }
 
 /** The keys of the dictation chord, then `more` (Shift, Alt): Bebas keycaps, the Windows key as its logo. */
@@ -81,6 +101,13 @@ export function stepPage(step: Step, p: StepParts): HTMLElement {
     case 'hello':
       pg.append(bigMark(), h('div', 'oname', 'CUE'), h('div', 'ohd', x.helloTitle), h('div', 'op', x.helloText));
       break;
+    case 'cleanup': {
+      // The page's own rows, from the top: the step's list can be longer than the window, and scrolls.
+      const box = h('div', 'ocl');
+      box.append(...p.cleanup.rows());
+      pg.append(h('div', 'ohd', x.steps.cleanup), box);
+      break;
+    }
     case 'model': {
       const block = h('div', 'sgrp orows');
       block.append(modelRow(p.t, p.model));

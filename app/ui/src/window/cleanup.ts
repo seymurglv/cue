@@ -14,7 +14,8 @@
 // The first page's Cleanup value comes from here too (`value`): what cleans now, the local model's download in percent,
 // and in amber an agent to sign in to again or not found.
 // The page is drawn again where it stands when a setting or the agents change (`paint`); only a move to another part
-// draws it anew, its list easing in.
+// draws it anew, its list easing in. The welcome window's step "Кто чистит текст" draws this page too, without "Ваши
+// инструкции" (the instructions are the main window's).
 import * as api from './api';
 import type { AgentView, Where } from './api';
 import { icon } from './icons';
@@ -46,6 +47,12 @@ export interface CleanupValue {
   progress: number | null;
 }
 
+export interface CleanupOptions {
+  /** "Ваши инструкции" under the part's list, and the instructions read with the agents (true by default; the welcome
+   *  window has none). */
+  instructions?: boolean;
+}
+
 export class CleanupPage {
   private readonly llms: ModelsPage;
   /** The Instructions page, one level under this one; its state gives the "Ваши инструкции" row its line. */
@@ -62,13 +69,16 @@ export class CleanupPage {
   private modelBox: HTMLElement | null = null;
   private foot: HTMLElement | null = null;
   private insRow: HTMLElement | null = null;
+  private readonly withInstructions: boolean;
 
   /** `resized` — the page's height changed (the tray follows it); `valueChanged` — the first page's value may have. */
   constructor(
     private readonly ctx: Ctx,
     private readonly resized: () => void,
     private readonly valueChanged: () => void,
+    opts: CleanupOptions = {},
   ) {
+    this.withInstructions = opts.instructions ?? true;
     this.llms = new ModelsPage(ctx, resized, llmSource(ctx));
     this.instructions = new InstructionsPage(ctx, resized, () => this.paintInstructions(), () => this.agents);
   }
@@ -84,24 +94,27 @@ export class CleanupPage {
     this.valueChanged();
   }
 
-  /** The agents looked at again (the tray or this page opened, the cleanup moved to "Ваш AI", another agent chosen). */
-  refresh(): void {
-    this.instructions.refresh();
+  /** The agents looked at again (the tray or this page opened, the cleanup moved to "Ваш AI", another agent chosen).
+   *  Resolves to what was found once the page shows it; null — the look failed, or a newer one took its place. */
+  refresh(): Promise<AgentView[] | null> {
+    if (this.withInstructions) this.instructions.refresh();
     const seq = ++this.seq;
     this.looking = true;
-    api.agentsGet().then(
+    return api.agentsGet().then(
       (views) => {
-        if (seq !== this.seq) return;
+        if (seq !== this.seq) return null;
         this.looking = false;
         this.agents = views;
         this.paint();
         this.valueChanged();
+        return views;
       },
       (e) => {
         logFailed('looking at the agents', e);
-        if (seq !== this.seq) return;
+        if (seq !== this.seq) return null;
         this.looking = false;
         this.paint();
+        return null;
       },
     );
   }
@@ -135,7 +148,7 @@ export class CleanupPage {
       body.push(this.agentBox, this.modelBox);
     }
     this.insRow = null;
-    if (where !== 'off') body.push(this.instructionsRow());
+    if (where !== 'off' && this.withInstructions) body.push(this.instructionsRow());
     this.foot = h('div', 'tft');
     const moved = this.drawn !== null && this.drawn !== where;
     this.drawn = where;

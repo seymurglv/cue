@@ -1,6 +1,7 @@
-//! The welcome window (spec 4a §1): hello, the speech model, the microphone, a first dictation, done. It opens with
-//! `--welcome`, at a start and when a second launch brings it to the CUE already running; CUE holds no key, so a
-//! missing one opens nothing. Like the main window (`main_window`) there is one at a time, created when opened and
+//! The welcome window (spec 4a §1): hello, who cleans the text, the speech model, the microphone, a first dictation,
+//! done. It opens at CUE's first start here — no settings.json yet, or one that never set the cleanup
+//! (`first_start`) — and with `--welcome`, at a start and when a second launch brings it to the CUE already running.
+//! CUE holds no key, so a missing one opens nothing. Like the main window (`main_window`) there is one at a time, created when opened and
 //! destroyed when closed, never built on the main thread. Windows draws its frame, in the Windows theme, with the close
 //! button alone; it takes the focus, so its first dictation is pasted into its own field.
 //!
@@ -9,6 +10,7 @@
 //! between its page moves it with its steps (`commands::welcome_step`). A chord it holds brings it forward
 //! (`bring_forward`). Its microphone preview goes with it; the main window's stays.
 use std::ffi::OsStr;
+use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
 use cue_core::flow::Input;
@@ -33,11 +35,26 @@ pub fn asks_welcome<S: AsRef<OsStr>>(args: impl IntoIterator<Item = S>) -> bool 
     args.into_iter().any(|a| a.as_ref() == WELCOME_ARG)
 }
 
-/// At startup: the window opens when asked for (`forced`, `--welcome`).
-// Task 13: the welcome step "Кто чистит текст" decides when a first start opens it.
-pub fn open_at_start(app: &AppHandle, forced: bool) {
-    tracing::info!(forced, "welcome window at startup");
-    if forced {
+/// Whether this start is CUE's first here, read before anything is written: no settings.json (a fresh install), or one
+/// that never set the cleanup (`settings::cleanup_set`) — never a missing key. A file that cannot be read is the
+/// user's: no first start.
+pub fn first_start(settings: &Path) -> bool {
+    match std::fs::read(settings) {
+        Ok(bytes) => !cue_core::settings::cleanup_set(&bytes),
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+/// The window opens at a start when asked for (`forced`, `--welcome`) or on the first start (`first`).
+pub fn opens_at_start(first: bool, forced: bool) -> bool {
+    forced || first
+}
+
+/// At startup: the window opens when asked for or on the first start.
+pub fn open_at_start(app: &AppHandle, first: bool, forced: bool) {
+    let opens = opens_at_start(first, forced);
+    tracing::info!(first, forced, opens, "welcome window at startup");
+    if opens {
         open(app);
     }
 }
@@ -169,6 +186,61 @@ mod tests {
         for other in ["--Welcome", "welcome", "-welcome", "--welcome=1", " --welcome", "/welcome"] {
             assert!(!asks_welcome(["cue.exe", other]), "{other:?}");
         }
+    }
+
+    /// A settings.json of its own in the temporary folder (never the user's), written with `json` unless `None`.
+    fn settings_file(name: &str, json: Option<&str>) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cue-welcome-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        if let Some(json) = json {
+            std::fs::write(&path, json).unwrap();
+        }
+        path
+    }
+
+    /// A fresh install has no settings.json: the window opens at its first start.
+    #[test]
+    fn welcome_opens_on_a_fresh_install() {
+        let path = settings_file("fresh", None);
+        assert!(first_start(&path));
+        assert!(opens_at_start(first_start(&path), false));
+        // Settings written by an earlier start of this version say where the cleanup runs: no window then.
+        let path = settings_file("written", Some(r#"{"refine":{"where":"local","fallback":"raw"}}"#));
+        assert!(!first_start(&path));
+        assert!(!opens_at_start(first_start(&path), false));
+        // Settings that never set the cleanup (only the microphone, say) are a first start still.
+        let path = settings_file("unset", Some(r#"{"refine":{"context_chars":500},"audio":{"device":"USB Microphone"}}"#));
+        assert!(first_start(&path));
+    }
+
+    /// The owner's case: settings of an earlier version, whose cleanup went to the cloud with a key CUE no longer holds
+    /// — the window does not open for the missing key; the move to the user's agent is the core's.
+    #[test]
+    fn welcome_does_not_open_for_missing_key() {
+        for json in [
+            r#"{"refine":{"runs":"cloud","connection":"anthropic","style":"bold","context_chars":500}}"#,
+            r#"{"refine":{"runs":"cloud","connection":"openrouter"},"ui":{"language":"ru"}}"#,
+            r#"{"refine":{"model":"claude-haiku-4-5","context_chars":500}}"#,
+            r#"{"refine":{"where":"agent","agent":"codex"}}"#,
+        ] {
+            let path = settings_file("upgrade", Some(json));
+            assert!(!first_start(&path), "{json}");
+            assert!(!opens_at_start(first_start(&path), false), "{json}");
+        }
+        // A file CUE cannot read is the user's: no first start, and it is not touched.
+        let path = settings_file("corrupt", Some("{not json"));
+        assert!(!first_start(&path));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json");
+    }
+
+    /// `--welcome` opens it whatever the settings say.
+    #[test]
+    fn welcome_opens_when_asked() {
+        assert!(opens_at_start(false, true));
+        assert!(opens_at_start(true, true));
+        assert!(!opens_at_start(false, false));
     }
 
     /// What the core was told of the gate, in order.

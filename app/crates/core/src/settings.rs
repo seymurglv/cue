@@ -1065,6 +1065,18 @@ impl DictionarySettings {
     }
 }
 
+/// Whether settings.json as stored (`bytes`) shows the cleanup set: this version's `refine.where`, or what an earlier
+/// version kept for it — `runs`, its cloud `connection`, or the cloud `model` from before `runs`. The welcome window
+/// opens at a start without it. A file that is not settings at all is the user's, never a first start: set.
+pub fn cleanup_set(bytes: &[u8]) -> bool {
+    let json = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    let Ok(serde_json::Value::Object(file)) = serde_json::from_slice::<serde_json::Value>(json) else {
+        return true;
+    };
+    let refine = file.get("refine").and_then(serde_json::Value::as_object);
+    refine.is_some_and(|r| ["where", "runs", "connection", "model"].iter().any(|k| r.contains_key(*k)))
+}
+
 /// No file: default settings. A corrupt file: an error (the user's file is never overwritten).
 /// A UTF-8 byte order mark (some Windows editors add one) is skipped.
 pub fn load(path: &Path) -> Result<Settings, SettingsError> {
@@ -1370,6 +1382,39 @@ mod tests {
             let s = read_refine(json);
             assert_eq!((s.where_, s.local.as_str()), (Where::Local, OLD_RECOMMENDED), "{json}");
         }
+    }
+
+    /// The cleanup is set in a file of this version (`where`) or of an earlier one (`runs`, the cloud `connection`, or
+    /// the cloud `model` from before `runs`); a file with none of them, or with no `refine`, never set it. A file that
+    /// is not settings at all is the user's: set.
+    #[test]
+    fn cleanup_set_by_this_version_or_an_earlier_one() {
+        for json in [
+            r#"{"refine":{"where":"agent","fallback":"raw","context_chars":500}}"#,
+            r#"{"refine":{"where":null}}"#,
+            r#"{"refine":{"runs":"cloud","connection":"anthropic","style":"bold","context_chars":500}}"#,
+            r#"{"refine":{"runs":"local","local":"llm--a--b--q4_k_m"}}"#,
+            r#"{"refine":{"connection":"openai"}}"#,
+            r#"{"refine":{"model":"claude-haiku-4-5","context_chars":500,"min_ratio":0.35}}"#,
+            "\u{FEFF}{\"refine\":{\"where\":\"off\"}}",
+            "{not json",
+            "[]",
+            "",
+        ] {
+            assert!(cleanup_set(json.as_bytes()), "{json:?}");
+        }
+        for json in [
+            "{}",
+            r#"{"stt":{"engine":"parakeet"},"hold_hints_left":2}"#,
+            r#"{"refine":{"context_chars":500,"min_ratio":0.35,"max_ratio":1.25,"min_overlap":0.7}}"#,
+            r#"{"refine":{"models":{"codex":"gpt-6-sol"}},"audio":{"device":"USB Microphone"}}"#,
+            "\u{FEFF}{}",
+        ] {
+            assert!(!cleanup_set(json.as_bytes()), "{json:?}");
+        }
+        // What this version writes always says it.
+        let written = serde_json::to_vec(&Settings::default()).unwrap();
+        assert!(cleanup_set(&written));
     }
 
     #[test]

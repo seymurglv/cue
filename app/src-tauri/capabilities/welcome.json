@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "welcome",
-  "description": "The welcome window: it only listens to the microphone level and to a microphone that failed. Its commands are the app's own (each checks the window's label and answers it only those its steps need).",
+  "description": "The welcome window: it only listens to the microphone level, a microphone that failed, the speech model and the local models. Its commands are the app's own (each checks the window's label and answers it only those its steps need).",
   "windows": ["welcome"],
   "permissions": ["core:event:allow-listen"]
 }

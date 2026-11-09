@@ -191,7 +191,7 @@ export class SettingsTray {
     this.gear.classList.add('hid');
     // General's value says whether CUE starts at sign-in; Cleanup's whether its agent can be used.
     void this.readAutostart();
-    this.cleanup.refresh();
+    void this.cleanup.refresh();
   }
 
   close(): void {
@@ -394,7 +394,7 @@ export class SettingsTray {
     } else if (sub === 'general') {
       void this.readAutostart();
     } else if (sub === 'cleanup') {
-      this.cleanup.refresh();
+      void this.cleanup.refresh();
     } else if (sub === 'instructions') {
       this.cleanup.instructions.shown();
     }

@@ -66,8 +66,8 @@ machine, so it is tested without windows, a microphone, a model, a network or a 
   (the "Ask" answer, one view for the tray and the card), `markdown.ts` (its safe Markdown), `card.ts` and `cardPage.ts`
   (the card window), `strings.ts`, `window.html` with `window/` (the main window: `page.ts`, `history.ts`, `said.ts`
   (how an entry was said, and its player), `habits.ts` (the Habits section), `settings.ts`, `text.ts`, `icons.ts`,
-  `api.ts`, and `model.ts`, `keys.ts` and `mic.ts`, the speech model's block and the key and microphone rows the welcome
-  window shares), `welcome.html` with `welcome/` (`page.ts`, `steps.ts`, `text.ts`, `welcome.css`), and `design/` (Drop,
+  `api.ts`, and `model.ts`, `mic.ts` and `cleanup.ts`, the speech model's block, the microphone rows and the Cleanup
+  page the welcome window shares), `welcome.html` with `welcome/` (`page.ts`, `steps.ts`, `text.ts`, `welcome.css`), and `design/` (Drop,
   tray card, answer and animation code, styles including the main and welcome windows' `window.css`, the Bebas Neue and
   Montserrat ExtraBold fonts).
 - **`cue-cli`** (`app/crates/cli`: keys, usage and `leak-scan`, see Installer and release build) and **`cue-bench`**
@@ -1101,9 +1101,11 @@ Quit exits with one. When it is destroyed, its history channel is dropped and a 
 The main and welcome windows' pages talk to the core through the app's own commands (`commands.rs`), and every one
 starts with `guard` and its own name. The main window is answered for every command but the welcome window's own
 (`welcome_step`, `welcome_close`, `open_link`); the welcome window only for what its steps need (`WELCOME_COMMANDS`:
-`settings_get`, `settings_set` with a microphone change alone, `model_get`, `model_retry`, `key_state`, `key_set`,
-`key_check`, `mic_list`, `mic_preview`, `mic_access`, and its own); any other window gets `notMain` and a log line with
-its label and the command. The Drop's and the card's commands (`drop_action`, `answer_source`, `drop_ready`,
+`settings_get`, `settings_set` with a change of the microphone or of where the cleanup runs (`refineWhere`,
+`refineAgent`, `refineAgentModel`, `refineFallback`) alone, `agents_get`, `agent_install_link`, `llms_get`,
+`llms_search`, `llm_choose`, `llm_delete`, `model_get`, `model_retry`, `mic_list`, `mic_preview`, `mic_access`, and its
+own; never the history or the instructions); any other window gets `notMain` and a log line with its label and the
+command. The Drop's and the card's commands (`drop_action`, `answer_source`, `drop_ready`,
 `drop_drag`, `drop_hit_rects`, `card_ready`, `card_hit_rects`) answer those windows alone in the same way (`ipc::guard`)
 and do nothing for another. The Drop and the card draw what a model wrote, so no page of theirs may read the history,
 change a setting or touch a key. Errors are short codes (`core`, `notFound`, `badValue`, `badName`, `emptyKey`, `store`,
@@ -1297,12 +1299,14 @@ again.
 
 ## Welcome window
 
-An ordinary window that walks through Hello, Key, Model, Microphone, First dictation and Done (`welcome_window`, label
-`welcome`, the page `welcome.html`). It opens at startup when the key of the cleanup's cloud connection is missing from
-Credential Manager (a local server needs none; a
-store that cannot be read is no missing key: a log line says so), and with `--welcome`,
-matched exactly among the program's arguments (`args_os`). The check runs in `setup` right after the tray and before
-the hook starts, so the core holds the hotkey before any chord comes. As with the main window there is one at a time
+An ordinary window that walks through Hello, Кто чистит текст (who cleans the text), Model, Microphone, First
+dictation and Done (`welcome_window`, label `welcome`, the page `welcome.html`). It opens at CUE's first start here
+(`first_start`, read in `setup` before anything is written): no settings.json, or one that never set the cleanup — no
+`refine.where`, nor an earlier version's `runs`, `connection` or `model` (`settings::cleanup_set`); a file that cannot
+be read is the user's and no first start. CUE holds no key, so a missing one opens nothing, and a user upgrading keeps
+the settings that say where the cleanup runs. It opens too with `--welcome`, matched exactly among the program's
+arguments (`args_os`); a restart after a loss of WebView2 opens it for neither. The check runs in `setup` right after
+the tray and before the hook starts, so the core holds the hotkey before any chord comes. As with the main window there is one at a time
 (its own `CREATING`, with `main_window::decide`), created when opened, destroyed when closed and built on
 `cue-welcome-window`. Windows draws its frame in the Windows theme with the close button alone; it is 560 × 430
 logical px, centered, not resizable, and it takes the focus, so its first dictation is pasted into its own field.
@@ -1313,11 +1317,15 @@ logical px, centered, not resizable, and it takes the focus, so its first dictat
   start. In between the page moves the gate with its steps (`welcome_step`): held from its load, let go on First
   dictation, held again on any other step. A chord the hold ignores brings the window forward (`bring_forward`, which
   never creates one; see Hotkey chord).
-- **Key**: the settings tray's key row (`window/keys.ts`), read again on each entry, with a link to the Anthropic
-  Console, the price line ("Recognition is free, on this computer; Anthropic bills only the cleanup.") and the privacy
-  line ("Sound stays on this computer; text goes to Anthropic for the cleanup; the history stays on this computer
-  only."). Next waits until the key is saved, has not failed its check and is not waiting for one, and no typed key
-  waits in the field; leaving the step empties the field.
+- **Кто чистит текст**: the settings tray's Cleanup page itself (`window/cleanup.ts`) under the heading — Без ИИ ·
+  Этот компьютер · Ваш AI, the part's list, the line on where the text goes — without "Ваши инструкции" (the
+  instructions are the main window's). Entering the step looks at the agents (`agents_get`, which never starts
+  OpenCode's server); the local models come from `llms_get` and `cue://llms`. The first time the agents are known in
+  the window, a cleanup not chosen yet (the agent route with no agent, or this computer with no model) is chosen
+  (`cleanupDefault`): Ваш AI with OpenCode when found, else the first agent found (OpenCode, Codex); none found,
+  Этот компьютер with nothing chosen, its recommended model first in "Для ваших языков" and nothing downloading until
+  a model is pressed. A choice already made stays. Next is always there; the list scrolls when it is longer than the
+  window.
 - **Model**: the settings tray's model block (`window/model.ts`), drawn anew on every `cue://model` (the page asks
   `model_get` once at its load). The model has been downloading since CUE started (see The speech model), so the step
   shows its progress, Retry when it failed, and moves on by itself when the model becomes ready while the step is
@@ -1332,10 +1340,11 @@ logical px, centered, not resizable, and it takes the focus, so its first dictat
 - **First dictation**: a text field kept in focus takes the paste of an ordinary dictation; the first text in it
   leads to Done 1.5 s later, with the number of words. Until then the field says it waits and the main button is not
   shown (its place kept).
-- **Links** go by name (`open_link`: `anthropic`, `micPrivacy`, exact), each to a fixed address, opened with
-  `ShellExecuteW` on `cue-open-link`, so no address of the page reaches the shell. `welcome_close` closes the window.
+- **Links** go by name (`open_link`: `micPrivacy`, exact; an agent's install page by its id, `agent_install_link`),
+  each to a fixed address, opened with `ShellExecuteW` on `cue-open-link`, so no address of the page reaches the shell.
+  `welcome_close` closes the window.
 - The page takes its language from `settings_get` (English or Russian, `welcome/text.ts`) and changes no setting but
-  the microphone. Its headings use Montserrat ExtraBold, its keycaps Bebas Neue.
+  the microphone and where the cleanup runs. Its headings use Montserrat ExtraBold, its keycaps Bebas Neue.
 
 ## Tray icon
 

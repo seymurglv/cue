@@ -1,23 +1,27 @@
-// The welcome window's page (spec 4a §1): one step at a time — Hello, Model, Microphone, First dictation, Done — with
+// The welcome window's page (spec 4a §1): one step at a time — Hello, Кто чистит текст, Model, Microphone, First
+// dictation, Done — with
 // the step dots, Back and one main button at the bottom; a new step slides in from the side. Ported from the approved
 // design (stage 6, the welcome window only): Windows draws the frame, so the page draws none. The page draws nothing
 // until the core has told it the settings (the language is SettingsView.lang); the theme follows Windows.
 // The core holds the hotkey from the window's creation: the page holds it again on load (a reload starts from a known
 // state), lets it go on First dictation and holds it again when leaving that step. The microphone is open only while
-// the Microphone step is shown.
+// the Microphone step is shown. "Кто чистит текст" is the Cleanup page (window/cleanup.ts) without its instructions:
+// it looks at the agents when shown (never starting OpenCode's server), and the first time they are known chooses for
+// a cleanup not chosen yet (`cleanupDefault`); nothing downloads until a model is pressed.
 import '../design/cue.css';
 import '../design/window.css';
 import './welcome.css';
 import '../design/cue.js';
 import '../design/drop.js';
 import * as api from '../window/api';
-import type { LinkTarget, MicAccess, ModelState, SettingChange, SettingsView } from '../window/api';
+import type { AgentView, LinkTarget, MicAccess, ModelState, SettingChange, SettingsView, Where } from '../window/api';
 import { CUE } from '../designParts';
+import { CleanupPage } from '../window/cleanup';
 import { MicRows } from '../window/mic';
 import { modelRow, stepModelRow } from '../window/model';
-import { Menus, codeOf, h, logFailed, relRect, type MenuItem } from '../window/page';
-import { TEXTS, pickLang, type Lang, type WinText } from '../window/text';
-import { STEPS, stepPage, wordCount, type Step } from './steps';
+import { Menus, codeOf, h, logFailed, relRect, syncSeg, type MenuAlign, type MenuFilter, type MenuItem } from '../window/page';
+import { TEXTS, isoDate, pickLang, type Lang, type WinText } from '../window/text';
+import { STEPS, cleanupDefault, stepPage, wordCount, type Step } from './steps';
 import { WELCOME_TEXTS, type WelcomeText } from './text';
 
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
@@ -66,6 +70,10 @@ export class WelcomePage {
   /** The speech model's state, followed from `cue://model`. */
   model: ModelState | null = null;
   readonly mic: MicRows;
+  /** "Кто чистит текст": the Cleanup page, without its instructions. */
+  readonly cleanup: CleanupPage;
+  /** The cleanup was chosen for the user once (or found chosen): never again in this window. */
+  private defaulted = false;
   readonly reduced: () => boolean;
   private readonly steps: readonly Step[] = STEPS;
   /** The step shown, by its place in `steps`. */
@@ -95,6 +103,7 @@ export class WelcomePage {
     app.classList.add('app', 'ow');
     this.menus = new Menus(app);
     this.mic = new MicRows(this, () => this.shown('mic'), () => this.redrawMic());
+    this.cleanup = new CleanupPage(this, () => {}, () => {}, { instructions: false });
     const signal = this.off.signal;
     const dark = window.matchMedia?.(DARK);
     const theme = () => (document.documentElement.dataset.theme = dark?.matches ? 'dark' : 'light');
@@ -146,6 +155,9 @@ export class WelcomePage {
     this.text = WELCOME_TEXTS[this.lang];
     document.documentElement.lang = this.lang;
     this.build();
+    // The local models of "Этот компьютер", followed for the page's whole life: a download goes on in its row.
+    api.onLlms((v) => this.cleanup.setLlms(v)).catch((e) => logFailed('following the language models', e));
+    api.llmsGet().then((v) => this.cleanup.setLlms(v), (e) => logFailed('reading the language models', e));
     // The model downloads while the steps go on: its step redraws its block, and moves on by itself once it is ready.
     api.onModel((m) => this.followModel(m)).catch((e) => logFailed('following the speech model', e));
     api.modelGet().then((m) => this.followModel(m), (e) => logFailed('reading the speech model', e));
@@ -167,17 +179,34 @@ export class WelcomePage {
     this.mic.stopPreview();
   }
 
-  menu(button: HTMLElement, items: MenuItem[], pick: (value: string) => void, note?: string): void {
-    this.menus.show(button, items, pick, note);
+  menu(
+    button: HTMLElement,
+    items: MenuItem[],
+    pick: (value: string) => void,
+    note?: string,
+    align?: MenuAlign,
+    wide?: boolean,
+    filter?: MenuFilter,
+  ): void {
+    this.menus.show(button, items, pick, note, align, wide, filter);
   }
 
-  /** The microphone through the core (the only setting this window changes). */
+  closeMenu(): void {
+    this.menus.close();
+  }
+
+  today(): string {
+    return isoDate(new Date());
+  }
+
+  /** The microphone or the cleanup through the core (the only settings this window changes). */
   async change(c: SettingChange): Promise<SettingsView | null> {
     try {
       this.settings = await api.settingsSet(c);
       // A new preview starts for the new choice.
-      this.failed = false;
+      if (c.kind === 'micDevice') this.failed = false;
       this.redrawMic();
+      this.redrawCleanup();
       return this.settings;
     } catch (e) {
       logFailed(`setting ${c.kind}`, e);
@@ -186,6 +215,7 @@ export class WelcomePage {
         await api.settingsGet().then((v) => {
           this.settings = v;
           this.redrawMic();
+          this.redrawCleanup();
         }, (err) => logFailed('reading the settings', err));
       }
       return null;
@@ -231,6 +261,7 @@ export class WelcomePage {
   private leave(): void {
     for (const f of this.undo.splice(0)) f();
     this.menus.close();
+    if (this.step === 'cleanup') this.cleanup.left();
     if (this.step === 'mic') this.mic.stopPreview();
     if (this.step === 'try') api.welcomeStep(false).catch((e) => logFailed('holding the hotkey', e));
   }
@@ -244,6 +275,7 @@ export class WelcomePage {
     this.paintFoot();
     const pg = this.current!;
     if (step === 'hello') this.hello(pg);
+    else if (step === 'cleanup') this.lookAtCleanup(pg);
     else if (step === 'mic') this.lookAtMic();
     else if (step === 'try') {
       api.welcomeStep(true).catch((e) => logFailed('letting the hotkey go', e));
@@ -251,6 +283,31 @@ export class WelcomePage {
       if (!this.reduced()) pg.querySelector('textarea[data-field]')?.classList.add('wait');
       this.focusField();
     } else if (step === 'done') this.done(pg);
+  }
+
+  /** "Кто чистит текст" is shown: its parts' thumb finds its place, and the agents are looked at (OpenCode's models
+   *  only from a server already running). The first time they are known, a cleanup not chosen yet is chosen. */
+  private lookAtCleanup(pg: HTMLElement): void {
+    pg.querySelectorAll<HTMLElement>('.segc').forEach(syncSeg);
+    void this.cleanup.refresh().then((agents) => {
+      if (agents) void this.chooseDefault(agents);
+    });
+  }
+
+  private async chooseDefault(agents: AgentView[]): Promise<void> {
+    if (this.defaulted || !this.settings) return;
+    this.defaulted = true;
+    for (const c of cleanupDefault(this.settings, agents)) {
+      if (!(await this.change(c))) return;
+    }
+  }
+
+  /** "Кто чистит текст" takes the new settings where it stands; a move to another part draws its rows anew. */
+  private redrawCleanup(): void {
+    const box = this.shown('cleanup')?.querySelector<HTMLElement>('.ocl');
+    if (!box || this.cleanup.paint()) return;
+    box.replaceChildren(...this.cleanup.rows());
+    box.querySelectorAll<HTMLElement>('.segc').forEach(syncSeg);
   }
 
   /** The Microphone step's preview starts, and Windows' access and its microphones are read. */
@@ -313,7 +370,7 @@ export class WelcomePage {
    *  so Back does not move. */
   private paintPrimary(): void {
     const x = this.text;
-    const label = { hello: x.start, model: x.next, mic: this.blocked() ? x.next : x.micWorks, try: null, done: x.finish }[
+    const label = { hello: x.start, cleanup: x.next, model: x.next, mic: this.blocked() ? x.next : x.micWorks, try: null, done: x.finish }[
       this.step
     ];
     const lbl = this.pri.querySelector<HTMLElement>('.lbl')!;
@@ -329,7 +386,13 @@ export class WelcomePage {
     else if (t.closest('[data-back]')) {
       if (this.at > 0 && this.step !== 'done') this.go(this.at - 1);
     } else if ((b = t.closest<HTMLElement>('[data-dd="mic"]'))) this.mic.menu(b);
-    else if ((b = t.closest<HTMLElement>('[data-link]'))) {
+    else if ((b = t.closest<HTMLElement>('[data-seg="where"] button')) && b.getAttribute('aria-pressed') !== 'true') {
+      // The thumb slides to the part pressed at once; the list follows the core's answer.
+      const seg = b.closest<HTMLElement>('.segc')!;
+      for (const x of seg.querySelectorAll('button')) x.setAttribute('aria-pressed', String(x === b));
+      syncSeg(seg);
+      this.cleanup.choose(b.dataset.v as Where, seg);
+    } else if ((b = t.closest<HTMLElement>('[data-link]'))) {
       api.openLink(b.dataset.link as LinkTarget).catch((err) => logFailed('opening a link', err));
     }
   }

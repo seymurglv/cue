@@ -136,6 +136,8 @@ fn setup(
     core_tx: UnboundedSender<CoreEvent>,
     core_rx: UnboundedReceiver<CoreEvent>,
 ) -> anyhow::Result<()> {
+    // Read before anything is written: no settings.json yet, or one that never set the cleanup, opens the welcome window.
+    let first = welcome_window::first_start(&paths.settings);
     // Any read error (corrupt or unreadable) means defaults, and the user's file is not overwritten all session.
     let (settings, can_save_settings) = match cue_core::settings::load(&paths.settings) {
         Ok(s) => (s, true),
@@ -199,10 +201,12 @@ fn setup(
     };
     // Without the icon there is no way to quit or pause: if it is not created, CUE does not start (reason in the log).
     tray::create(app.handle(), core_tx.clone(), paths.logs.clone(), lang).context("tray icon not created")?;
-    // `--welcome`: the welcome window. Before the hook: the core hears that it holds the hotkey ahead of any chord.
-    // `--welcome` is the user's ask at launch: a restart after a loss of WebView2 carries it along, but does not ask again.
-    let asked = welcome_window::asks_welcome(std::env::args_os()) && !webview_health::restarted();
-    welcome_window::open_at_start(app.handle(), asked);
+    // The first start, or `--welcome`: the welcome window. Before the hook: the core hears that it holds the hotkey ahead
+    // of any chord. A restart after a loss of WebView2 opens it for neither: it carries `--welcome` along, and its
+    // settings may still be unwritten, but the user is already past the start.
+    let restarted = webview_health::restarted();
+    let asked = welcome_window::asks_welcome(std::env::args_os()) && !restarted;
+    welcome_window::open_at_start(app.handle(), first && !restarted, asked);
 
     let (hk_tx, hk_rx) = std::sync::mpsc::channel::<HotkeyEvent>();
     start_hook(&hk_tx);
