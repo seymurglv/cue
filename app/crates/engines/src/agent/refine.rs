@@ -110,12 +110,15 @@ pub async fn run(
                 Parsed::Text(t) => Parsed::Text(rules::drop_copied_context(&t, ctx.before_cursor.as_deref(), raw).to_owned()),
                 other => other,
             };
-            // A cleanup no schema held may open with a lead-in ("Вот исправленный текст: …"): not the text said. A
-            // translation's words are not the speaker's, so it is not judged by them.
+            // An answer no schema held may open with a lead-in ("Вот исправленный текст: …", "Here is the translation:
+            // …"): not the text said. A translation's words are never the speaker's, so it is judged by the lead-in
+            // words instead.
             if let Parsed::Text(t) = &parsed
                 && !held
-                && matches!(job, Job::Clean | Job::Rewrite)
-                && rules::opens_with_lead_in(raw, t, &dict.terms, &ctx.said)
+                && match job {
+                    Job::Clean | Job::Rewrite => rules::opens_with_lead_in(raw, t, &dict.terms, &ctx.said),
+                    Job::Translate(_) => rules::translation_opens_with_lead_in(raw, t),
+                }
             {
                 return prompt::raw_fallback(raw, RefineOutcome::RawFallback, Usage::default(), "the answer opens with a lead-in");
             }
@@ -384,6 +387,30 @@ mod tests {
         let listed = "План на завтра:\n- купить молоко и хлеб\n- позвонить в банк насчет карты\n- забрать посылку на почте до шести вечера\n- потом зайти к маме на ужин с тортом.";
         let r = opencode_cleans(list, listed, Job::Rewrite).await;
         assert_eq!((r.text.as_str(), r.outcome), (listed, RefineOutcome::Refined));
+    }
+
+    /// A translation through OpenCode that opens with a lead-in is not pasted, either way round; a translated heading
+    /// with a colon and a plain translation are.
+    #[tokio::test]
+    async fn opencode_translation_lead_in_is_refused() {
+        let ru = "план на завтра купить молоко и хлеб позвонить в банк насчет карты и забрать посылку на почте до шести вечера";
+        let en = "plan for tomorrow buy milk and bread call the bank about the card and pick up the parcel at the post office before six";
+        let to_en = "Plan for tomorrow: buy milk and bread, call the bank about the card, and pick up the parcel at the post office before six.";
+        let to_ru = "План на завтра: купить молоко и хлеб, позвонить в банк насчёт карты и забрать посылку на почте до шести.";
+        for (raw, to, translated, leads) in [
+            (ru, "en", to_en, ["Here is the translation:\n", "Translation: ", "Here's the translated text:\n\n"]),
+            (en, "ru", to_ru, ["Вот перевод:\n", "Перевод: ", "Переведённый текст:\n"]),
+        ] {
+            let r = opencode_cleans(raw, translated, Job::Translate(to)).await;
+            assert_eq!((r.text.as_str(), r.outcome), (translated, RefineOutcome::Refined), "{to}");
+            let plain = translated.replacen(':', ",", 1);
+            let r = opencode_cleans(raw, &plain, Job::Translate(to)).await;
+            assert_eq!((r.text.as_str(), r.outcome), (plain.as_str(), RefineOutcome::Refined), "{to}");
+            for lead in leads {
+                let r = opencode_cleans(raw, &format!("{lead}{translated}"), Job::Translate(to)).await;
+                assert_eq!((r.text.as_str(), r.outcome), (raw, RefineOutcome::RawFallback), "{lead:?}");
+            }
+        }
     }
 
     /// The provider's rate limit or a used-up free allowance: the agent's "did not answer", the raw text kept.

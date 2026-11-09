@@ -439,12 +439,33 @@ pub fn sanity_ok_with(raw: &str, refined: &str, terms: &[String], said: &[String
 /// a time ("10:30") is no such colon. Dictionary terms and the habits' words (`said`) count as said, as in
 /// [`sanity_ok_with`].
 pub fn opens_with_lead_in(raw: &str, refined: &str, terms: &[String], said: &[String]) -> bool {
-    let first = refined.trim_start().lines().next().unwrap_or("");
+    let Some(head) = before_first_colon(refined) else { return false };
+    let known = Said::new(&words(raw), terms, said);
+    words(head).iter().any(|w| !known.has(w))
+}
+
+/// A translation no schema held opens with a lead-in: before a colon in its first line ([`opens_with_lead_in`]'s
+/// colon) stands a reply word ([`REPLY_WORDS`]: "вот", "here", "конечно", …) or a word of [`TRANSLATION_STEMS`]
+/// ("Here is the translation:", "Вот перевод:", "Translated text:"). A translation's words are never the speaker's, so
+/// they are judged by these lists, not by what was said: a translated heading ("План на завтра:" → "Plan for
+/// tomorrow:") passes. When the speaker said such a word anywhere ("вот план на завтра", "переведи это"), the answer
+/// may rightly hold it, and nothing is refused.
+pub fn translation_opens_with_lead_in(raw: &str, translated: &str) -> bool {
+    let lead = |w: &str| REPLY_WORDS.contains(&w) || TRANSLATION_STEMS.iter().any(|s| w.starts_with(s));
+    let Some(head) = before_first_colon(translated) else { return false };
+    !words(raw).iter().any(|w| lead(w)) && words(head).iter().any(|w| lead(w))
+}
+
+/// The beginnings of the words that name a translation (lowercase, "ё" as "е", as [`words`] gives them).
+const TRANSLATION_STEMS: [&str; 3] = ["перевод", "переведен", "translat"];
+
+/// The first line of `text` up to its first colon that ends the line or is followed by a space (not the one in
+/// "10:30"); `None` without one.
+fn before_first_colon(text: &str) -> Option<&str> {
+    let first = text.trim_start().lines().next().unwrap_or("");
     let colon =
         first.char_indices().find(|&(i, c)| c == ':' && first[i + 1..].chars().next().is_none_or(char::is_whitespace));
-    let Some((at, _)) = colon else { return false };
-    let known = Said::new(&words(raw), terms, said);
-    words(&first[..at]).iter().any(|w| !known.has(w))
+    colon.map(|(at, _)| &first[..at])
 }
 
 /// What counts as said: the speaker's words, the dictionary's and the habits' (`said`), and any word of their stems
@@ -875,6 +896,31 @@ mod tests {
         let terms = vec!["Soniox".to_string()];
         assert!(!opens_with_lead_in("сониокс итоги теста хорошие", "Soniox: итоги теста хорошие.", &terms, &[]));
         assert!(opens_with_lead_in("сониокс итоги теста хорошие", "Soniox: итоги теста хорошие.", &[], &[]));
+    }
+
+    /// A translation's lead-in is judged by the lead-in words, not by what was said: a translated heading passes.
+    #[test]
+    fn a_translation_lead_in_is_refused_and_a_translated_heading_passes() {
+        let ru = "план на завтра купить молоко и позвонить в банк";
+        let en = "plan for tomorrow buy milk and call the bank";
+        for answer in [
+            "Here is the translation:\nPlan for tomorrow: buy milk and call the bank.",
+            "Here's the translated text: Plan for tomorrow: buy milk and call the bank.",
+            "Translation: Plan for tomorrow, buy milk and call the bank.",
+            "Sure: plan for tomorrow, buy milk and call the bank.",
+        ] {
+            assert!(translation_opens_with_lead_in(ru, answer), "{answer}");
+        }
+        for answer in ["Вот перевод:\nПлан на завтра: купить молоко и позвонить в банк.", "Переведённый текст: план на завтра."] {
+            assert!(translation_opens_with_lead_in(en, answer), "{answer}");
+        }
+        assert!(!translation_opens_with_lead_in(ru, "Plan for tomorrow:\n- buy milk\n- call the bank"));
+        assert!(!translation_opens_with_lead_in(en, "План на завтра: купить молоко и позвонить в банк."));
+        assert!(!translation_opens_with_lead_in(ru, "Plan for tomorrow: buy milk and call the bank at 10:30."));
+        assert!(!translation_opens_with_lead_in(ru, "Buy milk and call the bank."));
+        // The speaker said the word: the answer may hold it.
+        assert!(!translation_opens_with_lead_in("вот план на завтра купить молоко", "Here is the plan for tomorrow: buy milk."));
+        assert!(!translation_opens_with_lead_in("перевод договора готов", "Translation of the contract: ready."));
     }
 
     /// An answer opens with a reply word the speaker never said; a cleanup keeps one they did say.

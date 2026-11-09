@@ -239,7 +239,10 @@ in the park (`LONG` in `live.rs`) were sent.
   plain text in a fence is taken without the fence); before, a plain-text answer was refused as "does not match the
   schema" and the text went in as said. A plain-text cleanup whose first line has a colon after words the speaker did
   not say ("Вот исправленный текст:", "Here is the cleaned text:") is refused (`opens_with_lead_in`), and "вот",
-  "here", "исправленный", "cleaned", "corrected" joined the reply words refused at an answer's start unless said.
+  "here", "исправленный", "cleaned", "corrected" joined the reply words refused at an answer's start unless said. A
+  translation's words are never the speaker's, so a plain-text translation is refused when a reply word or a word
+  naming a translation ("перевод…", "переведён…", "translat…") stands before a colon in its first line ("Here is the
+  translation:", "Вот перевод:"), unless the speaker said one (`translation_opens_with_lead_in`).
 - **Time per cleanup** (`agent::refine::refine`, Claude Haiku 5.5, warm server), short sentence: 1.90, 1.81, 1.75 s;
   2.10, 1.77, 2.00 s; 1.66, 2.01, 1.61 s; every one `Refined` as "Завтра в 10 созвон с командой.".
 - **A 165-word dictation** (`live_opencode_long_dictation`): 7.47, 6.98, 5.66 s; 6.50, 5.85, 6.10 s; then within the

@@ -422,7 +422,10 @@ At its first start this version deletes the Soniox key of earlier versions from 
     folder: 2.2.5 keeps every folder a request names as one of the user's projects. Its answer is the JSON CUE asks
     for, the same in a code fence, or plain text, fenced or not (no schema holds it), each through the same check
     (`refine::held_to_schema`); a plain-text cleanup whose first line has a colon after words the speaker did not say
-    ("Вот исправленный текст:") is refused (`refine::opens_with_lead_in`). A rate limit or a used-up free allowance
+    ("Вот исправленный текст:") is refused (`refine::opens_with_lead_in`), and so is a translation whose first line
+    has a reply word or a word naming a translation before a colon ("Here is the translation:", "Вот перевод:";
+    `refine::translation_opens_with_lead_in`, judged by those words since a translation's are never the speaker's: a
+    translated "Plan for tomorrow:" passes). A rate limit or a used-up free allowance
     (`ProviderRequestError`, `reason: "rate_limit"`) is `AgentFailure::RateLimited`: the agent did not answer
     (`RawAgent(Silent)`, "не ответил"; the local fallback cleans as for any silence), the log's reason "rate limit".
 - The cloud request described below (the Messages API, OpenRouter, the OpenAI-compatible services) is no longer reached

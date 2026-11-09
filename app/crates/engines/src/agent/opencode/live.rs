@@ -223,12 +223,21 @@ async fn live_opencode_long_dictation() {
             continue;
         };
         let parsed = crate::prompt::parse_content(&answer, None, false);
-        let lead_in = matches!(&parsed, crate::prompt::Parsed::Text(t) if cue_core::refine::opens_with_lead_in(LONG, t, &[], &[]));
-        let (text, outcome) = crate::prompt::decide(LONG, parsed, &dict, &s);
         let form = if answer.trim_start().starts_with('{') { "json" } else if answer.trim_start().starts_with("```") { "fenced" } else { "plain" };
-        println!("long cleanup {}: {outcome:?} (lead-in {lead_in}, {form}) in {took:?}, {} chars", run + 1, text.chars().count());
-        if outcome != cue_core::flow::RefineOutcome::Refined || lead_in {
-            println!("  answer: {answer}");
-        }
+        let (outcome, reason) = match &parsed {
+            crate::prompt::Parsed::Text(t) if cue_core::refine::opens_with_lead_in(LONG, t, &[], &[]) => {
+                (cue_core::flow::RefineOutcome::RawFallback, "the answer opens with a lead-in")
+            }
+            crate::prompt::Parsed::Text(t) => {
+                let tidy = crate::prompt::decide(LONG, crate::prompt::Parsed::Text(t.clone()), &dict, &s);
+                let ratio = t.chars().count() as f32 / LONG.chars().count() as f32;
+                let why = if tidy.1 == cue_core::flow::RefineOutcome::Refined { "" } else { "failed the sanity check" };
+                println!("  answer {} chars, {ratio:.2} of what was said", t.chars().count());
+                (tidy.1, why)
+            }
+            other => (cue_core::flow::RefineOutcome::RawFallback, if *other == crate::prompt::Parsed::Malformed { "does not match the schema" } else { "refused or cut" }),
+        };
+        // The reason on every run that is not a cleanup; never the text.
+        println!("long cleanup {}: {outcome:?} {reason} ({form}) in {took:?}", run + 1);
     }
 }
