@@ -214,10 +214,10 @@ describe('Which Drop parts are visible in each state', () => {
     expect(shown()).toEqual([]);
   });
 
-  it('thinking: three dots centered on the 24 × 24 mark grid (center 12, like the circle)', () => {
+  it("thinking: three dots centered on the 24 × 24 mark grid (center 12, like the circle), on the voice bars' lines", () => {
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     new (CUE().Morph)(g, { state: 'think' });
-    const xs = [...g.querySelectorAll('.m-l')].slice(0, 3).map((l) => Number(l.getAttribute('x1')));
+    const xs = [...g.querySelectorAll('.m-l')].filter((_, i) => i % 2 === 0).map((l) => Number(l.getAttribute('x1')));
     expect(xs).toEqual([7.5, 12, 16.5]);
     expect((Math.min(...xs) + Math.max(...xs)) / 2).toBe(12);
   });
@@ -461,48 +461,25 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
     expect(size(part('.pt.on'), 'margin-left')).toBeCloseTo(4 * 0.9, 6);
   });
 
-  /** The two visible gaps of the idle capsule on hover, CSS px: capsule edge to the bar's left stroke edge, and the lamp
-   *  dot's right edge to the capsule edge. Where the bar and the dot are painted is
-   *  read from the idle mark itself (cue.js), not from drop.css. */
-  const idleGaps = () => {
-    const mark = part('.mkw svg');
-    const line = mark.querySelector('line')!;
-    const dot = mark.querySelector('circle')!;
-    const n = (el: Element, a: string) => parseFloat(el.getAttribute(a)!);
-    const box = markBox();
-    const barL = ((n(line, 'x1') - n(line, 'stroke-width') / 2) / 24) * box;
-    const dotR = ((n(dot, 'cx') + n(dot, 'r')) / 24) * box;
-    const mk = part('.mkw');
-    return {
-      left: size(drop(), 'padding-left') + size(mk, 'margin-left') + barL,
-      right: box - dotR + size(mk, 'margin-right') + size(drop(), 'padding-right'),
-    };
-  };
-
-  it('idle on hover: 0.3 h at both ends to what is painted, at every place and size', () => {
-    ctl.apply(base);
-    hover(true);
-    // The Drop's idle mark the margins are measured from, centered (cue.js): the first bar at x 4.85 with a 2.2 stroke,
-    // the lamp at 18.35 with r 1.9.
-    const line = part('.mkw svg line');
-    expect([line.getAttribute('x1'), line.getAttribute('stroke-width')]).toEqual(['4.850', '2.2']);
-    const dot = part('.mkw svg circle');
-    expect([dot.getAttribute('cx'), dot.getAttribute('r')]).toEqual(['18.350', '1.900']);
+  it('idle on hover is the circle a dictation starts in: --h wide, the mark centered, at every place and size', () => {
     const check = (h: number, at: string) => {
-      const g = idleGaps();
-      expect(g.left, `${at} left`).toBeCloseTo(0.3 * h, 6);
-      expect(g.right, `${at} right`).toBeCloseTo(0.3 * h, 6);
+      ctl.apply(base);
+      hover(true);
+      expect(size(drop(), 'height'), at).toBe(h);
+      expect(circleWidth(), at).toBeCloseTo(h, 6);
+      // The same paddings and margins on both sides, as in start and listen.
+      expect(size(drop(), 'padding-left'), at).toBeCloseTo(size(drop(), 'padding-right'), 9);
+      expect(size(part('.mkw'), 'margin-left'), at).toBeCloseTo(size(part('.mkw'), 'margin-right'), 9);
+      const hov = [size(drop(), 'padding-left'), size(part('.mkw'), 'margin-left')];
+      ctl.apply({ ...base, phase: 'start' });
+      expect([size(drop(), 'padding-left'), size(part('.mkw'), 'margin-left')], at).toEqual(hov);
+      hover(false);
     };
     for (const place of ['bottom', 'top', 'left', 'right'] as const) {
       ctl.place(place);
       check(H, place);
     }
-    // 36 px: no padding on the left; the mark's margins 7.425 and 0, and 7.425 of padding on the right: the mark's box
-    // is centered in the capsule, as in the circle.
     ctl.place('bottom');
-    expect(size(drop(), 'padding-left')).toBe(0);
-    expect([size(part('.mkw'), 'margin-left'), size(part('.mkw'), 'margin-right')].map((v) => +v.toFixed(4))).toEqual([7.425, 0]);
-    expect(+size(drop(), 'padding-right').toFixed(4)).toBe(7.425);
     const big = document.createElement('style');
     big.textContent = ':root{--h:48px}';
     document.head.append(big);
@@ -511,9 +488,15 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
     } finally {
       big.remove();
     }
-    // Not on hover, and in other states, the parts keep the usual 4u margins.
+  });
+
+  it("the mark's part paints as far as the circle: the lamp near the rim lies outside the grid", () => {
     ctl.apply({ ...base, phase: 'listen' });
-    expect(size(part('.mkw'), 'margin-left')).toBeCloseTo(3.6, 6);
+    const mk = getComputedStyle(part('.mkw'));
+    expect(mk.getPropertyValue('overflow')).toBe('visible');
+    // 0.2 h past the part on every side: from the 0.6 h part to the circle's square.
+    const inset = /^inset\((.+)\)$/.exec(mk.getPropertyValue('clip-path').trim())!;
+    expect(resolvePx(part('.mkw'), inset[1])).toBeCloseTo(-0.2 * H, 6);
   });
 
   it('idle strip: as long as the Drop is high, a fifth of it thick; upright at the side places', () => {
@@ -600,10 +583,10 @@ describe('The mark opens to its own size, the same in every state', () => {
   });
 });
 
-describe("The Drop's mark is centered in the circle and stays put from hover into a dictation", () => {
+describe("The Drop's mark: the bars centered on the circle, the lamp near its rim, still from hover into a dictation", () => {
   const n = (el: Element, a: string) => parseFloat(el.getAttribute(a)!);
-  /** What the Drop's mark paints on its 24 grid, the lines with half their stroke and the lamp. */
-  const painted = () => {
+  /** The visible lines' painted box on the mark's 24 grid, with half their stroke. */
+  const linesCenter = () => {
     const g = document.querySelector('.drop .mkw svg g')!;
     const xs: number[] = [];
     for (const l of g.querySelectorAll('line')) {
@@ -611,31 +594,38 @@ describe("The Drop's mark is centered in the circle and stays put from hover int
       const half = n(l, 'stroke-width') / 2;
       xs.push(n(l, 'x1') - half, n(l, 'x1') + half, n(l, 'x2') - half, n(l, 'x2') + half);
     }
-    const dot = g.querySelector('circle')!;
-    if (n(dot, 'opacity') > 0 && n(dot, 'r') > 0) xs.push(n(dot, 'cx') - n(dot, 'r'), n(dot, 'cx') + n(dot, 'r'));
     return (Math.min(...xs) + Math.max(...xs)) / 2;
   };
   const bars = () => {
     const l = [...document.querySelectorAll('.drop .mkw svg line')];
     return [l[0], l[2], l[4]].map((x) => +n(x, 'x1').toFixed(2));
   };
-  const lamp = () => +n(document.querySelector('.drop .mkw svg circle')!, 'cx').toFixed(2);
+  const lamp = () => {
+    const d = document.querySelector('.drop .mkw svg circle')!;
+    return [n(d, 'cx'), n(d, 'cy')];
+  };
   /** 1.5 s of frames from now: the Drop times its poses from performance.now(). */
   const settle = () => {
     for (let t = performance.now(), end = t + 1500; t < end; t += 16) ctl.frame(t);
   };
 
-  it('every pose of a dictation paints its box on x = 12 within 0.3, the lamp included', () => {
-    for (const phase of ['start', 'listen', 'think', 'done', 'empty', 'cancel', 'error'] as const) {
-      ctl.apply({ ...base, phase, error: phase === 'error' ? 'model' : null });
-      settle();
-      expect(Math.abs(painted() - 12), phase).toBeLessThanOrEqual(0.3 + 1e-9);
+  it('the bars are centered on the circle within 0.25 px in start, listen (every mode) and think', () => {
+    // 0.25 px in the 36 px Drop, on the 24 grid that is 0.6 of it.
+    const tol = 0.25 / ((36 * 0.6) / 24);
+    for (const mode of ['dictate', 'translate', 'ask'] as const) {
+      for (const phase of ['start', 'listen', 'think'] as const) {
+        ctl.apply({ ...base, phase, mode });
+        settle();
+        // In translate and ask, start is their own glyph; the bars come with listen.
+        if (phase !== 'start' || mode === 'dictate') expect(bars(), `${mode} · ${phase}`).toEqual([7.5, 12, 16.5]);
+        expect(Math.abs(linesCenter() - 12), `${mode} · ${phase}`).toBeLessThanOrEqual(tol);
+      }
     }
     for (const lvl of [0, 0.5, 1]) {
       ctl.apply({ ...base, phase: 'listen' });
       ctl.level(lvl);
       settle();
-      expect(Math.abs(painted() - 12), `listen at ${lvl}`).toBeLessThanOrEqual(0.3 + 1e-9);
+      expect(Math.abs(linesCenter() - 12), `listen at ${lvl}`).toBeLessThanOrEqual(tol);
     }
   });
 
@@ -644,7 +634,7 @@ describe("The Drop's mark is centered in the circle and stays put from hover int
     hover(true);
     settle();
     const rest = { bars: bars(), lamp: lamp() };
-    expect(rest).toEqual({ bars: [4.85, 9.35, 13.85], lamp: 18.35 });
+    expect(rest).toEqual({ bars: [7.5, 12, 16.5], lamp: [22, 2] });
     for (const phase of ['start', 'listen'] as const) {
       ctl.apply({ ...base, phase });
       settle();

@@ -1030,10 +1030,12 @@ test keeps them equal). The circle states are 36 × 36. Everything inside is the
 `--h / 40`: the mark 0.6 h (the same while recording), buttons 0.7 h, small icons 0.5 h, keys and label text 0.9 of
 the drawing, paddings and gaps alike. The idle strip is 36 × 7 (upright at the sides), so starting a dictation grows it
 into a circle of the same diameter. Tray cards keep their own sizes. The capsule is centered on the window, so on the
-work area's center at the top and the bottom in every state and while it changes. What the mark paints is centered in
-it, the red lamp included: the Drop's mark (`Morph` with `centered`) draws the voice bars and the lamp 2.65 units of
-its 24 grid left of where other marks draw them, so the hover capsule and the circle hold them in the same place and
-from rest through start into listen only their heights change.
+work area's center at the top and the bottom in every state and while it changes. The voice bars are centered on the
+circle, and the red lamp is a status light near its rim: the Drop's mark (`Morph` with `rim`) draws the lamp 45 degrees
+up and right of the middle (at 22, 2 on the 24 grid, 9 px from the center at 36 px), 3 to 4.5 px inside the rim as it
+grows with the voice and clear of the bars, and the mark's part paints out to the circle for it. On hover the idle Drop
+is the same circle with the same mark, so from rest through start into listen only the bars' heights change; into
+think each bar shrinks into its dot where it stands, and the lamp goes out at its spot.
 
 Phases: `idle` (a thin strip; on hover the mark and the hotkey), `start`, `listen` (voice bars and no timer; cancel
 and done buttons on hover), `think` (three dots), `done` (a check, gone after 1.5 s), `empty`, `cancel` (Restore with

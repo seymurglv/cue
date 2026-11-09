@@ -6,8 +6,8 @@
    paddings and gaps alike. To resize the Drop, change --h (and DROP_SIZE in app/src-tauri/src/drop_window.rs, which
    places it; a test keeps the two equal). Tray cards keep their own sizes.
    The idle strip is as long as the Drop is high and a fifth of it thick, so starting a dictation grows it into a circle
-   of the same diameter. Idle on hover has even margins to what is painted (see the rule below); padding is in the .drop
-   transition (the same .45s as the height) and margins in the parts' own, so the change does not jolt.
+   of the same diameter. Idle on hover is that circle (see the rule below); padding is in the .drop transition (the same
+   .45s as the height) and margins in the parts' own, so the change does not jolt.
    No recording timer (.t is gone): while recording the Drop is the same circle with the same mark, only the bars move.
    Places: the page gives the Drop's center (--ax, --ay; the window's center by default) and data-place on an ancestor.
    bottom (the default) and top keep the Drop centered on the edge and growing both ways along it; left and right pin
@@ -28,15 +28,9 @@
   75%{opacity:.4;animation-timing-function:ease-in}
 }
 @media (prefers-reduced-motion:reduce){.drop[data-s=idle]:not(.hov){animation:none}}
-/* Idle on hover: even margins to what is painted. 0.3 h from each end of the capsule to the bar's left stroke edge and
-   to the lamp dot's right edge. Where the bar and the dot are painted in the mark's box comes from the Drop's idle mark
-   in cue.js, which is centered (on its 24 grid: the first bar at x 4.85 with a 2.2 stroke, the dot at x 18.35 with
-   r 1.9; a test keeps them equal); the padding and the mark's margin take the rest. What is painted being centered in
-   the mark's box, the box is centered in the capsule too, as in the circle: hovering, then starting a dictation, the
-   mark stays where it is. */
-.drop{--bar-l:calc((4.85 - 2.2 / 2) / 24 * var(--mk));--dot-r:calc((18.35 + 1.9) / 24 * var(--mk))}
-.drop[data-s=idle].hov{height:var(--h);opacity:1;padding-left:0;padding-right:calc(.3 * var(--h) - (var(--mk) - var(--dot-r)))}
-.drop[data-s=idle].hov>.mkw.on{margin-left:calc(.3 * var(--h) - var(--bar-l));margin-right:0}
+/* Idle on hover is the circle a dictation starts in, with the same mark: the bars centered on it and the lamp near its
+   rim (cue.js). Starting a dictation, the bars stay where they are and only their heights change. */
+.drop[data-s=idle].hov{height:var(--h);opacity:1}
 /* at the side places the idle strip stands upright against the edge: as high as the Drop, a fifth of it wide */
 :is([data-place=left],[data-place=right]) .drop[data-s=idle]:not(.hov){height:var(--h);min-width:calc(var(--h) / 5);padding-left:0;padding-right:0}
 .drop.away{opacity:0!important;transition:opacity .18s}
@@ -49,7 +43,9 @@
    states the svg's box is the Drop's own box. The renderer snaps an svg's box to whole device pixels and moves its
    content with it: a 0.6 h box 0.2 h in from the edge falls between device pixels at most scales, and the mark would
    sit up to half a pixel off the circle's center; with the Drop's box both are snapped alike. The part clips the svg to
-   the grid, which holds every pose. */
+   the circle's square, 0.2 h past the grid on every side, which holds every pose: the lines stay inside the grid, and
+   the lamp sits near the circle's rim, partly outside it. (A clip-path: overflow-clip-margin takes no calc().) */
+.pt.mkw{overflow:visible;clip-path:inset(calc(var(--h) * -.2))}
 .mkw svg{width:var(--h);height:var(--h);margin-left:calc((var(--mk) - var(--h)) / 2);margin-right:calc((var(--mk) - var(--h)) / 2);margin-top:calc((var(--mk) - var(--h)) / 2);margin-bottom:calc((var(--mk) - var(--h)) / 2)}
 .lab{font-size:calc(13.5 * var(--u));font-weight:550;letter-spacing:-.01em;line-height:calc(24 * var(--u))}
 .lab span,.lbl span{display:inline-block}

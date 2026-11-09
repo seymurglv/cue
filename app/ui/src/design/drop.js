@@ -4,7 +4,7 @@
    (the language is chosen outside this file). Parts only the design's own demo pages used are removed.
    No recording timer: while recording the Drop shows only the mark and stays a circle of the same size.
    Sizes come from drop.css (--h, the Drop's height in every state); nothing here assumes a size.
-   The mark is made centered (cue.js): in the circle what it paints, the lamp included, is centered, as on hover.
+   The mark is made with {rim:true} (cue.js): its bars centered on the circle, its lamp a status light near the rim.
    Also: the mark, buttons and icons open to their own size measured once (this.nat), not to their scrollWidth;
    with prefers-reduced-motion the mark's spring has almost no inertia (k=20, d=.05) and the tray card folds at once. */
 (function(){
@@ -48,7 +48,7 @@ class Drop{
   const P=(k,h)=>{const e=el(h);e.classList.add('pt');this.parts[k]=e;this.p.append(e);return e};
   const T=api.text;
   P('bx',`<button class="ib soft" title="${T.cancel}" aria-label="${T.cancelName}">${IC.x}</button>`);
-  const mk=P('mk','<span class="mkw"><svg viewBox="-8 -8 40 40" width="40" height="40"><g></g></svg></span>');this.morph=new CUE.Morph(mk.querySelector('g'),{centered:true});
+  const mk=P('mk','<span class="mkw"><svg viewBox="-8 -8 40 40" width="40" height="40"><g></g></svg></span>');this.morph=new CUE.Morph(mk.querySelector('g'),{rim:true});
   P('mi','<span class="mi"></span>');P('chip','<span class="chip"></span>');P('why','<span class="why"></span>');
   P('lab','<span class="lab"></span>');P('act','<button class="act"></button>');
   P('undo',`<button class="ib solid" title="${T.restore}" aria-label="${T.restore}">${RING}${IC.undo}</button>`);
