@@ -143,7 +143,7 @@ export class HabitsView {
     if (!this.sec) return;
     const ask = ++this.keyAsk;
     const s = this.ctx.settings;
-    // Task 7: an agent needs no key; until then the cloud path is Anthropic's.
+    // Task 8: an agent needs no key; this check goes with the keys.
     if (!s || s.refineWhere !== 'agent') {
       this.noCleanup.hidden = true;
       return;

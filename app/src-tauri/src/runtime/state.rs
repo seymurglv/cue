@@ -131,30 +131,6 @@ impl LevelGate {
     }
 }
 
-/// Warm-up of the Anthropic connection: at most once every 20 s.
-pub const WARM_EVERY_MS: u64 = 20_000;
-
-#[derive(Default)]
-pub struct WarmUp {
-    last: Option<u64>,
-}
-
-impl WarmUp {
-    /// `true` if it is time to warm up (and the next 20 s are counted from now).
-    pub fn due(&mut self, now: u64) -> bool {
-        if self.last.is_some_and(|t| now.saturating_sub(t) < WARM_EVERY_MS) {
-            return false;
-        }
-        self.last = Some(now);
-        true
-    }
-
-    /// After sleep or unlock the pooled connections are most likely dead: the next warm-up happens without waiting.
-    pub fn reset(&mut self) {
-        self.last = None;
-    }
-}
-
 /// A prompt cache (refine's, and "Ask"'s of its own) lives 5 minutes from the start of the last request that used it
 /// (spec 2 §6.3).
 pub const CACHE_TTL_MS: u64 = 5 * 60_000;
@@ -451,20 +427,6 @@ mod tests {
             l.phase(p);
             assert!(!l.allow(10_000), "{p:?}");
         }
-    }
-
-    #[test]
-    fn warm_up_at_most_every_20_seconds() {
-        let mut w = WarmUp::default();
-        assert!(w.due(1_000));
-        assert!(!w.due(5_000));
-        assert!(!w.due(20_999));
-        assert!(w.due(21_000));
-        assert!(!w.due(21_001));
-        // Woke up: the pooled connections are most likely dead, so warm up right away.
-        w.reset();
-        assert!(w.due(22_000));
-        assert!(!w.due(22_001));
     }
 
     #[test]

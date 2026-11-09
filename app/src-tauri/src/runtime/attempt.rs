@@ -353,8 +353,9 @@ impl UsageLog {
     /// `true` if the model has no price in the settings and no warning about it has been given yet (once per model and
     /// session).
     pub fn warn_no_price(&mut self, pricing: &Pricing, model: &str) -> bool {
-        // A model on this computer costs nothing.
-        if model.starts_with("local:") || self.warned_no_price.iter().any(|m| m == model) || pricing.claude_price(model).is_some() {
+        // A model on this computer, the user's own agent and no AI cost CUE nothing.
+        let free = model.starts_with("local:") || model.starts_with("agent:") || model == "off";
+        if free || self.warned_no_price.iter().any(|m| m == model) || pricing.claude_price(model).is_some() {
             return false;
         }
         self.warned_no_price.push(model.to_owned());
@@ -371,6 +372,8 @@ mod tests {
     fn local_models_have_no_price_warning() {
         let mut u = UsageLog::default();
         assert!(!u.warn_no_price(&cue_core::settings::Pricing::default(), "local:llm--qwen--qwen3-4b-gguf--q4_k_m"));
+        assert!(!u.warn_no_price(&cue_core::settings::Pricing::default(), "agent:codex:gpt-6-luna"), "the user's own agent");
+        assert!(!u.warn_no_price(&cue_core::settings::Pricing::default(), "off"), "no AI");
         assert!(u.warn_no_price(&cue_core::settings::Pricing::default(), "openai:unknown"), "a cloud model without a price");
     }
 
@@ -401,12 +404,12 @@ mod tests {
         assert_eq!(r.ts, "2026-10-27T10:00:00Z");
         assert_eq!(r.audio_ms, 2_000);
         assert_eq!(r.stt_path, SttPath::Local);
-        assert_eq!(r.refine_model, "claude-haiku-5-5");
+        assert_eq!(r.refine_model, "off", "no agent resolved yet");
         assert_eq!((r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens), (120, 15, 7, 3));
-        // Over another connection the row names the model behind it.
-        let mut openai = s.clone();
-        openai.refine.connection = "openai".into();
-        assert_eq!(a.record(Outcome::Inserted, "t".into(), &openai).refine_model, "openai:gpt-6-luna");
+        // Through the user's agent the row names it and the model asked for.
+        let mut codex = s.clone();
+        codex.refine.agent = Some(cue_core::agents::AgentId::Codex);
+        assert_eq!(a.record(Outcome::Inserted, "t".into(), &codex).refine_model, "agent:codex:gpt-6-luna");
         assert_eq!(r.latency_ms, 1_090);
         assert_eq!(r.outcome, Outcome::Inserted);
     }
@@ -561,9 +564,10 @@ mod tests {
 
     #[test]
     fn a_dictation_row_keeps_the_refine_model_and_no_searches() {
-        let s = Settings::default();
+        let mut s = Settings::default();
+        s.refine.agent = Some(cue_core::agents::AgentId::OpenCode);
         let r = Attempt::new(DictationId(1)).record(Outcome::Inserted, "t".into(), &s);
-        assert_eq!((r.refine_model.as_str(), r.web_searches), ("claude-haiku-5-5", 0));
+        assert_eq!((r.refine_model.as_str(), r.web_searches), ("agent:opencode:auto", 0));
     }
 
     /// Esc before the answer showed, then "restore": the question goes again on the same attempt, and its row counts

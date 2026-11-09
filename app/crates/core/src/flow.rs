@@ -46,6 +46,27 @@ pub enum RefineOutcome {
     RawFallback,
     /// The raw text, because the AI that cleans it needs the user: it was not found, is signed out, or did not answer.
     RawAgent(AgentProblem),
+    /// The local model cleaned (or translated) the text in place of the user's AI, which needs the user: not found or
+    /// signed out. Pasted like a cleanup; the Drop still says the agent's word.
+    Covered(AgentProblem),
+    /// No AI (or none chosen): the no-AI layer's text, pasted at once. A translation has nothing to translate with.
+    NoAi,
+}
+
+impl RefineOutcome {
+    /// The text is the AI's own work: cleaned or translated, by the route or by the local fallback.
+    pub fn cleaned(self) -> bool {
+        matches!(self, RefineOutcome::Refined | RefineOutcome::Covered(_))
+    }
+}
+
+/// The Drop's word for the agent's problem.
+fn agent_cause(p: AgentProblem) -> ErrorCause {
+    match p {
+        AgentProblem::Missing => ErrorCause::AgentMissing,
+        AgentProblem::SignedOut => ErrorCause::AgentSignIn,
+        AgentProblem::Silent => ErrorCause::AgentSilent,
+    }
 }
 
 /// Why the user's AI gave no cleanup, in the words the Drop says it with.
@@ -398,11 +419,16 @@ impl Flow {
                 self.refine_pending = false;
                 // A failed translation is never replaced with the untranslated text (spec 2 §5): an error with "retry",
                 // which refines the saved text again.
-                if self.mode == Mode::Translate && (outcome != RefineOutcome::Refined || text.trim().is_empty()) {
-                    let cause = if matches!(outcome, RefineOutcome::RawAgent(_)) { ErrorCause::CleanupKey } else { ErrorCause::Translate };
+                // With no AI there is nothing to translate with, and a retry would fail the same way: no Retry.
+                if self.mode == Mode::Translate && (!outcome.cleaned() || text.trim().is_empty()) {
+                    let (cause, retry) = match outcome {
+                        RefineOutcome::NoAi => (ErrorCause::NeedAiTranslate, false),
+                        RefineOutcome::RawAgent(p) => (agent_cause(p), true),
+                        _ => (ErrorCause::Translate, true),
+                    };
                     fx.push(Effect::Finished { id, outcome: Outcome::Failed });
-                    self.retry_text = true;
-                    self.phase = Phase::Error { cause, retry: true };
+                    self.retry_text = retry;
+                    self.phase = Phase::Error { cause, retry };
                     self.push_ui(&mut fx);
                     return fx;
                 }
@@ -410,7 +436,8 @@ impl Flow {
                 let (text, outcome) = match self.raw.clone() {
                     Some(raw) if text.trim().is_empty() => {
                         let outcome = match outcome {
-                            RefineOutcome::RawAgent(p) => RefineOutcome::RawAgent(p),
+                            RefineOutcome::RawAgent(p) | RefineOutcome::Covered(p) => RefineOutcome::RawAgent(p),
+                            RefineOutcome::NoAi => RefineOutcome::NoAi,
                             RefineOutcome::Refined | RefineOutcome::RawFallback => RefineOutcome::RawFallback,
                         };
                         (raw, outcome)
@@ -463,14 +490,16 @@ impl Flow {
                 self.asking = None;
                 fx.push(Effect::Finished { id, outcome: Outcome::Failed });
                 match error {
-                    // Retry would fail the same way: the Drop's "Claude key problem"; the answer closes, and a follow-up
+                    // Retry would fail the same way: the Drop's "Ask: choose an AI" (until Ask follows the cleanup's
+                    // route, its missing or refused Anthropic key is no AI for it); the answer closes, and a follow-up
                     // under way goes with it (spec 2 §8).
+                    // Task 9: raised by Ask's own route.
                     AskError::Key => {
                         if self.follow_up_under_way(id) {
                             self.drop_pending_follow_up(&mut fx);
                         }
                         self.end_conversation(&mut fx);
-                        self.phase = Phase::Error { cause: ErrorCause::ClaudeKey, retry: false };
+                        self.phase = Phase::Error { cause: ErrorCause::NeedAiAsk, retry: false };
                         self.push_ui(&mut fx);
                     }
                     AskError::Failed => {
@@ -1016,8 +1045,9 @@ impl Flow {
                 if !counted {
                     fx.push(Effect::Finished { id, outcome: Outcome::Inserted });
                 }
-                if matches!(self.refine_outcome, Some(RefineOutcome::RawAgent(_))) {
-                    self.phase = Phase::Error { cause: ErrorCause::CleanupKey, retry: false };
+                // The text went in; the Drop says what the agent needs ("Codex: sign in again").
+                if let Some(RefineOutcome::RawAgent(p) | RefineOutcome::Covered(p)) = self.refine_outcome {
+                    self.phase = Phase::Error { cause: agent_cause(p), retry: false };
                     self.push_ui(fx);
                     return;
                 }
@@ -1185,9 +1215,9 @@ mod tests {
         fx.iter().filter_map(|e| if let E::Ui(s) = e { Some(s.clone()) } else { None }).collect()
     }
 
-    /// The Drop's "Claude key problem" after an "Ask" request, without Retry.
+    /// The Drop's "Ask: choose an AI" after an "Ask" request whose key is missing or refused, without Retry.
     fn claude_key_error() -> UiState {
-        UiState { phase: UiPhase::Error, error: Some(ErrorCause::ClaudeKey), retry: false, paused: false, mode: Mode::Ask }
+        UiState { phase: UiPhase::Error, error: Some(ErrorCause::NeedAiAsk), retry: false, paused: false, mode: Mode::Ask }
     }
 
     #[test]
@@ -1409,17 +1439,85 @@ mod tests {
     }
 
     #[test]
-    fn a_cleanup_key_problem_inserts_raw_then_shows_the_cleanup_key_error() {
+    fn a_signed_out_agent_inserts_raw_then_says_sign_in_again() {
         let mut f = Flow::new(2, false);
         let id = thinking_with_raw(&mut f, 0, "сырой текст");
         let fx = f.handle(I::Refined { id, text: "сырой текст".into(), outcome: RefineOutcome::RawAgent(AgentProblem::SignedOut) }, 5_600);
         assert!(has(&fx, &E::Insert { id, text: "сырой текст".into() }));
         let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 5_700);
         let ui = last_ui(&fx).unwrap();
-        // The cleanup's connection, whichever it is: not "Claude", which is "Ask"'s.
-        assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::CleanupKey), false));
+        // The Drop names the agent ("Codex: sign in again"); nothing to retry.
+        assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::AgentSignIn), false));
         assert!(f.esc_active(), "Esc closes the error");
         assert_eq!(phase(&f.handle(I::Esc, 8_000)), Some(UiPhase::Idle));
+    }
+
+    /// The text goes in as said, then the Drop says which way the agent failed: each its own word, none with Retry.
+    #[test]
+    fn agent_silent_with_raw_fallback_shows_agent_silent() {
+        for (problem, cause) in [
+            (AgentProblem::Silent, ErrorCause::AgentSilent),
+            (AgentProblem::SignedOut, ErrorCause::AgentSignIn),
+            (AgentProblem::Missing, ErrorCause::AgentMissing),
+        ] {
+            let mut f = Flow::new(2, false);
+            let id = thinking_with_raw(&mut f, 0, "сырой текст");
+            let fx = f.handle(I::Refined { id, text: "Сырой текст".into(), outcome: RefineOutcome::RawAgent(problem) }, 5_600);
+            assert!(has(&fx, &E::Insert { id, text: "Сырой текст".into() }), "{problem:?}: the dictation is never lost");
+            let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 5_700);
+            assert!(has(&fx, &E::Finished { id, outcome: Outcome::Inserted }));
+            let ui = last_ui(&fx).unwrap();
+            assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(cause), false), "{problem:?}");
+        }
+    }
+
+    /// The local fallback cleaned the text: pasted, and the Drop still says the agent needs the user.
+    #[test]
+    fn local_fallback_text_still_says_the_agent_needs_a_sign_in() {
+        for (problem, cause) in [(AgentProblem::SignedOut, ErrorCause::AgentSignIn), (AgentProblem::Missing, ErrorCause::AgentMissing)] {
+            let mut f = Flow::new(2, false);
+            let id = thinking_with_raw(&mut f, 0, "ну привет");
+            let fx = f.handle(I::Refined { id, text: "Привет.".into(), outcome: RefineOutcome::Covered(problem) }, 5_600);
+            assert!(has(&fx, &E::Insert { id, text: "Привет.".into() }));
+            let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 5_700);
+            assert_eq!(last_ui(&fx).unwrap().error, Some(cause), "{problem:?}");
+        }
+        // A translation the local fallback made is pasted too.
+        let mut f = Flow::new(2, false);
+        let id = recording_in(&mut f, 0, Mode::Translate);
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
+        f.handle(I::SttFinal { id, text: "привет".into() }, 5_200);
+        let fx = f.handle(I::Refined { id, text: "Hi.".into(), outcome: RefineOutcome::Covered(AgentProblem::SignedOut) }, 6_000);
+        assert!(has(&fx, &E::Insert { id, text: "Hi.".into() }));
+        let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 6_100);
+        assert_eq!(last_ui(&fx).unwrap().error, Some(ErrorCause::AgentSignIn));
+    }
+
+    /// No AI: the no-AI layer's text goes in at once, a normal "done".
+    #[test]
+    fn off_pastes_basics_text() {
+        let mut f = Flow::new(2, false);
+        let id = thinking_with_raw(&mut f, 0, "ну привет");
+        let fx = f.handle(I::Refined { id, text: "Ну привет".into(), outcome: RefineOutcome::NoAi }, 5_400);
+        assert!(has(&fx, &E::Insert { id, text: "Ну привет".into() }));
+        let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 5_500);
+        assert_eq!(phase(&fx), Some(UiPhase::Done));
+        assert_eq!(last_ui(&fx).unwrap().error, None);
+    }
+
+    /// A translation with no AI: "Translate: choose an AI", nothing pasted, and no Retry (it would fail the same way).
+    #[test]
+    fn translate_on_off_shows_need_ai_and_pastes_nothing() {
+        let mut f = Flow::new(2, false);
+        let id = recording_in(&mut f, 0, Mode::Translate);
+        f.handle(I::ChordDown(Mode::Dictate), 5_000);
+        f.handle(I::SttFinal { id, text: "привет".into() }, 5_200);
+        let fx = f.handle(I::Refined { id, text: "привет".into(), outcome: RefineOutcome::NoAi }, 5_300);
+        assert!(!fx.iter().any(|e| matches!(e, E::Insert { .. })), "nothing untranslated is pasted");
+        assert!(has(&fx, &E::Finished { id, outcome: Outcome::Failed }));
+        let ui = last_ui(&fx).unwrap();
+        assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::NeedAiTranslate), false));
+        assert!(!has(&f.handle(I::Ui(UiAction::Retry), 6_000), &E::RefineAgain { id, raw: "привет".into(), mode: Mode::Translate }));
     }
 
     #[test]
@@ -1961,13 +2059,13 @@ mod tests {
         let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 5_500);
         assert!(has(&fx, &E::Finished { id, outcome: Outcome::Inserted }));
         assert_eq!(phase(&fx), Some(UiPhase::Done), "as with RawFallback: a normal \"done\"");
-        // A key problem of the cleanup's connection is not lost.
+        // The agent's problem is not lost.
         let mut f = Flow::new(2, false);
         let id = thinking_with_raw(&mut f, 0, "сырой текст");
         let fx = f.handle(I::Refined { id, text: String::new(), outcome: RefineOutcome::RawAgent(AgentProblem::SignedOut) }, 5_400);
         assert!(has(&fx, &E::Insert { id, text: "сырой текст".into() }));
         let fx = f.handle(I::Inserted { id, outcome: InsertOutcome::Pasted }, 5_500);
-        assert_eq!(last_ui(&fx).unwrap().error, Some(ErrorCause::CleanupKey));
+        assert_eq!(last_ui(&fx).unwrap().error, Some(ErrorCause::AgentSignIn));
     }
 
     #[test]
@@ -2321,14 +2419,14 @@ mod tests {
     }
 
     #[test]
-    fn translation_key_problem_shows_the_key_error_with_retry() {
+    fn translation_through_a_signed_out_agent_says_sign_in_again_with_retry() {
         let mut f = Flow::new(2, false);
         let id = recording_in(&mut f, 0, Mode::Translate);
         f.handle(I::ChordDown(Mode::Dictate), 5_000);
         f.handle(I::SttFinal { id, text: "привет".into() }, 5_200);
         let fx = f.handle(I::Refined { id, text: "привет".into(), outcome: RefineOutcome::RawAgent(AgentProblem::SignedOut) }, 6_000);
         let ui = last_ui(&fx).unwrap();
-        assert_eq!((ui.error, ui.retry), (Some(ErrorCause::CleanupKey), true));
+        assert_eq!((ui.error, ui.retry), (Some(ErrorCause::AgentSignIn), true));
         assert!(!fx.iter().any(|e| matches!(e, E::Insert { .. })));
     }
 
@@ -2715,7 +2813,7 @@ mod tests {
         let fx = f.handle(I::AskFailed { id, error: AskError::Key }, 6_500);
         assert!(has(&fx, &E::Finished { id, outcome: Outcome::Failed }) && has(&fx, &E::CloseAnswer));
         let ui = last_ui(&fx).unwrap();
-        assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::ClaudeKey), false));
+        assert_eq!((ui.phase, ui.error, ui.retry), (UiPhase::Error, Some(ErrorCause::NeedAiAsk), false));
         assert!(!f.answer_open());
     }
 
@@ -3118,8 +3216,14 @@ mod tests {
                     14 => I::Refined {
                         id,
                         text,
-                        outcome: [RefineOutcome::Refined, RefineOutcome::RawFallback, RefineOutcome::RawAgent(AgentProblem::SignedOut)]
-                            [next(3) as usize],
+                        outcome: [
+                            RefineOutcome::Refined,
+                            RefineOutcome::RawFallback,
+                            RefineOutcome::RawAgent(AgentProblem::SignedOut),
+                            RefineOutcome::RawAgent(AgentProblem::Silent),
+                            RefineOutcome::Covered(AgentProblem::Missing),
+                            RefineOutcome::NoAi,
+                        ][next(6) as usize],
                     },
                     15 => I::Inserted { id, outcome: if next(2) == 0 { InsertOutcome::Pasted } else { InsertOutcome::NoField } },
                     16 if next(3) == 0 => I::ModeChange([Mode::Ask, Mode::Translate, Mode::Dictate][next(3) as usize]),

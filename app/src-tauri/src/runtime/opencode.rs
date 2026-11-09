@@ -76,7 +76,6 @@ impl OpenCodeSlot {
     /// The server to send a cleanup to: the one in use while it runs, else the user's own, else one CUE starts now
     /// (blocking up to `opencode::START_WAIT`: call it off the core's thread). A rest during the start stops the
     /// server it started: `Failed("rest")`.
-    #[allow(dead_code)] // used when the cleanup goes through OpenCode
     pub fn get_or_start(&self) -> Result<Arc<Server>, AgentFailure> {
         let _one = lock(&self.starting);
         let held = lock(&self.held).clone();
@@ -105,6 +104,12 @@ impl OpenCodeSlot {
         }
         *held = Some(server.clone());
         Ok(server)
+    }
+
+    /// A server is held: the next cleanup goes to it without finding or starting one. None after CUE starts and after a
+    /// rest, so the next request is OpenCode's first and gets the start allowance.
+    pub fn holds(&self) -> bool {
+        lock(&self.held).is_some()
     }
 
     /// `s` is no longer used: stopped if CUE started it.
@@ -225,9 +230,11 @@ mod tests {
             }),
             Duration::from_secs(60),
         );
+        assert!(!slot.holds(), "nothing held before the first cleanup");
         let a = slot.get_or_start().unwrap();
         let b = slot.get_or_start().unwrap();
         assert!(Arc::ptr_eq(&a, &b));
+        assert!(slot.holds());
         assert!(!a.owned);
         assert_eq!(a.url.port(), Some(port));
         // Rest, lock, sleep and quit leave it running; CUE only lets go of it.
@@ -267,6 +274,7 @@ mod tests {
         slot.busy(true);
         slot.busy(false);
         gone(&s1).await;
+        assert!(!slot.holds(), "after a rest the next request is the first again");
 
         // A lock or sleep between dictations (both come as the session lock): stopped now.
         let s2 = slot.get_or_start().unwrap();

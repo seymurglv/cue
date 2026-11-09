@@ -36,11 +36,21 @@ pub enum ErrorCause {
     Cpu,
     /// Recognition failed.
     Stt,
-    /// "Ask"'s Anthropic key is missing or refused: "Ask" always goes to Claude.
-    ClaudeKey,
-    /// The cleanup's cloud connection refused its key, a limit or the balance (or there is no key): the Drop names the
-    /// connection (`cue://cleanup-name`).
-    CleanupKey,
+    /// The user's AI is signed out, its sign-in expired, or it has no access: the Drop names the agent
+    /// (`cue://cleanup-name`), "<Agent>: sign in again".
+    AgentSignIn,
+    /// The user's AI is not installed on this computer: "<Agent> not found".
+    AgentMissing,
+    /// The user's AI did not answer in time and the text went in as said: "<Agent> didn't answer".
+    AgentSilent,
+    /// A translation with no AI chosen (no AI, or nothing chosen): nothing was pasted.
+    NeedAiTranslate,
+    /// "Ask" with no AI chosen.
+    NeedAiAsk,
+    /// A translation on a local model that only cleans (raised once such models are offered).
+    NeedTranslatingModel,
+    /// "Ask" on a local model that only cleans (raised once such models are offered).
+    NeedAnsweringModel,
     /// The translation failed (network, timeout, the check): nothing was pasted.
     Translate,
 }
@@ -145,8 +155,13 @@ mod tests {
             (ErrorCause::Model, "model"),
             (ErrorCause::Cpu, "cpu"),
             (ErrorCause::Stt, "stt"),
-            (ErrorCause::ClaudeKey, "claudeKey"),
-            (ErrorCause::CleanupKey, "cleanupKey"),
+            (ErrorCause::AgentSignIn, "agentSignIn"),
+            (ErrorCause::AgentMissing, "agentMissing"),
+            (ErrorCause::AgentSilent, "agentSilent"),
+            (ErrorCause::NeedAiTranslate, "needAiTranslate"),
+            (ErrorCause::NeedAiAsk, "needAiAsk"),
+            (ErrorCause::NeedTranslatingModel, "needTranslatingModel"),
+            (ErrorCause::NeedAnsweringModel, "needAnsweringModel"),
             (ErrorCause::Translate, "translate"),
         ];
         for (v, name) in causes {

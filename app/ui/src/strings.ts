@@ -2,7 +2,11 @@
 // and sets it in the Drop window before any script runs (window.__CUE_LANG__); the tray menu uses the same value.
 export type Lang = 'en' | 'ru';
 export type TrayKind = 'noField' | 'micSilent' | 'holdHint' | 'lastMinute' | 'micMissing' | 'modelReady' | 'modelSwitched' | 'newHabit' | 'habitChanged';
-export type ErrorCause = 'model' | 'cpu' | 'stt' | 'claudeKey' | 'cleanupKey' | 'translate';
+export type ErrorCause =
+  | 'model' | 'cpu' | 'stt'
+  | 'agentSignIn' | 'agentMissing' | 'agentSilent'
+  | 'needAiTranslate' | 'needAiAsk' | 'needTranslatingModel' | 'needAnsweringModel'
+  | 'translate';
 
 export const KEY_NAME = 'Ctrl + Win';
 
@@ -80,9 +84,9 @@ export interface AnswerText {
 
 export interface Dict {
   tray: Record<TrayKind, TrayText>;
-  /** The Drop's errors; `cleanupKey` holds {NAME}, the cleanup's connection (`cleanupUnnamed` when none was heard). */
+  /** The Drop's errors; the agent's words hold {NAME}, the agent (`agentUnnamed` when none was heard). */
   error: Record<ErrorCause, string>;
-  cleanupUnnamed: string;
+  agentUnnamed: string;
   /** Close button of a tray card: tooltip and accessible name. */
   close: string;
   drop: DropText;
@@ -141,11 +145,16 @@ export const en: Dict = {
     model: 'Model did not download',
     cpu: 'Processor not supported',
     stt: "Couldn't recognize",
-    claudeKey: 'Claude key problem',
-    cleanupKey: '{NAME}: key or balance',
+    agentSignIn: '{NAME}: sign in again',
+    agentMissing: '{NAME} not found',
+    agentSilent: "{NAME} didn't answer",
+    needAiTranslate: 'Translate: choose an AI',
+    needAiAsk: 'Ask: choose an AI',
+    needTranslatingModel: 'Translate: needs a model that translates',
+    needAnsweringModel: 'Ask: needs a model that answers',
     translate: "Couldn't translate",
   },
-  cleanupUnnamed: 'Cleanup',
+  agentUnnamed: 'AI',
   close: 'Close',
   drop: {
     cancel: 'Cancel · Esc',
@@ -229,11 +238,16 @@ export const ru: Dict = {
     model: 'Модель не скачалась',
     cpu: 'Процессор не подходит',
     stt: 'Не распознал',
-    claudeKey: 'Проблема с ключом Claude',
-    cleanupKey: '{NAME}: ключ или баланс',
+    agentSignIn: '{NAME}: войдите заново',
+    agentMissing: '{NAME} не найден',
+    agentSilent: '{NAME} не ответил',
+    needAiTranslate: 'Перевод: выберите AI',
+    needAiAsk: 'Спросить: выберите AI',
+    needTranslatingModel: 'Перевод: нужна модель, которая переводит',
+    needAnsweringModel: 'Спросить: нужна модель, которая отвечает',
     translate: 'Не удалось перевести',
   },
-  cleanupUnnamed: 'Чистка',
+  agentUnnamed: 'AI',
   close: 'Закрыть',
   drop: {
     cancel: 'Отменить · Esc',

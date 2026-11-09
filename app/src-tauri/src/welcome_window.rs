@@ -55,7 +55,9 @@ pub fn asks_welcome<S: AsRef<OsStr>>(args: impl IntoIterator<Item = S>) -> bool 
 fn start_key(refine: &RefineSettings) -> Option<KeyName> {
     match refine.where_ {
         Where::Local | Where::Off => None,
-        Where::Agent => KeyName::of_connection(refine.connection().id), // Task 7: route to the agent
+        // Task 13: the welcome step "Кто чистит текст" replaces this key check (a fresh install has no key, so the
+        // window still opens at the first start).
+        Where::Agent => KeyName::of_connection(refine.connection().id),
     }
 }
 

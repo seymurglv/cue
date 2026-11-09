@@ -119,7 +119,8 @@ impl Switch {
 pub struct LlmKeeper {
     /// `%LOCALAPPDATA%\CUE\models`: a folder per model, named by its id.
     models: PathBuf,
-    /// `refine.local`, or the recommended one: what loads at start when its file is here.
+    /// `refine.local`: what loads at start when its file is here. Empty: nothing chosen, nothing loads (the text goes in
+    /// through the no-AI layer).
     chosen: String,
     in_use: Option<Manifest>,
     slot: Arc<LlmSlot>,
@@ -147,17 +148,16 @@ pub struct LlmKeeper {
 }
 
 impl LlmKeeper {
-    /// The model `chosen` (`refine.local`; empty — the recommended one) in `models`; `active` — the cleanup runs on
-    /// this computer.
+    /// The model `chosen` (`refine.local`; empty — none) in `models`; `active` — the cleanup runs on this computer, or
+    /// goes to the user's AI with this model as its fallback.
     pub fn new(models: PathBuf, chosen: &str, active: bool) -> Self {
         Self::with(models, chosen, active, load_llm, free_space)
     }
 
     fn with(models: PathBuf, chosen: &str, active: bool, load: Loader, free: FreeSpace) -> Self {
-        let chosen = if chosen.is_empty() { llm::default_id().unwrap_or_default() } else { chosen.to_owned() };
         Self {
             models,
-            chosen,
+            chosen: chosen.to_owned(),
             in_use: None,
             slot: Arc::new(LlmSlot::default()),
             switch: None,

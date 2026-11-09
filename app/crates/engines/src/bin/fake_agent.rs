@@ -7,7 +7,9 @@
 //!   what it got to, as JSON (its arguments, stdin, and the contents of the files named by
 //!   `-c model_instructions_file=<path>` and `--output-schema <path>`, as Codex reads them); it sleeps
 //!   `FAKE_AGENT_SLEEP` ms, prints the files `FAKE_AGENT_STDOUT` and `FAKE_AGENT_STDERR` (a canned answer) and exits
-//!   with `FAKE_AGENT_EXIT`.
+//!   with `FAKE_AGENT_EXIT`. `FAKE_AGENT_PID` names a file it writes its process id to before it sleeps.
+//! - `login status` (Codex's): prints `FAKE_AGENT_LOGIN` (default "Logged in using ChatGPT") and exits with
+//!   `FAKE_AGENT_LOGIN_EXIT` (default 0).
 //! - `echo-grok`: prints stdin as Grok's answer, in `grok -p --output-format json`'s object.
 //! - `report`: prints what it was given as JSON: its arguments, stdin, working folder, the folder's entry count and
 //!   whether it has a console window.
@@ -51,6 +53,11 @@ fn main() {
             println!("{}", serde_json::json!({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}));
         }
         "exec" => codex(&args),
+        "login" => {
+            let said = std::env::var("FAKE_AGENT_LOGIN").unwrap_or_else(|_| "Logged in using ChatGPT".into());
+            println!("{said}");
+            std::process::exit(std::env::var("FAKE_AGENT_LOGIN_EXIT").ok().and_then(|v| v.parse().ok()).unwrap_or(0));
+        }
         "echo-grok" => {
             let text = stdin();
             println!("{}", serde_json::json!({"text": text, "stopReason": "end_turn", "sessionId": "0", "requestId": "0"}));
@@ -124,6 +131,9 @@ fn codex(args: &[String]) {
             "schema": read(schema.map(String::as_str)),
         });
         std::fs::write(record, got.to_string()).expect("record");
+    }
+    if let Some(pid) = env("FAKE_AGENT_PID") {
+        std::fs::write(pid, std::process::id().to_string()).expect("pid file");
     }
     if let Some(ms) = env("FAKE_AGENT_SLEEP").and_then(|v| v.parse().ok()) {
         std::thread::sleep(Duration::from_millis(ms));

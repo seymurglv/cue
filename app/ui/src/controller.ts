@@ -75,7 +75,7 @@ export class DropController {
   private mic: MicNames | null = null;
   private model: string | null = null;
   private rule: string | null = null;
-  /** The cleanup's connection whose key or balance was refused, for the error that follows. */
+  /** The agent the cleanup went to, for the error that names it ("Codex: sign in again"). */
   private cleanup: string | null = null;
   /** Quiet mode: false — the frame loop is asleep. calmSince — the frame since which nothing on screen can change. */
   private awake = true;
@@ -95,10 +95,10 @@ export class DropController {
     this.voice.ext = 0;
     const api = {
       mode: () => this.state.mode ?? 'dictate',
-      // The cause icon: a failed translation shows the network one; the key problems show none.
+      // The cause icon: a failed translation shows the network one; the agent's words and "choose an AI" show none.
       // The network icon where the network is the cause: the model's download, a translation.
       err: () => (this.state.error === 'model' || this.state.error === 'translate' ? 'net' : 'key'),
-      errLabel: () => this.t.error[this.state.error ?? 'stt'].replace('{NAME}', this.cleanup || this.t.cleanupUnnamed),
+      errLabel: () => this.t.error[this.state.error ?? 'stt'].replace('{NAME}', this.cleanup || this.t.agentUnnamed),
       text: this.t.drop,
       retry: () => this.state.retry,
       lbl: () => 'icons',
@@ -282,7 +282,7 @@ export class DropController {
     this.model = String(name ?? '');
   }
 
-  /** The name of the cleanup's connection whose key or balance was refused, for the error that follows. */
+  /** The name of the agent the cleanup went to, for the error that follows. */
   cleanupName(name: string) {
     this.cleanup = String(name ?? '');
   }

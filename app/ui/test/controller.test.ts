@@ -77,14 +77,27 @@ describe('Dictionaries and language', () => {
     expect(en.tray.lastMinute.title).toBe('One minute left');
     expect(en.error).toEqual({
       model: 'Model did not download', cpu: 'Processor not supported', stt: "Couldn't recognize",
-      claudeKey: 'Claude key problem', cleanupKey: '{NAME}: key or balance', translate: "Couldn't translate",
+      agentSignIn: '{NAME}: sign in again', agentMissing: '{NAME} not found', agentSilent: "{NAME} didn't answer",
+      needAiTranslate: 'Translate: choose an AI', needAiAsk: 'Ask: choose an AI',
+      needTranslatingModel: 'Translate: needs a model that translates', needAnsweringModel: 'Ask: needs a model that answers',
+      translate: "Couldn't translate",
     });
-    expect(en.cleanupUnnamed).toBe('Cleanup');
+    expect(en.agentUnnamed).toBe('AI');
     expect(en.close).toBe('Close');
     expect(en.drop).toEqual({
       cancel: 'Cancel · Esc', cancelName: 'Cancel', restore: 'Restore', retry: 'Retry', done: 'Done', cancelled: 'Cancelled', ask: 'Ask',
       learnAdd: 'Add to dictionary', learnUndo: 'Undo',
     });
+  });
+
+  it("the Russian agent words are the spec's, verbatim", () => {
+    expect(ru.error.agentSignIn).toBe('{NAME}: войдите заново');
+    expect(ru.error.agentMissing).toBe('{NAME} не найден');
+    expect(ru.error.agentSilent).toBe('{NAME} не ответил');
+    expect(ru.error.needAiTranslate).toBe('Перевод: выберите AI');
+    expect(ru.error.needAiAsk).toBe('Спросить: выберите AI');
+    expect(ru.error.needTranslatingModel).toBe('Перевод: нужна модель, которая переводит');
+    expect(ru.error.needAnsweringModel).toBe('Спросить: нужна модель, которая отвечает');
   });
 
   it('language from the core: "ru" is Russian, anything else is English', () => {
@@ -122,23 +135,49 @@ describe('The Drop follows the core', () => {
     expect(document.querySelector('.drop')!.textContent).not.toMatch(/\d:\d\d/);
   });
 
-  it('Claude key error — no "retry" and no cause icon', () => {
-    ctl.apply({ ...base, phase: 'error', error: 'claudeKey', retry: false });
+  it('"Ask: choose an AI" — no "retry" and no cause icon', () => {
+    ctl.apply({ ...base, phase: 'error', error: 'needAiAsk', retry: false });
     const visible = on().join(' ');
     expect(visible).not.toContain('why');
     expect(document.querySelector('.drop .ib.solid[title="Retry"]')!.classList.contains('on')).toBe(false);
   });
 
-  it('cleanup key error names the connection, not Claude; none heard — "Cleanup"', () => {
+  it("the agent's words name the agent; none heard — \"AI\"", () => {
     const label = () => document.querySelector('.drop .lab')!.textContent!.replace(/ /g, ' ');
-    ctl.apply({ ...base, phase: 'error', error: 'cleanupKey', retry: false });
-    expect(label()).toBe('Cleanup: key or balance');
+    ctl.apply({ ...base, phase: 'error', error: 'agentSignIn', retry: false });
+    expect(label()).toBe('AI: sign in again');
     ctl.apply({ ...base, phase: 'idle' });
-    ctl.cleanupName('DeepSeek');
-    ctl.apply({ ...base, phase: 'error', error: 'cleanupKey', retry: false });
-    expect(label()).toBe('DeepSeek: key or balance');
-    expect(on().join(' ')).not.toContain('why');
-    expect(document.querySelector('.drop .ib.solid[title="Retry"]')!.classList.contains('on')).toBe(false);
+    ctl.cleanupName('Codex');
+    const words = [
+      ['agentSignIn', 'Codex: sign in again'],
+      ['agentMissing', 'Codex not found'],
+      ['agentSilent', "Codex didn't answer"],
+      ['needAiTranslate', 'Translate: choose an AI'],
+    ] as const;
+    for (const [error, said] of words) {
+      ctl.apply({ ...base, phase: 'error', error, retry: false });
+      expect(label()).toBe(said);
+      expect(on().join(' ')).not.toContain('why');
+      expect(document.querySelector('.drop .ib.solid[title="Retry"]')!.classList.contains('on')).toBe(false);
+    }
+  });
+
+  it('the Drop says the agent words and "choose an AI" in Russian', () => {
+    document.body.innerHTML = '<div id="ru"></div>';
+    const ruCtl = new DropController(document.getElementById('ru')!, { send: () => {}, rects: () => {} }, 'ru');
+    const label = () => document.querySelector('.drop .lab')!.textContent!.replace(/ /g, ' ');
+    ruCtl.cleanupName('OpenCode');
+    const words = [
+      ['agentSignIn', 'OpenCode: войдите заново'],
+      ['agentMissing', 'OpenCode не найден'],
+      ['agentSilent', 'OpenCode не ответил'],
+      ['needAiTranslate', 'Перевод: выберите AI'],
+      ['needAiAsk', 'Спросить: выберите AI'],
+    ] as const;
+    for (const [error, said] of words) {
+      ruCtl.apply({ ...base, phase: 'error', error, retry: false });
+      expect(label()).toBe(said);
+    }
   });
 
   it('network error — "retry" sends retry, the cross sends dismiss', () => {
@@ -270,21 +309,21 @@ describe('Which Drop parts are visible in each state', () => {
     expect(sent).toEqual(['retry']);
   });
 
-  it('Claude key error: the mark only; on hover the cross and the cause in words', () => {
-    ctl.apply({ ...base, phase: 'error', error: 'claudeKey', retry: false });
+  it('"Ask: choose an AI": the mark only; on hover the cross and the cause in words', () => {
+    ctl.apply({ ...base, phase: 'error', error: 'needAiAsk', retry: false });
     expect(shown()).toEqual(['mk']);
     hover(true);
     expect(shown()).toEqual(['bx', 'lab', 'mk']);
-    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Claude key problem');
+    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Ask: choose an AI');
   });
 
-  it('error → error with another cause (network → Claude key) redraws the icon, "retry" and the label', () => {
+  it('error → error with another cause (network → choose an AI) redraws the icon, "retry" and the label', () => {
     ctl.apply({ ...base, phase: 'error', error: 'model', retry: true });
     expect(shown()).toEqual(['mk', 'retry', 'why']);
     expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Model did not download');
-    ctl.apply({ ...base, phase: 'error', error: 'claudeKey', retry: false });
+    ctl.apply({ ...base, phase: 'error', error: 'needAiAsk', retry: false });
     expect(shown()).toEqual(['mk']);
-    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Claude key problem');
+    expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Ask: choose an AI');
     ctl.apply({ ...base, phase: 'error', error: 'model', retry: true });
     expect(shown()).toEqual(['mk', 'retry', 'why']);
     expect(document.querySelector('.drop .lab')!.getAttribute('data-t')).toBe('Model did not download');

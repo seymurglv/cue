@@ -17,7 +17,7 @@ pub mod refine;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use cue_core::agents::AgentId;
@@ -135,9 +135,47 @@ impl AgentClient {
     }
 }
 
+/// What Codex says of its sign-in when asked (`codex login status`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Login {
+    SignedIn,
+    SignedOut,
+    /// It said something else, or did not answer in time: a run tells.
+    Unknown,
+}
+
+/// How long `codex login status` may take; it answers in under a second.
+pub const LOGIN_WAIT: Duration = Duration::from_secs(5);
+
+/// Codex's own word on its sign-in, asked with no text at all: `codex login status` in its empty working folder. A
+/// Codex never signed in retries its requests for about 15 s before it says so, past CUE's budget, so this is asked
+/// first; but it says "Logged in" for an expired sign-in too, which only a run tells (`cli::signed_out`). A missing
+/// program is `NotInstalled`.
+pub async fn codex_login(found: &Found, home: &Path) -> Result<Login, AgentFailure> {
+    let (exe, cwd) = (found.exe.clone(), cwd(home, AgentId::Codex));
+    let args = cli::codex_login_args();
+    let out = tokio::task::spawn_blocking(move || process::run(&exe, &args, "", &cwd, LOGIN_WAIT))
+        .await
+        .map_err(|_| AgentFailure::Failed("join"));
+    match out? {
+        Ok(out) => Ok(cli::codex_login(&out)),
+        Err(AgentFailure::NotInstalled) => Err(AgentFailure::NotInstalled),
+        Err(_) => Ok(Login::Unknown),
+    }
+}
+
+/// Sets its flag when dropped: a request whose future is dropped (Esc, a newer request) ends the process it started.
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 /// One `codex exec`: CUE's fixed instructions and the answer's schema in files beside its working folder, the rest of
 /// the request on stdin, run off the async threads. A run that failed is never read for an answer: a half-written last
-/// message is not a cleanup.
+/// message is not a cleanup. Dropping the request (Esc) ends the run and every process it started.
 async fn codex(found: &Found, home: &Path, model: &str, p: &Prompt, timeout: Duration) -> Result<String, AgentFailure> {
     let instructions = codex_instructions(home, &p.system);
     let schema = home.join(CODEX_SCHEMA);
@@ -150,7 +188,9 @@ async fn codex(found: &Found, home: &Path, model: &str, p: &Prompt, timeout: Dur
     }
     let args = cli::codex_args(model, &instructions, &schema);
     let (exe, stdin, cwd) = (found.exe.clone(), p.user.clone(), cwd(home, AgentId::Codex));
-    let out = tokio::task::spawn_blocking(move || process::run(&exe, &args, &stdin, &cwd, timeout))
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _stop = CancelOnDrop(cancel.clone());
+    let out = tokio::task::spawn_blocking(move || process::run_until(&exe, &args, &stdin, &cwd, timeout, &cancel))
         .await
         .map_err(|_| AgentFailure::Failed("join"))??;
     if cli::signed_out(AgentId::Codex, &out) {

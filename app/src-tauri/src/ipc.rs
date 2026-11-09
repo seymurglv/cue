@@ -368,8 +368,8 @@ impl Ui {
         }
     }
 
-    /// The name of the cleanup's connection whose key, limit or balance was refused, just before the Drop's error: the
-    /// Drop names it.
+    /// The name of the agent the cleanup went to ("Codex"), just before the Drop's word about it: "Codex: sign in
+    /// again", "Codex not found", "Codex didn't answer".
     pub fn cleanup_name(&self, name: &str) {
         if let Err(e) = self.app.emit_to(DROP_LABEL, "cue://cleanup-name", name) {
             tracing::debug!("Drop window: event cue://cleanup-name not sent: {e}");

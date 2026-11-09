@@ -250,6 +250,8 @@ fn outcome_name(o: RefineOutcome) -> &'static str {
         RefineOutcome::Refined => "refined",
         RefineOutcome::RawFallback => "raw_fallback",
         RefineOutcome::RawAgent(_) => "raw_agent",
+        RefineOutcome::Covered(_) => "covered",
+        RefineOutcome::NoAi => "no_ai",
     }
 }
 

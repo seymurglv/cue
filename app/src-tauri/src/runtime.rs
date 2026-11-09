@@ -44,12 +44,17 @@
 //!   a new dictation opens the microphone or the switch goes off; a word the user wrote instead becomes the one
 //!   suggestion (`Offers`), shown on the Drop at rest. The field's text stays in memory: the log gets numbers only;
 //! - a dictation's correction also counts for habits (docs/specs/2026-11-04-habits.md): a form corrected three times in
-//!   one app becomes a habit, its rule asked of the cleanup's connection (5 s, else a template), its card shown at rest
+//!   one app becomes a habit, its rule asked of the local model on this computer (5 s; elsewhere, or past that, CUE's
+//!   template), its card shown at rest
 //!   after the suggestion found before it; the habits of the dictation's app go with its cleanup, and those whose effect
 //!   shows are kept on its history entry; a correction that goes back on a habit three times changes it, and its card
 //!   says so;
+//! - a dictation's cleanup and translation go where the settings say (`route`): no AI (the no-AI layer's text at
+//!   once), the model on this computer, or the user's own agent (`agents`), with the fallback the user chose when the
+//!   agent does not answer; the Drop names the agent that needs a sign-in, was not found or did not answer;
 //! - the log gets events, per-stage latencies and error codes; no text, no audio, no keys. Never `Effect` or `Input`
 //!   with `{:?}`: their `Debug` prints text.
+mod agents;
 mod ask;
 mod attempt;
 mod files;
@@ -84,15 +89,13 @@ use cue_core::translate;
 use cue_core::ui::{Mode, TrayKind, UiAction, UiPhase, UiState};
 use cue_core::usage::{self, SttPath, UsageRecord};
 use cue_engines::EngineError;
-use cue_engines::agent::{self, AgentClient};
+use cue_core::agents::AgentId;
+use cue_engines::agent;
 use cue_engines::ask as engine_ask;
 use cue_engines::claude::{self, Job, RefineResult};
-use cue_engines::habit;
 use cue_engines::hub;
 use cue_engines::local;
 use cue_engines::local_llm::Generate;
-use cue_engines::{chat, openrouter};
-use cue_core::connections::Kind;
 use cue_engines::keys::{self, KeyName};
 use cue_engines::stt::{self, Engine, SttOutput, SttSession};
 use cue_platform_win::cardplace::{self, CARD};
@@ -119,9 +122,7 @@ use attempt::{Attempt, UsageLog, log_finished, needs_row, warmup_record};
 use files::{LastFiles, Sound};
 use insert::{InsertJob, first_known_app, insert_app, known_app, one_line, pasted_text, trim_edges};
 use recordings::{AudioLimit, Recordings, Snapshot};
-use state::{
-    CacheWarm, InsertWatch, LevelGate, MicGate, MicTold, ShownOnce, TaskSlot, Timers, ViewGate, ViewSend, WarmUp,
-};
+use state::{CacheWarm, InsertWatch, LevelGate, MicGate, MicTold, ShownOnce, TaskSlot, Timers, ViewGate, ViewSend};
 pub(crate) use model::Choice;
 use model::{ModelKeeper, ModelNews, Told};
 use tasks::{ask_panicked, guarded, refine_panicked, stt_panicked};
@@ -142,10 +143,6 @@ const INSERT_WATCHDOG: Duration = Duration::from_secs(10);
 /// A tray card whose button shows a done label ("Copied", "Removed") keeps it for 1100 ms, then folds in 430 ms
 /// (controller.ts `DONE_HOLD_MS`, the tray's fold): the Drop is not at rest until then.
 const TRAY_DONE_MS: u64 = 1100 + 430;
-/// Warm-up: a request with no key and no text, just for a TLS connection in the shared client's pool. The response
-/// (a refusal) is not needed. The API address, not the site root: the root could redirect to another host.
-const WARM_URL: &str = claude::API_URL;
-const WARM_TIMEOUT: Duration = Duration::from_secs(5);
 /// The Windows microphone privacy settings: the "microphone is silent" card opens them, and the welcome window.
 pub(crate) const MIC_SETTINGS: &str = "ms-settings:privacy-microphone";
 
@@ -167,8 +164,8 @@ pub enum CoreEvent {
     /// watch's own flag, which tells it from a later one; `app` is the dictation's app, when its correction counts for
     /// habits (`None` for a translation). The text is never logged.
     Corrected { pasted: String, span: Option<String>, stop: Arc<AtomicBool>, app: Option<String> },
-    /// The rule of the habit being made under `draft`, from the cleanup's connection: `None` (no connection, no answer
-    /// in 5 s, none usable) — the template writes it. Never logged.
+    /// The rule of the habit being made under `draft`, from the local model: `None` (not on this computer, no answer in
+    /// 5 s, none usable) — the template writes it. Never logged.
     HabitRule { draft: u64, rule: Option<habits::RuleText> },
     TimerFired { kind: TimerKind, generation: u64 },
     /// The hold after a tray card's action (`hold_tray`) is over: the card has folded. `generation` tells it from a
@@ -187,8 +184,10 @@ pub enum CoreEvent {
     AnswerSource(u32),
     /// A cache warm-up got an answer: its tokens go to usage.csv, priced with the model it warmed.
     Warmed { usage: claude::Usage, model: String },
-    /// Wake from sleep or unlock: the pooled connections are most likely dead.
+    /// Wake from sleep or unlock: the prompt caches' clocks may have skipped.
     Wake,
+    /// The agents found on this computer at startup, in `ORDER`, for a cleanup whose agent is not set yet.
+    AgentsFound(Vec<AgentId>),
     /// The Drop was dragged to a new place: saved in settings.json.
     DropMoved(DropPosition),
     /// The idle Drop hid over a full-screen app (`true`) or shows again (`false`).
@@ -300,6 +299,8 @@ pub struct Runtime {
     llm: llm::LlmKeeper,
     /// The OpenCode server the cleanup goes to: the user's, or one CUE started and stops at rest and on quit.
     opencode: Arc<opencode::OpenCodeSlot>,
+    /// The user's agents as the cleanup uses them: their clients, models, first requests and marks.
+    agents: Arc<agents::Agents>,
     /// The recognition in flight (at the second press, or "retry"): `AbortStt` cancels it too. Without a task (there
     /// was no session) it is `None`: the result was sent at once.
     stt_task: TaskSlot<Option<JoinHandle<()>>>,
@@ -349,9 +350,6 @@ pub struct Runtime {
     notices: u64,
     offer_found: u64,
     level: LevelGate,
-    /// The connection warm-up; the refine prompt cache has its own (`cache_warm`).
-    warm: WarmUp,
-    cache_warm: CacheWarm,
     attempt: Attempt,
     usage: UsageLog,
     /// "Ask": the focus query with the selection taken at the chord (spec 2 §6.1) and its answer once read; the Ctrl+C
@@ -400,8 +398,9 @@ impl Runtime {
         };
         let translate_home = pair_now(&settings);
         let model = ModelKeeper::new(paths.models.clone(), &settings.stt.model);
-        let llm = llm::LlmKeeper::new(paths.models.clone(), &settings.refine.local, settings.refine.where_ == settings::Where::Local);
-        let opencode = opencode::OpenCodeSlot::new(agent::cwd(&paths.agent_dir(), cue_core::agents::AgentId::OpenCode));
+        let llm = llm::LlmKeeper::new(paths.models.clone(), &settings.refine.local, llm_active(&settings.refine));
+        let opencode = opencode::OpenCodeSlot::new(agent::cwd(&paths.agent_dir(), AgentId::OpenCode));
+        let agents = agents::Agents::new(paths.agent_dir(), opencode.clone());
         let instructions = Instructions::load_or_create(&paths, lang.code(), settings.refine.legacy_custom());
         // The old custom text leaves settings.json once the instructions file exists.
         let mut settings = settings;
@@ -442,6 +441,7 @@ impl Runtime {
             model,
             llm,
             opencode,
+            agents,
             stt_task: TaskSlot::default(),
             refine_task: TaskSlot::default(),
             refine_focus: None,
@@ -466,8 +466,6 @@ impl Runtime {
             notices: 0,
             offer_found: 0,
             level: LevelGate::default(),
-            warm: WarmUp::default(),
-            cache_warm: CacheWarm::default(),
             attempt: Attempt::new(DictationId::default()),
             usage: UsageLog::default(),
             ask_query: None,
@@ -514,6 +512,7 @@ impl Runtime {
         self.ui.models(&self.model.view());
         self.llm.start(&self.tx, &self.http);
         self.ui.llms(&self.llm.view());
+        self.find_agents();
         forget_soniox_key();
         self.key_habits();
         while let Some(ev) = rx.recv().await {
@@ -743,11 +742,8 @@ impl Runtime {
             }
             CoreEvent::AnswerSource(n) => self.open_source(n),
             CoreEvent::Warmed { usage, model } => self.on_warmed(usage, &model),
-            CoreEvent::Wake => {
-                self.warm.reset();
-                self.cache_warm.reset();
-                self.ask_warm.reset();
-            }
+            CoreEvent::Wake => self.ask_warm.reset(),
+            CoreEvent::AgentsFound(found) => self.on_agents_found(&found),
             CoreEvent::DropMoved(place) => {
                 self.settings.drop.position = place;
                 self.save_settings();
@@ -857,7 +853,7 @@ impl Runtime {
         let s = &self.settings;
         let (target, language, periods) = (s.translate.target(), s.ui.language, s.history.clone());
         let device = s.audio.device.clone();
-        let place = s.refine.where_;
+        let (place, fallback) = (s.refine.where_, s.refine.fallback);
         // "Forget all": habits still waiting for their rule or their card do not come back after it.
         if change == SettingChange::HabitsForget {
             self.drafts.clear();
@@ -885,11 +881,11 @@ impl Runtime {
             tracing::info!(keep, audio, "history: period changed");
             self.history.prune(&s.history, &local_today());
         }
-        if s.refine.where_ != place {
-            tracing::info!(place = ?s.refine.where_, "cleanup: where it runs changed");
-            // On this computer: the chosen model loads when its file is here. Back to the cloud: the next cleanup goes
-            // there at once, the local model is let go (its memory freed), and a local download goes on.
-            self.llm.set_active(s.refine.where_ == settings::Where::Local, &self.tx, &self.http);
+        if s.refine.where_ != place || s.refine.fallback != fallback {
+            tracing::info!(place = ?s.refine.where_, fallback = ?s.refine.fallback, "cleanup: where it runs changed");
+            // On this computer, or the agent with the local fallback: the chosen model loads when its file is here.
+            // Otherwise the local model is let go (its memory freed), and a local download goes on.
+            self.llm.set_active(llm_active(&s.refine), &self.tx, &self.http);
             self.ui.llms(&self.llm.view());
         }
         let s = &self.settings;
@@ -1018,17 +1014,17 @@ impl Runtime {
         }
     }
 
-    /// The rule of a habit just found, asked of the cleanup's connection: within `RULE_WAIT_MS`, or at once without a
-    /// connection, `on_habit_rule` gets it or nothing. The habit is numbered now, as found.
+    /// The rule of a habit just found, asked of the local model on this computer: within `RULE_WAIT_MS`, or at once on
+    /// any other route, `on_habit_rule` gets it or nothing. The habit is numbered now, as found.
     fn ask_rule(&mut self, draft: habits::Draft) {
         let n = self.next_notice();
         let ask = draft.ask();
         self.drafts.push((n, draft));
-        let (http, s, tx, lang, key) = (self.http.clone(), self.settings.refine.clone(), self.tx.clone(), self.lang.code(), self.cleanup_key());
-        let to = route(s.where_, &self.llm.slot());
+        let (s, tx, lang) = (self.settings.refine.clone(), self.tx.clone(), self.lang.code());
+        let to = route(&s, &self.llm.slot());
         tokio::spawn(async move {
             let wait = Duration::from_millis(habits::RULE_WAIT_MS);
-            let asked = habit_rule(to, &http, key.as_deref(), &s, &ask, lang, wait);
+            let asked = habit_rule(to, &s, &ask, lang, wait);
             let rule = tokio::time::timeout(wait, asked).await.ok().flatten();
             let _ = tx.send(CoreEvent::HabitRule { draft: n, rule });
         });
@@ -1069,14 +1065,32 @@ impl Runtime {
         self.ui.settings(&SettingsView::of(&self.settings, self.lang, self.can_save_settings));
     }
 
-    /// The cleanup connection's key from the store (a local server has none; `None` too when it cannot be read).
-    fn cleanup_key(&self) -> Option<String> {
-        KeyName::of_connection(self.settings.refine.connection().id).and_then(|name| {
-            keys::lookup(name).unwrap_or_else(|e| {
-                tracing::warn!("{} key: {e}", name.as_str());
-                None
-            })
-        })
+    /// At startup, the cleanup goes to the user's agent but none is set yet: the agents on this computer are looked for
+    /// off the core's thread (`AgentsFound`). Meanwhile a dictation goes in through the no-AI layer.
+    fn find_agents(&self) {
+        let s = &self.settings.refine;
+        if s.where_ != settings::Where::Agent || s.agent.is_some() {
+            return;
+        }
+        let tx = self.tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let found = agent::discover().into_iter().map(|f| f.id).collect();
+            let _ = tx.send(CoreEvent::AgentsFound(found));
+        });
+    }
+
+    /// The agents found: the first in `ORDER` cleans from now on; none, the cleanup runs on this computer, nothing
+    /// chosen there until the user picks a model (`agents::resolve_agent`). Written to settings.json at once.
+    fn on_agents_found(&mut self, found: &[AgentId]) {
+        if !agents::resolve_agent(&mut self.settings.refine, found) {
+            return;
+        }
+        let s = &self.settings.refine;
+        tracing::info!(agent = s.agent.map(|a| a.id()), place = ?s.where_, "cleanup: the agent at start");
+        self.save_settings();
+        self.send_settings();
+        self.llm.set_active(llm_active(&self.settings.refine), &self.tx, &self.http);
+        self.ui.llms(&self.llm.view());
     }
 
     /// The habits' hash secret from the key store (docs/specs/2026-11-04-habits.md, "The hash's secret"), before the
@@ -1243,17 +1257,17 @@ impl Runtime {
         // Of the habits sent, those whose effect shows in the cleaned text go on its history entry; a raw fallback shows
         // none.
         if let Some((sent, raw)) = self.habits_sent.take(id) {
-            let marks = if result.outcome == RefineOutcome::Refined { habits::marks(&sent, &raw, &result.text) } else { Vec::new() };
+            let marks = if result.outcome.cleaned() { habits::marks(&sent, &raw, &result.text) } else { Vec::new() };
             self.habits_applied.put(id, marks);
         }
         if self.attempt.id == id {
             let now = self.now();
             self.attempt.refine_done(result.usage, result.outcome, now);
         }
-        // A key problem (`RawAgent`) is already in the log: the connection's refine writes one line for each failed
-        // refine, whatever the insert outcome. The Drop names the connection in its error.
-        if matches!(result.outcome, RefineOutcome::RawAgent(_)) {
-            self.ui.cleanup_name(self.settings.refine.connection().name);
+        // The agent's problem (`RawAgent`, `Covered`) is already in the log: one line for each failed request, whatever
+        // the insert outcome. The Drop names the agent in its word ("Codex: sign in again").
+        if let (RefineOutcome::RawAgent(_) | RefineOutcome::Covered(_), Some(a)) = (result.outcome, self.settings.refine.agent) {
+            self.ui.cleanup_name(a.name());
         }
         self.feed(Input::Refined { id, text: result.text, outcome: result.outcome });
     }
@@ -1457,8 +1471,6 @@ impl Runtime {
                 self.take_ask_context(id);
             }
         }
-        self.warm_up();
-        self.warm_cache();
         self.warm_local();
         if let Some(old) = self.stream.take() {
             old.session.abort();
@@ -1479,7 +1491,6 @@ impl Runtime {
         if self.flow.mode() == Mode::Ask && !self.flow.answer_open() && self.flow.ui_state().phase == UiPhase::Think {
             self.read_ask_context(id);
         }
-        self.warm_up();
         self.prefetch_focus(id);
         let tx = self.tx.clone();
         let Some(Stream { session, .. }) = self.stream.take_if(|s| s.id == id) else {
@@ -1516,7 +1527,6 @@ impl Runtime {
             let now = self.now();
             self.attempt.retry(now);
         }
-        self.warm_up();
         self.prefetch_focus(id);
         // Retry after the model failed: its download goes on first, and recognition waits for it.
         self.model.retry(&self.tx, &self.http);
@@ -1536,39 +1546,6 @@ impl Runtime {
         abort_stt_task(old);
     }
 
-
-    /// Connect to Anthropic ahead of time: when recording starts and on the second press (in parallel with
-    /// transcription), at most once every 20 s (right away after sleep) and only if there is a key: refine does not pay
-    /// for the TLS handshake inside its 1.5 s budget.
-    fn warm_up(&mut self) {
-        let anthropic = self.settings.refine.where_ == settings::Where::Agent && self.settings.refine.connection().kind == Kind::Anthropic;
-        if !anthropic || !self.warm.due(self.now()) || !matches!(keys::lookup(KeyName::Anthropic), Ok(Some(_))) {
-            return;
-        }
-        let http = self.http.clone();
-        tokio::spawn(async move {
-            let _ = http.head(WARM_URL).timeout(WARM_TIMEOUT).send().await;
-        });
-    }
-
-    /// Warms the refine prompt cache when a dictation starts and the cache may have expired (spec 2 §6.3): the first refine
-    /// after a pause reads the prompt from the cache. Dictation and translation share the prefix; "Ask" has its own
-    /// (`warm_ask_cache`).
-    fn warm_cache(&mut self) {
-        // Over another connection there is no warm-up: its first cleanup writes the cache, where it has one.
-        let model = self.settings.refine.model().id.to_owned();
-        let anthropic = self.settings.refine.where_ == settings::Where::Agent && self.settings.refine.connection().kind == Kind::Anthropic;
-        if !anthropic || self.flow.mode() == Mode::Ask || !claude::can_warm(&model) || !self.cache_warm.due(self.now()) {
-            return;
-        }
-        let Ok(Some(key)) = keys::lookup(KeyName::Anthropic) else { return };
-        let (http, tx, dict) = (self.http.clone(), self.tx.clone(), self.settings.dictionary.clone());
-        tokio::spawn(async move {
-            if let Some(usage) = claude::warm(&http, &key, &model, &dict).await {
-                let _ = tx.send(CoreEvent::Warmed { usage, model });
-            }
-        });
-    }
 
     /// Warms the local model for a dictation just started on this computer: the cleanup's system part, with this app's
     /// habits, is evaluated while the person speaks. A translation and "Ask" have other prompts.
@@ -1644,19 +1621,14 @@ impl Runtime {
         // The query was late ("unknown"): use the app at the start of recording.
         let app = first_known_app(&[&info.app, &self.attempt.app]).to_owned();
         let ctx = RefineContext::new(app, info.before_cursor.as_deref(), self.settings.refine.context_chars);
-        // The connection's key (a local server has none). No key: refine writes the log line itself and returns the raw
-        // text.
-        let kind = self.settings.refine.connection().kind;
-        let key = self.cleanup_key();
-        let to = match route(self.settings.refine.where_, &self.llm.slot()) {
+        let to = match route(&self.settings.refine, &self.llm.slot()) {
             Route::NotReady if self.llm.waking() => Route::Waking(self.llm.slot()),
             to => to,
         };
-        let now = self.now();
-        // "Ask" has a prefix of its own (`ask_warm`).
-        if mode != Mode::Ask {
-            self.cache_warm.touched(now);
+        if matches!(to, Route::Off) {
+            tracing::info!(reason = off_reason(&self.settings.refine), "cleanup: no AI, the no-AI layer's text");
         }
+        let now = self.now();
         if self.attempt.id == id {
             self.attempt.refine_started(now);
             // The mode is final by the time refine starts.
@@ -1682,49 +1654,27 @@ impl Runtime {
         // text as heard).
         let raw = basics::tidy(&raw, &dict);
         self.habits_sent.put(id, (sent, raw.clone()));
-        let (http, s, tx) = (self.http.clone(), self.settings.refine.clone(), self.tx.clone());
+        let (s, tx, agents, slot) = (self.settings.refine.clone(), self.tx.clone(), self.agents.clone(), self.llm.slot());
         let old = self.refine_task.start(id, |task| {
             tokio::spawn(async move {
                 let fallback_raw = raw.clone();
-                // One future for both jobs, so `guarded` covers a translation too.
+                // One future for every route and job, so `guarded` covers them all.
                 let body = async {
-                    let key = key.as_deref();
-                    // On this computer the local model; in the cloud the connection picks the client; the settings give
-                    // it the model and the style.
                     let here = match to {
-                        Route::Local(g) => Some(Some(g)),
-                        Route::Waking(slot) => Some(slot.wait(llm::LOAD_WAIT).await),
-                        Route::NotReady => Some(None),
-                        // The agent's default model; which one, and whether this is its first request, come with the
-                        // settings.
-                        Route::Agent(c) => {
-                            return match job {
-                                Job::Clean | Job::Rewrite => {
-                                    agent::refine::refine(&c, "", &raw, &ctx, &dict, &s, &instructions, false).await
-                                }
-                                Job::Translate(to) => {
-                                    agent::refine::translate(&c, "", &raw, &ctx, &dict, &s, &instructions, false, to).await
-                                }
-                            };
+                        Route::Off => return no_ai(&raw),
+                        Route::Local(g) => Some(g),
+                        Route::Waking(slot) => slot.wait(llm::LOAD_WAIT).await,
+                        Route::NotReady => None,
+                        // The user's agent, then the fallback the user chose when it does not answer.
+                        Route::Agent(a) => {
+                            let r = agents.refine(a, &raw, &ctx, &dict, &s, &instructions, job).await;
+                            return agents::or_local(r, s.fallback, &slot, &raw, &ctx, &dict, &s, &instructions, job).await;
                         }
-                        Route::Cloud => None,
                     };
-                    if let Some(g) = here {
-                        return match (g, job) {
-                            (Some(g), Job::Clean | Job::Rewrite) => local::refine(g, &raw, &ctx, &dict, &s, &instructions).await,
-                            (Some(g), Job::Translate(to)) => local::translate(g, &raw, &ctx, &dict, &s, &instructions, to).await,
-                            (None, _) => local::not_ready(&raw),
-                        };
-                    }
-                    match (kind, job) {
-                        (Kind::Anthropic, Job::Clean | Job::Rewrite) => claude::refine(&http, key, s.model().id, &raw, &ctx, &dict, &s, &instructions).await,
-                        (Kind::Anthropic, Job::Translate(to)) => {
-                            claude::translate(&http, key, s.model().id, &raw, &ctx, &dict, &s, &instructions, to).await
-                        }
-                        (Kind::OpenRouter, Job::Clean | Job::Rewrite) => openrouter::refine(&http, key, &raw, &ctx, &dict, &s, &instructions).await,
-                        (Kind::OpenRouter, Job::Translate(to)) => openrouter::translate(&http, key, &raw, &ctx, &dict, &s, &instructions, to).await,
-                        (Kind::Chat, Job::Clean | Job::Rewrite) => chat::refine(&http, key, &raw, &ctx, &dict, &s, &instructions).await,
-                        (Kind::Chat, Job::Translate(to)) => chat::translate(&http, key, &raw, &ctx, &dict, &s, &instructions, to).await,
+                    match (here, job) {
+                        (Some(g), Job::Clean | Job::Rewrite) => local::refine(g, &raw, &ctx, &dict, &s, &instructions).await,
+                        (Some(g), Job::Translate(to)) => local::translate(g, &raw, &ctx, &dict, &s, &instructions, to).await,
+                        (None, _) => local::not_ready(&raw),
                     }
                 };
                 let result = guarded("refine", body, move || refine_panicked(fallback_raw)).await;
@@ -2722,45 +2672,59 @@ fn job_for(
 
 /// Where a dictation's cleanup, a translation and a habit's rule go.
 enum Route {
+    /// No AI, or none chosen: the no-AI layer's text at once; a translation has nothing to translate with.
+    Off,
     /// The local model in the slot.
     Local(Arc<dyn Generate>),
-    /// On this computer, no model ready yet: the raw text at once.
+    /// On this computer, the chosen model not ready yet: the raw text at once.
     NotReady,
     /// On this computer, the model in use loading again after a rest: a dictation's cleanup waits for it
     /// (`llm::LOAD_WAIT` at most); a habit's rule does not.
     Waking(Arc<llm::LlmSlot>),
-    /// The cloud connection.
-    Cloud,
-    /// The user's own agent (OpenCode, Codex).
-    #[allow(dead_code)] // chosen once the settings say where the cleanup runs
-    Agent(AgentClient),
+    /// The user's own agent. Its client is made in the request's task: OpenCode's server may have to start first.
+    Agent(AgentId),
 }
 
-/// A habit's rule along `to`, within `wait`; none: CUE's template writes it. On this computer the rule never asks the
-/// cloud: the local model, or the template. On an agent route it is always the template: no agent is run for a rule.
-async fn habit_rule(
-    to: Route,
-    http: &reqwest::Client,
-    key: Option<&str>,
-    s: &settings::RefineSettings,
-    ask: &habits::RuleAsk,
-    lang: &str,
-    wait: Duration,
-) -> Option<habits::RuleText> {
+/// A habit's rule along `to`, within `wait`; none: CUE's template writes it. Only the local model is asked: on an agent
+/// route the rule's wait would expire on most runs, so it is always the template, and no agent is run for a rule.
+async fn habit_rule(to: Route, s: &settings::RefineSettings, ask: &habits::RuleAsk, lang: &str, wait: Duration) -> Option<habits::RuleText> {
     match to {
         Route::Local(g) => local::rule(g, s, ask, lang, wait).await,
-        Route::NotReady | Route::Waking(_) | Route::Agent(_) => None,
-        Route::Cloud => habit::rule(http, key, s, ask, lang, wait).await,
+        Route::Off | Route::NotReady | Route::Waking(_) | Route::Agent(_) => None,
     }
 }
 
-fn route(place: settings::Where, slot: &llm::LlmSlot) -> Route {
-    match (place, slot.get()) {
-        // Task 7: route to the agent
-        (settings::Where::Agent, _) => Route::Cloud,
-        (settings::Where::Local, Some(g)) => Route::Local(g),
-        // No AI, or a local model not ready yet: the raw text at once.
-        (settings::Where::Local, None) | (settings::Where::Off, _) => Route::NotReady,
+/// The route the settings say: no AI; this computer, with nothing chosen there counting as no AI; the user's agent,
+/// with none set yet (looked for at startup) counting as no AI.
+fn route(s: &settings::RefineSettings, slot: &llm::LlmSlot) -> Route {
+    match s.where_ {
+        settings::Where::Off => Route::Off,
+        settings::Where::Local if s.local.is_empty() => Route::Off,
+        settings::Where::Local => slot.get().map_or(Route::NotReady, Route::Local),
+        settings::Where::Agent => s.agent.map_or(Route::Off, Route::Agent),
+    }
+}
+
+/// Why a cleanup has no AI, for the log.
+fn off_reason(s: &settings::RefineSettings) -> &'static str {
+    match s.where_ {
+        settings::Where::Off => "no AI chosen",
+        settings::Where::Local => "no local model chosen",
+        settings::Where::Agent => "no agent found yet",
+    }
+}
+
+/// The no-AI layer's text, as it is (`basics::tidy` already ran).
+fn no_ai(raw: &str) -> RefineResult {
+    RefineResult { text: raw.to_owned(), outcome: RefineOutcome::NoAi, usage: claude::Usage::default() }
+}
+
+/// The local model is kept loaded on this computer, and beside the user's agent when it is the agent's fallback.
+fn llm_active(s: &settings::RefineSettings) -> bool {
+    match s.where_ {
+        settings::Where::Local => true,
+        settings::Where::Agent => s.fallback == settings::Fallback::Local,
+        settings::Where::Off => false,
     }
 }
 
@@ -3038,40 +3002,77 @@ mod tests {
             }
         }
 
+        fn at(where_: settings::Where, local: &str, agent: Option<AgentId>) -> settings::RefineSettings {
+            settings::RefineSettings { where_, local: local.into(), agent, ..settings::RefineSettings::default() }
+        }
+
+        const MODEL: &str = "llm--here--model--q4_k_m";
+
         #[test]
-        fn no_ai_pastes_raw_even_with_a_ready_local_model() {
+        fn no_ai_pastes_the_basics_even_with_a_ready_local_model() {
             let slot = llm::LlmSlot::default();
             slot.ready(std::sync::Arc::new(Here));
-            assert!(matches!(route(settings::Where::Off, &slot), Route::NotReady));
+            assert!(matches!(route(&at(settings::Where::Off, MODEL, Some(AgentId::Codex)), &slot), Route::Off));
+        }
+
+        /// Nothing chosen on this computer, or no agent found yet: the no-AI layer, not "the local model is not ready".
+        #[test]
+        fn nothing_chosen_is_no_ai() {
+            let slot = llm::LlmSlot::default();
+            slot.ready(std::sync::Arc::new(Here));
+            assert!(matches!(route(&at(settings::Where::Local, "", None), &slot), Route::Off));
+            assert!(matches!(route(&at(settings::Where::Agent, MODEL, None), &slot), Route::Off));
+            assert_eq!(off_reason(&at(settings::Where::Local, "", None)), "no local model chosen");
+            assert_eq!(off_reason(&at(settings::Where::Off, "", None)), "no AI chosen");
         }
 
         #[test]
         fn local_with_nothing_ready_pastes_raw_at_once() {
             let slot = llm::LlmSlot::default();
-            assert!(matches!(route(settings::Where::Local, &slot), Route::NotReady));
+            assert!(matches!(route(&at(settings::Where::Local, MODEL, None), &slot), Route::NotReady));
         }
 
         #[test]
         fn local_refine_uses_the_local_engine() {
             let slot = llm::LlmSlot::default();
             slot.ready(std::sync::Arc::new(Here));
-            assert!(matches!(route(settings::Where::Local, &slot), Route::Local(g) if g.id() == "llm--here--model--q4_k_m"));
+            assert!(matches!(route(&at(settings::Where::Local, MODEL, None), &slot), Route::Local(g) if g.id() == MODEL));
         }
 
-        /// No agent is run for a habit's rule: CUE's template writes it.
+        #[test]
+        fn the_agent_route_goes_to_the_chosen_agent_not_the_local_model() {
+            let slot = llm::LlmSlot::default();
+            slot.ready(std::sync::Arc::new(Here));
+            let s = at(settings::Where::Agent, MODEL, Some(AgentId::Codex));
+            assert!(matches!(route(&s, &slot), Route::Agent(AgentId::Codex)), "a loaded local model is not used");
+        }
+
+        /// The no-AI layer's text goes in at once, with an outcome of its own.
+        #[tokio::test]
+        async fn off_pastes_basics_text() {
+            let dict = settings::DictionarySettings::default();
+            let raw = basics::tidy("ну   эм привет  ээ как дела", &dict);
+            let r = no_ai(&raw);
+            assert_eq!((r.text.as_str(), r.outcome), (raw.as_str(), RefineOutcome::NoAi));
+            assert!(!r.text.contains("эм") && !r.text.contains("  "), "{:?}", r.text);
+        }
+
+        /// The local model stays loaded beside the agent only when it is the agent's fallback.
+        #[test]
+        fn the_local_model_is_kept_for_this_computer_or_the_fallback() {
+            let mut s = at(settings::Where::Agent, MODEL, Some(AgentId::Codex));
+            assert!(!llm_active(&s));
+            s.fallback = settings::Fallback::Local;
+            assert!(llm_active(&s));
+            s.where_ = settings::Where::Off;
+            assert!(!llm_active(&s));
+            s.where_ = settings::Where::Local;
+            assert!(llm_active(&s));
+        }
+
+        /// No agent is run for a habit's rule: CUE's template writes it. Nor with no AI.
         #[tokio::test]
         async fn habit_rule_on_agent_route_uses_template() {
-            let dir = std::env::temp_dir().join(format!("cue-habit-rule-agent-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            // A Codex that leaves a mark when it runs.
-            let ran = dir.join("ran.txt");
-            let shim = dir.join("codex.cmd");
-            std::fs::write(&shim, format!("@ECHO off
-echo ran> \"{}\"
-", ran.display())).unwrap();
-            let found = cue_engines::agent::Found { id: cue_core::agents::AgentId::Codex, exe: shim, version: None };
-            let to = Route::Agent(AgentClient::Cli { found, home: dir.join("agent") });
             let draft = habits::Draft {
                 forms: vec![habits::Form::EndMark { mark: '.', removed: true }],
                 app: "Telegram".into(),
@@ -3080,19 +3081,10 @@ echo ran> \"{}\"
                 n: 3,
             };
             let s = settings::RefineSettings::default();
-            let http = reqwest::Client::new();
-            let rule = habit_rule(to, &http, Some("sk-test"), &s, &draft.ask(), "ru", Duration::from_secs(5)).await;
-            assert!(rule.is_none(), "the template writes it");
-            assert!(!ran.exists(), "the agent was run");
-            assert!(!dir.join("agent").exists(), "nothing was written for the agent");
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-
-        #[test]
-        fn back_to_cloud_goes_to_the_cloud_at_once() {
-            let slot = llm::LlmSlot::default();
-            slot.ready(std::sync::Arc::new(Here));
-            assert!(matches!(route(settings::Where::Agent, &slot), Route::Cloud), "a loaded local model is not used");
+            for to in [Route::Agent(AgentId::Codex), Route::Agent(AgentId::OpenCode), Route::Off] {
+                let rule = habit_rule(to, &s, &draft.ask(), "ru", Duration::from_secs(5)).await;
+                assert!(rule.is_none(), "the template writes it");
+            }
         }
     }
 

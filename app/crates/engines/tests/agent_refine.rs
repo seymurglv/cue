@@ -265,3 +265,72 @@ async fn translation_never_returns_untranslated_as_refined() {
     let r = refine::translate(&c.client, "", raw, &ctx(), &Default::default(), &s, BOLD_PROMPT, false, "en").await;
     assert_eq!((r.text.as_str(), r.outcome), ("Hi, how are you today?", RefineOutcome::Refined));
 }
+
+impl Codex {
+    /// Adds `name=value` to the environment its shim gives the fake.
+    fn env(&self, name: &str, value: &str) {
+        let shim = self.dir.join("codex.cmd");
+        let script = std::fs::read_to_string(&shim).unwrap();
+        let script = script.replacen("@ECHO off\r\n", &format!("@ECHO off\r\nset \"{name}={value}\"\r\n"), 1);
+        std::fs::write(&shim, script).unwrap();
+    }
+}
+
+#[cfg(windows)]
+fn alive(pid: u32) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+    // SAFETY: plain calls on a handle this function owns and closes.
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) else { return false };
+        let running = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+        let _ = CloseHandle(h);
+        running
+    }
+}
+
+/// Esc while Codex works: the dropped request ends Codex's process at once, not at its timeout, so it spends none of
+/// the user's quota on a text nobody waits for.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_dropped_request_ends_codex_well_before_its_timeout() {
+    let c = codex("dropped", Answer { stdout: &says(CLEAN), stderr: "", exit: 0, sleep_ms: 60_000 });
+    let pid_file = c.dir.join("pid.txt");
+    c.env("FAKE_AGENT_PID", &pid_file.to_string_lossy());
+    let client = c.client.clone();
+    let start = Instant::now();
+    let request = tokio::spawn(async move {
+        let s = RefineSettings::default();
+        refine::run(&client, "", RAW, &ctx(), &Default::default(), &s, BOLD_PROMPT, Job::Rewrite, Duration::from_secs(30)).await
+    });
+    let pid = loop {
+        if let Some(pid) = std::fs::read_to_string(&pid_file).ok().and_then(|s| s.trim().parse::<u32>().ok()) {
+            break pid;
+        }
+        assert!(start.elapsed() < Duration::from_secs(15), "the fake did not start");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(alive(pid));
+    request.abort();
+    let dropped = Instant::now();
+    while alive(pid) {
+        assert!(dropped.elapsed() < Duration::from_secs(5), "Codex runs on after the request was dropped");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(start.elapsed() < Duration::from_secs(25), "ended by the drop, not the 30 s timeout: {:?}", start.elapsed());
+}
+
+/// `codex login status` through the shim, as a never-signed-in Codex and a signed-in one answer it.
+#[tokio::test]
+async fn codex_login_status_tells_a_never_signed_in_codex() {
+    use cue_engines::agent::{Login, codex_login};
+    let c = answering("login", &says(CLEAN));
+    let AgentClient::Cli { found, home } = c.client.clone() else { unreachable!() };
+    assert_eq!(codex_login(&found, &home).await, Ok(Login::SignedIn));
+    c.env("FAKE_AGENT_LOGIN", "Not logged in");
+    c.env("FAKE_AGENT_LOGIN_EXIT", "1");
+    assert_eq!(codex_login(&found, &home).await, Ok(Login::SignedOut));
+    assert!(!c.record.exists(), "no exec ran, so no text went anywhere");
+    let gone = Found { exe: c.dir.join("no-such-codex.exe"), ..found };
+    assert_eq!(codex_login(&gone, &home).await, Err(cue_engines::agent::AgentFailure::NotInstalled));
+}

@@ -7,8 +7,9 @@ use std::path::Path;
 #[cfg(not(windows))]
 use std::process::Child;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::AgentFailure;
 
@@ -35,6 +36,23 @@ pub struct Output {
 /// the timeout the whole tree is killed and the run is `Timeout`. `.cmd` shims run through `cmd.exe` (Rust's
 /// `Command` quotes their arguments, and refuses ones it cannot quote safely).
 pub fn run(exe: &Path, args: &[String], stdin: &str, cwd: &Path, timeout: Duration) -> Result<Output, AgentFailure> {
+    run_until(exe, args, stdin, cwd, timeout, &AtomicBool::new(false))
+}
+
+/// How often a run looks at its cancel flag.
+const CANCEL_EVERY: Duration = Duration::from_millis(50);
+
+/// [`run`] that also ends, with its whole process tree, as soon as `cancel` is set (the request was dropped: Esc, or
+/// a newer one): `Failed("cancelled")`. The flag is looked at every [`CANCEL_EVERY`], so the agent never runs on,
+/// spending the user's quota, for a text nobody waits for.
+pub fn run_until(
+    exe: &Path,
+    args: &[String],
+    stdin: &str,
+    cwd: &Path,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<Output, AgentFailure> {
     ready_cwd(cwd)?;
     let mut cmd = Command::new(exe);
     cmd.args(args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -50,14 +68,37 @@ pub fn run(exe: &Path, args: &[String], stdin: &str, cwd: &Path, timeout: Durati
     let out = child.stdout.take().map(|pipe| std::thread::spawn(move || read_capped(pipe)));
     let err = child.stderr.take().map(|pipe| std::thread::spawn(move || read_tail(pipe)));
 
-    let exited = tree.wait(&mut child, timeout);
+    let deadline = Instant::now() + timeout;
+    let mut exited = false;
+    let mut cancelled = false;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if tree.wait(&mut child, left.min(CANCEL_EVERY)) {
+            exited = true;
+            break;
+        }
+        if cancel.load(Ordering::Relaxed) {
+            cancelled = true;
+            break;
+        }
+        if left <= CANCEL_EVERY {
+            break;
+        }
+    }
     // Whatever the agent left running ends with it; then the pipes close and the readers finish.
     tree.kill();
+    if !exited {
+        // Elsewhere than Windows the tree is the child alone.
+        let _ = child.kill();
+    }
     let status = child.wait().ok().and_then(|s| s.code());
     let stdout = join(out);
     let stderr = join(err);
     if let Some(w) = writer {
         let _ = w.join();
+    }
+    if cancelled {
+        return Err(AgentFailure::Failed("cancelled"));
     }
     if !exited {
         return Err(AgentFailure::Timeout);
@@ -345,7 +386,8 @@ mod win {
     }
 }
 
-/// Elsewhere (CUE is a Windows app; this keeps the crate building): the child alone is killed at the timeout.
+/// Elsewhere (CUE is a Windows app; this keeps the crate building): the child alone is killed at the timeout or a
+/// cancel.
 #[cfg(not(windows))]
 struct Tree;
 
@@ -363,7 +405,6 @@ impl Tree {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        let _ = child.kill();
         false
     }
 

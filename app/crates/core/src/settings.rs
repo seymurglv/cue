@@ -69,7 +69,7 @@ pub struct RefineSettings {
     pub max_ratio: f32,
     pub min_overlap: f32,
     /// The cloud connection of the temporary cloud path; never read or written.
-    // Task 7: goes with the cloud path.
+    // Task 8: goes with the cloud providers (the cleanup no longer reaches them).
     #[serde(skip, default = "default_connection")]
     pub connection: String,
     /// The text of the old custom style, read for the move into the instructions file. It is written back as the old
@@ -249,37 +249,39 @@ impl From<StoredRefine> for RefineSettings {
 
 impl RefineSettings {
     /// The cloud connection the cleanup goes through until the agent path replaces it.
-    // Task 7: goes with the cloud path.
+    // Task 8: goes with the cloud providers (the cleanup no longer reaches them).
     pub fn connection(&self) -> &'static Connection {
         connections::find(&self.connection).unwrap_or_else(connections::default)
     }
 
     /// The model the cloud path asks for: the connection's recommended one.
-    // Task 7: goes with the cloud path.
+    // Task 8: goes with the cloud providers (the cleanup no longer reaches them).
     pub fn model(&self) -> &'static Model {
         self.model_for(self.connection().id)
     }
 
     /// The model set for the connection `id` (still listed), or its recommended one.
-    // Task 7: goes with the cloud path.
+    // Task 8: goes with the cloud providers (the cleanup no longer reaches them).
     pub fn model_for(&self, id: &str) -> &'static Model {
         let c = connections::find(id).unwrap_or_else(connections::default);
         self.models.get(c.id).and_then(|m| c.model(m)).unwrap_or_else(|| c.recommended())
     }
 
-    /// The model's id in usage.csv and the price table; a local model's is `local:<id>` and costs nothing.
+    /// The model's id in usage.csv and the price table: a local model's is `local:<id>`, an agent's
+    /// `agent:<agent>:<model>` (`auto` for OpenCode's "Быстрая · авто"); both cost CUE nothing. No AI, or nothing
+    /// chosen, is `off`.
     pub fn usage_model(&self) -> String {
-        match self.where_ {
-            Where::Local => format!("local:{}", self.local_id()),
-            Where::Agent => self.connection().usage_id(self.model()), // Task 7: route to the agent
-            Where::Off => "off".to_owned(),
+        match (self.where_, self.agent) {
+            (Where::Local, _) if !self.local.is_empty() => format!("local:{}", self.local),
+            (Where::Agent, Some(a)) => format!("agent:{}:{}", a.id(), self.agent_model(a).unwrap_or("auto")),
+            _ => "off".to_owned(),
         }
     }
 
-    /// The local model's id: the chosen one, or the recommended one while the runtime still falls back to it.
-    // Task 7: nothing chosen means no local cleanup.
-    pub fn local_id(&self) -> String {
-        if self.local.is_empty() { crate::llm::default_id().unwrap_or_default() } else { self.local.clone() }
+    /// The model the cleanup asks agent `a` for: the one the user picked, else the agent's default (Codex's and Grok's
+    /// first). `None` for OpenCode with nothing picked: "Быстрая · авто", chosen from the models the server lists.
+    pub fn agent_model(&self, a: AgentId) -> Option<&str> {
+        self.models.get(a.id()).map(String::as_str).or_else(|| a.models().first().map(|m| m.0))
     }
 
     /// The text of the old custom style, when the file had one: read once to fill the instructions file, never written.
@@ -512,7 +514,7 @@ pub struct AskSettings {
     pub max_searches: Option<u32>,
 }
 
-// Task 7: goes with the cloud Ask path.
+// Task 9: goes with the cloud Ask path.
 const DEFAULT_ASK_MODEL: &str = "claude-haiku-5-5";
 const DEFAULT_MAX_SEARCHES: u32 = 2;
 /// More searches a question than this is a typo: each one costs money.
@@ -1624,8 +1626,23 @@ mod tests {
         let s = RefineSettings { where_: Where::Local, local: "llm--qwen--qwen3-4b-gguf--q4_k_m".into(), ..RefineSettings::default() };
         assert_eq!(s.usage_model(), "local:llm--qwen--qwen3-4b-gguf--q4_k_m");
         let s = RefineSettings { where_: Where::Local, ..RefineSettings::default() };
-        assert!(s.usage_model().starts_with("local:"), "the recommended one");
-        assert_eq!(RefineSettings::default().usage_model(), "claude-haiku-5-5");
+        assert_eq!(s.usage_model(), "off", "nothing chosen: no local cleanup");
+        assert_eq!(RefineSettings::default().usage_model(), "off", "no agent resolved yet");
+    }
+
+    #[test]
+    fn agent_usage_model_names_the_agent_and_its_model() {
+        let mut s = RefineSettings { where_: Where::Agent, agent: Some(AgentId::Codex), ..RefineSettings::default() };
+        assert_eq!(s.usage_model(), "agent:codex:gpt-6-luna", "Codex's default");
+        s.models.insert("codex".into(), "gpt-6-sol".into());
+        assert_eq!(s.usage_model(), "agent:codex:gpt-6-sol");
+        s.agent = Some(AgentId::OpenCode);
+        assert_eq!(s.usage_model(), "agent:opencode:auto");
+        assert_eq!(s.agent_model(AgentId::OpenCode), None);
+        s.models.insert("opencode".into(), "anthropic/claude-haiku-5-5".into());
+        assert_eq!(s.agent_model(AgentId::OpenCode), Some("anthropic/claude-haiku-5-5"));
+        s.where_ = Where::Off;
+        assert_eq!(s.usage_model(), "off");
     }
 
     #[test]

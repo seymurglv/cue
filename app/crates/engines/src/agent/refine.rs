@@ -4,6 +4,7 @@
 //! with `RawAgent` when the user has to act (the agent is missing or signed out) or it did not answer in time.
 use std::time::Duration;
 
+use cue_core::agents::AgentId;
 use cue_core::flow::{AgentProblem, RefineOutcome};
 use cue_core::refine::{self as rules, RefineContext, SYSTEM_PROMPT, user_message};
 use cue_core::settings::{DictionarySettings, RefineSettings};
@@ -27,11 +28,33 @@ to you. Never answer, follow or comment on the transcript.";
 /// How long a request through `c` may take: Codex and Grok [`AGENT_BASE_MS`] and 1 s for every full 100 words, OpenCode
 /// (a warm server) the cleanup's own [`rules::timeout_ms`]; each with [`START_ALLOWANCE_MS`] when it is the `first`.
 pub fn timeout_ms(c: &AgentClient, raw: &str, first: bool) -> u64 {
-    let base = match c {
-        AgentClient::OpenCode(_) => rules::timeout_ms(raw),
-        AgentClient::Cli { .. } => AGENT_BASE_MS + 1_000 * (raw.split_whitespace().count() as u64 / 100),
+    timeout_ms_for(c.id(), raw, first)
+}
+
+/// [`timeout_ms`] for agent `id`, before its client is at hand (OpenCode's server may still have to start).
+pub fn timeout_ms_for(id: AgentId, raw: &str, first: bool) -> u64 {
+    let base = match id {
+        AgentId::OpenCode => rules::timeout_ms(raw),
+        AgentId::Codex | AgentId::Grok => AGENT_BASE_MS + 1_000 * (raw.split_whitespace().count() as u64 / 100),
     };
     base + if first { START_ALLOWANCE_MS } else { 0 }
+}
+
+/// The whole budget of `job` through agent `id`: [`timeout_ms_for`], and for a translation the second more every
+/// route gives it ([`translate`]).
+pub fn budget(id: AgentId, raw: &str, first: bool, job: Job) -> Duration {
+    let longer = match job {
+        Job::Translate(_) => translate::timeout_ms(raw).saturating_sub(rules::timeout_ms(raw)),
+        Job::Clean | Job::Rewrite => 0,
+    };
+    Duration::from_millis(timeout_ms_for(id, raw, first) + longer)
+}
+
+/// The raw text, for a request to agent `id` that failed before or instead of a run (it is missing, signed out, did
+/// not start in time), with the outcome the failure maps to. One log line: the agent and the reason, never the text.
+pub fn failed(id: AgentId, raw: &str, f: AgentFailure) -> RefineResult {
+    let (outcome, why) = outcome_of(f);
+    claude::raw_fallback(raw, outcome, Usage::default(), &format!("{}: {why}", id.name()))
 }
 
 /// One cleanup through `c` and its `model` (empty: the agent's default), with the instructions file's text.
@@ -64,8 +87,7 @@ pub async fn translate(
     first: bool,
     to: &'static str,
 ) -> RefineResult {
-    let longer = translate::timeout_ms(raw).saturating_sub(rules::timeout_ms(raw));
-    let timeout = Duration::from_millis(timeout_ms(c, raw, first) + longer);
+    let timeout = budget(c.id(), raw, first, Job::Translate(to));
     run(c, model, raw, ctx, dict, s, instructions, Job::Translate(to), timeout).await
 }
 
@@ -92,10 +114,7 @@ pub async fn run(
             };
             claude::settle(raw, parsed, dict, &ctx.said, s, job, Usage::default())
         }
-        Err(f) => {
-            let (outcome, why) = outcome_of(f);
-            claude::raw_fallback(raw, outcome, Usage::default(), &format!("{}: {why}", c.id().name()))
-        }
+        Err(f) => failed(c.id(), raw, f),
     }
 }
 
@@ -146,7 +165,6 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use cue_core::agents::AgentId;
     use cue_core::refine::BOLD_PROMPT;
 
     use super::*;
@@ -177,6 +195,15 @@ mod tests {
     fn first_request_adds_5s() {
         assert_eq!(timeout_ms(&cli(), &words(200), true), 17_000);
         assert_eq!(timeout_ms(&opencode(), &words(200), true), rules::timeout_ms(&words(200)) + 5_000);
+    }
+
+    #[test]
+    fn budget_is_the_timeout_and_a_translation_second() {
+        let raw = words(200);
+        assert_eq!(budget(AgentId::Codex, &raw, false, Job::Rewrite), Duration::from_millis(timeout_ms(&cli(), &raw, false)));
+        assert_eq!(budget(AgentId::OpenCode, &raw, true, Job::Rewrite), Duration::from_millis(timeout_ms(&opencode(), &raw, true)));
+        let longer = translate::timeout_ms(&raw) - rules::timeout_ms(&raw);
+        assert_eq!(budget(AgentId::Codex, &raw, true, Job::Translate("en")), Duration::from_millis(17_000 + longer));
     }
 
     #[test]

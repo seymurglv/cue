@@ -151,8 +151,10 @@ too). Once the finishing press has moved the flow to thinking, neither
 changes the mode, and neither does anything outside a recording. The mode reaches the Drop in `UiState` and the
 runtime in `Refine { mode }` and `RefineAgain { mode }`; every path into Idle resets it to `Dictate`. A translation
 that comes back as anything but a refined, non-empty text is never pasted: the attempt ends as `failed`, and the flow
-shows the `translate` error (`claudeKey` for a key, balance or limit problem) with Retry. That Retry emits
-`RefineAgain` with the saved transcript: the text is translated again, the audio is not transcribed again.
+shows the `translate` error (the agent's word, `agentSignIn`, `agentMissing` or `agentSilent`, when the user's AI is
+the cause) with Retry. That Retry emits `RefineAgain` with the saved transcript: the text is translated again, the audio
+is not transcribed again. With no AI (`RefineOutcome::NoAi`) there is nothing to translate with: `needAiTranslate`
+("Перевод: выберите AI"), nothing pasted, no Retry.
 
 **"Ask" in the flow.** A question is recorded and transcribed like a dictation; then, instead of `Refine`, the flow
 emits `Ask { id, question, follow_up }` and stays in Thinking (the Drop's three dots) until the answer has something to
@@ -164,7 +166,8 @@ flow to the `Answer` phase: the Drop rests (it looks idle), the answer shows in 
 swallowed, and a chord records a follow-up. A write goes to `Inserting` at once with `AskPaste { id, how }` and ends
 the conversation (`CloseAnswer`); the answer's buttons (Insert, Insert below, Replace) do the same for an answer that
 is complete on screen, and Retry after a failure emits `AskAgain { id }`. `AbortAsk { id }` drops the request in
-flight. A `Key` failure closes the answer and shows the Drop's "Claude key problem" without Retry; any other failure
+flight. A `Key` failure closes the answer and shows the Drop's "Спросить: выберите AI" (`needAiAsk`) without Retry: until
+"Ask" follows the cleanup's route, its missing or refused Anthropic key means it has no AI; any other failure
 keeps the answer open with the error and Retry, and the question is kept.
 
 - `asking` is the dictation whose request is in flight, and it can be an earlier one than the current dictation: a
@@ -370,10 +373,41 @@ At its first start this version deletes the Soniox key of earlier versions from 
 
 ### Refine (cleanup)
 
-- At the start of recording and again at the second press, the runtime warms up a TLS connection to the Anthropic API
-  (a key-less `HEAD`, at most every 20 s, at once after wake). Right after the second press it also asks `cue-focus`
-  for the focused app and up to `refine.context_chars` characters before the caret, in parallel with transcription.
-  Password fields are never read; the app name comes from the executable's file description, never the window title.
+- **Where it goes** (`runtime::route`, docs/specs/2026-11-08-no-keys-design.md). Every route first gets the text with
+  the no-AI layer done (`basics::tidy`: the dictionary and learned spellings, no "эм"/"ээ", tidy spaces), and that is
+  what goes in whenever no AI cleans it.
+  - `Where::Off`, `Local` with no model chosen, or `Agent` with no agent set yet: `Route::Off`, the no-AI layer's text
+    at once (`RefineOutcome::NoAi`, a normal "Done"; the log names the reason). A translation shows `needAiTranslate`.
+  - `Where::Local`: the model in the slot (`local::refine`), or the raw text at once while none is ready, or a wait of
+    at most `LOAD_WAIT` for the model loading again after a rest.
+  - `Where::Agent`: the agent in `refine.agent` through `runtime::agents::Agents`. Its budget (`agent::refine::budget`:
+    Codex 10 s + 1 s per 100 words, OpenCode the cleanup's own timeout, a translation a second more, plus 5 s on the
+    agent's first request after CUE starts or after it rested: OpenCode's server let go, or 15 min without a request
+    to Codex) counts from the moment it is asked, so finding or starting OpenCode's server (`OpenCodeSlot::get_or_start`,
+    off the core's thread) comes out of it. The model is `refine.models[agent]`, else Codex's default (GPT-6 Luna), else
+    OpenCode's "Быстрая · авто" (`opencode::fast_auto` over the models its server lists, picked once per server) or its
+    own default; OpenCode's model goes in the request's JSON body only. Grok is not routed yet.
+  - **Marks** (`AgentMarks`, `MARK_FOR` = 5 min): Codex is asked `codex login status` (no text) before its first run and
+    every 5 minutes after, since a Codex never signed in retries about 15 s and would read as a timeout; "Not logged in"
+    marks it signed out. An expired sign-in, which that command does not tell, is marked from the run's own error
+    (`cli::signed_out`), and a missing program marks the agent missing. While a mark holds, a dictation goes in at once
+    with `RawAgent(SignedOut | Missing)`, without the agent.
+  - **Esc** drops the request: a running Codex is ended with its whole process tree at once (`process::run_until`'s
+    cancel flag, set when the request's future is dropped), not at its timeout.
+  - **Fallback** (`refine.fallback`, `agents::or_local`): "paste as said" leaves the no-AI layer's text and the Drop's
+    word. "Почистить: <local model>" cleans (or translates) with the local model only when it is in its slot at that
+    moment; a resting one is never woken or waited for. Cleaned in place of an agent that did not answer, nothing is
+    shown (`Refined`); in place of one that is signed out or missing, the text goes in and the Drop still says so
+    (`RefineOutcome::Covered`). With this fallback the local model is kept loaded beside the agent (`llm_active`).
+  - The Drop's words after the paste, without Retry, name the agent (`cue://cleanup-name`): `agentSignIn`
+    "<Agent>: войдите заново", `agentMissing` "<Agent> не найден", `agentSilent` "<Agent> не ответил".
+  - At startup, `Agent` with no agent set: `agent::discover` off the core's thread, and the first found in `ORDER`
+    (OpenCode, Codex) is written to settings.json; none found, the cleanup moves to this computer with nothing chosen.
+- The cloud request described below (the Messages API, OpenRouter, the OpenAI-compatible services) is no longer reached
+  by a dictation; it stays in `cue_engines` until the keys go. Right after the second press the runtime asks
+  `cue-focus` for the focused app and up to `refine.context_chars` characters before the caret, in parallel with
+  transcription. Password fields are never read; the app name comes from the executable's file description, never the
+  window title.
 - The request: the system prompt as a cached block, a user message with `<app>`, `<before_cursor>` and `<transcript>`
   tags (closing tags inside the data are defused), effort `low`, thinking disabled where the model allows it, and a
   JSON schema that forces `{"text": …}`. Timeout: 3 s plus 1 s per 100 words. A timeout, a network failure or an
@@ -404,8 +438,8 @@ At its first start this version deletes the Soniox key of earlier versions from 
   within `min_ratio`…`max_ratio` (0.35–1.25). At least `min_overlap` (70 %) of the result's non-number words must
   appear in the transcript; words of `dictionary.terms` count as appearing, so a name fixed in a short phrase
   ("открой гитхаб" → "Открой GitHub.") is not taken for an invention. An empty result always fails. A failed check pastes the raw transcript.
-- A key, balance or limit problem at Anthropic pastes the raw transcript and then shows "Claude key problem" without
-  Retry.
+- The user's AI signed out, missing or silent pastes the no-AI layer's text (or the local fallback's) and then shows the
+  agent's word without Retry (see "Where it goes").
 
 ### Translation
 
@@ -456,23 +490,16 @@ At its first start this version deletes the Soniox key of earlier versions from 
   does a large round number said in one word and written in many digits ("миллиард" → "1 000 000 000"): both safely,
   with Retry. A short question answered with a bare number ("какой год" → "2026") passes.
 - **Failure.** A network error, a timeout, a refusal, `max_tokens`, a response off the schema or a failed check pastes
-  nothing: the flow shows "Couldn't translate" with Retry, which translates the saved transcript again. No Anthropic
-  key, or a key, balance or limit problem, shows "Claude key problem" with Retry instead. The log gets one line with the
-  reason and the outcome, and the target code when a translation starts; never the text.
+  nothing: the flow shows "Couldn't translate" with Retry, which translates the saved transcript again. The user's AI
+  signed out, missing or silent shows the agent's word with Retry instead; no AI shows "Перевод: выберите AI" without
+  Retry. The log gets one line with the reason and the outcome, and the target code when a translation starts; never
+  the text.
 
 ### Cache warm-up
 
-When a dictation starts (on `StartStt`, in any mode but "Ask") and no refine or warm-up has started in the last
-4 minutes (`CACHE_WARM_AFTER_MS`: the 5-minute cache lifetime counts from the start of a request, and the recording
-takes time), the runtime sends a warm-up (`claude::warm`): the refine request with the same system blocks and
-dictionary, a one-character transcript, no app, no text before the caret and `max_tokens: 1` (`warm_body`; the API
-refuses `max_tokens: 0` together with the output format, and the format must stay for the prefix to match).
-Dictation and translation share the prefix, so one warm-up serves both. A model whose thinking cannot be turned off
-(Opus 5.5) gets no warm-up: a one-token answer leaves it no thinking budget. The warm-up has a 5 s timeout; a failure
-writes one log line with the reason, and the dictation's own refine writes the cache. After waking from sleep or an
-unlock the next dictation warms the cache again. The tokens are paid for and get a usage row of their own
-(`warmup`); a recording cancelled after the press has paid for its warm-up. "Ask" has a prefix and a warm-up of its
-own (see Ask).
+The cleanup has none: it no longer goes to the Messages API, and an agent keeps its own caches. "Ask" has a prefix and a
+warm-up of its own (see Ask). On this computer the local model evaluates the cleanup's system part while the person
+speaks (`local::warm`).
 
 ### Paste
 
@@ -588,10 +615,10 @@ the correction watch's end: the path from there to a card, and on to a result:
    `follow` moves the open card and the waiting ones to it, and `habits.ts` keeps the row of an app's habit gone with
    the same example for the habit of every app that took its place, so the row changes in place. A habit's form alone in another app counts for that app as any form does. The other forms that reach three
    together become one `Draft`, with the example and `n`.
-4. `ask_rule` numbers the draft as found (`next_notice`), keeps it in `drafts` and spawns the request
-   `cue_engines::habit::rule` through the cleanup's own connection and model, as the cleanup would use them
-   (`cleanup_key`; the Messages API, OpenRouter or `chat`; over OpenRouter with the routing of the cleanup's first try,
-   `Routing::STRICT` through `openrouter::provider`, and a "no provider" is not asked again with less).
+4. `ask_rule` numbers the draft as found (`next_notice`), keeps it in `drafts` and, when the cleanup runs on this
+   computer with its model in the slot, asks that model (`local::rule`). On an agent route the rule is always CUE's
+   template: the 5 s wait would expire on most agent runs, and no agent is run for a rule; with no AI, the template
+   too.
    `habits::rule_messages` builds it: instructions that name the interface language, and a user message that holds the
    kind(s), the example and the app, nothing else. The answer is a `{rule, short}` object (`read_rule` accepts a rule of
    at most `MAX_RULE_CHARS` (80) on one line, and a short name of at most `MAX_SHORT_CHARS`). With no key for a cloud
@@ -774,7 +801,7 @@ effects need, and `cue_engines::ask` talks to the API.
   whole answer, continuations included, within 30 s. The rest of an answered response's body is read in the background
   (5 s at most), so the connection can be reused.
 - Failures (`AskFailure`, one log line with the kind): no key; 401, 402 or 403, or a 400 about the credit balance (a
-  key problem: `AskError::Key`, the Drop's "Claude key problem" without Retry); 404, the model in `ask.model` does not
+  key problem: `AskError::Key`, the Drop's "Спросить: выберите AI" without Retry); 404, the model in `ask.model` does not
   exist (`NoModel`, the log says to check `settings.json`); a timeout; the network; another HTTP status (429 and 5xx
   too: a rate limit passes, so Retry may help, unlike a key problem); an `error` event in the stream (its type); a
   stream against the protocol. Everything but a key problem shows "Couldn't get an answer" with Retry, under the words
@@ -963,7 +990,10 @@ Phases: `idle` (a thin strip; on hover the mark and the hotkey), `start`, `liste
 and done buttons on hover), `think` (three dots), `done` (a check, gone after 1.5 s), `empty`, `cancel` (Restore with
 a 3.6 s ring), `error` (amber "!", the cause on hover, Retry when available; the causes are `model` "Model did not
 download" and `translate` "Couldn't translate" with the network icon, `cpu` "Processor not supported", `stt`
-"Couldn't recognize" and `claudeKey` "Claude key problem"), `answer` (an "Ask" answer is open and
+"Couldn't recognize", the agent's words `agentSignIn` "<Agent>: войдите заново", `agentMissing` "<Agent> не найден" and
+`agentSilent` "<Agent> не ответил" (the agent's name comes on `cue://cleanup-name` just before; "AI" when none came),
+`needAiTranslate` "Перевод: выберите AI" and `needAiAsk` "Спросить: выберите AI"; `needTranslatingModel` and
+`needAnsweringModel` are kept for models that only clean), `answer` (an "Ask" answer is open and
 nothing records: the Drop rests as in `idle`). The frame loop sleeps when nothing moves; with reduced motion turned on
 in Windows, states change instantly.
 

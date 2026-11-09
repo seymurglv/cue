@@ -153,6 +153,25 @@ pub fn grok_text(stdout: &str) -> Option<String> {
     answer["text"].as_str().map(String::from)
 }
 
+/// `codex login status`: no text, no model, nothing of the user's.
+pub fn codex_login_args() -> Vec<String> {
+    vec!["login".to_string(), "status".to_string()]
+}
+
+/// What `codex login status` printed: "Not logged in" (exit 1) is signed out, exit 0 ("Logged in using ChatGPT") signed
+/// in; anything else (another exit code, an older Codex without the command) is unknown.
+pub fn codex_login(out: &Output) -> super::Login {
+    let said = format!("{}
+{}", out.stdout, out.stderr_tail).to_lowercase();
+    if said.contains("not logged in") || out.status == Some(1) {
+        super::Login::SignedOut
+    } else if out.status == Some(0) {
+        super::Login::SignedIn
+    } else {
+        super::Login::Unknown
+    }
+}
+
 /// Whether a failed run says the agent is signed out, its sign-in expired, or it has no access. Only the CLI's own
 /// error messages and stderr are read, never the answer, so a dictation about signing in is not taken for one.
 pub fn signed_out(id: AgentId, out: &Output) -> bool {
@@ -387,6 +406,20 @@ mod tests {
         ] {
             assert!(!probe.contains("CANARY-7Q4"), "the canary file was read");
         }
+    }
+
+    /// `codex login status` as codex-cli 0.166.0 answers it (fixtures README, "Signed out, as each CLI says it").
+    #[test]
+    fn codex_login_status_reads_signed_out_and_in() {
+        use crate::agent::Login;
+        assert_eq!(codex_login_args(), ["login", "status"]);
+        assert_eq!(codex_login(&output(1, "", "Not logged in
+")), Login::SignedOut);
+        assert_eq!(codex_login(&output(1, "Not logged in
+", "")), Login::SignedOut);
+        assert_eq!(codex_login(&output(0, "Logged in using ChatGPT
+", "")), Login::SignedIn);
+        assert_eq!(codex_login(&output(2, "", "error: unrecognized subcommand 'status'")), Login::Unknown);
     }
 
     #[test]
