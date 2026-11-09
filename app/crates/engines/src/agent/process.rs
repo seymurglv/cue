@@ -7,7 +7,7 @@ use std::path::Path;
 #[cfg(not(windows))]
 use std::process::Child;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -53,10 +53,12 @@ pub fn run_until(
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> Result<Output, AgentFailure> {
-    run_env_until(exe, args, &[], stdin, cwd, timeout, cancel)
+    run_env_until(exe, args, &[], stdin, cwd, timeout, cancel, None)
 }
 
-/// [`run_until`] with the extra environment `env` (Grok's switches, `cli::GROK_ENV`).
+/// [`run_until`] with the extra environment `env` (Grok's switches, `cli::GROK_ENV`); `started` gets the process id
+/// once it runs (Grok's pipe lets only that process read the text).
+#[allow(clippy::too_many_arguments)]
 pub fn run_env_until(
     exe: &Path,
     args: &[String],
@@ -65,6 +67,7 @@ pub fn run_env_until(
     cwd: &Path,
     timeout: Duration,
     cancel: &AtomicBool,
+    started: Option<&AtomicU32>,
 ) -> Result<Output, AgentFailure> {
     ready_cwd(cwd)?;
     let mut cmd = Command::new(exe);
@@ -75,6 +78,9 @@ pub fn run_env_until(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let (mut child, tree) = start(cmd)?;
+    if let Some(started) = started {
+        started.store(child.id(), Ordering::Relaxed);
+    }
 
     let writer = child.stdin.take().map(|mut pipe| {
         let bytes = stdin.as_bytes().to_vec();

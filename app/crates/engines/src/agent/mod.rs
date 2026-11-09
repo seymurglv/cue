@@ -18,9 +18,9 @@ pub mod refine;
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use cue_core::agents::AgentId;
 use serde::Serialize;
@@ -267,6 +267,14 @@ async fn grok(
     timeout: Duration,
 ) -> Result<String, AgentFailure> {
     let cwd = empty_cwd(home, AgentId::Grok)?;
+    // The first Grok run after CUE starts also deletes what an earlier CUE left (it quit or crashed before a run's
+    // session was deleted): sessions made before this moment only, so never this run's, on a thread of its own.
+    if let Some(data) = data
+        && !GROK_SWEPT.swap(true, Ordering::Relaxed)
+    {
+        let (exe, home, data, before) = (found.exe.clone(), home.to_path_buf(), data.to_path_buf(), SystemTime::now());
+        std::thread::spawn(move || sweep_grok_sessions(&exe, &home, &data, before));
+    }
     let pipe = pipe::OneShot::create()?;
     let session = session_id()?;
     let args = cli::grok_args(model, p.web_search, &p.system, &pipe.path(), &session);
@@ -298,6 +306,10 @@ async fn grok(
 /// What a finished Grok run gave: signed out, a turn cut because the model reached for a tool (never pasted), a failed
 /// run, a run that did not get the whole text, or the answer.
 fn grok_answer(out: &process::Output, sent: Result<(), AgentFailure>) -> Result<String, AgentFailure> {
+    if sent == Err(AgentFailure::Failed("pipe client")) {
+        tracing::warn!(agent = "grok", "agent: another process opened grok's pipe; nothing was written to it");
+        return Err(AgentFailure::Failed("pipe client"));
+    }
     if cli::signed_out(AgentId::Grok, out) {
         return Err(AgentFailure::SignedOut);
     }
@@ -325,7 +337,8 @@ struct GrokRun {
 
 impl GrokRun {
     /// Starts Grok, hands it `text` through `pipe` while it runs, and waits for it: what it printed, and whether the
-    /// text went through whole. The pipe gives up as soon as Grok has ended.
+    /// text went through whole. Only the process started here may read it (the pipe checks the client's process id);
+    /// the pipe gives up as soon as Grok has ended.
     fn ask(
         &self,
         pipe: pipe::OneShot,
@@ -335,33 +348,82 @@ impl GrokRun {
         cancel: &AtomicBool,
     ) -> Result<(process::Output, Result<(), AgentFailure>), AgentFailure> {
         let ended = Arc::new(AtomicBool::new(false));
-        let (flag, text) = (ended.clone(), text.to_owned());
-        let sender = std::thread::spawn(move || pipe.send_until(&text, timeout, &flag));
-        let out = process::run_env_until(&self.exe, args, &cli::GROK_ENV, "", &self.cwd, timeout, cancel);
+        let grok = Arc::new(AtomicU32::new(0));
+        let (flag, pid, text) = (ended.clone(), grok.clone(), text.to_owned());
+        let sender = std::thread::spawn(move || pipe.send_until(&text, timeout, &flag, &pid));
+        let out = process::run_env_until(&self.exe, args, &cli::GROK_ENV, "", &self.cwd, timeout, cancel, Some(&grok));
         ended.store(true, Ordering::Relaxed);
         let sent = sender.join().unwrap_or(Err(AgentFailure::Failed("pipe")));
         Ok((out?, sent))
     }
 
-    /// Deletes what Grok kept of the run: `grok sessions delete <id>` in the same empty folder (the session's folder
-    /// and the text in it), then the one prompt-history file Grok keeps beside the sessions of CUE's own working
-    /// folder. Nothing else in Grok's folder is touched. CUE chose the session id (`--session-id`), so a run cut by a
-    /// timeout or Esc is deleted too; one cut before Grok made its session has none, and `sessions delete` finds
-    /// nothing. The log says neither the id nor a path.
+    /// Deletes what Grok kept of the run: `grok sessions delete <id>` (the session's folder and the text in it),
+    /// then the one prompt-history file Grok keeps beside the sessions of the run's working folder. Nothing else in
+    /// Grok's folder is touched. CUE chose the session id (`--session-id`), so a run cut by a timeout or Esc is deleted
+    /// too; one cut before Grok made its session has none, and `sessions delete` finds nothing. The log says neither
+    /// the id nor a path.
     fn forget(&self) {
-        let args = cli::grok_delete_args(&self.session);
-        let none = AtomicBool::new(false);
-        let deleted = process::run_env_until(&self.exe, &args, &cli::GROK_ENV, "", &self.cwd, GROK_FORGET_WAIT, &none);
-        if !deleted.is_ok_and(|o| o.status == Some(0)) {
+        if !grok_delete(&self.exe, &self.home, &self.session) {
             tracing::info!(agent = "grok", "agent: grok deleted no session (none was made, or it did not answer)");
         }
-        let Some(dir) = self.data.as_deref().and_then(|d| grok_sessions_of(d, &self.home, &self.cwd)) else { return };
-        match std::fs::remove_file(dir.join(GROK_PROMPT_HISTORY)) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => tracing::warn!(agent = "grok", "agent: grok's prompt history was not removed"),
+        if let Some(dir) = self.data.as_deref().and_then(|d| grok_sessions_of(d, &self.home, &self.cwd)) {
+            remove_prompt_history(&dir);
         }
     }
+}
+
+/// Whether this CUE has looked for the sessions an earlier one left ([`sweep_grok_sessions`]).
+static GROK_SWEPT: AtomicBool = AtomicBool::new(false);
+
+/// `grok sessions delete <id>`, whether Grok said it is done. It carries no text, so it runs in an empty folder of
+/// its own ([`empty_cwd`]), whatever has turned up in the run's folder since.
+fn grok_delete(exe: &Path, home: &Path, id: &str) -> bool {
+    let Ok(cwd) = empty_cwd(home, AgentId::Grok) else { return false };
+    let none = AtomicBool::new(false);
+    let args = cli::grok_delete_args(id);
+    process::run_env_until(exe, &args, &cli::GROK_ENV, "", &cwd, GROK_FORGET_WAIT, &none, None)
+        .is_ok_and(|o| o.status == Some(0))
+}
+
+/// Removes the prompt history in `dir`, Grok's sessions folder of one of CUE's working folders.
+fn remove_prompt_history(dir: &Path) {
+    match std::fs::remove_file(dir.join(GROK_PROMPT_HISTORY)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => tracing::warn!(agent = "grok", "agent: grok's prompt history was not removed"),
+    }
+}
+
+/// Deletes what earlier Grok runs left in Grok's own folder `data` (CUE quit or crashed before a run's
+/// [`GrokRun::forget`]): in the sessions folder of each of CUE's Grok working folders in `home` (`grok`, `grok-1` …,
+/// found as [`grok_sessions_of`] finds them), every session folder made before `before`, through
+/// `grok sessions delete <id>`, and the prompt history. A folder whose name is not a session id is left alone, and
+/// nothing else in Grok's folder is touched. How many sessions it deleted.
+pub fn sweep_grok_sessions(exe: &Path, home: &Path, data: &Path, before: SystemTime) -> usize {
+    let mut deleted = 0;
+    let folders = std::iter::once(cwd(home, AgentId::Grok))
+        .chain((1..=SPARE_FOLDERS).map(|n| home.join(format!("{}-{n}", AgentId::Grok.id()))));
+    for dir in folders.filter_map(|f| grok_sessions_of(data, home, &f)) {
+        let old = |e: &std::fs::DirEntry| e.metadata().and_then(|m| m.created().or_else(|_| m.modified())).is_ok_and(|t| t < before);
+        let ids: Vec<String> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().is_dir() && old(e))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.is_empty() && n.len() <= 64 && n.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
+            .collect();
+        for id in ids {
+            if grok_delete(exe, home, &id) {
+                deleted += 1;
+            }
+        }
+        remove_prompt_history(&dir);
+    }
+    if deleted > 0 {
+        tracing::info!(agent = "grok", deleted, "agent: deleted the grok sessions an earlier run left");
+    }
+    deleted
 }
 
 /// A new random session id for Grok (a UUID, version 4, in lower case).

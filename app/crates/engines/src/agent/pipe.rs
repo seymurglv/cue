@@ -4,7 +4,7 @@
 //! open (no other account, no network logon, no remote client), with room for one client; CUE writes the text once and
 //! closes it. The text is never an argument and never a file on disk.
 use std::fmt::Write as _;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use super::AgentFailure;
@@ -47,32 +47,47 @@ impl OneShot {
         self.name.clone()
     }
 
-    /// Waits for the one client to connect, at most `timeout`, writes `text` (UTF-8) once and closes the pipe: the
-    /// client reads what is left, then the end. No client within `timeout` is `Timeout`.
-    pub fn send(self, text: &str, timeout: Duration) -> Result<(), AgentFailure> {
-        self.send_until(text, timeout, &AtomicBool::new(false))
+    /// Waits for the one client to connect, at most `timeout`, checks that it is process `client`, writes `text`
+    /// (UTF-8) once and closes the pipe: the client reads what is left, then the end. No client within `timeout` is
+    /// `Timeout`; any other process that connected is cut off before a byte is written, `Failed("pipe client")`.
+    pub fn send(self, text: &str, timeout: Duration, client: u32) -> Result<(), AgentFailure> {
+        self.send_until(text, timeout, &AtomicBool::new(false), &AtomicU32::new(client))
     }
 
     /// [`send`](Self::send) that also gives up, as `Failed("stopped")`, as soon as `stop` is set (the client's
-    /// process ended without reading, or the request was dropped). `stop` is looked at every 50 ms.
-    pub fn send_until(self, text: &str, timeout: Duration, stop: &AtomicBool) -> Result<(), AgentFailure> {
+    /// process ended without reading, or the request was dropped); `stop` is looked at every 50 ms. `client` is the
+    /// process that may read the text, set once it is started (0 until then: a client that connects first waits for
+    /// it).
+    pub fn send_until(self, text: &str, timeout: Duration, stop: &AtomicBool, client: &AtomicU32) -> Result<(), AgentFailure> {
         let deadline = Instant::now() + timeout;
         #[cfg(windows)]
         {
             self.pipe.connect(deadline, stop)?;
+            let expected = loop {
+                match client.load(Ordering::Relaxed) {
+                    0 if stop.load(Ordering::Relaxed) => return Err(AgentFailure::Failed("stopped")),
+                    0 if Instant::now() >= deadline => return Err(AgentFailure::Timeout),
+                    0 => std::thread::sleep(Duration::from_millis(5)),
+                    pid => break pid,
+                }
+            };
+            if self.pipe.client_pid() != Some(expected) {
+                self.pipe.disconnect();
+                return Err(AgentFailure::Failed("pipe client"));
+            }
             self.pipe.write_all(text.as_bytes(), deadline, stop)
         }
         #[cfg(not(windows))]
         {
-            let _ = (text, deadline, stop);
+            let _ = (text, deadline, stop, client);
             Err(AgentFailure::Failed("pipe"))
         }
     }
 
-    /// The pipe's DACL as SDDL, as Windows holds it.
+    /// The pipe's DACL and mandatory label as SDDL, as Windows holds them.
     #[cfg(all(test, windows))]
-    fn dacl_sddl(&self) -> String {
-        self.pipe.dacl_sddl()
+    fn sddl(&self) -> String {
+        self.pipe.sddl()
     }
 }
 
@@ -96,7 +111,8 @@ mod win {
     };
     use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
     use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId, PIPE_REJECT_REMOTE_CLIENTS,
+        PIPE_TYPE_BYTE, PIPE_WAIT,
     };
     use windows::Win32::System::Threading::{
         CreateEventW, GetCurrentProcess, OpenProcessToken, ResetEvent, WaitForSingleObject,
@@ -153,8 +169,9 @@ mod win {
     impl Pipe {
         pub(super) fn create(name: &str) -> Result<Pipe, AgentFailure> {
             // A protected DACL (nothing inherited): network logons denied, then full access for the current user and
-            // no one else; everyone else is denied by having no entry.
-            let sddl = format!("D:P(D;;GA;;;NU)(A;;GA;;;{})", current_user_sid()?);
+            // no one else; everyone else is denied by having no entry. The mandatory label keeps a process of the
+            // same user below medium integrity (a sandboxed one) from reading or writing it.
+            let sddl = format!("D:P(D;;GA;;;NU)(A;;GA;;;{})S:(ML;;NWNR;;;ME)", current_user_sid()?);
             let (sddl, name) = (wide(&sddl), wide(name));
             // SAFETY: the strings outlive the calls; the descriptor is freed here once the pipe holds its copy; the
             // event and pipe handles are owned by the returned `Pipe` (or closed here on failure).
@@ -205,6 +222,19 @@ mod win {
                     Err(_) => Err(AgentFailure::Failed("pipe")),
                 }
             }
+        }
+
+        /// The process id of the client that connected, as Windows tells it.
+        pub(super) fn client_pid(&self) -> Option<u32> {
+            let mut pid = 0u32;
+            // SAFETY: the pipe handle is valid while `self` lives; `pid` outlives the call.
+            unsafe { GetNamedPipeClientProcessId(self.handle, &mut pid) }.ok().map(|()| pid).filter(|p| *p != 0)
+        }
+
+        /// Cuts the connected client off: what it has not read is dropped, and it can never connect again.
+        pub(super) fn disconnect(&self) {
+            // SAFETY: the pipe handle is valid while `self` lives.
+            let _ = unsafe { DisconnectNamedPipe(self.handle) };
         }
 
         /// Writes all of `bytes`, a chunk at a time; a client that goes away first is `Failed("pipe")`.
@@ -265,20 +295,20 @@ mod win {
             }
         }
 
-        /// The DACL Windows holds for the pipe, as SDDL.
+        /// The DACL and mandatory label Windows holds for the pipe, as SDDL.
         #[cfg(test)]
-        pub(super) fn dacl_sddl(&self) -> String {
+        pub(super) fn sddl(&self) -> String {
             use windows::Win32::Security::Authorization::{
                 ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SE_KERNEL_OBJECT,
             };
-            use windows::Win32::Security::DACL_SECURITY_INFORMATION;
+            use windows::Win32::Security::{DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION};
             // SAFETY: plain Win32 calls; the descriptor and the string are freed here.
             unsafe {
                 let mut sd = PSECURITY_DESCRIPTOR::default();
                 let r = GetSecurityInfo(
                     self.handle,
                     SE_KERNEL_OBJECT,
-                    DACL_SECURITY_INFORMATION,
+                    DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
                     None,
                     None,
                     None,
@@ -290,7 +320,7 @@ mod win {
                 ConvertSecurityDescriptorToStringSecurityDescriptorW(
                     sd,
                     SDDL_REVISION_1,
-                    DACL_SECURITY_INFORMATION,
+                    DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
                     &mut text,
                     None,
                 )
@@ -305,8 +335,9 @@ mod win {
 
     impl Drop for Pipe {
         fn drop(&mut self) {
-            // SAFETY: both handles are owned and closed once. Closing the server end without disconnecting leaves
-            // what the client has not read yet for it to read, then the end.
+            // SAFETY: both handles are owned and closed once. No `FlushFileBuffers` is needed: the last write
+            // completed, so every byte is in the pipe, and closing the server end without disconnecting leaves what
+            // the client has not read yet for it to read, then the end (only `DisconnectNamedPipe` would drop it).
             unsafe {
                 let _ = CloseHandle(self.handle);
                 let _ = CloseHandle(self.event);
@@ -333,6 +364,11 @@ mod tests {
         })
     }
 
+    /// This test process: the pipe's client in these tests.
+    fn me() -> u32 {
+        std::process::id()
+    }
+
     #[test]
     fn pipe_name_is_random_and_local() {
         let (a, b) = (OneShot::create().unwrap(), OneShot::create().unwrap());
@@ -347,14 +383,18 @@ mod tests {
     }
 
     /// The descriptor CUE gives the pipe: one allow entry, for the current user's SID alone (no Everyone, no users'
-    /// group, no administrators, no SYSTEM), a deny of network logons before it, and no inherited entry.
+    /// group, no administrators, no SYSTEM), a deny of network logons before it, no inherited entry, and a medium
+    /// mandatory label that keeps lower-integrity processes from reading or writing it.
     #[test]
     fn pipe_denies_other_users() {
         let p = OneShot::create().unwrap();
-        let sddl = p.dacl_sddl();
+        let sddl = p.sddl();
         let user = win::current_user_sid().unwrap();
         assert!(user.starts_with("S-1-5-"), "{user}");
-        let dacl = sddl.strip_prefix("D:P").unwrap_or_else(|| panic!("protected, nothing inherited: {sddl}"));
+        let (dacl, label) = sddl.split_once("S:").unwrap_or_else(|| panic!("a mandatory label: {sddl}"));
+        // Windows reports the label's SACL with its own `AI` flag: `S:AI(ML;;NWNR;;;ME)`.
+        assert!(label.ends_with("(ML;;NWNR;;;ME)") && label.matches('(').count() == 1, "{sddl}");
+        let dacl = dacl.strip_prefix("D:P").unwrap_or_else(|| panic!("protected, nothing inherited: {sddl}"));
         let aces: Vec<&str> = dacl.trim_start_matches('(').trim_end_matches(')').split(")(").collect();
         let allows: Vec<&&str> = aces.iter().filter(|a| a.starts_with("A;")).collect();
         assert_eq!(allows.len(), 1, "{sddl}");
@@ -369,7 +409,7 @@ mod tests {
     fn pipe_send_times_out_without_a_client() {
         let p = OneShot::create().unwrap();
         let start = Instant::now();
-        assert_eq!(p.send("текст", Duration::from_millis(300)), Err(AgentFailure::Timeout));
+        assert_eq!(p.send("текст", Duration::from_millis(300), me()), Err(AgentFailure::Timeout));
         assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
     }
 
@@ -384,7 +424,8 @@ mod tests {
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
         });
         let start = Instant::now();
-        assert_eq!(p.send_until("текст", Duration::from_secs(30), &stop), Err(AgentFailure::Failed("stopped")));
+        let client = AtomicU32::new(me());
+        assert_eq!(p.send_until("текст", Duration::from_secs(30), &stop, &client), Err(AgentFailure::Failed("stopped")));
         assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
     }
 
@@ -396,17 +437,54 @@ mod tests {
         let p = OneShot::create().unwrap();
         let client = read_all(&p.path());
         std::thread::sleep(Duration::from_millis(100));
-        p.send(&text, Duration::from_secs(10)).unwrap();
+        p.send(&text, Duration::from_secs(10), me()).unwrap();
         assert_eq!(client.join().unwrap(), text);
 
         let p = OneShot::create().unwrap();
         let path = p.path();
-        let sender = std::thread::spawn(move || p.send("Привет.", Duration::from_secs(10)));
+        let sender = std::thread::spawn(move || p.send("Привет.", Duration::from_secs(10), me()));
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(read_all(&path).join().unwrap(), "Привет.");
         sender.join().unwrap().unwrap();
         // One shot: once sent, the pipe is gone.
         assert!(std::fs::File::open(&path).is_err());
+    }
+
+    /// A process other than the one CUE started (Grok) connects first: it is cut off and gets not a byte, the send
+    /// fails, and the pipe is spent, so nobody reads the text.
+    #[test]
+    fn pipe_refuses_a_foreign_client() {
+        let p = OneShot::create().unwrap();
+        let path = p.path();
+        let foreign = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                let mut f = std::fs::File::open(&path).expect("it opens: same user");
+                let mut got = Vec::new();
+                let _ = f.read_to_end(&mut got);
+                got
+            }
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        // The process CUE started is another one.
+        assert_eq!(p.send("секрет", Duration::from_secs(5), me().wrapping_add(4)), Err(AgentFailure::Failed("pipe client")));
+        assert!(foreign.join().unwrap().is_empty(), "the foreign client read something");
+        assert!(std::fs::File::open(&path).is_err(), "the pipe is gone");
+    }
+
+    /// The client may connect before CUE knows the started process's id: the send waits for it, then checks.
+    #[test]
+    fn pipe_waits_for_the_started_process_id() {
+        let p = OneShot::create().unwrap();
+        let client = std::sync::Arc::new(AtomicU32::new(0));
+        let reader = read_all(&p.path());
+        let set = client.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            set.store(std::process::id(), Ordering::Relaxed);
+        });
+        p.send_until("Привет.", Duration::from_secs(5), &AtomicBool::new(false), &client).unwrap();
+        assert_eq!(reader.join().unwrap(), "Привет.");
     }
 
     /// One client only: a second one cannot open the pipe while the first holds it.

@@ -163,7 +163,8 @@ fn codex(args: &[String]) {
 ///   keeps the run as Grok does: `<data>\sessions\<working folder, percent-encoded>\<--session-id>\chat_history.jsonl`
 ///   and a line in `prompt_history.jsonl` beside it; writes what it got to `record` (its arguments, the prompt, the
 ///   system prompt, its `GROK_*` variables, its working folder); writes its pid to `pid`; sleeps `sleep_ms`; prints the
-///   files `stdout` (`{session}` replaced by the session id) and `stderr`; exits with `exit`.
+///   files `stdout` (`{session}` replaced by the session id) and `stderr`; with `litter`, leaves `litter.txt` in its
+///   working folder; exits with `exit`.
 fn grok(me: &Path, args: &[String]) {
     let config: serde_json::Value = std::fs::read_to_string(me.with_file_name("fake-grok.json"))
         .ok()
@@ -228,6 +229,9 @@ fn grok(me: &Path, args: &[String]) {
     }
     if let Some(err) = path("stderr").and_then(|p| std::fs::read_to_string(p).ok()) {
         eprint!("{err}");
+    }
+    if config["litter"].as_bool() == Some(true) {
+        std::fs::write(cwd.join("litter.txt"), "left behind").expect("litter");
     }
     std::process::exit(config["exit"].as_i64().unwrap_or(0) as i32);
 }

@@ -381,9 +381,9 @@ At its first start this version deletes the Soniox key of earlier versions from 
   - `Where::Local`: the model in the slot (`local::refine`), or the raw text at once while none is ready, or a wait of
     at most `LOAD_WAIT` for the model loading again after a rest.
   - `Where::Agent`: the agent in `refine.agent` through `runtime::agents::Agents`. Its budget (`agent::refine::budget`:
-    Codex 10 s + 1 s per 100 words, OpenCode the cleanup's own timeout, a translation a second more, plus 5 s on the
-    agent's first request after CUE starts or after it rested: OpenCode's server let go, or 15 min without a request
-    to Codex or Grok; Grok's budget is Codex's) counts from the moment it is asked, so finding or starting OpenCode's
+    Codex 10 s and Grok 15 s, each + 1 s per 100 words, OpenCode the cleanup's own timeout, a translation a second
+    more, plus 5 s on the agent's first request after CUE starts or after it rested: OpenCode's server let go, or 15 min
+    without a request to Codex or Grok) counts from the moment it is asked, so finding or starting OpenCode's
     server (`OpenCodeSlot::get_or_start`, off the core's thread) comes out of it. The model is `refine.models[agent]`,
     else Codex's default (GPT-6 Luna) or Grok's (grok-4.7), else OpenCode's "Быстрая · авто" (`opencode::fast_auto`
     over the models its server lists, picked once per server) or its own default; OpenCode's model goes in the
@@ -391,15 +391,23 @@ At its first start this version deletes the Soniox key of earlier versions from 
   - **Grok** (`agent::grok`, `AgentClient::Grok`): grok 1.0.34 never reads stdin, so the request goes through a
     one-shot named pipe (`agent::pipe::OneShot`): `\\.\pipe\cue-grok-<128 random bits>`, created before Grok starts,
     outbound, one instance, remote clients refused, a DACL that lets only the current user open it (network logons
-    denied); CUE writes the text once Grok opens it (`--prompt-file`, within the budget) and closes it. CUE's fixed text
+    denied) and a medium mandatory label (`NWNR`: no lower-integrity process reads or writes it); once a client opens
+    it (`--prompt-file`, within the budget) CUE checks that it is the Grok process it started
+    (`GetNamedPipeClientProcessId`), else cuts it off without writing a byte (`Failed("pipe client")`, the user's
+    fallback); then it writes the text and closes the pipe. Grok is only ever run as `grok.exe`
+    (`discover::program_in`: its multi-line system argument cannot pass through a `.cmd`). CUE's fixed text
     (its prompt, the user's instructions for a cleanup, the protocol line) is the `--system-prompt-override` argument;
     everything from the dictation (dictionary, habits, context, transcript) goes through the pipe. `--max-turns 1`: a
     model that reaches for a tool is cut (`stopReason` `cancelled`) and its text is never pasted ("tried a tool", the
     user's fallback). Every run sets `cli::GROK_ENV` (no telemetry, trace upload, session search, recap or memory) and
     a session id CUE chose (`--session-id`); after every run, answer, timeout or Esc, on a thread of its own, CUE runs
-    `grok sessions delete <id>` in the same folder (5 s) and removes the one `prompt_history.jsonl` in Grok's sessions
-    folder of CUE's own Grok folder (`<GROK_HOME or %USERPROFILE%\.grok>\sessions\<the folder, percent-encoded>`);
-    nothing else in Grok's folder is touched. A Grok that exits before it opens the pipe is judged by what it said.
+    `grok sessions delete <id>` (5 s, in an empty folder of its own, `empty_cwd`) and removes the one
+    `prompt_history.jsonl` in Grok's sessions folder of the run's working folder (`<GROK_HOME or
+    %USERPROFILE%\.grok>\sessions\<the folder, percent-encoded>`). The first Grok run after CUE starts also deletes,
+    beside it, what an earlier CUE left by quitting or crashing too soon (`sweep_grok_sessions`): every session folder
+    made before that moment in the sessions folders of CUE's Grok folders (`grok`, `grok-N`), through
+    `grok sessions delete`, and their prompt histories. Nothing else in Grok's folder is touched. A Grok that exits
+    before it opens the pipe is judged by what it said.
   - **Marks** (`AgentMarks`, `MARK_FOR` = 5 min): Codex is asked `codex login status` (no text) before its first run and
     every 5 minutes after, since a Codex never signed in retries about 15 s and would read as a timeout; "Not logged in"
     marks it signed out. An expired sign-in, which that command does not tell, is marked from the run's own error

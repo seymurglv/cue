@@ -87,13 +87,31 @@ impl Grok {
 
     /// The sessions folder Grok keeps for CUE's Grok folder.
     fn sessions(&self) -> PathBuf {
-        let cwd = self.home.join("grok");
+        self.sessions_of("grok")
+    }
+
+    /// The sessions folder Grok keeps for CUE's working folder `folder` (`grok`, `grok-2`, …).
+    fn sessions_of(&self, folder: &str) -> PathBuf {
+        let cwd = self.home.join(folder);
         let encoded: String = cwd
             .to_string_lossy()
             .bytes()
             .map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { char::from(b).to_string() } else { format!("%{b:02X}") })
             .collect();
         self.data.join("sessions").join(encoded)
+    }
+
+    /// Changes one setting of the fake Grok.
+    fn set(&self, key: &str, value: Value) {
+        let file = self.exe().with_file_name("fake-grok.json");
+        let mut config: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        config[key] = value;
+        std::fs::write(&file, config.to_string()).unwrap();
+    }
+
+    fn exe(&self) -> PathBuf {
+        let AgentClient::Grok { found, .. } = &self.client else { unreachable!() };
+        found.exe.clone()
     }
 
     /// Waits (up to 10 s) until the fake was asked to delete `session`; the lines it was asked with.
@@ -242,6 +260,60 @@ async fn grok_session_is_deleted_after_every_run() {
     assert!(request.await.is_err_and(|e| e.is_cancelled()), "the request was dropped");
     g.forgot(&g.flag("--session-id"));
     assert!(start.elapsed() < Duration::from_secs(20), "deleted after the drop, not the 30 s timeout: {:?}", start.elapsed());
+}
+
+/// Something turns up in Grok's folder after the run: the session is still deleted, through `grok sessions delete`
+/// run in an empty folder beside it, and the stray file stays where it is.
+#[tokio::test]
+async fn grok_session_is_deleted_even_when_its_folder_is_no_longer_empty() {
+    let g = answering("litter", &says(CLEAN));
+    g.set("litter", json!(true));
+    assert_eq!(clean(&g).await.outcome, RefineOutcome::Refined);
+    let session = g.flag("--session-id");
+    let lines = g.wait_deleted(&session);
+    let line = lines.iter().find(|l| l.starts_with(&session)).unwrap();
+    assert_eq!(line.split('\t').nth(1), Some(g.home.join("grok-1").to_string_lossy().as_ref()), "an empty folder");
+    assert!(!g.sessions().join(&session).exists(), "the session's folder is gone");
+    assert!(g.home.join("grok").join("litter.txt").is_file(), "nothing of the user's folder is deleted");
+}
+
+/// What an earlier CUE left (it quit before a run's session was deleted): the sessions of CUE's own Grok folders
+/// made before the sweep's moment are deleted through Grok, with their prompt histories; a later session, a folder
+/// that is not a session, and another program's sessions are left alone.
+#[test]
+fn leftover_sessions_of_cues_grok_folders_are_deleted() {
+    use cue_engines::agent::sweep_grok_sessions;
+    let g = answering("sweep", &says(CLEAN));
+    let old = [("grok", "0190a1b2-0000-7000-8000-000000000001"), ("grok-2", "0190a1b2-0000-7000-8000-000000000002")];
+    for (folder, id) in old {
+        std::fs::create_dir_all(g.home.join(folder)).unwrap();
+        let group = g.sessions_of(folder);
+        std::fs::create_dir_all(group.join(id)).unwrap();
+        std::fs::write(group.join(id).join("chat_history.jsonl"), "ну эм созвон").unwrap();
+        std::fs::write(group.join("prompt_history.jsonl"), "{\"prompt\":\"ну эм созвон\"}\n").unwrap();
+    }
+    let not_a_session = g.sessions().join("notes here");
+    std::fs::create_dir_all(&not_a_session).unwrap();
+    let other = g.data.join("sessions").join("C%3A%5Cwork%5Cproject");
+    std::fs::create_dir_all(other.join("0190a1b2-0000-7000-8000-000000000009")).unwrap();
+    std::fs::write(other.join("prompt_history.jsonl"), "{}\n").unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let before = std::time::SystemTime::now();
+    std::thread::sleep(Duration::from_millis(100));
+    let current = g.sessions().join("0190a1b2-0000-7000-8000-000000000003");
+    std::fs::create_dir_all(&current).unwrap();
+
+    assert_eq!(sweep_grok_sessions(&g.exe(), &g.home, &g.data, before), 2);
+    let asked = std::fs::read_to_string(&g.deleted).unwrap();
+    for (folder, id) in old {
+        assert!(asked.contains(id), "{asked}");
+        assert!(!g.sessions_of(folder).join(id).exists(), "{folder}: the old session is gone");
+        assert!(!g.sessions_of(folder).join("prompt_history.jsonl").exists(), "{folder}: the history is gone");
+    }
+    assert!(current.is_dir() && !asked.contains("000000000003"), "a session of this CUE is left");
+    assert!(not_a_session.is_dir(), "a folder that is not a session is left");
+    assert!(other.join("prompt_history.jsonl").is_file() && other.join("0190a1b2-0000-7000-8000-000000000009").is_dir());
+    assert!(!asked.contains("000000000009"));
 }
 
 /// Grok signed out, as grok 1.0.34 says it (it reads the prompt, then the sign-in fails): the user is told to sign in.

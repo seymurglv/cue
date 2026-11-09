@@ -15,6 +15,9 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// extensionless shell script and a `.ps1` beside the `.cmd`: neither is run (one needs a Unix shell, the other
 /// PowerShell and its execution policy).
 const EXTENSIONS: [&str; 3] = ["exe", "cmd", "bat"];
+/// Grok's only form: it installs `grok.exe`, and its system prompt, which spans lines, cannot pass through a batch
+/// file (Rust refuses such an argument), so a `grok.cmd` or `grok.bat` is never run.
+const GROK_EXTENSIONS: [&str; 1] = ["exe"];
 
 /// The agents installed here, in [`ORDER`], each with its version when it answers `--version` in time.
 pub fn discover() -> Vec<Found> {
@@ -40,14 +43,14 @@ pub fn program(id: AgentId) -> Option<PathBuf> {
     let var = |k: &str| std::env::var_os(k).map(PathBuf::from);
     let mut dirs = path_dirs(path.as_deref());
     dirs.extend(usual_dirs(id, var("USERPROFILE").as_deref(), var("APPDATA").as_deref(), var("LOCALAPPDATA").as_deref()));
-    dirs.iter().find_map(|d| program_in(d, id.id()))
+    dirs.iter().find_map(|d| program_in(d, id))
 }
 
 /// [`discover`] over the folders `dirs` gives for each agent, asking each version in that agent's empty folder in
 /// `home`, CUE's agent folder ([`super::empty_cwd`]).
 pub(crate) fn discover_in(dirs: &dyn Fn(AgentId) -> Vec<PathBuf>, home: &Path) -> Vec<Found> {
     let programs: Vec<(AgentId, PathBuf)> =
-        ORDER.iter().filter_map(|&id| dirs(id).iter().find_map(|d| program_in(d, id.id())).map(|exe| (id, exe))).collect();
+        ORDER.iter().filter_map(|&id| dirs(id).iter().find_map(|d| program_in(d, id)).map(|exe| (id, exe))).collect();
     // Asked together: an npm shim starts Node, which takes a moment.
     std::thread::scope(|s| {
         let asks: Vec<_> = programs
@@ -83,9 +86,10 @@ fn usual_dirs(id: AgentId, home: Option<&Path>, roaming: Option<&Path>, local: O
     .collect()
 }
 
-/// `<dir>\<name>.exe`, `.cmd` or `.bat`, the first that is a file.
-fn program_in(dir: &Path, name: &str) -> Option<PathBuf> {
-    EXTENSIONS.iter().map(|ext| dir.join(format!("{name}.{ext}"))).find(|p| p.is_file())
+/// `<dir>\<agent>.exe`, `.cmd` or `.bat`, the first that is a file; for Grok `grok.exe` only.
+fn program_in(dir: &Path, id: AgentId) -> Option<PathBuf> {
+    let extensions: &[&str] = if id == AgentId::Grok { &GROK_EXTENSIONS } else { &EXTENSIONS };
+    extensions.iter().map(|ext| dir.join(format!("{}.{ext}", id.id()))).find(|p| p.is_file())
 }
 
 /// The version in `--version`'s first line: its first word that is a dotted number (`v` before it dropped).
@@ -153,14 +157,16 @@ mod tests {
         let base = temp_dir("order");
         let bin = base.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        // Written in the opposite order, with Claude Code and Gemini beside them: never offered.
-        for name in ["grok", "codex", "opencode", "claude", "gemini"] {
+        // Written in the opposite order, with Claude Code and Gemini beside them: never offered. Grok is an `.exe`
+        // (this one does not start, so it has no version).
+        std::fs::write(bin.join("grok.exe"), b"MZ").unwrap();
+        for name in ["codex", "opencode", "claude", "gemini"] {
             shim(&bin, &format!("{name}.cmd"), &format!("{name} 1.2.3"));
         }
         let found = discover_in(&|_| vec![bin.clone()], &base.join("agent"));
         let ids: Vec<AgentId> = found.iter().map(|f| f.id).collect();
         assert_eq!(ids, ORDER.to_vec());
-        assert!(found.iter().all(|f| f.version.as_deref() == Some("1.2.3")));
+        assert!(found.iter().filter(|f| f.id != AgentId::Grok).all(|f| f.version.as_deref() == Some("1.2.3")));
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -174,9 +180,28 @@ mod tests {
         shim(&b, "codex.cmd", "codex-cli 2.0.0");
         let found = discover_in(&|_| vec![a.clone(), b.clone()], &base.join("agent"));
         assert_eq!(found[0].exe, a.join("codex.cmd"));
-        assert_eq!(super::program_in(&a, "codex"), Some(a.join("codex.cmd")));
+        assert_eq!(super::program_in(&a, AgentId::Codex), Some(a.join("codex.cmd")));
         std::fs::write(a.join("codex.exe"), b"MZ").unwrap();
-        assert_eq!(super::program_in(&a, "codex"), Some(a.join("codex.exe")));
+        assert_eq!(super::program_in(&a, AgentId::Codex), Some(a.join("codex.exe")));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Grok only as `grok.exe`: a `grok.cmd` or `grok.bat` found first is passed over for the `.exe` in a later
+    /// folder (Grok's own `bin`), and alone it is not Grok at all.
+    #[test]
+    fn grok_is_found_only_as_an_exe() {
+        let base = temp_dir("grok-exe");
+        let (path, own) = (base.join("path"), base.join(".grok").join("bin"));
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::create_dir_all(&own).unwrap();
+        shim(&path, "grok.cmd", "grok 9.9.9");
+        shim(&path, "grok.bat", "grok 9.9.9");
+        let dirs = |_| vec![path.clone(), own.clone()];
+        assert!(discover_in(&dirs, &base.join("agent")).iter().all(|f| f.id != AgentId::Grok), "a grok.cmd is not Grok");
+        assert_eq!(super::program_in(&path, AgentId::Grok), None);
+        std::fs::write(own.join("grok.exe"), b"MZ").unwrap();
+        let found = discover_in(&dirs, &base.join("agent"));
+        assert_eq!(found.iter().find(|f| f.id == AgentId::Grok).map(|f| f.exe.clone()), Some(own.join("grok.exe")));
         let _ = std::fs::remove_dir_all(&base);
     }
 
