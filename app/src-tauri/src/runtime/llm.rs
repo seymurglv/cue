@@ -498,8 +498,12 @@ impl LlmKeeper {
             self.stop_switch();
             return;
         }
+        // The Cleanup page's row pressed again while its model is on its way: the switch stops (a download keeps what
+        // it has), and the model in use stays.
         let running = |s: &EntryState| matches!(s, EntryState::Preparing | EntryState::Downloading { .. } | EntryState::Loading);
         if self.switch.as_ref().is_some_and(|s| s.id == id && running(&s.state)) {
+            tracing::info!("language model: the switch stopped from the Cleanup page");
+            self.stop_switch();
             return;
         }
         let repo = repo.or_else(|| self.switch.as_ref().filter(|s| s.id == id).map(|s| s.repo.clone()));
@@ -604,7 +608,9 @@ impl LlmKeeper {
                 None => entries.push(e),
             }
         }
-        ModelsView { current: self.in_use().unwrap_or_default().to_owned(), entries, recommended: llm::default_id() }
+        let short: Vec<String> = llm::catalog().into_iter().map(|m| m.id).collect();
+        let found = entries.iter().filter(|e| !short.contains(&e.id)).map(|e| e.id.clone()).collect();
+        ModelsView { current: self.in_use().unwrap_or_default().to_owned(), entries, recommended: llm::default_id(), found }
     }
 }
 
@@ -786,6 +792,28 @@ mod tests {
         assert_eq!(told, [Told::Switched { id: new.id.clone(), name: new.name.clone() }], "the chosen id is written only now");
         assert_eq!(b.in_slot(), Some(new.id.clone()));
         assert_eq!(b.state_of(&old.id), EntryState::Downloaded);
+        std::fs::remove_dir_all(models).unwrap();
+    }
+
+    /// The Cleanup page's row pressed again while its model downloads or loads stops the switch: the model in use stays.
+    #[tokio::test]
+    async fn pressing_a_switching_model_again_stops_it() {
+        let models = folder("again");
+        let old = fake(&models, "old", true);
+        let new = fake(&models, "new", true);
+        let mut b = Bench::new(&models, &old.id, roomy).await;
+        // Both are found models, not CUE's short list: the page marks them as not checked by CUE.
+        let found = b.keeper.view().found;
+        assert!(found.contains(&old.id) && found.contains(&new.id), "{found:?}");
+        assert!(llm::catalog().iter().all(|m| !found.contains(&m.id)));
+        b.choose(Choice::Id(new.id.clone()));
+        assert_eq!(b.state_of(&new.id), EntryState::Loading);
+        b.choose(Choice::Id(new.id.clone()));
+        assert_eq!(b.state_of(&new.id), EntryState::Downloaded, "stopped");
+        let told = b.settle().await;
+        assert!(told.iter().all(|t| *t == Told::Nothing), "{told:?}");
+        assert_eq!(b.in_slot(), Some(old.id.clone()));
+        assert_eq!(b.keeper.view().current, old.id);
         std::fs::remove_dir_all(models).unwrap();
     }
 

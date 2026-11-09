@@ -325,6 +325,10 @@ pub struct ModelsView {
     /// The short list's recommended model, where a list marks one (the local cleanup's).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recommended: Option<String>,
+    /// The entries found on Hugging Face rather than on CUE's short list (the local cleanup's): their rows say CUE has
+    /// not checked them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub found: Vec<String>,
 }
 
 impl ModelEntry {
@@ -451,10 +455,13 @@ mod tests {
     /// The local cleanup's list names its recommended model; the speech list says nothing of one.
     #[test]
     fn models_view_names_the_recommended_only_when_there_is_one() {
-        let v = ModelsView { current: "a".into(), entries: vec![], recommended: None };
+        let v = ModelsView { current: "a".into(), entries: vec![], recommended: None, found: vec![] };
         assert!(serde_json::to_value(&v).unwrap().get("recommended").is_none());
+        assert!(serde_json::to_value(&v).unwrap().get("found").is_none(), "no found model: nothing said");
         let v = ModelsView { recommended: Some("llm--a--b--q4_k_m".into()), ..v };
         assert_eq!(serde_json::to_value(&v).unwrap()["recommended"], "llm--a--b--q4_k_m");
+        let v = ModelsView { found: vec!["llm--someone--model-gguf--q8_0".into()], ..v };
+        assert_eq!(serde_json::to_value(&v).unwrap()["found"], serde_json::json!(["llm--someone--model-gguf--q8_0"]));
     }
 
     /// The cleanup's language models share the `models` folder; the speech list never shows them.

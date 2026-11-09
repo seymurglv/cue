@@ -149,6 +149,21 @@ impl OpenCodeSlot {
         rest.timer = Some(rt.spawn(rest_later(me, after)).abort_handle());
     }
 
+    /// A server is held while no dictation runs and no rest waits (the Cleanup page started it to list OpenCode's
+    /// models): it rests after the same wait as after a dictation. During a dictation its end starts the wait.
+    pub fn idle(self: &Arc<Self>) {
+        if !self.holds() {
+            return;
+        }
+        let mut rest = lock(&self.rest);
+        if rest.busy || rest.timer.as_ref().is_some_and(|t| !t.is_finished()) {
+            return;
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+        let (me, after) = (Arc::downgrade(self), self.rest_after);
+        rest.timer = Some(rt.spawn(rest_later(me, after)).abort_handle());
+    }
+
     /// The session locked or the computer goes to sleep: the server CUE started is stopped now, or once the dictation
     /// ends.
     pub fn rest_soon(&self) {
@@ -354,6 +369,30 @@ mod tests {
         assert!(s.alive());
         slot.rest();
         assert!(!s.alive());
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// A server the Cleanup page started to list OpenCode's models, with no dictation after it, rests too; one asked for
+    /// during a dictation waits for the dictation's end, as before.
+    #[tokio::test]
+    async fn a_server_started_outside_a_dictation_rests_too() {
+        let cwd = temp_dir("idle");
+        let starts = Arc::new(AtomicUsize::new(0));
+        let slot = OpenCodeSlot::with(Box::new(|| None), counting(&starts, cwd.clone()), Duration::from_millis(100));
+        slot.idle();
+        assert!(!slot.holds(), "nothing held: nothing to rest");
+        let s = slot.get_or_start().unwrap();
+        slot.idle();
+        gone(&s).await;
+        assert!(!slot.holds());
+        // During a dictation the page's look leaves it to the dictation's end.
+        slot.busy(true);
+        let s = slot.get_or_start().unwrap();
+        slot.idle();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(s.alive(), "stopped during a dictation");
+        slot.busy(false);
+        gone(&s).await;
         let _ = std::fs::remove_dir_all(&cwd);
     }
 

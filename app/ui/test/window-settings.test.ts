@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { $, $$, NOW, TODAY, click, core, entry, feeds, key, mount, settle, stub, text, view } from './windowFixture';
+import { $, $$, NOW, TODAY, agents, click, core, entry, feeds, key, mount, settle, stub, text, view } from './windowFixture';
 import type { WindowPage } from '../src/window/page';
 import { CLEAR_ARMED_MS, matchMic } from '../src/window/settings';
 
@@ -59,7 +59,7 @@ describe('The settings tray', () => {
     // Each row with its value.
     expect($$('.btray .trw em').map((e) => e.textContent)).toEqual([
       'Ready',
-      'Cloud',
+      'Not chosen',
       'As in Windows',
       'Auto · into English',
       'A month',
@@ -709,18 +709,20 @@ describe('The settings tray', () => {
     expect(group).not.toBeNull();
   });
 
-  it('the Cleanup page: where it runs, and the note', async () => {
-    stub(view({ lang: 'ru', uiLanguage: 'ru' }));
+  it('the Cleanup page: where it runs on top, and the note', async () => {
+    stub(view({ lang: 'ru', uiLanguage: 'ru', refineAgent: 'codex' }));
+    core.agentsGet.mockResolvedValue(agents({ codex: { found: true, signedIn: true } }));
     page = await mount();
     await open();
     const value = () => text($('.btray em[data-val="cleanup"]'));
-    expect(value()).toBe('Облако');
+    expect(value()).toBe('Codex · GPT-6 Luna');
     await sub('cleanup');
     expect(title()).toBe('Чистка текста');
-    const seg = () => $$('[data-seg="runs"] button');
-    expect(seg().map((b) => b.textContent)).toEqual(['Этот компьютер', 'Облако']);
-    expect(seg().map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'true']);
-    expect(text($('.btray .tft'))).toBe('Текст уходит в Облако для чистки; история — только на этом компьютере.');
+    const seg = () => $$('[data-seg="where"] button');
+    expect(seg().map((b) => b.textContent)).toEqual(['Без ИИ', 'Этот компьютер', 'Ваш AI']);
+    expect(seg().map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'false', 'true']);
+    expect(text($('.btray .tft'))).toBe('Текст уходит в ChatGPT через Codex, по вашему входу. CUE не хранит ключи.');
+    expect($('.btray [data-seg="runs"]')).toBeNull();
   });
 
   it('reads the settings again when the core did not answer a change in time', async () => {

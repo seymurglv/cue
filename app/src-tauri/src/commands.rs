@@ -9,7 +9,8 @@
 //! core, which owns them (`CoreEvent::Settings`). Start at sign-in is the autostart plugin's Run key, as in the tray
 //! menu, whose check follows within 5 s. The microphones are listed as Windows names them, and a preview sends the page
 //! that started it a microphone's level alone (`micpreview`). The welcome window opens its links by name, never by an
-//! address of its page's (`open_link`).
+//! address of its page's (`open_link`), and so does the Cleanup page's install button (`agent_install_link`). The
+//! Cleanup page's agents are looked at by the core, off its thread (`agents_get`).
 use std::path::Path;
 use std::time::Duration;
 
@@ -28,10 +29,13 @@ use crate::ipc::{CoreTx, DayView, EntryView, HistoryFeed, MAIN_LABEL, PageView, 
 use crate::micpreview;
 use crate::paths::Paths;
 use crate::runtime::recordings::{self, AudioLimit, Playable};
-use crate::runtime::{Choice, CoreEvent, MIC_SETTINGS, SettingsCmd, local_today, open_url, utc_offset_minutes};
+use crate::runtime::{AgentView, Choice, CoreEvent, MIC_SETTINGS, SettingsCmd, local_today, open_url, utc_offset_minutes};
 
 /// How long a command waits for the core's answer about the settings.
 const CORE_WAIT: Duration = Duration::from_secs(3);
+/// How long the Cleanup page's look at the agents may take: each looked for, Codex's sign-in (5 s at most), OpenCode's
+/// server found or started (30 s at most) and its models listed.
+const AGENTS_WAIT: Duration = Duration::from_secs(60);
 /// How long a search of Hugging Face may take, its repositories' files asked for included.
 const MODELS_SEARCH_WAIT: Duration = Duration::from_secs(30);
 /// The longest search text sent.
@@ -94,6 +98,16 @@ pub enum PasteAgain {
 fn link(target: &str) -> Option<&'static str> {
     match target {
         "micPrivacy" => Some(MIC_SETTINGS),
+        _ => None,
+    }
+}
+
+/// Where the Cleanup page's install buttons go, by the agent's id (`agent_install_link`): OpenCode's download page and
+/// Codex's own; no other agent is offered.
+fn install_link(agent: &str) -> Option<&'static str> {
+    match agent {
+        "opencode" => Some("https://opencode.ai/download"),
+        "codex" => Some("https://github.com/openai/codex"),
         _ => None,
     }
 }
@@ -566,9 +580,39 @@ pub async fn welcome_close(window: WebviewWindow) -> Result<(), CmdError> {
 pub async fn open_link(window: WebviewWindow, target: String) -> Result<(), CmdError> {
     guard(&window, "open_link")?;
     let url = link(&target).ok_or(CmdError::BadValue)?;
+    open_named(url, target)
+}
+
+/// The agents as the Cleanup page lists them (OpenCode, then Codex): looked for again, Codex asked about its sign-in,
+/// OpenCode's models listed when it cleans or is about to (`Agents::look`); the marks that let a dictation skip a
+/// signed-out or missing agent go. Off the core's thread: the page shows a quiet "checking" meanwhile. The agents found
+/// also settle a cleanup moved to "Ваш AI" with none chosen.
+#[tauri::command]
+pub async fn agents_get(window: WebviewWindow, core: State<'_, CoreTx>) -> Result<Vec<AgentView>, CmdError> {
+    guard(&window, "agents_get")?;
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    send(&core, CoreEvent::AgentsGet(reply))?;
+    match tokio::time::timeout(AGENTS_WAIT, answer).await {
+        Ok(Ok(views)) => Ok(views),
+        _ => Err(CmdError::Core),
+    }
+}
+
+/// "Установить" (OpenCode) or "Как установить" (Codex) on the Cleanup page: the agent's own page in the default browser,
+/// named by the agent's id; CUE holds the address.
+#[tauri::command]
+pub async fn agent_install_link(window: WebviewWindow, id: String) -> Result<(), CmdError> {
+    guard(&window, "agent_install_link")?;
+    let url = install_link(&id).ok_or(CmdError::BadValue)?;
+    open_named(url, id)
+}
+
+/// `url`, one of CUE's own addresses, opened from a short thread of its own, so the shell never holds a command; the
+/// log names it by `name`.
+fn open_named(url: &'static str, name: String) -> Result<(), CmdError> {
     let spawned = std::thread::Builder::new().name("cue-open-link".into()).spawn(move || {
         if let Err(e) = open_url(url) {
-            tracing::warn!(link = target.as_str(), "link did not open: {e}");
+            tracing::warn!(link = name.as_str(), "link did not open: {e}");
         }
     });
     match spawned {
@@ -596,7 +640,9 @@ mod tests {
     use serde_json::json;
 
     /// Every command a window's page calls (`main`'s handler list, but for the Drop's and the card's own).
-    const COMMANDS: [&str; 28] = [
+    const COMMANDS: [&str; 30] = [
+        "agents_get",
+        "agent_install_link",
         "settings_get",
         "model_get",
         "model_retry",
@@ -745,6 +791,21 @@ mod tests {
             "",
         ] {
             assert_eq!(link(other), None, "{other:?}");
+        }
+    }
+
+    /// The Cleanup page's install buttons open the agent's own page, named by the agent's id: OpenCode's download page
+    /// and Codex's; nothing for Grok (not offered), an address, or anything else. Only the main window asks.
+    #[test]
+    fn agent_install_link_opens_only_the_offered_agents_pages() {
+        assert_eq!(install_link("opencode"), Some("https://opencode.ai/download"));
+        assert_eq!(install_link("codex"), Some("https://github.com/openai/codex"));
+        for other in ["grok", "claude", "OpenCode", " codex", "https://opencode.ai/download", "", "micPrivacy"] {
+            assert_eq!(install_link(other), None, "{other:?}");
+        }
+        for command in ["agents_get", "agent_install_link"] {
+            assert_eq!(guard_label(MAIN_LABEL, command), Ok(()));
+            assert_eq!(guard_label(WELCOME_LABEL, command), Err(CmdError::NotMain));
         }
     }
 

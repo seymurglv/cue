@@ -667,7 +667,7 @@ impl ModelKeeper {
 
     /// The list with the model in use, for the windows.
     pub fn view(&self) -> ModelsView {
-        ModelsView { current: self.current.id.clone(), entries: self.entries(), recommended: None }
+        ModelsView { current: self.current.id.clone(), entries: self.entries(), recommended: None, found: Vec::new() }
     }
 
     fn entry_state(&self, m: &Manifest) -> EntryState {

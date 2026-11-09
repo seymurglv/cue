@@ -18,13 +18,15 @@ import {
   type AudioKeep,
   type Keep,
   type UiLanguage,
+  type Where,
 } from './api';
 import { CUE } from '../designParts';
+import { CleanupPage, type CleanupValue } from './cleanup';
 import { icon, type IconName } from './icons';
 import { MicRows } from './mic';
-import { bar, modelRow, modelValue, percent, stepModelRow } from './model';
-import { ModelsPage, llmSource, speechSource } from './models';
-import { dropDown, h, iconButton, logFailed, relRect, srow, wrap, type Ctx } from './page';
+import { bar, modelRow, modelValue, stepModelRow } from './model';
+import { ModelsPage, speechSource } from './models';
+import { dropDown, h, iconButton, logFailed, relRect, segment, srow, syncSeg, wrap, type Ctx } from './page';
 import { languageName } from './text';
 
 export { matchMic } from './mic';
@@ -51,37 +53,6 @@ const SWAP_MS = 480;
 /** "Clear history" waits this long for its second press. */
 export const CLEAR_ARMED_MS = 3000;
 
-/** The design's segment thumb: under the pressed button, without sliding the first time. */
-function syncSeg(sg: HTMLElement): void {
-  const b = sg.querySelector<HTMLElement>('button[aria-pressed=true]');
-  const th = sg.querySelector<HTMLElement>('.thb');
-  if (!b || !th) return;
-  const first = !sg.dataset.ready;
-  if (first) th.style.transition = 'none';
-  th.style.width = `${b.offsetWidth}px`;
-  th.style.transform = `translateX(${b.offsetLeft - 2}px)`;
-  if (first) {
-    void th.offsetWidth;
-    th.style.transition = '';
-    sg.dataset.ready = '1';
-  }
-}
-
-/** A segmented control of `values` named by `labels`, `cur` pressed; `name` tells the click which setting it is. */
-function segment<V extends string>(name: string, values: readonly V[], labels: Record<V, string>, cur: V | undefined): HTMLElement {
-  const seg = h('span', 'segc');
-  seg.dataset.seg = name;
-  seg.append(h('span', 'thb'));
-  for (const v of values) {
-    const b = h('button', '', labels[v]);
-    b.type = 'button';
-    b.dataset.v = v;
-    b.setAttribute('aria-pressed', String(v === cur));
-    seg.append(b);
-  }
-  return seg;
-}
-
 export class SettingsTray {
   isOpen = false;
   sub: Sub | null = null;
@@ -99,12 +70,8 @@ export class SettingsTray {
   private swapTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly mic: MicRows;
   private readonly models: ModelsPage;
-  /** The cleanup's local models, on the Cleanup page while it runs on this computer. */
-  private readonly llms: ModelsPage;
-  /** The local models downloaded here, to delete, on the Cleanup page while it runs in the cloud. */
-  private readonly llmsHere: ModelsPage;
-  /** The local list as the core last said (null — not heard yet). */
-  private llmView: api.ModelsView | null = null;
+  /** The Cleanup page (cleanup.ts): where the cleanup runs, and the first page's value for it. */
+  private readonly cleanup: CleanupPage;
   private autostart: boolean | null = null;
   /** The speech model's state, as `cue://model` last said (null — not heard yet). */
   private model: api.ModelState | null = null;
@@ -120,16 +87,12 @@ export class SettingsTray {
       if (this.sub === 'mic') this.redraw();
     });
     this.models = new ModelsPage(ctx, () => this.fit(), speechSource(ctx));
-    this.llms = new ModelsPage(ctx, () => this.fit(), llmSource(ctx));
-    this.llmsHere = new ModelsPage(ctx, () => this.fit(), llmSource(ctx), true);
+    this.cleanup = new CleanupPage(ctx, () => this.fit(), () => this.paintCleanupValue());
   }
 
   /** The cleanup's local list: drawn where it is shown, and the first page's Cleanup value follows it. */
   setLlms(view: api.ModelsView): void {
-    this.llmView = view;
-    this.llms.set(view);
-    this.llmsHere.set(view);
-    this.paintCleanupValue();
+    this.cleanup.setLlms(view);
   }
 
   /** The Model page's list and the model in use: the page shown follows it, and Speech recognition names the model. */
@@ -165,31 +128,13 @@ export class SettingsTray {
   /** The first page's Speech recognition value: its text, amber or Bebas, and the line under the row while the model
    *  downloads. */
   private paintModelValue(page: ParentNode | null = this.current): void {
-    const row = page?.querySelector<HTMLElement>('[data-sub="model"]');
-    if (!row) return;
-    const v = modelValue(this.ctx.t, this.model);
-    const em = row.querySelector('em')!;
-    em.textContent = v.text;
-    em.classList.toggle('warn', v.warn);
-    em.classList.toggle('num', v.progress !== null);
-    const old = row.querySelector('.tline');
-    if (v.progress === null) old?.remove();
-    else if (old) old.querySelector<HTMLElement>('i')!.style.transform = `scaleX(${Math.min(1, v.progress)})`;
-    else row.append(bar('tline', v.progress));
+    paintValue(page?.querySelector<HTMLElement>('[data-sub="model"]'), modelValue(this.ctx.t, this.model));
   }
 
-  /** The first page's Cleanup value: where it runs; amber while the local model is not ready. */
+  /** The first page's Cleanup value: what cleans now; amber when it cannot (an agent to sign in to again or not found,
+   *  a local model not here); the local model's download in Bebas with the line under the row. */
   private paintCleanupValue(page: ParentNode | null = this.current): void {
-    const em = page?.querySelector<HTMLElement>('em[data-val="cleanup"]');
-    if (!em) return;
-    if (this.ctx.settings?.refineWhere === 'local') {
-      const { text, warn } = this.localValue();
-      em.textContent = text;
-      em.classList.toggle('warn', warn);
-      return;
-    }
-    em.textContent = this.value('cleanup');
-    em.classList.remove('warn');
+    paintValue(page?.querySelector<HTMLElement>('[data-sub="cleanup"]'), this.cleanup.value());
   }
 
   /** Takes the page's tray box and gear; an open tray stays open on its page (the page was built again). */
@@ -235,8 +180,9 @@ export class SettingsTray {
     this.show(null, 0);
     el.classList.add('open');
     this.gear.classList.add('hid');
-    // General's value says whether CUE starts at sign-in.
+    // General's value says whether CUE starts at sign-in; Cleanup's whether its agent can be used.
     void this.readAutostart();
+    this.cleanup.refresh();
   }
 
   close(): void {
@@ -245,7 +191,7 @@ export class SettingsTray {
     this.isOpen = false;
     if (this.sub === 'mic') this.stopPreview();
     if (this.sub === 'models') this.models.stop();
-    if (this.sub === 'cleanup') this.llms.stop();
+    if (this.sub === 'cleanup') this.cleanup.left();
     this.sub = null;
     this.ctx.closeMenu();
     this.swapped();
@@ -284,6 +230,14 @@ export class SettingsTray {
   /** The settings changed: the page shown shows the new values. */
   settingsChanged(): void {
     if (this.isOpen) this.redraw();
+  }
+
+  /** The core changed the settings by itself (the agent it found, a local model it loaded): the first page shows the
+   *  new values, the Cleanup page takes them where it stands (a search typed there stays), another page is left as it
+   *  is. */
+  pushed(): void {
+    if (!this.isOpen) return;
+    if (!this.sub || (this.sub === 'cleanup' && !this.cleanup.paint())) this.redraw();
   }
 
   /** The microphone's level on the meter (only the microphone page has one). */
@@ -411,7 +365,7 @@ export class SettingsTray {
 
   private go(sub: Sub): void {
     if (this.sub === 'models') this.models.stop();
-    if (this.sub === 'cleanup') this.llms.stop();
+    if (this.sub === 'cleanup') this.cleanup.left();
     this.sub = sub;
     this.show(sub, 1);
     if (sub === 'mic') {
@@ -419,13 +373,15 @@ export class SettingsTray {
       void this.mic.read();
     } else if (sub === 'general') {
       void this.readAutostart();
+    } else if (sub === 'cleanup') {
+      this.cleanup.refresh();
     }
   }
 
   private back(): void {
     if (this.sub === 'mic') this.stopPreview();
     if (this.sub === 'models') this.models.stop();
-    if (this.sub === 'cleanup') this.llms.stop();
+    if (this.sub === 'cleanup') this.cleanup.left();
     this.ctx.closeMenu();
     const parent = this.sub ? PARENT[this.sub] ?? null : null;
     this.sub = parent;
@@ -447,9 +403,13 @@ export class SettingsTray {
     else if (t.closest('[data-sw="autostart"]')) void this.toggleAutostart();
     else if ((b = t.closest<HTMLElement>('.segc button')) && b.getAttribute('aria-pressed') !== 'true') {
       const v = b.dataset.v!;
-      const seg = b.closest<HTMLElement>('.segc')!.dataset.seg;
-      if (seg === 'runs') void this.ctx.change({ kind: 'refineWhere', value: v === 'local' ? 'local' : 'agent' });
-      else void this.ctx.change({ kind: 'uiLanguage', value: v as UiLanguage });
+      const seg = b.closest<HTMLElement>('.segc')!;
+      if (seg.dataset.seg === 'where') {
+        // The thumb slides to the part pressed at once; the list follows the core's answer.
+        for (const x of seg.querySelectorAll('button')) x.setAttribute('aria-pressed', String(x === b));
+        syncSeg(seg);
+        this.cleanup.choose(v as Where);
+      } else void this.ctx.change({ kind: 'uiLanguage', value: v as UiLanguage });
     }
   }
 
@@ -492,11 +452,8 @@ export class SettingsTray {
       g.append(this.modelRow());
       pg.append(h('div', 'tft', t.modelNote));
     } else if (sub === 'cleanup') {
-      g.append(...this.cleanupRows());
-      const local = this.ctx.settings?.refineWhere === 'local';
-      if (local) pg.append(...this.llms.rows());
-      pg.append(h('div', 'tft', local ? t.cleanupNoteLocal : t.cleanupNote.replace('{NAME}', t.runs.cloud)));
-      if (!local) pg.append(...this.llmsHere.rows());
+      g.remove();
+      pg.append(...this.cleanup.rows());
     } else if (sub === 'mic') g.append(...this.mic.rows());
     else if (sub === 'languages') g.append(...this.languageRows());
     else if (sub === 'history') g.append(...this.historyRows());
@@ -518,9 +475,8 @@ export class SettingsTray {
         // Drawn with its look by `paintModelValue`.
         return '';
       case 'cleanup':
-        // Where it runs; the warnings over it are `paintCleanupValue`'s.
-        if (!s) return '';
-        return s.refineWhere === 'local' ? t.runs.local : t.runs.cloud;
+        // Drawn with its look by `paintCleanupValue`.
+        return '';
       case 'mic':
         return this.mic.label();
       case 'languages':
@@ -637,38 +593,6 @@ export class SettingsTray {
     this.ctx.menu(b, items, (v) => void this.ctx.change({ kind: 'translateTarget', value: v }));
   }
 
-  /* ---------- cleanup ---------- */
-
-  /** Where the cleanup runs (this page is rebuilt with the agent choice later). */
-  private cleanupRows(): HTMLElement[] {
-    const t = this.ctx.t;
-    const runs = this.ctx.settings?.refineWhere === 'local' ? 'local' : 'cloud';
-    return [srow(t.runsOn, t.runsHint[runs], segment('runs', ['local', 'cloud'] as const, t.runs, runs)).row];
-  }
-
-  /** The local model's state in words for the first page, from the local list: in use, a switch's step, or nothing. */
-  private localValue(): { text: string; warn: boolean } {
-    const t = this.ctx.t;
-    const v = this.llmView;
-    if (!v) return { text: t.runs.local, warn: false };
-    if (v.current) return { text: t.runs.local, warn: false };
-    const busy: api.EntryState['state'][] = ['preparing', 'downloading', 'loading', 'failed', 'noSpace', 'notRunnable'];
-    const e = v.entries.find((x) => busy.includes(x.state));
-    if (!e) return { text: t.cleanupValue.notDownloaded, warn: true };
-    switch (e.state) {
-      case 'downloading':
-        return { text: t.cleanupValue.downloading.replace('{PCT}', String(percent(e.done, e.total))), warn: true };
-      case 'preparing':
-        return { text: t.cleanupValue.downloading.replace('{PCT}', '0'), warn: true };
-      case 'loading':
-        return { text: t.models.loading, warn: false };
-      case 'notRunnable':
-        return { text: t.models.notRunnable, warn: true };
-      default:
-        return { text: t.modelValue.failed, warn: true };
-    }
-  }
-
   /* ---------- general ---------- */
 
   private generalRows(): HTMLElement[] {
@@ -711,4 +635,17 @@ export class SettingsTray {
     sw.setAttribute('aria-checked', String(!!this.autostart));
     sw.disabled = this.autostart === null;
   }
+}
+
+/** A first page value on its row: its text, amber or Bebas, and the line under the row while a model downloads. */
+function paintValue(row: HTMLElement | null | undefined, v: CleanupValue): void {
+  if (!row) return;
+  const em = row.querySelector('em')!;
+  em.textContent = v.text;
+  em.classList.toggle('warn', v.warn);
+  em.classList.toggle('num', v.progress !== null);
+  const old = row.querySelector('.tline');
+  if (v.progress === null) old?.remove();
+  else if (old) old.querySelector<HTMLElement>('i')!.style.transform = `scaleX(${Math.min(1, v.progress)})`;
+  else row.append(bar('tline', v.progress));
 }

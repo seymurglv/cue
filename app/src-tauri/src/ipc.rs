@@ -601,6 +601,18 @@ mod tests {
         assert_eq!((&view["historyKeep"], &view["historyAudio"]), (&Value::Null, &Value::Null));
     }
 
+    /// The old custom style's text, kept in settings.json until instructions.md exists, never reaches a window: the
+    /// view has no `style` or `custom`, at any depth.
+    #[test]
+    fn settings_view_never_carries_the_old_custom_text() {
+        let s: Settings = serde_json::from_str(r#"{"refine":{"style":"custom","custom":"пиши коротко"}}"#).unwrap();
+        assert_eq!(s.refine.legacy_custom(), Some("пиши коротко"), "the text is pending");
+        let json = serde_json::to_string(&SettingsView::of(&s, Lang::Ru, true)).unwrap();
+        assert!(!json.contains("пиши коротко"), "{json}");
+        assert!(!json.contains("\"style\"") && !json.contains("\"custom\""), "{json}");
+        assert!(!format!("{:?}", SettingsView::of(&s, Lang::Ru, true)).contains("пиши"));
+    }
+
     /// A word added from a suggestion: the window gets it with how it was heard, the log only the count.
     #[test]
     fn settings_view_has_the_learned_words() {

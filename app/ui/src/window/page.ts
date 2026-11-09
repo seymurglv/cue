@@ -35,21 +35,26 @@ const MARK =
   '<circle class="lamp" cx="18.2" cy="3.2" r="1.7"/></svg>';
 
 /** One choice of a menu: its value, its label (text), a muted note after it, whether it is the current one; and for a
- *  richer list a second line under the label (`sub`), a quiet chip after it (`badge`), a lamp before it (`lamp`: on or
- *  off), and the group it is listed under (a heading wherever the group changes). */
+ *  richer list a second line under the label (`sub`) and the group it is listed under (a heading wherever the group
+ *  changes). */
 export interface MenuItem {
   value: string;
   label: string;
   note?: string;
   on: boolean;
   sub?: string;
-  badge?: string;
-  lamp?: boolean;
   group?: string;
 }
 
 /** Which edge of its button a menu lines up with. */
 export type MenuAlign = 'start' | 'end';
+
+/** A long menu's field over its items (an agent's hundreds of models): its hint, and the line when nothing matches.
+ *  Typing keeps the items whose label or value hold the words; Enter takes the first one left. */
+export interface MenuFilter {
+  hint: string;
+  none: string;
+}
 
 /** What the History section and the tray take from the page. */
 export interface Ctx {
@@ -63,8 +68,8 @@ export interface Ctx {
   today(): string;
   /** A menu under `button` (a second press on the same button closes it); `pick` gets the value chosen. `align`: the
    *  menu's right edge on the button's (`end`, by default) or its left edge (`start`, for a button that starts a row);
-   *  `wide` — the menu as wide as the button. */
-  menu(button: HTMLElement, items: MenuItem[], pick: (value: string) => void, note?: string, align?: MenuAlign, wide?: boolean): void;
+   *  `wide` — the menu as wide as the button; `filter` — a field over the items. */
+  menu(button: HTMLElement, items: MenuItem[], pick: (value: string) => void, note?: string, align?: MenuAlign, wide?: boolean, filter?: MenuFilter): void;
   closeMenu(): void;
   /** A setting through the core; the page takes the settings it answers with (null — refused or no answer). */
   change(c: SettingChange): Promise<SettingsView | null>;
@@ -125,6 +130,37 @@ export function srow(label: string, desc: string | null, ...ctrls: HTMLElement[]
   return { row, small };
 }
 
+/** The design's segment thumb: under the pressed button, without sliding the first time. */
+export function syncSeg(sg: HTMLElement): void {
+  const b = sg.querySelector<HTMLElement>('button[aria-pressed=true]');
+  const th = sg.querySelector<HTMLElement>('.thb');
+  if (!b || !th) return;
+  const first = !sg.dataset.ready;
+  if (first) th.style.transition = 'none';
+  th.style.width = `${b.offsetWidth}px`;
+  th.style.transform = `translateX(${b.offsetLeft - 2}px)`;
+  if (first) {
+    void th.offsetWidth;
+    th.style.transition = '';
+    sg.dataset.ready = '1';
+  }
+}
+
+/** A segmented control of `values` named by `labels`, `cur` pressed; `name` tells the click which setting it is. */
+export function segment<V extends string>(name: string, values: readonly V[], labels: Record<V, string>, cur: V | undefined): HTMLElement {
+  const seg = h('span', 'segc');
+  seg.dataset.seg = name;
+  seg.append(h('span', 'thb'));
+  for (const v of values) {
+    const b = h('button', '', labels[v]);
+    b.type = 'button';
+    b.dataset.v = v;
+    b.setAttribute('aria-pressed', String(v === cur));
+    seg.append(b);
+  }
+  return seg;
+}
+
 export function dropDown(kind: string, value: string): HTMLButtonElement {
   const b = h('button', 'dd');
   b.type = 'button';
@@ -166,7 +202,15 @@ export class Menus {
   }
 
   /** A menu under `button` (a second press on the same button closes it); `pick` gets the value chosen. */
-  show(button: HTMLElement, items: MenuItem[], pick: (value: string) => void, note?: string, align: MenuAlign = 'end', wide = false): void {
+  show(
+    button: HTMLElement,
+    items: MenuItem[],
+    pick: (value: string) => void,
+    note?: string,
+    align: MenuAlign = 'end',
+    wide = false,
+    filter?: MenuFilter,
+  ): void {
     if (this.open?.b === button) {
       this.close();
       return;
@@ -177,15 +221,16 @@ export class Menus {
     m.setAttribute('role', 'menu');
     let current: HTMLElement | null = null;
     let group: string | undefined;
+    // Built once as one fragment: a list of hundreds opens at once.
+    const list = document.createDocumentFragment();
     items.forEach((it, i) => {
-      if (it.group !== undefined && it.group !== group) m.append(h('div', 'mg', it.group));
+      if (it.group !== undefined && it.group !== group) list.append(h('div', 'mg', it.group));
       group = it.group;
       const b = h('button');
       b.type = 'button';
       b.dataset.i = String(i);
       b.setAttribute('role', 'menuitemradio');
       b.setAttribute('aria-checked', String(it.on));
-      if (it.lamp !== undefined) b.append(h('span', it.lamp ? 'mlamp on' : 'mlamp'));
       if (it.sub === undefined) b.append(h('span', 'mlb', it.label));
       else {
         const two = h('span', 'mt');
@@ -193,22 +238,25 @@ export class Menus {
         b.append(two);
         m.classList.add('two');
       }
-      if (it.badge) b.append(h('span', 'mbadge', it.badge));
       if (it.note) b.append(h('span', 'mnc', it.note));
       if (it.on) {
         b.insertAdjacentHTML('beforeend', icon('ok'));
         current = b;
       }
-      m.append(b);
+      list.append(b);
     });
-    if (note) m.append(h('div', 'mnote', note));
-    m.addEventListener('click', (e) => {
-      const b = (e.target as Element).closest<HTMLElement>('[data-i]');
-      if (!b) return;
-      const it = items[Number(b.dataset.i)];
+    const take = (b: HTMLElement | null) => {
+      const it = b ? items[Number(b.dataset.i)] : undefined;
+      if (!it) return;
       this.close();
-      if (it) pick(it.value);
-    });
+      pick(it.value);
+    };
+    const field = filter ? this.filterField(m, items, filter, take) : null;
+    if (field) m.append(field.row);
+    m.append(list);
+    if (field) m.append(field.none);
+    if (note) m.append(h('div', 'mnote', note));
+    m.addEventListener('click', (e) => take((e.target as Element).closest<HTMLElement>('[data-i]')));
     if (wide) {
       m.classList.add('wide');
       m.style.width = `${button.offsetWidth}px`;
@@ -216,6 +264,53 @@ export class Menus {
     this.app.append(m);
     this.open = { m, b: button };
     this.place(m, button, current, align);
+    field?.input.focus();
+  }
+
+  /** The field over a long menu `m`: it keeps the items whose words hold what is typed (a heading only while one of its
+   *  items is kept), says so when none is, and Enter takes the first item kept. */
+  private filterField(m: HTMLElement, items: MenuItem[], filter: MenuFilter, take: (b: HTMLElement | null) => void) {
+    m.classList.add('filt');
+    const row = h('div', 'mfl');
+    const input = h('input');
+    input.placeholder = filter.hint;
+    input.setAttribute('aria-label', filter.hint);
+    input.spellcheck = false;
+    row.insertAdjacentHTML('afterbegin', icon('search'));
+    row.append(input);
+    const none = h('div', 'mfnone', filter.none);
+    none.hidden = true;
+    // The second line is left out: "Быстрая · авто" names the model it picks there, and is not that model.
+    const words = items.map((it) => `${it.label} ${it.value}`.toLocaleLowerCase());
+    input.addEventListener('input', () => {
+      const q = input.value.trim().toLocaleLowerCase();
+      let head: HTMLElement | null = null;
+      let headKept = false;
+      let kept = 0;
+      for (const el of m.querySelectorAll<HTMLElement>('.mg, [data-i]')) {
+        if (el.classList.contains('mg')) {
+          if (head) head.hidden = !headKept;
+          head = el;
+          headKept = false;
+          continue;
+        }
+        const on = !q || words[Number(el.dataset.i)].includes(q);
+        el.hidden = !on;
+        if (on) {
+          kept++;
+          headKept = true;
+        }
+      }
+      if (head) head.hidden = !headKept;
+      none.hidden = kept > 0;
+      m.scrollTop = 0;
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      take(m.querySelector<HTMLElement>('[data-i]:not([hidden])'));
+    });
+    return { row, input, none };
   }
 
   close(): void {
@@ -371,8 +466,8 @@ export class WindowPage implements Ctx {
     }
   }
 
-  menu(button: HTMLElement, items: MenuItem[], pick: (value: string) => void, note?: string, align?: MenuAlign, wide?: boolean): void {
-    this.menus.show(button, items, pick, note, align, wide);
+  menu(button: HTMLElement, items: MenuItem[], pick: (value: string) => void, note?: string, align?: MenuAlign, wide?: boolean, filter?: MenuFilter): void {
+    this.menus.show(button, items, pick, note, align, wide, filter);
   }
 
   closeMenu(): void {
@@ -406,12 +501,13 @@ export class WindowPage implements Ctx {
   }
 
   /** Settings the core sent by itself (a word learned or taken back from the Drop, a habit learned, widened or undone
-   *  from its card): the Dictionary and the Habits are drawn again. The tray is not redrawn: a draft in it (the
-   *  instructions are saved when their field loses focus) stays as typed. */
+   *  from its card, the agent it found, a local model it loaded): the Dictionary and the Habits are drawn again, and
+   *  the tray shows the new values where they are, a search typed on its page left as it is. */
   private pushed(view: SettingsView): void {
     this.settings = view;
     this.dict.render();
     this.habits.render();
+    this.tray.pushed();
   }
 
   /** The window's content in the current language; the History section and the tray keep their state. */

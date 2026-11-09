@@ -167,7 +167,7 @@ describe('Habits', () => {
     stub(view({ refineWhere: 'off' }));
     page = await mount();
     expect($<HTMLElement>('.hnocl')!.hidden).toBe(false);
-    expect(text($('.hnocl'))).toBe('Habits work when the cleanup is on.');
+    expect(text($('.hnocl'))).toBe('Habits work when an AI cleans the text: this computer or your AI.');
   });
 
   it('the user\'s own AI or this computer: no such line, and no key is asked for', async () => {

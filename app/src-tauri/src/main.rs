@@ -92,7 +92,9 @@ fn main() {
             commands::mic_access,
             commands::welcome_step,
             commands::welcome_close,
-            commands::open_link
+            commands::open_link,
+            commands::agents_get,
+            commands::agent_install_link
         ])
         .setup(move |app| {
             // We log the reason ourselves: Tauri turns a `setup` error into a panic, and the panic hook does not

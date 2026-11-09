@@ -218,6 +218,8 @@ export interface ModelsView {
   entries: ModelEntry[];
   /** The short list's recommended model, where a list marks one (the local cleanup's). */
   recommended?: string | null;
+  /** The entries found on Hugging Face, not on CUE's short list (the local cleanup's): CUE has not checked them. */
+  found?: string[];
 }
 /** Why CUE cannot run a repository's model. */
 export type NotRunnable = 'architecture' | 'noInt8' | 'layout';
@@ -261,6 +263,23 @@ export const llmDelete = (id: string) => invoke<boolean>('llm_delete', { id });
 export async function onLlms(cb: (v: ModelsView) => void): Promise<void> {
   await getCurrentWebviewWindow().listen<ModelsView>('cue://llms', (e) => cb(e.payload));
 }
+
+/** An agent the user may clean through, as the Cleanup page lists it (`agents_get`, OpenCode then Codex): installed
+ *  here or not; signed in (`null` — it does not tell: OpenCode, whose providers are its own, or a Codex that said
+ *  nothing CUE knows); the models it offers (OpenCode's only once its server listed them); and the model CUE asks for
+ *  when the user picked none (Codex's default, OpenCode's "Быстрая · авто" pick; empty while not known). */
+export interface AgentView {
+  id: string;
+  name: string;
+  found: boolean;
+  signedIn: boolean | null;
+  models: { id: string; name: string }[];
+  model: string;
+}
+/** The agents looked at again (their marks cleared, Codex asked about its sign-in); slow: seconds, off the core. */
+export const agentsGet = () => invoke<AgentView[]>('agents_get');
+/** The agent's install page in the browser, by its id (CUE holds the address). */
+export const agentInstallLink = (id: string) => invoke<void>('agent_install_link', { id });
 
 /** What the core is doing, as every window hears it: `start` and `listen` — a recording is on. */
 export type CorePhase = 'idle' | 'start' | 'listen' | 'think' | 'done' | 'empty' | 'cancel' | 'error' | 'answer';

@@ -6,12 +6,13 @@
    data-theme on <html>; the tokens and their dark values are design/cue.css).
    Added for the real data: a history row shows its mode (a small badge; none for a plain dictation, its place kept)
    and its app as muted text before the text, an "Ask" question muted before the answer; a period note and a "not
-   connected" mark in menus; long menus scroll; a key field; quiet lines for an empty history and for nothing found.
+   connected" mark in menus; long menus scroll, and a long list filters as one types; quiet lines for an empty history
+   and for nothing found.
    Since: runs from one app stacked, the search grown out of the magnifier on the heading's line, an opened row's
    recording as a thin progress line in place of the design's waveform, the history's period and Clear history on the
    tray's History page instead of under the list; every control one capsule 28 px high (docs/specs/2026-11-02-selectors.md):
-   fields, drop-downs and the connection card with a hairline ring that darkens with the focus, buttons and segments
-   filled, menus rounded to match. */
+   fields and drop-downs with a hairline ring that darkens with the focus, buttons and segments filled, menus rounded to
+   match. */
 @font-face{font-family:"Bebas Neue";src:url("./fonts/BebasNeue-Regular.ttf") format("truetype");font-display:block}
 @font-face{font-family:"Montserrat";font-weight:800;src:url("./fonts/Montserrat-ExtraBold-cyrillic-ext.woff2") format("woff2");font-display:block;unicode-range:U+0460-052F,U+1C80-1C8A,U+20B4,U+2DE0-2DFF,U+A640-A69F,U+FE2E-FE2F}
 @font-face{font-family:"Montserrat";font-weight:800;src:url("./fonts/Montserrat-ExtraBold-cyrillic.woff2") format("woff2");font-display:block;unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
@@ -61,11 +62,6 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .btn2.warn{color:var(--warn-ink)}
 .btn2 .lbl{display:inline-flex}
 .btn2:disabled{opacity:.5}
-/* a key field: a capsule with a hairline ring, as the history's search and the Dictionary's "+ Word"; the ring darkens
-   with the focus */
-.kin{width:100px;height:28px;padding:0 12px;border:0;outline:0;border-radius:14px;background:transparent;box-shadow:inset 0 0 0 1px var(--faint);font-size:12px;color:var(--text);transition:box-shadow .2s}
-.kin:focus{box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--text) 45%,transparent)}
-.kin::placeholder{color:var(--muted)}
 /* switch */
 .sw{position:relative;flex:none;width:40px;height:20px;border-radius:999px;background:transparent;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--text) 60%,transparent);transition:background .25s,box-shadow .25s}
 .sw::after{content:"";position:absolute;left:4px;top:4px;width:12px;height:12px;border-radius:50%;background:color-mix(in srgb,var(--text) 78%,transparent);transition:transform .4s var(--e-spring),background .25s}
@@ -82,25 +78,6 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .dd:hover{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--text) 30%,transparent)}
 .dd .ddv{overflow:hidden;text-overflow:ellipsis}
 .dd svg{width:12px;height:12px;color:var(--muted);transform:rotate(90deg)}
-/* the Cleanup page's connection card: a lamp (green once the connection is ready), the name, its state under it; it opens
-   the list of connections at its own width. The drop-down's ring at the card's size. */
-.srow.wide{display:block}
-.pk{display:flex;align-items:center;gap:10px;width:100%;min-height:44px;padding:6px 12px 6px 14px;border-radius:14px;background:transparent;box-shadow:inset 0 0 0 1px var(--faint);text-align:left;transition:box-shadow .2s}
-.pk:hover{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--text) 30%,transparent)}
-.pk .pt{flex:1;min-width:0}
-.pk .pt b{display:block;font-weight:500;font-size:13px}
-.pk .pt small{display:block;margin-top:1px;overflow:hidden;font-size:11px;line-height:1.35;color:var(--muted);text-overflow:ellipsis;white-space:nowrap}
-.pk>svg{flex:none;width:12px;height:12px;color:var(--muted);transform:rotate(90deg)}
-.pk .lamp,.menu .mlamp{flex:none;width:6px;height:6px;border-radius:50%;background:color-mix(in srgb,var(--text) 25%,transparent);transition:background-color .3s}
-.pk .lamp.on,.menu .mlamp.on{background:var(--ok)}
-/* a local server's address is longer than a key's mask: the field takes the line under the row's name */
-.srow[data-server]{flex-wrap:wrap;row-gap:6px}
-.srow[data-server] .stx{flex-basis:100%}
-.srow[data-server] .sc{flex:1 1 100%;max-width:none;flex-wrap:nowrap}
-.srow[data-server] .kin{flex:1;width:auto;min-width:0}
-/* the custom style's instructions: the fields' ring */
-.cta{display:block;width:100%;min-height:64px;resize:vertical;padding:8px 12px;border:0;outline:0;border-radius:14px;background:transparent;box-shadow:inset 0 0 0 1px var(--faint);font:inherit;font-size:12px;line-height:1.45;color:var(--text);transition:box-shadow .2s}
-.cta:focus{box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--text) 45%,transparent)}
 /* menus: 4 px in from the edge, so an item's radius is 4 less than the menu's */
 .menu{position:absolute;z-index:45;min-width:180px;max-width:320px;overflow-x:hidden;overflow-y:auto;scrollbar-width:thin;padding:4px;border-radius:14px;background:var(--card);box-shadow:0 14px 32px -10px rgba(0,0,0,.32),0 0 0 .5px color-mix(in srgb,var(--text) 18%,transparent);transform-origin:50% 0;animation:mnIn .32s var(--e-spring)}
 [data-theme=dark] .menu{background:#222225}
@@ -109,16 +86,24 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .menu button svg{width:14px;height:14px}
 .menu .mlb{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .menu .mnc{font-size:11px;color:var(--muted)}
-/* a richer list: group headings, two lines (a name and its state or price), a quiet chip, a lamp; as wide as its button */
+/* a richer list: group headings, two lines (a name and the model it stands for); as wide as its button */
 .menu .mg{padding:8px 10px 3px;font-size:11px;font-weight:600;color:var(--muted)}
 .menu .mg:first-child{padding-top:4px}
 .menu.two button{height:auto;min-height:28px;padding-top:5px;padding-bottom:5px}
 .menu .mt{display:flex;flex:1;flex-direction:column;min-width:0}
 .menu .mt .mlb{font-weight:500}
 .menu .msub{overflow:hidden;font-size:11px;color:var(--muted);text-overflow:ellipsis}
-.menu .mbadge{flex:none;padding:1px 6px;border-radius:9px;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--text) 16%,transparent);font-size:11px;color:var(--muted)}
 .menu.wide{max-width:none}
 .menu .mnote{padding:6px 10px 4px;border-top:1px solid var(--line);margin-top:4px;font-size:11px;line-height:1.35;color:var(--muted);white-space:normal}
+/* a long list (an agent's hundreds of models): a field on top that stays while the list scrolls under it, the
+   magnifier before it; a quiet line when nothing matches */
+.menu.filt{width:280px;max-width:calc(100% - 16px)}
+.menu .mfl{position:sticky;top:-4px;z-index:1;display:flex;align-items:center;gap:7px;height:36px;margin:-4px -4px 4px;padding:0 12px;border-bottom:1px solid var(--line);background:inherit;color:var(--muted)}
+.menu .mfl svg{width:14px;height:14px}
+.menu .mfl input{flex:1;min-width:0;padding:0;border:0;outline:0;background:none;font-size:12px;color:var(--text)}
+.menu .mfl input::placeholder{color:var(--muted);opacity:1}
+.menu .mfl:focus-within{color:var(--text)}
+.menu .mfnone{padding:6px 10px 8px;font-size:12px;color:var(--muted)}
 @keyframes mnIn{from{opacity:0;transform:translateY(-4px) scale(.97)}}
 /* microphone level */
 .meter{display:flex;gap:2px;align-items:center;height:14px}
@@ -231,7 +216,7 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .srow .stx b{display:block;font-weight:500}
 .srow .stx small{display:block;font-size:11px;line-height:1.35;color:var(--muted);margin-top:1px}
 .srow .stx small.ok{color:var(--ok)}
-.srow .stx small.warn{color:var(--warn)}
+.srow .stx small.warn{color:var(--warn-ink)}
 .srow .sc{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;flex:none;max-width:64%}
 /* a drop-down in place of the label (the microphone under its own heading): as wide as the row, its value on the left,
    the chevron at the end, the hint under it */
@@ -405,7 +390,7 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 /* Speech recognition (docs/specs/2026-11-02-settings-tray.md): the first page's value in amber or Bebas, a 2 px line
    under the row while the model downloads; on its page the model's row wraps to take its bar and its bytes. */
 .trw{position:relative}
-.trw em.warn{color:var(--warn)}
+.trw em.warn{color:var(--warn-ink)}
 .trw em.num{font-family:"Bebas Neue",sans-serif;font-size:15px;letter-spacing:.03em;color:var(--text);font-variant-numeric:tabular-nums;padding-top:2px}
 .tline,.mbar{display:block;height:2px;border-radius:1px;background:color-mix(in srgb,var(--text) 12%,transparent);overflow:hidden}
 .tline{position:absolute;left:30px;right:26px;bottom:3px}
@@ -456,14 +441,24 @@ input{font:inherit;color:inherit;letter-spacing:inherit}
 .mfd .stx b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mfd.off{opacity:.45}
 .mfnote{padding:8px 0 4px;font-size:12px;color:var(--muted)}
+/* the Cleanup page (docs/specs/2026-11-08-no-keys-design.md, "Cleanup page"): the three parts on top, in the middle; a
+   heading's quiet tail ("· русский, английский"); a marked word in a row's line ("Recommended" darker, "Not checked by
+   CUE" in amber ink); an agent not installed keeps its name in --muted (never opacity) beside its install button */
+.segrow{display:flex;justify-content:center;padding:2px 0 6px}
+.mgh .mut{font-weight:400}
+.srow .stx small .rc{color:var(--text);font-weight:500}
+.srow .stx small .ncheck{color:var(--warn-ink)}
+.mdl .stx small{text-wrap:pretty}
+.mdl.off{cursor:default}
+.mdl.off .stx b{color:var(--muted)}
+.btn2.lnk{padding:0 10px}
 /* the keyboard's focus on every other control: the same soft plate as on the icon buttons (one step darker where the
    control has a fill of its own) and dark text, never the system's ring; a plate wider than a bare text button is a
-   spread shadow, so nothing moves. The ringed capsules (drop-downs, the connection card) darken their ring, as the
-   fields do. */
-.app :is(.btn2,.dd,.pk,.sw,.segc button,.trw,.menu button,.bmore button,.dnb,.dx):focus-visible{outline:0}
+   spread shadow, so nothing moves. The ringed capsules (drop-downs) darken their ring, as the fields do. */
+.app :is(.btn2,.dd,.sw,.segc button,.trw,.menu button,.bmore button,.dnb,.dx):focus-visible{outline:0}
 .app :is(.mrow[data-sub],.mdl,.mfd):focus-visible{outline:0;box-shadow:0 0 0 4px color-mix(in srgb,var(--text) 8%,transparent);border-radius:6px;background:color-mix(in srgb,var(--text) 8%,transparent)}
 .app .btn2:focus-visible{background:color-mix(in srgb,var(--text) 13%,transparent)}
-.app :is(.dd,.pk):focus-visible{box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--text) 45%,transparent)}
+.app .dd:focus-visible{box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--text) 45%,transparent)}
 .app .sw:focus-visible{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--text) 60%,transparent),0 0 0 4px color-mix(in srgb,var(--text) 8%,transparent)}
 .app .sw[aria-checked=true]:focus-visible{box-shadow:0 0 0 4px color-mix(in srgb,var(--text) 8%,transparent)}
 .app .segc button:focus-visible{background:color-mix(in srgb,var(--text) 8%,transparent);color:var(--text)}

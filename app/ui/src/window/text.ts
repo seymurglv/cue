@@ -1,6 +1,6 @@
 // The main window's texts in English and Russian. The language is the core's (SettingsView.lang): the window has no
 // language set before its script runs, so the page asks for the settings before it draws anything.
-import type { AudioKeep, Keep, Mode, UiLanguage } from './api';
+import type { AudioKeep, Keep, Mode, UiLanguage, Where } from './api';
 
 export type Lang = 'en' | 'ru';
 
@@ -144,22 +144,45 @@ export interface WinText {
     offline: string;
     none: string;
   };
-  /** Where the cleanup runs: the row's name, its hint by the half chosen, the halves. */
-  runsOn: string;
-  runsHint: { local: string; cloud: string };
-  runs: { local: string; cloud: string };
-  /** The note under the Cleanup page on this computer. */
-  cleanupNoteLocal: string;
-  /** The first page's Cleanup value on this computer while its model is not ready ({PCT} — percent). */
-  cleanupValue: { notDownloaded: string; downloading: string };
-  /** The local models' list: the recommended one's line, a size ({SIZE} — gigabytes), why a found one cannot run, an
-   *  empty search. */
-  /** The local models: "Recommended", a size, the reasons a found one cannot run, an empty search, and the heading of
-   *  the models downloaded here, shown to delete while the cleanup runs in the cloud. */
-  llms: { recommended: string; gb: string; downloaded: string; reasons: { severalFiles: string; noChatTemplate: string; tooLarge: string; architecture: string; noQuant: string }; none: string };
-  /** Cleanup: its title and the note on where text goes ({NAME} — where it runs). */
+  /** The local models: a size ({SIZE} — gigabytes), the reasons a found one cannot run, an empty search. */
+  llms: { gb: string; reasons: { severalFiles: string; noChatTemplate: string; tooLarge: string; architecture: string; noQuant: string }; none: string };
+  /** Cleanup: its title. */
   cleanup: string;
-  cleanupNote: string;
+  /** The Cleanup page (docs/specs/2026-11-08-no-keys-design.md, "Cleanup page"): the three parts; No AI's one row; This
+   *  computer's groups, "Recommended", a found model's mark, a download's line ({DONE}, {TOTAL} — MB); Your AI's group,
+   *  the line while the agents are looked at, each agent's line and the sign-in to redo (by agent id), not installed and
+   *  its buttons; the model ({NAME} — the agent), its filter and no match; the fallback ({NAME} — the local model); the
+   *  footer by route; and the first page's value ({NAME} — the agent). */
+  cl: {
+    where: Record<Where, string>;
+    offTitle: string;
+    offLine: string;
+    forYou: string;
+    others: string;
+    recommended: string;
+    notChecked: string;
+    downloading: string;
+    found: string;
+    checking: string;
+    lines: Record<string, string>;
+    signIn: Record<string, string>;
+    notInstalled: string;
+    openCodeMissing: string;
+    install: string;
+    howInstall: string;
+    model: string;
+    auto: string;
+    autoHint: string;
+    filter: string;
+    noMatch: string;
+    fallback: string;
+    raw: string;
+    local: string;
+    fallbackHint: string;
+    fallbackNone: string;
+    notes: { opencode: string; codex: string; local: string; off: string; noneLocal: string; noneAgent: string };
+    value: { off: string; none: string; signIn: string; missing: string; notDownloaded: string };
+  };
   /** Languages: its title and its value ({UI} — the interface language, {TO} — the translation's). */
   languages: string;
   languagesValue: string;
@@ -199,7 +222,7 @@ export const en: WinText = {
   dictRemoveWord: 'Delete the word {NAME}',
   habits: 'Habits',
   habitsHint: 'How you correct text after a dictation. When a correction repeats, CUE remembers it and writes it that way itself. Kept only on this computer.',
-  habitsNoCleanup: 'Habits work when the cleanup is on.',
+  habitsNoCleanup: 'Habits work when an AI cleans the text: this computer or your AI.',
   habitsEmpty: 'Nothing yet. CUE will notice when you correct the same thing a few times.',
   habitsForgetAll: 'Forget all',
   habitsForgetAgain: 'Press again',
@@ -300,20 +323,49 @@ export const en: WinText = {
     offline: 'No connection to Hugging Face',
     none: 'No Parakeet models for this search',
   },
-  runsOn: 'Runs on',
-  runsHint: { local: 'Free, private', cloud: 'Your AI' },
-  runs: { local: 'This computer', cloud: 'Cloud' },
-  cleanupNoteLocal: 'Free. The text never leaves this computer; the model runs on its processor.',
-  cleanupValue: { notDownloaded: 'Model not downloaded', downloading: 'Downloading {PCT} %' },
   llms: {
-    recommended: 'Recommended · Russian and English',
     gb: '{SIZE} GB',
-    downloaded: 'Models on this computer',
     reasons: { severalFiles: 'several files', noChatTemplate: 'no chat template', tooLarge: 'too large', architecture: 'another architecture', noQuant: 'no quantization CUE takes' },
     none: 'No GGUF models for this search',
   },
   cleanup: 'Cleanup',
-  cleanupNote: 'Text goes to {NAME} for the cleanup; the history stays on this computer only.',
+  cl: {
+    where: { off: 'No AI', local: 'This computer', agent: 'Your AI' },
+    offTitle: 'What CUE does without AI',
+    offLine: 'Words from the dictionary and your corrections, no “um” or “uh”, tidy spaces. Instant.',
+    forYou: 'For your languages',
+    others: 'Others',
+    recommended: 'Recommended',
+    notChecked: 'Not checked by CUE',
+    downloading: 'Downloading: {DONE} of {TOTAL} MB · press to stop',
+    found: 'Found on this computer',
+    checking: 'Checking…',
+    lines: { opencode: 'Any provider: your key or subscription · ~2 s', codex: 'Signs in with ChatGPT · ~4 s' },
+    signIn: { codex: 'Sign in again: codex login in a terminal' },
+    notInstalled: 'Not installed',
+    openCodeMissing: 'Not installed: install it and CUE finds it by itself',
+    install: 'Install',
+    howInstall: 'How to install',
+    model: 'Model',
+    auto: 'Fast · auto',
+    autoHint: 'The fast one of those in {NAME}',
+    filter: 'Find a model',
+    noMatch: 'No such model',
+    fallback: "If the AI didn't answer",
+    raw: 'Paste as said',
+    local: 'Clean: {NAME}',
+    fallbackHint: 'Or clean with the model on this computer',
+    fallbackNone: 'Download a model to clean with it',
+    notes: {
+      opencode: 'Text goes wherever OpenCode is set up to send it: your provider, your key or subscription. CUE holds no keys.',
+      codex: 'Text goes to ChatGPT through Codex, under your sign-in. CUE holds no keys.',
+      local: 'Free. Text never leaves this computer; the model runs on its processor.',
+      off: 'Text goes in as recognized. CUE itself fixes words from the dictionary and drops “um” and “uh”.',
+      noneLocal: 'Until a model is chosen, text goes in without AI.',
+      noneAgent: 'Until an AI is chosen, text goes in without AI.',
+    },
+    value: { off: 'No AI', none: 'Not chosen', signIn: '{NAME}: sign in again', missing: '{NAME} not found', notDownloaded: 'Model not downloaded' },
+  },
   languages: 'Languages',
   languagesValue: '{UI} · into {TO}',
   generalOn: 'Starts at sign-in',
@@ -351,7 +403,7 @@ export const ru: WinText = {
   dictRemoveWord: 'Удалить слово {NAME}',
   habits: 'Привычки',
   habitsHint: 'Как вы правите текст после диктовки. Когда правка повторяется, CUE запоминает её и дальше пишет так сам. Хранится только на этом компьютере.',
-  habitsNoCleanup: 'Привычки работают, когда включена очистка.',
+  habitsNoCleanup: 'Привычки работают, когда текст чистит ИИ: этот компьютер или ваш AI.',
   habitsEmpty: 'Пока ничего. CUE заметит, если вы несколько раз поправите одно и то же.',
   habitsForgetAll: 'Забыть всё',
   habitsForgetAgain: 'Нажмите ещё раз',
@@ -452,20 +504,49 @@ export const ru: WinText = {
     offline: 'Нет связи с Hugging Face',
     none: 'Нет моделей Parakeet по запросу',
   },
-  runsOn: 'Где работает',
-  runsHint: { local: 'Бесплатно, приватно', cloud: 'Ваш AI' },
-  runs: { local: 'Этот компьютер', cloud: 'Облако' },
-  cleanupNoteLocal: 'Бесплатно. Текст не покидает этот компьютер; модель работает на его процессоре.',
-  cleanupValue: { notDownloaded: 'Модель не скачана', downloading: 'Качается {PCT} %' },
   llms: {
-    recommended: 'Рекомендуем · русский и английский',
     gb: '{SIZE} ГБ',
-    downloaded: 'Модели на этом компьютере',
     reasons: { severalFiles: 'несколько файлов', noChatTemplate: 'нет шаблона чата', tooLarge: 'слишком большая', architecture: 'другая архитектура', noQuant: 'нет подходящего квантования' },
     none: 'Нет GGUF-моделей по запросу',
   },
   cleanup: 'Чистка текста',
-  cleanupNote: 'Текст уходит в {NAME} для чистки; история — только на этом компьютере.',
+  cl: {
+    where: { off: 'Без ИИ', local: 'Этот компьютер', agent: 'Ваш AI' },
+    offTitle: 'Что CUE делает без ИИ',
+    offLine: 'Слова из словаря и ваших правок, без «эм» и «ээ», аккуратные пробелы. Мгновенно.',
+    forYou: 'Для ваших языков',
+    others: 'Другие',
+    recommended: 'Рекомендуем',
+    notChecked: 'CUE не проверял',
+    downloading: 'Скачивается: {DONE} из {TOTAL} МБ · нажмите, чтобы остановить',
+    found: 'Найдено на этом компьютере',
+    checking: 'Проверяем…',
+    lines: { opencode: 'Любой провайдер: ваш ключ или подписка · ~2 с', codex: 'Вход через ChatGPT · ~4 с' },
+    signIn: { codex: 'Войдите заново: codex login в терминале' },
+    notInstalled: 'Не установлен',
+    openCodeMissing: 'Не установлен: поставьте, и CUE найдёт его сам',
+    install: 'Установить',
+    howInstall: 'Как установить',
+    model: 'Модель',
+    auto: 'Быстрая · авто',
+    autoHint: 'Быстрая из тех, что есть в {NAME}',
+    filter: 'Найти модель',
+    noMatch: 'Такой модели нет',
+    fallback: 'Если AI не ответил',
+    raw: 'Вставить как сказано',
+    local: 'Почистить: {NAME}',
+    fallbackHint: 'Или почистить моделью на этом компьютере',
+    fallbackNone: 'Скачайте модель, чтобы чистить ею',
+    notes: {
+      opencode: 'Текст уходит туда, куда настроен OpenCode: ваш провайдер, ваш ключ или подписка. CUE ключей не хранит.',
+      codex: 'Текст уходит в ChatGPT через Codex, по вашему входу. CUE не хранит ключи.',
+      local: 'Бесплатно. Текст не покидает этот компьютер, модель работает на процессоре.',
+      off: 'Текст вставляется как распознан. CUE сам правит слова из словаря и убирает «эм» и «ээ».',
+      noneLocal: 'Пока модель не выбрана, текст вставляется без ИИ.',
+      noneAgent: 'Пока AI не выбран, текст вставляется без ИИ.',
+    },
+    value: { off: 'Без ИИ', none: 'Не выбрано', signIn: '{NAME}: войдите заново', missing: '{NAME} не найден', notDownloaded: 'Модель не скачана' },
+  },
   languages: 'Языки',
   languagesValue: '{UI} · на {TO}',
   generalOn: 'Запуск при входе',

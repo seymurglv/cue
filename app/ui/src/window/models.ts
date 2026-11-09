@@ -7,16 +7,27 @@
 // Pressed (or reached with Tab), the row becomes the field where it stands: the words stay in place as the field's
 // hint, a line grows under it from the magnifier, and a cross clears what was typed. Esc clears, then closes; leaving
 // an empty field closes it. Typing never loses the field: the list and the search's group are drawn again around it.
-// The same page lists the cleanup's local models on the Cleanup page (docs/specs/2026-11-04-local-cleanup.md): a
-// `ModelSource` says which list it is, its calls, its texts and how its rows read. A local model can be deleted in
-// use too (it is let go first), and while the cleanup runs in the cloud the same page shows only the models downloaded
-// here, to delete: nothing is chosen or searched there.
+// The same page lists the cleanup's local models on the Cleanup page's "Этот компьютер" (docs/specs/2026-11-08-no-keys-
+// design.md, "Cleanup page"): a `ModelSource` says which list it is, its calls, its texts and how its rows read — there
+// in two groups, the recommended model for the user's languages, then the others with the search as their last row; a
+// model found on Hugging Face says CUE has not checked it; a row pressed while its model downloads stops it. A local
+// model can be deleted in use too (it is let go first).
 import * as api from './api';
 import type { EntryState, ModelEntry, ModelsView } from './api';
 import { icon } from './icons';
 import { bar, bytesLine, percent } from './model';
 import { h, logFailed, wrap, type Ctx } from './page';
 import { formatNumber, plural, type WinText } from './text';
+
+/** A row's quiet line is made of parts: words, or a marked word ("Recommended", "Not checked by CUE"). */
+export type Part = string | HTMLElement;
+
+/** `parts` into `el`, joined by " · "; false when there is none. */
+export function joined(el: HTMLElement, parts: Part[]): boolean {
+  const kept = parts.filter((p) => p !== '');
+  kept.forEach((p, i) => el.append(...(i ? [' · ', p] : [p])));
+  return kept.length > 0;
+}
 
 /** The search runs this long after the last key, once the field holds this many letters. */
 export const SEARCH_MS = 300;
@@ -34,8 +45,9 @@ export interface FoundRow {
   extra?: string | null;
 }
 
-/** The texts a list is drawn with: the Model page's, with its own reasons and empty search. */
-export type ModelTexts = Omit<WinText['models'], 'reasons'> & { reasons: Record<string, string> };
+/** The texts a list is drawn with: the Model page's, with its own reasons and empty search, and the line of a download
+ *  ({DONE}, {TOTAL} — MB; the Model page's own when none). */
+export type ModelTexts = Omit<WinText['models'], 'reasons'> & { reasons: Record<string, string>; downloading?: string };
 
 /** Which list a `ModelsPage` draws: its calls, its texts, the quiet line of a row and how a size reads. */
 export interface ModelSource {
@@ -45,11 +57,16 @@ export interface ModelSource {
   search(q: string): Promise<FoundRow[]>;
   choose(choice: { id: string } | { repo: string }): Promise<void>;
   remove(id: string): Promise<boolean>;
-  /** The quiet line under a model's name, without its size (languages, "Recommended"). */
-  about(e: ModelEntry, view: ModelsView | null): string;
+  /** The quiet line under a model's name, without its size (languages, "Recommended", "Not checked by CUE"). */
+  about(e: ModelEntry, view: ModelsView | null): Part[];
   size(bytes: number): string;
   /** The model in use can be deleted: the core lets it go first. */
   deleteInUse?: boolean;
+  /** The list in two groups under these headings: the first holds the models `first` picks (left out when it has
+   *  none), the second the rest, the search its last row. One group, under the list's own heading, without it. */
+  groups?(view: ModelsView | null): { heads: [Part, Part]; first: (e: ModelEntry) => boolean };
+  /** A mark after a found repository's line (CUE has not checked it). */
+  foundMark?(): Part;
 }
 
 /** "25 languages", "English only", a language's name for one; nothing when the repository names none. */
@@ -76,30 +93,52 @@ export function speechSource(ctx: Ctx): ModelSource {
     search: (q) => api.modelsSearch(q),
     choose: (c) => api.modelChoose(c),
     remove: (id) => api.modelDelete(id),
-    about: (e) => languages(ctx, e.languages),
+    about: (e) => [languages(ctx, e.languages)],
     size: (bytes) => ctx.t.models.mb.replace('{SIZE}', String(Math.round(bytes / MB))),
   };
 }
 
-/** The cleanup's local models: the Cleanup page on this computer. */
+/** The user's languages as the heading of the recommended models names them: the interface's, then the one a
+ *  translation goes into ("русский, английский"; "English"). The history's languages are a later step (the catalog
+ *  by languages); until then these two say who the recommendation is for. */
+function userLanguages(ctx: Ctx): string {
+  const codes = [...new Set([ctx.lang, ctx.settings?.translateTarget].filter((c): c is string => !!c))];
+  const name = (code: string) => {
+    try {
+      return new Intl.DisplayNames([ctx.lang], { type: 'language' }).of(code) ?? code;
+    } catch {
+      return code;
+    }
+  };
+  return codes.map(name).join(', ');
+}
+
+/** The cleanup's local models: the Cleanup page's "Этот компьютер". */
 export function llmSource(ctx: Ctx): ModelSource {
+  const cl = () => ctx.t.cl;
   return {
     kind: 'language model',
-    texts: () => ({ ...ctx.t.models, reasons: ctx.t.llms.reasons, none: ctx.t.llms.none }),
+    texts: () => ({ ...ctx.t.models, reasons: ctx.t.llms.reasons, none: ctx.t.llms.none, downloading: cl().downloading }),
     search: async (q) => (await api.llmsSearch(q)).map((f) => ({ ...f, extra: f.quant })),
     choose: (c) => api.llmChoose(c),
     remove: (id) => api.llmDelete(id),
     deleteInUse: true,
-    about: (e, view) => (e.id === view?.recommended ? ctx.t.llms.recommended : ''),
+    about: (e, view) => [
+      e.id === view?.recommended ? h('span', 'rc', cl().recommended) : '',
+      view?.found?.includes(e.id) ? h('span', 'ncheck', cl().notChecked) : '',
+    ],
     size: (bytes) => {
       const n = (bytes / GB).toFixed(1);
       return ctx.t.llms.gb.replace('{SIZE}', ctx.lang === 'ru' ? n.replace('.', ',') : n);
     },
+    groups: (view) => {
+      const forYou = h('span', '', cl().forYou);
+      forYou.append(h('span', 'mut', ` · ${userLanguages(ctx)}`));
+      return { heads: [forYou, cl().others], first: (e) => e.id === view?.recommended };
+    },
+    foundMark: () => h('span', 'ncheck', cl().notChecked),
   };
 }
-
-/** What the list of downloaded models only shows: a model whose file is here. */
-const HERE: readonly EntryState['state'][] = ['inUse', 'downloaded', 'notRunnable'];
 
 /** A switch on its way: choosing the model in use stops it. */
 const RUNNING: readonly EntryState['state'][] = ['preparing', 'downloading', 'loading'];
@@ -115,14 +154,17 @@ export class ModelsPage {
   private list: HTMLElement | null = null;
   private found: HTMLElement | null = null;
 
-  /** `resized` — the page's height changed (the tray follows it); `downloadedOnly` — only the models downloaded here,
-   *  under their own heading, to delete: no choosing, no search, nothing at all when there are none. */
+  /** `resized` — the page's height changed (the tray follows it). */
   constructor(
     private readonly ctx: Ctx,
     private readonly resized: () => void,
     private readonly source: ModelSource = speechSource(ctx),
-    private readonly downloadedOnly = false,
   ) {}
+
+  /** The core's list as it last said (null — not heard yet). */
+  listView(): ModelsView | null {
+    return this.view;
+  }
 
   private get t(): ModelTexts {
     return this.source.texts();
@@ -160,7 +202,6 @@ export class ModelsPage {
     }
     this.paintList();
     this.paintFound();
-    if (this.downloadedOnly) return [this.list];
     return [this.list, this.searchRow(), this.found];
   }
 
@@ -262,12 +303,11 @@ export class ModelsPage {
     else if ((b = target.closest<HTMLElement>('[data-mdel]'))) {
       const id = b.closest<HTMLElement>('[data-mid]')!.dataset.mid!;
       this.source.remove(id).catch((e) => logFailed(`deleting a ${this.source.kind}`, e));
-    } else if (this.downloadedOnly) {
-      // Nothing to choose here.
     } else if ((b = target.closest<HTMLElement>('[data-mid]'))) {
       const v = this.view;
       const id = b.dataset.mid!;
-      // The model in use is chosen again only to stop a switch.
+      // The model in use is chosen again only to stop a switch; a model on its way, pressed again, stops too (the
+      // core's choice of the model it is switching to).
       const switching = v?.entries.some((e) => e.id !== v.current && RUNNING.includes(e.state));
       if (id !== v?.current || switching) this.choose({ id });
     } else if ((b = target.closest<HTMLElement>('[data-repo]:not(.off)'))) this.choose({ repo: b.dataset.repo! });
@@ -289,13 +329,24 @@ export class ModelsPage {
     const list = this.list;
     if (!list) return;
     const olds = new Map([...list.querySelectorAll<HTMLElement>('[data-mid]')].map((r) => [r.dataset.mid!, r]));
-    const entries = (this.view?.entries ?? []).filter((e) => !this.downloadedOnly || HERE.includes(e.state));
-    const rows = entries.map((e) => {
+    const entries = this.view?.entries ?? [];
+    const row = (e: ModelEntry) => {
       const old = olds.get(e.id);
       return old && stepRow(old, e) ? old : this.row(e);
-    });
-    list.hidden = this.downloadedOnly && rows.length === 0;
-    list.replaceChildren(h('div', 'mgh', this.downloadedOnly ? this.ctx.t.llms.downloaded : this.t.list), ...rows);
+    };
+    const head = (p: Part) => {
+      const g = h('div', 'mgh');
+      g.append(p);
+      return g;
+    };
+    const groups = this.source.groups?.(this.view);
+    if (!groups) {
+      list.replaceChildren(head(this.t.list), ...entries.map(row));
+      return;
+    }
+    const first = entries.filter(groups.first);
+    const rest = entries.filter((e) => !groups.first(e));
+    list.replaceChildren(...(first.length ? [head(groups.heads[0]), ...first.map(row)] : []), head(groups.heads[1]), ...rest.map(row));
   }
 
   /** A model of the list, by its state. */
@@ -304,17 +355,15 @@ export class ModelsPage {
     const r = h('div', 'srow mdl');
     r.dataset.mid = e.id;
     r.dataset.state = e.state;
-    if (!this.downloadedOnly) {
-      r.tabIndex = 0;
-      r.setAttribute('role', 'button');
-    }
+    r.tabIndex = 0;
+    r.setAttribute('role', 'button');
     const stx = h('div', 'stx');
     const small = h('small');
     stx.append(h('b', '', e.name), small);
     const sc = h('div', 'sc');
     r.append(stx, sc);
-    const langs = this.source.about(e, this.view);
-    const sized = [langs, this.source.size(e.size)].filter(Boolean).join(' · ');
+    const about = this.source.about(e, this.view);
+    const sized = () => joined(small, [...about, this.source.size(e.size)]);
     const warn = (text: string) => {
       small.className = 'warn';
       small.textContent = text;
@@ -327,7 +376,7 @@ export class ModelsPage {
     };
     switch (e.state) {
       case 'inUse': {
-        small.textContent = sized;
+        sized();
         const ok = h('span', 'mok');
         ok.innerHTML = icon('ok');
         sc.append(ok);
@@ -336,12 +385,11 @@ export class ModelsPage {
         break;
       }
       case 'downloaded':
-        small.textContent = sized;
+        sized();
         remove();
         break;
       case 'missing':
-        small.textContent = langs;
-        small.hidden = !langs;
+        small.hidden = !joined(small, about);
         sc.append(h('span', 'msz', this.source.size(e.size)));
         break;
       case 'preparing':
@@ -355,7 +403,7 @@ export class ModelsPage {
         sc.append(h('span', 'num mpct', `${percent(e.done, e.total)} %`));
         const prog = h('div', 'mprog');
         const note = h('small');
-        note.append(bytesLine(t.modelLine.downloading, e.done, e.total));
+        note.append(bytesLine(this.t.downloading ?? t.modelLine.downloading, e.done, e.total));
         prog.append(bar('mbar', e.done / (e.total || 1)), note);
         r.append(prog);
         break;
@@ -401,13 +449,14 @@ export class ModelsPage {
     const t = this.t;
     const r = h('div', 'srow mfd');
     r.dataset.repo = f.repo;
-    const line = f.reason
-      ? t.reasons[f.reason]
-      : [`${formatNumber(f.downloads, this.ctx.lang)} ${plural(f.downloads, t.downloads)}`, f.size ? this.source.size(f.size) : '', f.extra ?? '']
-          .filter(Boolean)
-          .join(' · ');
+    const small = h('small');
+    if (f.reason) small.textContent = t.reasons[f.reason];
+    else {
+      const downloads = `${formatNumber(f.downloads, this.ctx.lang)} ${plural(f.downloads, t.downloads)}`;
+      joined(small, [downloads, f.size ? this.source.size(f.size) : '', f.extra ?? '', this.source.foundMark?.() ?? '']);
+    }
     const stx = h('div', 'stx');
-    stx.append(h('b', '', f.repo), h('small', '', line));
+    stx.append(h('b', '', f.repo), small);
     r.append(stx);
     if (f.reason) {
       r.classList.add('off');

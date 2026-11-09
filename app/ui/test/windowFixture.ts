@@ -70,6 +70,24 @@ export function modelsView(over: Partial<Record<string, Partial<api.ModelEntry>>
   return { current, entries: changed };
 }
 
+/** Codex's models as the core lists them, its default first. */
+export const CODEX_MODELS = [
+  { id: 'gpt-6-luna', name: 'GPT-6 Luna' },
+  { id: 'gpt-6-sol', name: 'GPT-6 Sol' },
+  { id: 'gpt-6-astra', name: 'GPT-6 Astra' },
+  { id: 'gpt-6.1-sol', name: 'GPT-6.1 Sol' },
+  { id: 'gpt-6.1-terra', name: 'GPT-6.1 Terra' },
+  { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' },
+];
+
+/** The agents as `agents_get` answers: by default none installed here; `over` changes OpenCode's or Codex's. */
+export function agents(over: { opencode?: Partial<api.AgentView>; codex?: Partial<api.AgentView> } = {}): api.AgentView[] {
+  return [
+    { id: 'opencode', name: 'OpenCode', found: false, signedIn: null, models: [], model: '', ...over.opencode },
+    { id: 'codex', name: 'Codex', found: false, signedIn: null, models: CODEX_MODELS, model: 'gpt-6-luna', ...over.codex },
+  ];
+}
+
 export const core = vi.mocked(api);
 
 /** What the page subscribed with: new history entries, the microphone's level, a failed microphone, the core's state. */
@@ -122,6 +140,14 @@ export function stub(settings: api.SettingsView = view()): void {
       now = { ...now, habits: [] };
       return now;
     }
+    // A model per agent; empty: the agent's default.
+    if (c.kind === 'refineAgentModel') {
+      const models = { ...now.refineAgentModel };
+      if (c.value.model) models[c.value.agent] = c.value.model;
+      else delete models[c.value.agent];
+      now = { ...now, refineAgentModel: models };
+      return now;
+    }
     now = { ...now, [c.kind]: c.value };
     if (c.kind === 'uiLanguage') now.lang = c.value === 'ru' ? 'ru' : 'en';
     return now;
@@ -172,6 +198,8 @@ export function stub(settings: api.SettingsView = view()): void {
   core.llmsSearch.mockResolvedValue([]);
   core.llmChoose.mockResolvedValue(undefined);
   core.llmDelete.mockResolvedValue(true);
+  core.agentsGet.mockResolvedValue(agents());
+  core.agentInstallLink.mockResolvedValue(undefined);
   core.welcomeStep.mockResolvedValue(undefined);
   core.welcomeClose.mockResolvedValue(undefined);
   core.openLink.mockResolvedValue(undefined);

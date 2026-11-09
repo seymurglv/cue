@@ -121,6 +121,7 @@ use files::{LastFiles, Sound};
 use insert::{InsertJob, first_known_app, insert_app, known_app, one_line, pasted_text, trim_edges};
 use recordings::{AudioLimit, Recordings, Snapshot};
 use state::{InsertWatch, LevelGate, MicGate, MicTold, ShownOnce, TaskSlot, Timers, ViewGate, ViewSend};
+pub(crate) use agents::AgentView;
 pub(crate) use model::Choice;
 use model::{ModelKeeper, ModelNews, Told};
 use tasks::{ask_panicked, guarded, refine_panicked, stt_panicked};
@@ -180,8 +181,11 @@ pub enum CoreEvent {
     AnswerFlush,
     /// A source chip was clicked: open its page.
     AnswerSource(u32),
-    /// The agents found on this computer at startup, in `ORDER`, for a cleanup whose agent is not set yet.
-    AgentsFound(Vec<AgentId>),
+    /// The agents found on this computer, in `ORDER`, for a cleanup whose agent is not set yet: at startup
+    /// (`startup`), or after the user moved the cleanup to "Ваш AI" or the Cleanup page looked at them.
+    AgentsFound { found: Vec<AgentId>, startup: bool },
+    /// The Cleanup page looks at the agents again (`Agents::look`); the answer comes from a task of its own.
+    AgentsGet(tokio::sync::oneshot::Sender<Vec<AgentView>>),
     /// The Drop was dragged to a new place: saved in settings.json.
     DropMoved(DropPosition),
     /// The idle Drop hid over a full-screen app (`true`) or shows again (`false`).
@@ -504,7 +508,7 @@ impl Runtime {
         self.ui.models(&self.model.view());
         self.llm.start(&self.tx, &self.http);
         self.ui.llms(&self.llm.view());
-        self.find_agents();
+        self.find_agents(true);
         forget_api_keys();
         self.key_habits();
         while let Some(ev) = rx.recv().await {
@@ -733,7 +737,19 @@ impl Runtime {
                 }
             }
             CoreEvent::AnswerSource(n) => self.open_source(n),
-            CoreEvent::AgentsFound(found) => self.on_agents_found(&found),
+            CoreEvent::AgentsFound { found, startup } => self.on_agents_found(&found, startup),
+            CoreEvent::AgentsGet(reply) => {
+                // OpenCode lists its models when it cleans, or is about to (no agent chosen yet, OpenCode first).
+                let s = &self.settings.refine;
+                let models = s.where_ == settings::Where::Agent && s.agent.is_none_or(|a| a == AgentId::OpenCode);
+                let (agents, tx) = (self.agents.clone(), self.tx.clone());
+                tokio::spawn(async move {
+                    let views = agents.look(models).await;
+                    let found = views.iter().filter(|v| v.found).map(|v| v.id).collect();
+                    let _ = tx.send(CoreEvent::AgentsFound { found, startup: false });
+                    let _ = reply.send(views);
+                });
+            }
             CoreEvent::DropMoved(place) => {
                 self.settings.drop.position = place;
                 self.save_settings();
@@ -878,7 +894,7 @@ impl Runtime {
             self.llm.set_active(llm_active(&s.refine), &self.tx, &self.http);
             self.ui.llms(&self.llm.view());
             // Moved to "your AI" with none set: the agents are looked for now, not at the next start.
-            self.find_agents();
+            self.find_agents(false);
         }
         let s = &self.settings;
         if s.audio.device != device {
@@ -1060,25 +1076,26 @@ impl Runtime {
     /// The cleanup goes to the user's agent but none is set (at startup, or the main window moved it there): the agents
     /// on this computer are looked for off the core's thread (`AgentsFound`). Meanwhile a dictation goes in through the
     /// no-AI layer.
-    fn find_agents(&self) {
+    fn find_agents(&self, startup: bool) {
         if !agents::wants_agents(&self.settings.refine) {
             return;
         }
         let tx = self.tx.clone();
         tokio::task::spawn_blocking(move || {
             let found = agent::discover().into_iter().map(|f| f.id).collect();
-            let _ = tx.send(CoreEvent::AgentsFound(found));
+            let _ = tx.send(CoreEvent::AgentsFound { found, startup });
         });
     }
 
-    /// The agents found: the first in `ORDER` cleans from now on; none, the cleanup runs on this computer, nothing
-    /// chosen there until the user picks a model (`agents::resolve_agent`). Written to settings.json at once.
-    fn on_agents_found(&mut self, found: &[AgentId]) {
-        if !agents::resolve_agent(&mut self.settings.refine, found) {
+    /// The agents found: the first in `ORDER` cleans from now on. None: at startup the cleanup runs on this computer,
+    /// nothing chosen there until the user picks a model; after the user's move to "Ваш AI" it stays there with nothing
+    /// chosen (`agents::resolve_agent`). Written to settings.json at once.
+    fn on_agents_found(&mut self, found: &[AgentId], startup: bool) {
+        if !agents::resolve_agent(&mut self.settings.refine, found, startup) {
             return;
         }
         let s = &self.settings.refine;
-        tracing::info!(agent = s.agent.map(|a| a.id()), place = ?s.where_, "cleanup: the agent at start");
+        tracing::info!(agent = s.agent.map(|a| a.id()), place = ?s.where_, startup, "cleanup: the agent found");
         self.save_settings();
         self.send_settings();
         self.llm.set_active(llm_active(&self.settings.refine), &self.tx, &self.http);

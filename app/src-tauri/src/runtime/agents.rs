@@ -7,6 +7,9 @@
 //!   never signed in retries for about 15 s and would read as a timeout; an expired sign-in, which that check does not
 //!   tell, is marked from the run itself (`cli::signed_out`). A mark held answers the next dictation at once.
 //! - OpenCode's server is found or started off the core's thread; the dictation waits for it within its own budget.
+//! - The Cleanup page looks at the agents again (`Agents::look`): the marks go, each agent is looked for, Codex is asked
+//!   about its sign-in, and OpenCode lists its models when it cleans (a server CUE starts for that rests as after a
+//!   dictation).
 //! - The log gets the agent and a reason, never a text.
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -18,10 +21,10 @@ use cue_core::ask::AskTurn;
 use cue_core::flow::{AgentProblem, RefineOutcome};
 use cue_core::refine::RefineContext;
 use cue_core::settings::{DictionarySettings, Fallback, RefineSettings, Where};
-use cue_engines::agent::opencode::{Server, fast_auto};
+use cue_engines::agent::opencode::{self as engine_opencode, START_WAIT, Server, fast_auto};
 use cue_engines::agent::ask::{self as agent_ask, AskRoute};
 use cue_engines::agent::refine::START_ALLOWANCE_MS;
-use cue_engines::agent::{self, AgentClient, AgentFailure, Found, Login};
+use cue_engines::agent::{self, AgentClient, AgentFailure, AgentModel, Found, Login};
 use cue_engines::ask::{AskEnd, AskFailure, AskResult, Limits, Step};
 use cue_engines::prompt::{Job, RefineResult, Usage};
 use cue_engines::local;
@@ -87,14 +90,49 @@ impl AgentMarks {
     }
 
     /// Every mark goes: the agents are looked at again (the Cleanup page's list).
-    // Task 11: `agents_get` clears them.
-    #[allow(dead_code)]
     pub fn clear(&self) {
         self.0.lock().unwrap_or_else(PoisonError::into_inner).clear();
     }
 }
 
+/// How long the Cleanup page waits for OpenCode's server (found or started) before it lists no models: past the start's
+/// own wait, so a start is never cut short here.
+const LIST_WAIT: Duration = Duration::from_secs(START_WAIT.as_secs() + 2);
+
+/// An agent as the Cleanup page lists it (`agents_get`), in [`ORDER`]: whether it is installed here, whether it is
+/// signed in (Codex alone tells: `None` for OpenCode, whose providers are its own, and for a Codex that said nothing CUE
+/// knows), the models it offers, and the model CUE asks for when the user picked none (Codex's default; OpenCode's
+/// "Быстрая · авто", empty while its models are not listed). No text of the user's.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentView {
+    pub id: AgentId,
+    pub name: &'static str,
+    pub found: bool,
+    pub signed_in: Option<bool>,
+    pub models: Vec<AgentModel>,
+    pub model: String,
+}
+
+impl AgentView {
+    /// Agent `id` as found; `listed` — OpenCode's own models and its "Быстрая · авто" pick, when they were listed.
+    pub fn of(id: AgentId, found: bool, signed_in: Option<bool>, listed: Option<(Vec<AgentModel>, String)>) -> Self {
+        let (models, model) = match listed {
+            Some(l) => l,
+            None => {
+                let known: Vec<AgentModel> =
+                    id.models().iter().map(|(id, name)| AgentModel { id: (*id).to_owned(), name: (*name).to_owned() }).collect();
+                let model = known.first().map(|m| m.id.clone()).unwrap_or_default();
+                (known, model)
+            }
+        };
+        Self { id, name: id.name(), found, signed_in, models, model }
+    }
+}
+
 type Finder = Box<dyn Fn(AgentId) -> Option<PathBuf> + Send + Sync>;
+/// Whether an OpenCode server announces itself (`opencode::running`): OpenCode counts as installed by it alone.
+type Announced = Box<dyn Fn() -> bool + Send + Sync>;
 
 /// The user's agents as the dictation path uses them.
 pub struct Agents {
@@ -103,6 +141,7 @@ pub struct Agents {
     opencode: Arc<OpenCodeSlot>,
     /// Where an agent's program is (`discover::program`).
     find: Finder,
+    announced: Announced,
     pub marks: AgentMarks,
     /// When each agent run once per request (Codex) was last asked: its first request after CUE starts, or after
     /// [`REST_AFTER`] without one, gets the start allowance.
@@ -119,14 +158,16 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl Agents {
     pub fn new(home: PathBuf, opencode: Arc<OpenCodeSlot>) -> Arc<Self> {
-        Self::with(home, opencode, Box::new(agent::discover::program), None)
+        let announced: Announced = Box::new(|| engine_opencode::state_dir().and_then(|s| engine_opencode::running(&s)).is_some());
+        Self::with(home, opencode, Box::new(agent::discover::program), announced, None)
     }
 
-    fn with(home: PathBuf, opencode: Arc<OpenCodeSlot>, find: Finder, budget: Option<Duration>) -> Arc<Self> {
+    fn with(home: PathBuf, opencode: Arc<OpenCodeSlot>, find: Finder, announced: Announced, budget: Option<Duration>) -> Arc<Self> {
         Arc::new(Self {
             home,
             opencode,
             find,
+            announced,
             marks: AgentMarks::default(),
             used: Mutex::new(HashMap::new()),
             auto: Mutex::new(None),
@@ -278,6 +319,78 @@ impl Agents {
         m
     }
 
+    /// The Cleanup page looks at the agents again: every mark goes (the next dictation asks the agents anew), each
+    /// agent of [`ORDER`] is looked for (OpenCode also by the server it announces), Codex is asked about its sign-in
+    /// (no text; a signed-out answer is marked again, and a sign-in a run found expired still shows as signed out), and
+    /// OpenCode, when it is found and `opencode_models`, lists its models through its server: found or started here
+    /// (off the core's thread), resting after [`REST_AFTER`] like after a dictation. Never fails: what was not learned
+    /// shows as not known.
+    pub async fn look(self: Arc<Self>, opencode_models: bool) -> Vec<AgentView> {
+        let expired = self.marks.problem(AgentId::Codex) == Some(AgentProblem::SignedOut);
+        self.marks.clear();
+        let me = self.clone();
+        let present = tokio::task::spawn_blocking(move || {
+            ORDER
+                .iter()
+                .map(|&id| {
+                    let exe = (me.find)(id);
+                    let found = exe.is_some() || (id == AgentId::OpenCode && (me.announced)());
+                    (id, exe, found)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+        let mut views = Vec::with_capacity(present.len());
+        for (id, exe, found) in present {
+            let view = match (id, exe) {
+                (AgentId::Codex, Some(exe)) => {
+                    let login = agent::codex_login(&Found { id, exe: Some(exe), version: None }, &self.home).await;
+                    let signed_in = match login {
+                        Ok(Login::SignedOut) => {
+                            self.marks.set(id, Mark::SignedOut);
+                            Some(false)
+                        }
+                        _ if expired => Some(false),
+                        Ok(Login::SignedIn) => Some(true),
+                        _ => None,
+                    };
+                    AgentView::of(id, found, signed_in, None)
+                }
+                (AgentId::OpenCode, _) if found && opencode_models => AgentView::of(id, true, None, Some(self.opencode_models().await)),
+                (AgentId::OpenCode, _) => AgentView::of(id, found, None, Some((Vec::new(), String::new()))),
+                _ => AgentView::of(id, found, None, None),
+            };
+            views.push(view);
+        }
+        let found: Vec<&str> = views.iter().filter(|v| v.found).map(|v| v.id.id()).collect();
+        tracing::info!(?found, "agents: looked at for the Cleanup page");
+        views
+    }
+
+    /// OpenCode's models and its "Быстрая · авто" pick, from the server in use or one found or started now; none when
+    /// it cannot be had in [`LIST_WAIT`]. The pick is kept for the next cleanup, as [`Agents::model`] keeps it.
+    async fn opencode_models(&self) -> (Vec<AgentModel>, String) {
+        let slot = self.opencode.clone();
+        let start = tokio::task::spawn_blocking(move || slot.get_or_start());
+        let server = match tokio::time::timeout(LIST_WAIT, start).await {
+            Ok(Ok(Ok(server))) => server,
+            _ => {
+                tracing::info!("agents: OpenCode's models not listed (no server)");
+                return (Vec::new(), String::new());
+            }
+        };
+        // Started for the page alone, it rests as after a dictation.
+        self.opencode.idle();
+        let Ok(models) = server.models().await else {
+            tracing::info!("agents: OpenCode's models not listed");
+            return (Vec::new(), String::new());
+        };
+        let auto = fast_auto(&models).map(|m| m.id.clone()).unwrap_or_default();
+        *lock(&self.auto) = Some((Arc::downgrade(&server), auto.clone()));
+        (models, auto)
+    }
+
     /// What a request's outcome says of the agent: signed out or missing is marked; a Codex that answered is signed in.
     fn note(&self, id: AgentId, outcome: RefineOutcome) {
         match outcome {
@@ -334,15 +447,18 @@ pub fn wants_agents(s: &RefineSettings) -> bool {
     s.where_ == Where::Agent && s.agent.is_none()
 }
 
-/// At startup, `refine.agent` not set on the agent route: the first agent found in [`ORDER`]; none found, the cleanup
-/// runs on this computer, with nothing chosen there unless a model was. Whether the settings changed.
-pub fn resolve_agent(s: &mut RefineSettings, found: &[AgentId]) -> bool {
+/// `refine.agent` not set on the agent route: the first agent found in [`ORDER`]. None found: at startup
+/// (`startup`, the migration's rule) the cleanup runs on this computer, with nothing chosen there unless a model was;
+/// after the user moved it to "Ваш AI" on the page it stays there with nothing chosen, and the page offers the install.
+/// Whether the settings changed.
+pub fn resolve_agent(s: &mut RefineSettings, found: &[AgentId], startup: bool) -> bool {
     if !wants_agents(s) {
         return false;
     }
     match ORDER.iter().find(|a| found.contains(a)) {
         Some(&a) => s.agent = Some(a),
-        None => s.where_ = Where::Local,
+        None if startup => s.where_ = Where::Local,
+        None => return false,
     }
     true
 }
@@ -385,7 +501,70 @@ mod tests {
 
     fn agents(dir: &Path, exe: Option<PathBuf>, budget: Option<Duration>) -> Arc<Agents> {
         let slot = OpenCodeSlot::new(dir.join("agent"));
-        Agents::with(dir.join("agent"), slot, Box::new(move |_| exe.clone()), budget)
+        Agents::with(dir.join("agent"), slot, Box::new(move |_| exe.clone()), Box::new(|| false), budget)
+    }
+
+    /// Codex alone installed (its shim), OpenCode nowhere and announcing no server.
+    fn codex_only(dir: &Path, exe: PathBuf) -> Arc<Agents> {
+        let slot = OpenCodeSlot::new(dir.join("agent"));
+        let find: Finder = Box::new(move |id| (id == AgentId::Codex).then(|| exe.clone()));
+        Agents::with(dir.join("agent"), slot, find, Box::new(|| false), None)
+    }
+
+    /// The page's list: OpenCode then Codex, Codex's models with its default, OpenCode's none until listed; the marks
+    /// held before go.
+    #[tokio::test]
+    async fn the_page_lists_opencode_then_codex_and_clears_the_marks() {
+        let dir = temp_dir("look");
+        let exe = shim(&dir, "Logged in using ChatGPT", 0, "exit /b 0");
+        let a = codex_only(&dir, exe);
+        a.marks.set(AgentId::Codex, Mark::Missing);
+        a.marks.set(AgentId::OpenCode, Mark::SignedOut);
+        let views = a.clone().look(true).await;
+        assert_eq!(views.iter().map(|v| v.id).collect::<Vec<_>>(), [AgentId::OpenCode, AgentId::Codex]);
+        let (opencode, codex) = (&views[0], &views[1]);
+        assert_eq!((opencode.name, opencode.found, opencode.signed_in), ("OpenCode", false, None));
+        assert!(opencode.models.is_empty() && opencode.model.is_empty(), "no server for a missing OpenCode");
+        assert_eq!((codex.name, codex.found, codex.signed_in), ("Codex", true, Some(true)));
+        assert_eq!(codex.model, "gpt-6-luna");
+        assert_eq!(codex.models.len(), AgentId::Codex.models().len());
+        assert_eq!((codex.models[0].id.as_str(), codex.models[0].name.as_str()), ("gpt-6-luna", "GPT-6 Luna"));
+        assert_eq!(a.marks.problem(AgentId::Codex), None, "the old marks went");
+        assert_eq!(a.marks.problem(AgentId::OpenCode), None);
+        assert_eq!(runs(&dir), 0, "only its sign-in was asked");
+        let json = serde_json::to_value(&views[1]).unwrap();
+        assert_eq!(json["signedIn"], serde_json::json!(true));
+        assert_eq!(json["models"][0], serde_json::json!({ "id": "gpt-6-luna", "name": "GPT-6 Luna" }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Codex never signed in says so on the page, and the next dictation goes in at once without it.
+    #[tokio::test]
+    async fn the_page_shows_a_signed_out_codex_and_marks_it() {
+        let dir = temp_dir("look-out");
+        let exe = shim(&dir, "Not logged in", 1, "exit /b 0");
+        let a = codex_only(&dir, exe);
+        let views = a.clone().look(false).await;
+        assert_eq!(views[1].signed_in, Some(false));
+        assert_eq!(a.marks.problem(AgentId::Codex), Some(AgentProblem::SignedOut));
+        // A run that found the sign-in expired (which `login status` does not tell) still shows on the page.
+        let exe = shim(&dir, "Logged in using ChatGPT", 0, "exit /b 0");
+        let a = codex_only(&dir, exe);
+        a.marks.set(AgentId::Codex, Mark::SignedOut);
+        assert_eq!(a.clone().look(false).await[1].signed_in, Some(false));
+        assert_eq!(a.marks.problem(AgentId::Codex), None, "the next dictation asks Codex again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An OpenCode found only by the server it announces counts as installed.
+    #[tokio::test]
+    async fn an_announced_opencode_server_counts_as_installed() {
+        let dir = temp_dir("look-announced");
+        let slot = OpenCodeSlot::new(dir.join("agent"));
+        let a = Agents::with(dir.join("agent"), slot, Box::new(|_| None), Box::new(|| true), None);
+        let views = a.look(false).await;
+        assert!(views[0].found && !views[1].found);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     async fn clean(a: &Agents) -> RefineResult {
@@ -624,23 +803,39 @@ mod tests {
     fn startup_resolves_unset_agent_to_first_found_else_local_nothing_chosen() {
         let unset = || RefineSettings { where_: Where::Agent, agent: None, local: String::new(), ..RefineSettings::default() };
         let mut s = unset();
-        assert!(resolve_agent(&mut s, &[AgentId::Codex, AgentId::OpenCode]));
+        assert!(resolve_agent(&mut s, &[AgentId::Codex, AgentId::OpenCode], true));
         assert_eq!((s.where_, s.agent), (Where::Agent, Some(AgentId::OpenCode)), "OpenCode comes first");
         let mut s = unset();
-        assert!(resolve_agent(&mut s, &[AgentId::Codex]));
+        assert!(resolve_agent(&mut s, &[AgentId::Codex], true));
         assert_eq!(s.agent, Some(AgentId::Codex));
         let mut s = unset();
-        assert!(resolve_agent(&mut s, &[AgentId::Grok]), "Grok is not offered yet");
+        assert!(resolve_agent(&mut s, &[AgentId::Grok], true), "Grok is not offered");
         assert_eq!((s.where_, s.agent, s.local.as_str()), (Where::Local, None, ""));
         let mut s = unset();
-        assert!(resolve_agent(&mut s, &[]));
+        assert!(resolve_agent(&mut s, &[], true));
         assert_eq!((s.where_, s.agent, s.local.as_str()), (Where::Local, None, ""), "nothing chosen");
         // A chosen agent, or another route, is left alone.
         let mut s = RefineSettings { agent: Some(AgentId::Codex), ..unset() };
-        assert!(!resolve_agent(&mut s, &[AgentId::OpenCode]));
+        assert!(!resolve_agent(&mut s, &[AgentId::OpenCode], true));
         assert_eq!(s.agent, Some(AgentId::Codex));
         let mut s = RefineSettings { where_: Where::Off, ..unset() };
-        assert!(!resolve_agent(&mut s, &[AgentId::OpenCode]));
+        assert!(!resolve_agent(&mut s, &[AgentId::OpenCode], true));
         assert_eq!((s.where_, s.agent), (Where::Off, None));
+    }
+
+    /// The user moved the cleanup to "Ваш AI" on the page: the first agent found cleans; with none found it stays on
+    /// "Ваш AI" with nothing chosen (the page offers the install), never moved to this computer behind the user's back.
+    #[test]
+    fn a_move_from_the_page_with_none_found_stays_on_your_ai() {
+        let unset = || RefineSettings { where_: Where::Agent, agent: None, ..RefineSettings::default() };
+        let mut s = unset();
+        assert!(resolve_agent(&mut s, &[AgentId::Codex], false));
+        assert_eq!((s.where_, s.agent), (Where::Agent, Some(AgentId::Codex)));
+        let mut s = unset();
+        assert!(!resolve_agent(&mut s, &[], false));
+        assert_eq!((s.where_, s.agent), (Where::Agent, None));
+        let mut s = unset();
+        assert!(!resolve_agent(&mut s, &[AgentId::Grok], false));
+        assert_eq!((s.where_, s.agent), (Where::Agent, None));
     }
 }

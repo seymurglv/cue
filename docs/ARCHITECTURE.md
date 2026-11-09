@@ -1214,7 +1214,7 @@ core writes and deletes there (`runtime::recordings`).
 
 ### Settings tray
 
-The gear opens a tray with six pages: Speech recognition, Keys, Microphone, Translation, History and General. Every
+The gear opens a tray with six pages: Speech recognition, Cleanup, Microphone, Languages, History and General. Every
 change goes to the
 core at once (`settings_set` → `CoreEvent::Settings`), which applies it to its copy (`Settings::apply`), writes the
 whole file and answers with the settings as they are now (see Settings). After a `core` error the page reads them
@@ -1225,12 +1225,20 @@ again.
   supported, Not downloaded; also the row's value on the first page), "Speech is recognized on this computer.", and,
   while it downloads or once it failed, a thin bar and "N of M MB" with the numbers in Bebas; Retry (`model_retry`)
   once it failed. There is no choice of engine. The page reads the state with `model_get` when the window opens.
-- **Keys**: a password field and Check for the key of the cleanup's cloud connection (`refine.connection`, one of
-  `cue_core::connections`; 2026-11-02-refine-connections.md); a local server has an address and `server_check` instead. Check saves a typed key (`key_set`: Credential Manager,
-  the service `CUE`, where `cue-cli keys` keeps them; trimmed, an empty one refused) and empties the field, then checks
-  the saved key with the free probe of `cue_engines::check` (`key_check`, 10 s): works, key error (key, balance or
-  limit), couldn't check, no key. A key never leaves `commands.rs`, in a reply, an error or the log: only its mask
-  (`keys::mask`). A saved key is used from the next request on, since keys are read on use.
+- **Cleanup** (`window/cleanup.ts`, docs/specs/2026-11-08-no-keys-design.md, "Cleanup page"): on top Без ИИ · Этот
+  компьютер · Ваш AI (`refine.where`), under it the part's list, and a line on where the text goes. Этот компьютер lists
+  the local models (`llms_get`, `cue://llms`): the recommended one under "Для ваших языков" (the interface's language
+  and the translation's), the others and the found ones ("CUE не проверял", `ModelsView.found`) under "Другие", the
+  Hugging Face search last; a model downloads only when pressed, and pressed again on its way it stops. Ваш AI lists
+  OpenCode then Codex as `agents_get` finds them, each time the tray or the page opens: the core clears the agents'
+  marks, looks for each (OpenCode also by the server it announces), asks Codex `codex login status`, and lists
+  OpenCode's models through its server when it cleans (a server CUE starts for that rests as after a dictation,
+  `OpenCodeSlot::idle`); the page says "Проверяем…" meanwhile. A found agent is chosen by its row; one not installed
+  has its install page (`agent_install_link`, by id). The chosen agent's model is a drop-down (OpenCode's hundreds with
+  a filter, "Быстрая · авто" first), then the fallback, "Почистить: <model>" offered only when the local model's file
+  is here. A move to Ваш AI with no agent set takes the first found; with none it stays there, nothing chosen. The
+  first page's value is what cleans now, the local download in percent, or in amber an agent to sign in to again or
+  not found.
 - **Microphone**: As in Windows or one of the devices `mic_list` names (with the one Windows uses by default), saved
   as `audio.device` and used from the next recording on (see Recording). A pinned one that is not connected shows as
   such, by the same match as `mic::pick`. While the page is shown, `mic_preview` sends the level of the chosen
