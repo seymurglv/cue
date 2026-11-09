@@ -144,7 +144,7 @@ line under the row, as the speech model's row does today. When the chosen agent 
 
 Common to all three:
 - Run with no window, the working folder an empty `%LOCALAPPDATA%\CUE\agent\`, the transcript and context on stdin
-  (Grok: a named pipe, below; never as an argument), tools, web access and file writes off, output as JSON; CUE parses `{"text": …}` from the
+  (never as an argument), tools, web access and file writes off, output as JSON; CUE parses `{"text": …}` from the
   answer as it does today and runs the same output checks (`settle`, `sanity_ok_with`, `drop_copied_context`,
   `decide_translation`).
 - The prompt is the same system text as the cloud path today (`claude::system` blocks joined, as `chat::system_text`
@@ -181,15 +181,12 @@ Common to all three:
 `--skip-git-repo-check`, `--ignore-user-config`, `-m <model>`. Uses the user's own Codex sign-in. (OpenAI's "Sign in with
 ChatGPT" would be faster, but CUE would then hold a login token, against decision 1.)
 
-**Grok**: `grok` headless with `--output-format json`, tools off, web search off, no subagents, no auto-update,
-`--max-turns 1`, CUE's instructions as the system prompt, `-m grok-4.7` by default (its fast build-model acts on and
-comments on dictations). Uses the user's own Grok sign-in. **Owner's decision 09.11.2026:** grok cannot read stdin, so
-for Grok alone the transcript goes through a one-shot named pipe (`--prompt-file \\.\pipe\<random>`), which CUE
-creates for the current user, writes once and closes: never an argument, never a file on disk. Grok saves every run as
-a session it cannot be told not to keep, so CUE deletes that session (`grok sessions delete <id>`) and its prompt
-history line right after each answer, and turns Grok's telemetry, trace upload, session search, recap and memory off
-for the run through its environment. Evidence in `app/crates/engines/tests/fixtures/agents/README.md`. A long-lived
-`grok agent stdio` process may come later for speed.
+**Grok: not offered — owner's decision 10.11.2026.** A named-pipe route was built and passed its checks (09–10.11:
+the text through a one-shot pipe only CUE's own grok.exe could open, one turn, the session Grok keeps deleted after
+each answer), but grok-4.7, the only Grok model that cleans dictations without acting on or commenting on them, takes
+6–9 s for a short cleanup, against 3–4 s for Codex. The owner chose OpenCode and Codex only. The route lives in the
+history (commits 5999546 and 2054e46, reverted) and the evidence in `app/crates/engines/tests/fixtures/agents/README.md`;
+`AgentId::Grok` stays so settings that name it still parse.
 
 ### Ask and translation
 

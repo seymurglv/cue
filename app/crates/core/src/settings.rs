@@ -1577,7 +1577,7 @@ mod tests {
 
     #[test]
     fn migrated_agent_models_are_validated_like_apply() {
-        let s = read_refine(r#"{"refine":{"models":{"codex":"garbage","opencode":"x/y","grok":"grok-4.7"}}}"#);
+        let s = read_refine(r#"{"refine":{"models":{"codex":"garbage","opencode":"x/y","grok":"grok-4.6"}}}"#);
         assert_eq!(s.models.get("opencode").map(String::as_str), Some("x/y"));
         assert_eq!(s.models.len(), 1, "an unlisted model and a default are dropped: {:?}", s.models);
         let s = read_refine(r#"{"refine":{"models":{"codex":"gpt-6-sol","grok":"grok-4.5","opencode":"  "}}}"#);

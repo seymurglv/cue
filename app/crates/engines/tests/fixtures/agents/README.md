@@ -149,21 +149,13 @@ The text is on disk for the few seconds of a run, then deleted (not overwritten)
 On the grok.com side, "Coding data, retention, and training" (`/privacy` in Grok) is the account owner's choice; CUE does
 not change it.
 
-**Verdict: Grok can be offered, with grok-4.7** (not the fast model, which acts on or comments on dictations), third
-after OpenCode and Codex: the pipe, `--max-turns 1`, CUE's instructions as the system prompt, the five variables, and the
-session deleted after every run. It is slower than Codex (about 6 s against 3–4 s for a short cleanup).
+**Verdict of 09.11: Grok could be offered, with grok-4.7** (not the fast model, which acts on or comments on
+dictations), third after OpenCode and Codex: the pipe, `--max-turns 1`, CUE's instructions as the system prompt, the five
+variables, and the session deleted after every run. It is slower than Codex (about 6 s against 3–4 s for a short cleanup).
 
-**CUE's own run (09.11.2026)**, `agent_grok::live_grok_cleans_and_leaves_nothing` (ignored by default; run with
-`cargo test -p cue-engines --test agent_grok live_grok -- --ignored --nocapture`): grok 1.0.34, grok-4.7, "ну эм завтра
-в десять созвон" through CUE's `AgentClient::Grok` → "Завтра в 10 созвон." (`Refined`) in 5.5–7.9 s, 3 runs of 3. CUE's
-flags add `--json-schema` with the `{"text"}` schema (without it grok-4.7 answered the bare text once in two runs, which
-CUE's check refuses) and `--session-id <uuid CUE chose>` (so a run cut by a timeout or Esc is deleted too). A process
-poller saw every `grok.exe` command line of the runs: none held the dictation (only CUE's fixed text, the schema and
-`--prompt-file \\.\pipe\cue-grok-<random>`, a new pipe each run). About 0.3 s after each answer the run's sessions
-folder (`sessions\<working folder, percent-encoded as given: C%3A%5CUsers%5CSEYMUR~1%5C…, `~` kept, short names not
-expanded>`) held no session and no `prompt_history.jsonl`; no file Grok changed during the run held the text (UTF-8 or
-JSON-escaped); Grok wrote nothing into its working folder. `grok sessions delete <unknown id>` says "No session found"
-and exits 0.
+**10.11.2026:** the route was built (commits 5999546, 2054e46: CUE's own runs cleaned the text in 5.5–8.9 s and left no
+session). grok accepts no reasoning level below `low`; grok-4.5 tried a tool once and wrote the poem once. **The owner
+chose OpenCode and Codex only**, for speed; the route was reverted and Grok is not offered.
 
 ## Signed out, as each CLI says it
 
