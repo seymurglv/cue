@@ -7,6 +7,8 @@
 //!   never signed in retries for about 15 s and would read as a timeout; an expired sign-in, which that check does not
 //!   tell, is marked from the run itself (`cli::signed_out`). A mark held answers the next dictation at once.
 //! - OpenCode's server is found or started off the core's thread; the dictation waits for it within its own budget.
+//! - Grok needs no check first: signed out, it says so in under a second, and the run's own message marks it
+//!   (`cli::signed_out`). Its text goes through a one-shot pipe, and the session Grok keeps is deleted after the run.
 //! - The log gets the agent and a reason, never a text.
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -107,6 +109,8 @@ pub struct Agents {
     auto: Mutex<Option<(Weak<Server>, String)>>,
     /// Tests only: a shorter budget than an agent's.
     budget: Option<Duration>,
+    /// Grok's own folder (`agent::grok_home`), where it keeps the sessions CUE deletes after each run.
+    grok_data: Option<PathBuf>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -115,10 +119,16 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl Agents {
     pub fn new(home: PathBuf, opencode: Arc<OpenCodeSlot>) -> Arc<Self> {
-        Self::with(home, opencode, Box::new(agent::discover::program), None)
+        Self::with(home, opencode, Box::new(agent::discover::program), None, agent::grok_home())
     }
 
-    fn with(home: PathBuf, opencode: Arc<OpenCodeSlot>, find: Finder, budget: Option<Duration>) -> Arc<Self> {
+    fn with(
+        home: PathBuf,
+        opencode: Arc<OpenCodeSlot>,
+        find: Finder,
+        budget: Option<Duration>,
+        grok_data: Option<PathBuf>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             home,
             opencode,
@@ -127,6 +137,7 @@ impl Agents {
             used: Mutex::new(HashMap::new()),
             auto: Mutex::new(None),
             budget,
+            grok_data,
         })
     }
 
@@ -180,8 +191,8 @@ impl Agents {
         }
     }
 
-    /// The client for agent `id`, by `deadline`: OpenCode's server (found or started off the core's thread), or Codex
-    /// once its sign-in is known not to be missing.
+    /// The client for agent `id`, by `deadline`: OpenCode's server (found or started off the core's thread), Codex
+    /// once its sign-in is known not to be missing, or Grok.
     async fn client(&self, id: AgentId, deadline: tokio::time::Instant) -> Result<AgentClient, AgentFailure> {
         match id {
             AgentId::OpenCode => {
@@ -207,8 +218,11 @@ impl Agents {
                 }
                 Ok(AgentClient::Cli { found, home: self.home.clone() })
             }
-            // Grok is offered only through its named pipe, which comes later.
-            AgentId::Grok => Err(AgentFailure::Failed("not offered")),
+            AgentId::Grok => {
+                let exe = (self.find)(id).ok_or(AgentFailure::NotInstalled)?;
+                let found = Found { id, exe, version: None };
+                Ok(AgentClient::Grok { found, home: self.home.clone(), data: self.grok_data.clone() })
+            }
         }
     }
 
@@ -338,7 +352,7 @@ mod tests {
 
     fn agents(dir: &Path, exe: Option<PathBuf>, budget: Option<Duration>) -> Arc<Agents> {
         let slot = OpenCodeSlot::new(dir.join("agent"));
-        Agents::with(dir.join("agent"), slot, Box::new(move |_| exe.clone()), budget)
+        Agents::with(dir.join("agent"), slot, Box::new(move |_| exe.clone()), budget, Some(dir.join(".grok")))
     }
 
     async fn clean(a: &Agents) -> RefineResult {
@@ -450,6 +464,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A Grok run that says it is signed out (engines' `grok_signed_out_is_raw_agent_signed_out` runs Grok's stand-in
+    /// to that outcome; Grok's system prompt spans lines, which no `.cmd` stand-in here can take) marks Grok, and the
+    /// next dictation goes in at once without it. Grok gets no sign-in check first: it says it in under a second.
+    #[tokio::test]
+    async fn grok_signed_out_marks_the_agent() {
+        let dir = temp_dir("grok-signed-out");
+        // Had it been run, a program that is not there would be `Missing`.
+        let a = agents(&dir, Some(dir.join("no-such-grok.exe")), None);
+        let (s, ctx, dict) = (RefineSettings::default(), RefineContext::default(), DictionarySettings::default());
+        // Grok's client is offered: its own, with CUE's agent folder and Grok's own folder.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let Ok(AgentClient::Grok { home, data, .. }) = a.client(AgentId::Grok, deadline).await else { panic!("no Grok client") };
+        assert_eq!((home, data), (dir.join("agent"), Some(dir.join(".grok"))));
+        assert!(!a.marks.checked(AgentId::Grok), "no sign-in check ran");
+
+        a.note(AgentId::Grok, RefineOutcome::RawAgent(AgentProblem::SignedOut));
+        assert_eq!(a.marks.problem(AgentId::Grok), Some(AgentProblem::SignedOut));
+        assert_eq!(a.marks.problem(AgentId::Codex), None, "a mark is the agent's own");
+        let start = Instant::now();
+        let r = a.refine(AgentId::Grok, RAW, &ctx, &dict, &s, "", Job::Clean).await;
+        assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawAgent(AgentProblem::SignedOut)), "Grok was not run");
+        assert!(start.elapsed() < Duration::from_millis(200), "{:?}", start.elapsed());
+        // The Retry asks it again (here: it is not there).
+        a.marks.forget_problem(AgentId::Grok);
+        let r = a.refine(AgentId::Grok, RAW, &ctx, &dict, &s, "", Job::Clean).await;
+        assert_eq!(r.outcome, RefineOutcome::RawAgent(AgentProblem::Missing));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_missing_grok_is_marked_missing() {
+        let dir = temp_dir("grok-missing");
+        let a = agents(&dir, None, None);
+        let s = RefineSettings::default();
+        let r = a.refine(AgentId::Grok, RAW, &RefineContext::default(), &Default::default(), &s, "", Job::Clean).await;
+        assert_eq!(r.outcome, RefineOutcome::RawAgent(AgentProblem::Missing));
+        assert_eq!(a.marks.problem(AgentId::Grok), Some(AgentProblem::Missing));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_move_to_your_ai_with_none_set_looks_for_agents() {
         let s = RefineSettings { where_: Where::Agent, agent: None, ..RefineSettings::default() };
@@ -544,8 +598,11 @@ mod tests {
         assert!(resolve_agent(&mut s, &[AgentId::Codex]));
         assert_eq!(s.agent, Some(AgentId::Codex));
         let mut s = unset();
-        assert!(resolve_agent(&mut s, &[AgentId::Grok]), "Grok is not offered yet");
-        assert_eq!((s.where_, s.agent, s.local.as_str()), (Where::Local, None, ""));
+        assert!(resolve_agent(&mut s, &[AgentId::Grok, AgentId::Codex]));
+        assert_eq!(s.agent, Some(AgentId::Codex), "Codex comes before Grok");
+        let mut s = unset();
+        assert!(resolve_agent(&mut s, &[AgentId::Grok]));
+        assert_eq!((s.where_, s.agent), (Where::Agent, Some(AgentId::Grok)), "Grok is offered third");
         let mut s = unset();
         assert!(resolve_agent(&mut s, &[]));
         assert_eq!((s.where_, s.agent, s.local.as_str()), (Where::Local, None, ""), "nothing chosen");

@@ -25,10 +25,11 @@ getrandom.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # The processor's cores, for the local model's threads; a Job object that ends an agent's whole process tree
-# (`agent::process`); the fake agent's console check.
+# (`agent::process`); the fake agent's console check; Grok's one-shot named pipe, open to the current user only
+# (`agent::pipe`).
 windows = { workspace = true, features = [
   "Win32_System_SystemInformation", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_Security",
-  "Win32_System_Console",
+  "Win32_System_Console", "Win32_System_Pipes", "Win32_System_IO", "Win32_Security_Authorization",
 ] }
 
 [target.'cfg(windows)'.dev-dependencies]
@@ -37,6 +38,8 @@ windows = { workspace = true, features = ["Win32_System_ProcessStatus"] }
 
 [dev-dependencies]
 anyhow.workspace = true
+# CUE's log in the live Grok run (tests/agent_grok.rs), which names a fallback's reason.
+tracing-subscriber.workspace = true
 # A response built without the network, in tests of reading replies.
 http = "1"
 cpal.workspace = true

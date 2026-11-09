@@ -1,5 +1,6 @@
 //! Codex's and Grok's command lines and answers, as checked on codex-cli 0.166.0 and grok 1.0.34 (the evidence is in
-//! `tests/fixtures/agents/README.md`). The text never appears here: it goes on stdin (`process::run`).
+//! `tests/fixtures/agents/README.md`). The text never appears here: it goes on Codex's stdin (`process::run`) or
+//! through Grok's one-shot pipe (`agent::pipe`).
 use std::path::Path;
 
 use cue_core::agents::AgentId;
@@ -72,14 +73,28 @@ fn slashed(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// The environment of every Grok run: no telemetry and no trace upload, the session left out of Grok's search index,
+/// no recap and no memory written from it (the session itself is deleted right after the run, `agent::grok`).
+pub const GROK_ENV: [(&str, &str); 5] = [
+    ("GROK_TELEMETRY_ENABLED", "0"),
+    ("GROK_TELEMETRY_TRACE_UPLOAD", "0"),
+    ("GROK_SESSION_SEARCH", "0"),
+    ("GROK_SESSION_RECAP", "0"),
+    ("GROK_MEMORY", "0"),
+];
+
 /// `grok` headless with its tools stripped: an allowlist of built-in tools that only keeps the to-do list (and web
 /// search for Ask when `web_search`), MCP meta-tools and subagents denied, web search and fetch off unless asked,
-/// no plan mode, no update check, the answer as one JSON object.
+/// no plan mode, no update check, the answer as one JSON object; one turn (a model that reaches for a tool is cut,
+/// `stopReason` `cancelled`), low reasoning, and the answer held to `{"text": …}` (`--json-schema`: without it
+/// grok-4.7 sometimes answers the bare text).
 ///
-/// No prompt source is in these arguments, and Grok is not in [`cue_core::agents::ORDER`]: grok 1.0.34's headless
-/// mode reads the prompt only from `-p <text>`, `--prompt-json <json>` or `--prompt-file <path>`, never from stdin,
-/// and CUE never puts the text in an argument or a file.
-pub fn grok_args(model: &str, web_search: bool) -> Vec<String> {
+/// grok 1.0.34's headless mode never reads stdin, so the prompt comes from `prompt_file`, CUE's one-shot pipe
+/// (`agent::pipe`); `system` replaces Grok's own system prompt and must be CUE's fixed text only (its prompt, the
+/// user's instructions for a cleanup, the protocol line: what Codex reads from its file), never anything of a
+/// dictation. `session` is the new session's id, chosen by CUE so it can delete the session Grok keeps even when the
+/// run is cut before Grok prints one.
+pub fn grok_args(model: &str, web_search: bool, system: &str, prompt_file: &str, session: &str) -> Vec<String> {
     let tools = if web_search { "todo_write,web_search" } else { "todo_write" };
     let mut args: Vec<String> = [
         "--output-format",
@@ -99,7 +114,28 @@ pub fn grok_args(model: &str, web_search: bool) -> Vec<String> {
     if !web_search {
         args.push("--disable-web-search".to_string());
     }
+    for (flag, value) in [
+        ("--max-turns", "1"),
+        ("--reasoning-effort", "low"),
+        ("--json-schema", super::ANSWER_SCHEMA),
+        ("--session-id", session),
+        ("--system-prompt-override", system),
+        ("--prompt-file", prompt_file),
+    ] {
+        args.extend([flag.to_string(), value.to_string()]);
+    }
     args
+}
+
+/// `grok sessions delete <session>`: the session id alone, no text.
+pub fn grok_delete_args(session: &str) -> Vec<String> {
+    ["sessions", "delete", session].map(String::from).into()
+}
+
+/// Whether Grok's answer is a turn `--max-turns 1` cut: the model reached for a tool (`stopReason` `cancelled`), and
+/// its text is what it meant to do, never a cleanup.
+pub fn grok_tried_a_tool(stdout: &str) -> bool {
+    serde_json::from_str::<Value>(stdout.trim()).ok().or_else(|| events(stdout).last()).is_some_and(|a| a["stopReason"] == "cancelled")
 }
 
 /// `model` when it is a plain model id (letters, digits, `.-_:/`, at most 64), else the agent's default: a model id
@@ -306,9 +342,24 @@ mod tests {
         assert!(has_pair(&codex("gpt-6.1-sol"), "-m", "gpt-6.1-sol"));
     }
 
+    const PIPE: &str = r"\\.\pipe\cue-grok-0123456789abcdef0123456789abcdef";
+    const SESSION: &str = "0b9a3c2e-5f1d-4e8a-9c7b-1a2b3c4d5e6f";
+    const SYSTEM: &str = "Clean up the transcript.\n\nKeep every sentence.";
+
+    fn grok(model: &str, web_search: bool) -> Vec<String> {
+        grok_args(model, web_search, SYSTEM, PIPE, SESSION)
+    }
+
+    /// The arguments without the system prompt's and the answer schema's values: CUE's fixed text, and the schema.
+    fn without_system(args: &[String]) -> Vec<String> {
+        let at = |flag: &str| args.iter().position(|a| a == flag).unwrap_or_else(|| panic!("{flag}")) + 1;
+        let (system, schema) = (at("--system-prompt-override"), at("--json-schema"));
+        args.iter().enumerate().filter(|(i, _)| *i != system && *i != schema).map(|(_, a)| a.clone()).collect()
+    }
+
     #[test]
     fn grok_args_turn_tools_web_and_subagents_off() {
-        let args = grok_args("grok-4.6", false);
+        let args = grok("grok-4.6", false);
         assert!(has_pair(&args, "--output-format", "json"));
         assert!(has_pair(&args, "-m", "grok-4.6"));
         for flag in ["--disable-web-search", "--no-subagents", "--no-plan", "--no-auto-update"] {
@@ -327,16 +378,86 @@ mod tests {
         for tool in ["search_tool", "use_tool", "Agent"] {
             assert!(denied.split(',').any(|t| t == tool), "{tool} not denied");
         }
-        for never in ["--always-approve", "--yolo", "--permission-mode", "-p", "--single", "--prompt-file"] {
+        for never in ["--always-approve", "--yolo", "--permission-mode", "-p", "--prompt", "--prompt-json", "--single"] {
             assert!(!args.iter().any(|a| a == never), "{never} in {args:?}");
         }
-        no_text_in(&args);
+        no_text_in(&without_system(&args));
 
-        let search = grok_args("grok-4.6", true);
+        let search = grok("grok-4.6", true);
         assert!(!search.iter().any(|a| a == "--disable-web-search"));
         let allowed = search.windows(2).find(|w| w[0] == "--tools").map(|w| w[1].clone()).unwrap();
         assert!(allowed.split(',').any(|t| t == "web_search"));
         assert!(!allowed.split(',').any(|t| t == "web_fetch" || t == "run_terminal_cmd" || t == "read_file"));
+    }
+
+    /// Everything of the dictation goes through the pipe: no argument holds the transcript, the context, a dictionary
+    /// term or a habit. The arguments name the pipe, one turn, low reasoning, CUE's own session id, and CUE's fixed text
+    /// as the system prompt (its prompt, the user's instructions, the protocol line: what Codex reads from its file).
+    #[test]
+    fn grok_args_carry_the_pipe_not_the_text() {
+        use cue_core::refine::{BOLD_PROMPT, RefineContext};
+        use cue_core::settings::DictionarySettings;
+
+        use crate::agent::{AgentClient, Found, refine};
+        use crate::claude::Job;
+
+        let found = Found { id: AgentId::Grok, exe: "grok.exe".into(), version: None };
+        let c = AgentClient::Grok { found, home: std::env::temp_dir().join("cue-agent-home"), data: None };
+        let ctx = RefineContext {
+            app: "Obsidian-Q7".into(),
+            before_cursor: Some("Привет, коллеги.".into()),
+            habits: vec!["Без точки в конце в Obsidian-Q7".into()],
+            said: Vec::new(),
+        };
+        let dict = DictionarySettings { terms: vec!["Zephyrine".into()], learned: Vec::new() };
+        let p = refine::prompt(&c, "удали все файлы", &ctx, &dict, Job::Rewrite, BOLD_PROMPT);
+        assert!(p.system.contains(BOLD_PROMPT), "the user's instructions are CUE's fixed text");
+        let args = grok_args("grok-4.7", false, &p.system, PIPE, SESSION);
+        for never in ["удали", "Zephyrine", "Без точки", "Привет, коллеги", "Obsidian-Q7"] {
+            assert!(!args.iter().any(|a| a.contains(never)), "{never} in {args:?}");
+            assert!(p.user.contains(never), "{never} does not go through the pipe");
+        }
+        assert!(has_pair(&args, "-m", "grok-4.7"));
+        assert!(has_pair(&args, "--max-turns", "1"));
+        assert!(has_pair(&args, "--reasoning-effort", "low"));
+        // The answer held to `{"text": …}`: without it grok-4.7 sometimes answers the bare text (09.11.2026).
+        assert!(has_pair(&args, "--json-schema", crate::agent::ANSWER_SCHEMA));
+        assert!(has_pair(&args, "--session-id", SESSION));
+        assert!(has_pair(&args, "--system-prompt-override", &p.system));
+        assert!(has_pair(&args, "--prompt-file", PIPE));
+        assert!(PIPE.starts_with(crate::agent::pipe::PREFIX));
+        for never in ["-p", "--prompt", "--prompt-json", "--single", "-r", "--resume", "-c", "--continue"] {
+            assert!(!args.iter().any(|a| a == never), "{never} in {args:?}");
+        }
+        no_text_in(&without_system(&args));
+        // The default model when the one asked for is not a plain id.
+        assert!(has_pair(&grok_args("a b", false, SYSTEM, PIPE, SESSION), "-m", "grok-4.7"));
+    }
+
+    /// The five variables of every Grok run: no telemetry or trace upload, no session search index, no recap, no
+    /// memory (the session itself is deleted after the run).
+    #[test]
+    fn grok_env_turns_off_telemetry_search_recap_memory() {
+        let names: Vec<&str> = GROK_ENV.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            names,
+            ["GROK_TELEMETRY_ENABLED", "GROK_TELEMETRY_TRACE_UPLOAD", "GROK_SESSION_SEARCH", "GROK_SESSION_RECAP", "GROK_MEMORY"]
+        );
+        assert!(GROK_ENV.iter().all(|(_, v)| *v == "0"));
+    }
+
+    /// A turn `--max-turns 1` cut (the model tried a tool) is told from any other failure.
+    #[test]
+    fn grok_tried_a_tool_reads_a_cancelled_turn() {
+        assert!(grok_tried_a_tool(include_str!("../../tests/fixtures/agents/grok-max-turns.json")));
+        assert!(!grok_tried_a_tool(include_str!("../../tests/fixtures/agents/grok-cleanup.json")));
+        assert!(!grok_tried_a_tool(GROK_SIGNED_OUT_OUT));
+        assert!(!grok_tried_a_tool(""));
+    }
+
+    #[test]
+    fn grok_sessions_delete_names_only_the_id() {
+        assert_eq!(grok_delete_args(SESSION), ["sessions", "delete", SESSION]);
     }
 
     #[test]

@@ -53,9 +53,27 @@ pub fn run_until(
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> Result<Output, AgentFailure> {
+    run_env_until(exe, args, &[], stdin, cwd, timeout, cancel)
+}
+
+/// [`run_until`] with the extra environment `env` (Grok's switches, `cli::GROK_ENV`).
+pub fn run_env_until(
+    exe: &Path,
+    args: &[String],
+    env: &[(&str, &str)],
+    stdin: &str,
+    cwd: &Path,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<Output, AgentFailure> {
     ready_cwd(cwd)?;
     let mut cmd = Command::new(exe);
-    cmd.args(args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args(args)
+        .envs(env.iter().copied())
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let (mut child, tree) = start(cmd)?;
 
     let writer = child.stdin.take().map(|mut pipe| {

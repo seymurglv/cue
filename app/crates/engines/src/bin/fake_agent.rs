@@ -19,7 +19,11 @@
 //! - `serve --hostname <h> --port <p>`: OpenCode's server stand-in: listens there and answers every request with a JSON
 //!   report of its arguments, the length of `OPENCODE_SERVER_PASSWORD`, its working folder and whether it has a
 //!   console window.
+//!
+//! Copied to a file named `grok.exe` it is Grok's stand-in, told what to do by `fake-grok.json` beside it (Grok is an
+//! `.exe`, and its system prompt, which spans lines, cannot pass through a `.cmd` shim): see [`grok`].
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 fn stdin() -> String {
@@ -43,6 +47,10 @@ fn has_console_window() -> bool {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
+    let me = std::env::current_exe().expect("exe");
+    if me.file_stem().is_some_and(|s| s.eq_ignore_ascii_case("grok")) {
+        return grok(&me, &args);
+    }
     match arg(0) {
         "echo-codex" => {
             let text = stdin();
@@ -145,6 +153,92 @@ fn codex(args: &[String]) {
         eprint!("{err}");
     }
     std::process::exit(env("FAKE_AGENT_EXIT").and_then(|v| v.parse().ok()).unwrap_or(0));
+}
+
+/// Grok as a test sets it up in `fake-grok.json` beside the program (every field optional):
+///
+/// - `grok sessions delete <id>`: appends `<id>` and its working folder, tab-separated, to the file `deleted`, and
+///   removes `<data>\sessions\*\<id>` as Grok does; exit 0, or 1 when there was no such session.
+/// - any other run (headless): reads the prompt from `--prompt-file` unless `read_prompt` is false; with `data` set,
+///   keeps the run as Grok does: `<data>\sessions\<working folder, percent-encoded>\<--session-id>\chat_history.jsonl`
+///   and a line in `prompt_history.jsonl` beside it; writes what it got to `record` (its arguments, the prompt, the
+///   system prompt, its `GROK_*` variables, its working folder); writes its pid to `pid`; sleeps `sleep_ms`; prints the
+///   files `stdout` (`{session}` replaced by the session id) and `stderr`; exits with `exit`.
+fn grok(me: &Path, args: &[String]) {
+    let config: serde_json::Value = std::fs::read_to_string(me.with_file_name("fake-grok.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let path = |k: &str| config[k].as_str().map(PathBuf::from);
+    let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let cwd = std::env::current_dir().expect("cwd");
+    if args.first().map(String::as_str) == Some("sessions") && args.get(1).map(String::as_str) == Some("delete") {
+        let id = args.get(2).cloned().unwrap_or_default();
+        if let Some(deleted) = path("deleted") {
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(deleted).expect("deleted");
+            writeln!(f, "{id}\t{}", cwd.display()).expect("deleted");
+        }
+        let mut found = false;
+        if let Some(sessions) = path("data").map(|d| d.join("sessions"))
+            && let Ok(groups) = std::fs::read_dir(sessions)
+        {
+            for g in groups.flatten() {
+                let dir = g.path().join(&id);
+                if !id.is_empty() && dir.is_dir() {
+                    std::fs::remove_dir_all(&dir).expect("delete the session");
+                    found = true;
+                }
+            }
+        }
+        std::process::exit(if found { 0 } else { 1 });
+    }
+    let session = flag("--session-id").unwrap_or_default();
+    let prompt = if config["read_prompt"].as_bool() != Some(false) {
+        flag("--prompt-file").map(|p| std::fs::read_to_string(p).expect("the prompt file reads"))
+    } else {
+        None
+    };
+    if let Some(data) = path("data") {
+        let group = data.join("sessions").join(encode(&cwd.to_string_lossy()));
+        std::fs::create_dir_all(group.join(&session)).expect("session folder");
+        std::fs::write(group.join(&session).join("chat_history.jsonl"), prompt.clone().unwrap_or_default()).expect("chat");
+        let mut h = std::fs::OpenOptions::new().create(true).append(true).open(group.join("prompt_history.jsonl")).expect("history");
+        writeln!(h, "{}", serde_json::json!({ "prompt": prompt })).expect("history");
+    }
+    if let Some(record) = path("record") {
+        let env: serde_json::Map<String, serde_json::Value> =
+            std::env::vars().filter(|(k, _)| k.starts_with("GROK_")).map(|(k, v)| (k, v.into())).collect();
+        let got = serde_json::json!({
+            "args": args,
+            "prompt": prompt,
+            "system": flag("--system-prompt-override"),
+            "env": env,
+            "cwd": cwd,
+        });
+        std::fs::write(record, got.to_string()).expect("record");
+    }
+    if let Some(pid) = path("pid") {
+        std::fs::write(pid, std::process::id().to_string()).expect("pid file");
+    }
+    if let Some(ms) = config["sleep_ms"].as_u64() {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+    if let Some(out) = path("stdout").and_then(|p| std::fs::read_to_string(p).ok()) {
+        print!("{}", out.replace("{session}", &session));
+    }
+    if let Some(err) = path("stderr").and_then(|p| std::fs::read_to_string(p).ok()) {
+        eprint!("{err}");
+    }
+    std::process::exit(config["exit"].as_i64().unwrap_or(0) as i32);
+}
+
+/// A working folder as Grok names its sessions folder: percent-encoded, letters, digits and `-_.~` kept.
+fn encode(path: &str) -> String {
+    path.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { char::from(b).to_string() } else { format!("%{b:02X}") }
+        })
+        .collect()
 }
 
 /// Reads one request's head and answers it with `body`.

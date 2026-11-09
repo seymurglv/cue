@@ -6,11 +6,13 @@
 //!   timeout that ends the whole process tree.
 //! - [`cli`]: the flags that leave Codex and Grok no shell, no file reading and no network tool, and reading their
 //!   answers.
+//! - [`pipe`]: the one-shot named pipe Grok reads the text from (it never reads stdin).
 //! - [`opencode`]: the user's own OpenCode server, or one CUE starts on 127.0.0.1, over loopback HTTP.
 //! - [`AgentClient`]: one answer from either; [`refine`]: a cleanup or a translation through it.
 pub mod cli;
 pub mod discover;
 pub mod opencode;
+pub mod pipe;
 pub mod process;
 pub mod refine;
 
@@ -100,6 +102,7 @@ pub fn empty_cwd(home: &Path, id: AgentId) -> Result<PathBuf, AgentFailure> {
         }
         return Ok(dir);
     }
+    tracing::warn!(agent = id.id(), "agent: no empty folder left for the agent, it is not run");
     Err(AgentFailure::Failed("cwd"))
 }
 
@@ -109,8 +112,8 @@ pub fn empty_cwd(home: &Path, id: AgentId) -> Result<PathBuf, AgentFailure> {
 pub const CODEX_INSTRUCTIONS: &str = "codex-instructions";
 /// The file that holds Codex's answer to `{"text": …}`, in CUE's agent folder.
 pub const CODEX_SCHEMA: &str = "codex-schema.json";
-/// The answer CUE asks Codex for, as the cloud path asks for it.
-const ANSWER_SCHEMA: &str =
+/// The answer CUE asks Codex and Grok for, as the cloud path asks for it.
+pub(crate) const ANSWER_SCHEMA: &str =
     r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}"#;
 
 /// `<home>\codex-instructions-<the first 16 hex digits of the text's SHA-256>.md`: the file for `text`.
@@ -127,24 +130,28 @@ pub fn codex_instructions(home: &Path, text: &str) -> PathBuf {
 #[derive(Clone, Debug)]
 pub enum AgentClient {
     OpenCode(Arc<opencode::Server>),
-    /// Codex (Grok waits for its pipe). `home` is CUE's agent folder (`%LOCALAPPDATA%\CUE\agent`): the agent runs in
-    /// its [`cwd`] there, and Codex's instructions and schema files are written beside that folder.
+    /// Codex. `home` is CUE's agent folder (`%LOCALAPPDATA%\CUE\agent`): the agent runs in its [`cwd`] there, and
+    /// Codex's instructions and schema files are written beside that folder.
     Cli { found: Found, home: PathBuf },
+    /// Grok, run in its [`cwd`] in `home` as Codex is; `data` is Grok's own folder ([`grok_home`]), where it keeps the
+    /// sessions CUE deletes after each run (`None`: not known, only `grok sessions delete` runs).
+    Grok { found: Found, home: PathBuf, data: Option<PathBuf> },
 }
 
 impl AgentClient {
     pub fn id(&self) -> AgentId {
         match self {
             AgentClient::OpenCode(_) => AgentId::OpenCode,
-            AgentClient::Cli { found, .. } => found.id,
+            AgentClient::Cli { found, .. } | AgentClient::Grok { found, .. } => found.id,
         }
     }
 
     /// One answer to `p` from `model` (empty: the agent's default), within `timeout`, with no tools. The answer comes
     /// whole: `on_text` gets it once.
     ///
-    /// For Codex `p.system` is written to its instructions file, so it must hold only CUE's fixed text and the user's
-    /// instructions file, never anything of a dictation; `p.user` goes on stdin.
+    /// For Codex `p.system` is written to its instructions file, and for Grok it is an argument, so it must hold only
+    /// CUE's fixed text and the user's instructions file, never anything of a dictation; `p.user` goes on Codex's stdin
+    /// or through Grok's pipe.
     pub async fn complete(
         &self,
         model: &str,
@@ -156,10 +163,10 @@ impl AgentClient {
             AgentClient::OpenCode(server) => return server.complete(model, p, timeout, on_text).await,
             AgentClient::Cli { found, home } => match found.id {
                 AgentId::Codex => codex(found, home, model, p, timeout).await?,
-                // grok 1.0.34 reads the prompt only from an argument or a file; its named pipe comes later.
-                AgentId::Grok => return Err(AgentFailure::Failed("grok needs a pipe")),
+                AgentId::Grok => return Err(AgentFailure::Failed("grok runs as AgentClient::Grok")),
                 AgentId::OpenCode => return Err(AgentFailure::Failed("opencode is a server")),
             },
+            AgentClient::Grok { found, home, data } => grok(found, home, data.as_deref(), model, p, timeout).await?,
         };
         if let Some(on_text) = on_text {
             on_text(&text);
@@ -235,6 +242,201 @@ async fn codex(found: &Found, home: &Path, model: &str, p: &Prompt, timeout: Dur
     cli::codex_text(&out.stdout).filter(|t| !t.trim().is_empty()).ok_or(AgentFailure::Failed("no answer"))
 }
 
+/// How long `grok sessions delete` may take; it takes under a second.
+pub const GROK_FORGET_WAIT: Duration = Duration::from_secs(5);
+/// The file beside Grok's sessions of one working folder that lists the prompts run there.
+pub const GROK_PROMPT_HISTORY: &str = "prompt_history.jsonl";
+
+/// Grok's own folder, as Grok's docs name it: `GROK_HOME` when set, else `%USERPROFILE%\.grok`.
+pub fn grok_home() -> Option<PathBuf> {
+    let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    var("GROK_HOME").or_else(|| var("USERPROFILE").map(|h| h.join(".grok")))
+}
+
+/// One `grok` headless run: the pipe made first, then Grok started with CUE's fixed text as its system prompt and the
+/// pipe as its prompt file, then the rest of the request written through the pipe once Grok opens it (within the
+/// timeout). Off the async threads; dropping the request (Esc) ends the run and every process it started. A Grok
+/// that exits before it opens the pipe is judged by what it said (signed out, …), never as a pipe timeout. Whatever
+/// came of it, the session Grok keeps of the run is deleted afterwards ([`GrokRun::forget`]), on a thread of its own.
+async fn grok(
+    found: &Found,
+    home: &Path,
+    data: Option<&Path>,
+    model: &str,
+    p: &Prompt,
+    timeout: Duration,
+) -> Result<String, AgentFailure> {
+    let cwd = empty_cwd(home, AgentId::Grok)?;
+    let pipe = pipe::OneShot::create()?;
+    let session = session_id()?;
+    let args = cli::grok_args(model, p.web_search, &p.system, &pipe.path(), &session);
+    let run = GrokRun {
+        exe: found.exe.clone(),
+        cwd,
+        home: home.to_path_buf(),
+        data: data.map(Path::to_path_buf),
+        session,
+    };
+    let text = p.user.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _stop = CancelOnDrop(cancel.clone());
+    // This runs to its end even when the request is dropped: the flag ends Grok, then the session goes.
+    let (out, sent) = tokio::task::spawn_blocking(move || {
+        let ran = run.ask(pipe, &args, &text, timeout, &cancel);
+        // A Grok that never started (missing, or its folder or job refused) kept nothing.
+        let started = !matches!(ran, Err(AgentFailure::NotInstalled | AgentFailure::Failed("start" | "cwd" | "job")));
+        if started {
+            std::thread::spawn(move || run.forget());
+        }
+        ran
+    })
+    .await
+    .map_err(|_| AgentFailure::Failed("join"))??;
+    grok_answer(&out, sent)
+}
+
+/// What a finished Grok run gave: signed out, a turn cut because the model reached for a tool (never pasted), a failed
+/// run, a run that did not get the whole text, or the answer.
+fn grok_answer(out: &process::Output, sent: Result<(), AgentFailure>) -> Result<String, AgentFailure> {
+    if cli::signed_out(AgentId::Grok, out) {
+        return Err(AgentFailure::SignedOut);
+    }
+    if cli::grok_tried_a_tool(&out.stdout) {
+        return Err(AgentFailure::Failed("tried a tool"));
+    }
+    if out.status != Some(0) {
+        return Err(AgentFailure::Failed("exit"));
+    }
+    if sent.is_err() {
+        return Err(AgentFailure::Failed("pipe"));
+    }
+    cli::grok_text(&out.stdout).filter(|t| !t.trim().is_empty()).ok_or(AgentFailure::Failed("no answer"))
+}
+
+/// A Grok run's program, its working folder in CUE's agent folder `home`, Grok's own folder and the session id CUE
+/// gave the run.
+struct GrokRun {
+    exe: PathBuf,
+    cwd: PathBuf,
+    home: PathBuf,
+    data: Option<PathBuf>,
+    session: String,
+}
+
+impl GrokRun {
+    /// Starts Grok, hands it `text` through `pipe` while it runs, and waits for it: what it printed, and whether the
+    /// text went through whole. The pipe gives up as soon as Grok has ended.
+    fn ask(
+        &self,
+        pipe: pipe::OneShot,
+        args: &[String],
+        text: &str,
+        timeout: Duration,
+        cancel: &AtomicBool,
+    ) -> Result<(process::Output, Result<(), AgentFailure>), AgentFailure> {
+        let ended = Arc::new(AtomicBool::new(false));
+        let (flag, text) = (ended.clone(), text.to_owned());
+        let sender = std::thread::spawn(move || pipe.send_until(&text, timeout, &flag));
+        let out = process::run_env_until(&self.exe, args, &cli::GROK_ENV, "", &self.cwd, timeout, cancel);
+        ended.store(true, Ordering::Relaxed);
+        let sent = sender.join().unwrap_or(Err(AgentFailure::Failed("pipe")));
+        Ok((out?, sent))
+    }
+
+    /// Deletes what Grok kept of the run: `grok sessions delete <id>` in the same empty folder (the session's folder
+    /// and the text in it), then the one prompt-history file Grok keeps beside the sessions of CUE's own working
+    /// folder. Nothing else in Grok's folder is touched. CUE chose the session id (`--session-id`), so a run cut by a
+    /// timeout or Esc is deleted too; one cut before Grok made its session has none, and `sessions delete` finds
+    /// nothing. The log says neither the id nor a path.
+    fn forget(&self) {
+        let args = cli::grok_delete_args(&self.session);
+        let none = AtomicBool::new(false);
+        let deleted = process::run_env_until(&self.exe, &args, &cli::GROK_ENV, "", &self.cwd, GROK_FORGET_WAIT, &none);
+        if !deleted.is_ok_and(|o| o.status == Some(0)) {
+            tracing::info!(agent = "grok", "agent: grok deleted no session (none was made, or it did not answer)");
+        }
+        let Some(dir) = self.data.as_deref().and_then(|d| grok_sessions_of(d, &self.home, &self.cwd)) else { return };
+        match std::fs::remove_file(dir.join(GROK_PROMPT_HISTORY)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => tracing::warn!(agent = "grok", "agent: grok's prompt history was not removed"),
+        }
+    }
+}
+
+/// A new random session id for Grok (a UUID, version 4, in lower case).
+fn session_id() -> Result<String, AgentFailure> {
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).map_err(|_| AgentFailure::Failed("random"))?;
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let hex = b.iter().fold(String::with_capacity(32), |mut s, x| {
+        let _ = write!(s, "{x:02x}");
+        s
+    });
+    Ok(format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]))
+}
+
+/// `path` as Grok names a sessions folder after its working folder: percent-encoded whole (UTF-8 bytes, upper-case
+/// hex), only letters, digits and `-_.~` left as they are (`C:\Users\…` → `C%3A%5CUsers%5C…`).
+fn grok_encode(path: &Path) -> String {
+    let mut s = String::new();
+    for b in path.to_string_lossy().bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            s.push(char::from(b));
+        } else {
+            let _ = write!(s, "%{b:02X}");
+        }
+    }
+    s
+}
+
+/// A folder name percent-decoded; `None` when it is not valid UTF-8 or not percent-encoding.
+fn grok_decode(name: &str) -> Option<String> {
+    let bytes = name.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// The folder in Grok's own folder `data` that holds the sessions of working folder `cwd`: `sessions\<cwd encoded>`,
+/// else the one whose name decodes to `cwd` or whose `.cwd` file names it (Grok's form for a path too long to encode).
+/// Only for a working folder inside CUE's agent folder `home`, so it holds CUE's runs alone.
+fn grok_sessions_of(data: &Path, home: &Path, cwd: &Path) -> Option<PathBuf> {
+    if cwd == home || !cwd.starts_with(home) {
+        return None;
+    }
+    let sessions = data.join("sessions");
+    // The folder as CUE named it, and its full form (long names, not `SEYMUR~1`), as Grok may name it.
+    let mut forms = vec![cwd.to_string_lossy().into_owned()];
+    if let Ok(full) = std::fs::canonicalize(cwd) {
+        let full = full.to_string_lossy().into_owned();
+        forms.push(full.strip_prefix(r"\\?\").map(String::from).unwrap_or(full));
+    }
+    for form in &forms {
+        let named = sessions.join(grok_encode(Path::new(form)));
+        if named.is_dir() {
+            return Some(named);
+        }
+    }
+    let same = |s: &str| forms.iter().any(|f| s.trim().eq_ignore_ascii_case(f));
+    std::fs::read_dir(&sessions).ok()?.flatten().map(|e| e.path()).find(|dir| {
+        dir.is_dir()
+            && (dir.file_name().and_then(|n| grok_decode(&n.to_string_lossy())).is_some_and(|n| same(&n))
+                || std::fs::read_to_string(dir.join(".cwd")).is_ok_and(|c| same(&c)))
+    })
+}
+
 /// Writes `text` to `path` whole: under a temporary name in the same folder, then renamed into place, so a reader never
 /// sees half of it. A rename that fails while `path` holds `text` (another request wrote it meanwhile) is fine.
 fn write_whole(path: &Path, text: &str) -> Result<(), AgentFailure> {
@@ -269,16 +471,71 @@ mod tests {
         assert_eq!(cwd(home, AgentId::Codex), Path::new(r"C:\U\AppData\Local\CUE\agent\codex"));
     }
 
+    /// Grok names a sessions folder after its working folder, percent-encoded whole (fixtures README, "Signed-in
+    /// run"), and CUE finds it that way, by the decoded name, or by a `.cwd` file; never for a folder outside CUE's.
+    #[test]
+    fn grok_sessions_folder_is_named_after_the_working_folder() {
+        let seen = r"C:\Users\seymurglv\AppData\Local\Temp\claude\220d5e011641d0ef\53ca95ca-54cd-404a-8ac1-b2e6074a88e9\scratchpad\codexprobe2\g1";
+        assert_eq!(
+            grok_encode(Path::new(seen)),
+            "C%3A%5CUsers%5Cseymurglv%5CAppData%5CLocal%5CTemp%5Cclaude%5C220d5e011641d0ef%5C53ca95ca-54cd-404a-8ac1-b2e6074a88e9%5Cscratchpad%5Ccodexprobe2%5Cg1"
+        );
+        let odd = Path::new(r"C:\Users\Пользователь Тест\AppData\Local\CUE\agent\grok-1");
+        assert_eq!(grok_decode(&grok_encode(odd)).as_deref(), Some(odd.to_str().unwrap()));
+        assert_eq!(grok_decode("C%3"), None);
+
+        let dir = temp_dir("sessions-of");
+        let (home, data) = (dir.join("CUE").join("agent"), dir.join(".grok"));
+        let cwd = home.join("grok");
+        assert_eq!(grok_sessions_of(&data, &home, &cwd), None, "no folder yet");
+        let named = data.join("sessions").join(grok_encode(&cwd));
+        std::fs::create_dir_all(&named).unwrap();
+        assert_eq!(grok_sessions_of(&data, &home, &cwd), Some(named.clone()));
+        // Grok's form for a long path: a slug and a `.cwd` file naming the folder.
+        let spare = home.join("grok-1");
+        let long = data.join("sessions").join("grok-1-0f3a");
+        std::fs::create_dir_all(&long).unwrap();
+        std::fs::write(long.join(".cwd"), spare.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(grok_sessions_of(&data, &home, &spare), Some(long));
+        // Never CUE's agent folder itself, nor a folder outside it.
+        assert_eq!(grok_sessions_of(&data, &home, &home), None);
+        assert_eq!(grok_sessions_of(&data, &home, &dir.join("elsewhere")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn grok_session_ids_are_random_uuids() {
+        let (a, b) = (session_id().unwrap(), session_id().unwrap());
+        assert_ne!(a, b);
+        for id in [a, b] {
+            let parts: Vec<&str> = id.split('-').collect();
+            assert_eq!(parts.iter().map(|p| p.len()).collect::<Vec<_>>(), [8, 4, 4, 4, 12], "{id}");
+            assert!(parts[2].starts_with('4') && id.chars().all(|c| c == '-' || c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        }
+    }
+
+    /// A Cli client never runs Grok: Grok has its own, with its pipe and its own folder.
     #[tokio::test]
-    async fn grok_is_not_run_without_a_pipe() {
+    async fn grok_is_not_run_as_a_codex_client() {
         let home = temp_dir("grok");
-        // A program that is not there: had it been run, the answer would be `NotInstalled`.
         let found = Found { id: AgentId::Grok, exe: home.join("grok.exe"), version: None };
         let c = AgentClient::Cli { found, home: home.clone() };
         let p = Prompt { system: "Clean.".into(), user: "<transcript>hi</transcript>".into(), web_search: false };
         let r = c.complete("", &p, Duration::from_secs(5), None).await;
-        assert_eq!(r, Err(AgentFailure::Failed("grok needs a pipe")));
-        assert!(!home.exists(), "nothing was written or run for Grok");
+        assert_eq!(r, Err(AgentFailure::Failed("grok runs as AgentClient::Grok")));
+        assert!(!home.exists(), "nothing was written or run");
+    }
+
+    /// The cap of spare folders: no folder, no run.
+    #[test]
+    fn no_empty_folder_left_is_failed_cwd() {
+        let home = temp_dir("cap");
+        std::fs::create_dir_all(&home).unwrap();
+        for name in std::iter::once("grok".to_string()).chain((1..=SPARE_FOLDERS).map(|n| format!("grok-{n}"))) {
+            std::fs::write(home.join(name), "a file").unwrap();
+        }
+        assert_eq!(empty_cwd(&home, AgentId::Grok), Err(AgentFailure::Failed("cwd")));
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// A stray file in the agent's folder: the next empty folder beside it, created empty and reused; nothing deleted.

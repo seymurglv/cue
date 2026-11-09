@@ -129,10 +129,10 @@ fn outcome_of(f: AgentFailure) -> (RefineOutcome, &'static str) {
 }
 
 /// The request for `c`. OpenCode gets the system text the cloud path sends (`chat::system_text`) and
-/// [`KEEP_EVERY_SENTENCE`] as its system prompt. Codex reads its system text from a file, so only CUE's fixed text goes
-/// there: CUE's prompt, the cleanup's instructions (the instructions file, on disk already) and
-/// [`KEEP_EVERY_SENTENCE`]; the dictionary, the habits (which hold pieces of past dictations) and a translation's
-/// target go on stdin, before the user message.
+/// [`KEEP_EVERY_SENTENCE`] as its system prompt. Codex reads its system text from a file and Grok from an argument, so
+/// only CUE's fixed text goes there: CUE's prompt, the cleanup's instructions (the instructions file, on disk already)
+/// and [`KEEP_EVERY_SENTENCE`]; the dictionary, the habits (which hold pieces of past dictations) and a translation's
+/// target go on Codex's stdin or through Grok's pipe, before the user message.
 pub fn prompt(c: &AgentClient, raw: &str, ctx: &RefineContext, dict: &DictionarySettings, job: Job, instructions: &str) -> Prompt {
     let user = user_message(ctx, raw);
     match c {
@@ -140,9 +140,9 @@ pub fn prompt(c: &AgentClient, raw: &str, ctx: &RefineContext, dict: &Dictionary
             let system = chat::system_text(dict, &ctx.habits, job, instructions);
             Prompt { system: format!("{system}\n\n{KEEP_EVERY_SENTENCE}"), user, web_search: false }
         }
-        AgentClient::Cli { .. } => {
-            // The file: CUE's prompt, the cleanup's instructions, the protocol line. Named one by one, so nothing
-            // else can land in it.
+        AgentClient::Cli { .. } | AgentClient::Grok { .. } => {
+            // The file (Grok: its system prompt argument): CUE's prompt, the cleanup's instructions, the protocol
+            // line. Named one by one, so nothing else can land in it.
             let own = (job == Job::Rewrite).then_some(instructions).filter(|i| !i.trim().is_empty());
             let fixed: Vec<&str> = [Some(SYSTEM_PROMPT), own, Some(KEEP_EVERY_SENTENCE)].into_iter().flatten().collect();
             // Stdin: the dictionary, the habits (a cleanup's), a translation's target, then the user message.

@@ -153,6 +153,18 @@ not change it.
 after OpenCode and Codex: the pipe, `--max-turns 1`, CUE's instructions as the system prompt, the five variables, and the
 session deleted after every run. It is slower than Codex (about 6 s against 3–4 s for a short cleanup).
 
+**CUE's own run (09.11.2026)**, `agent_grok::live_grok_cleans_and_leaves_nothing` (ignored by default; run with
+`cargo test -p cue-engines --test agent_grok live_grok -- --ignored --nocapture`): grok 1.0.34, grok-4.7, "ну эм завтра
+в десять созвон" through CUE's `AgentClient::Grok` → "Завтра в 10 созвон." (`Refined`) in 5.5–7.9 s, 3 runs of 3. CUE's
+flags add `--json-schema` with the `{"text"}` schema (without it grok-4.7 answered the bare text once in two runs, which
+CUE's check refuses) and `--session-id <uuid CUE chose>` (so a run cut by a timeout or Esc is deleted too). A process
+poller saw every `grok.exe` command line of the runs: none held the dictation (only CUE's fixed text, the schema and
+`--prompt-file \\.\pipe\cue-grok-<random>`, a new pipe each run). About 0.3 s after each answer the run's sessions
+folder (`sessions\<working folder, percent-encoded as given: C%3A%5CUsers%5CSEYMUR~1%5C…, `~` kept, short names not
+expanded>`) held no session and no `prompt_history.jsonl`; no file Grok changed during the run held the text (UTF-8 or
+JSON-escaped); Grok wrote nothing into its working folder. `grok sessions delete <unknown id>` says "No session found"
+and exits 0.
+
 ## Signed out, as each CLI says it
 
 - Codex, expired: `{"type":"error","message":"Your access token could not be refreshed because your refresh token has

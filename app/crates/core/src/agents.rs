@@ -13,10 +13,10 @@ pub enum AgentId {
 
 /// The agents CUE offers, in the order every list shows them.
 ///
-/// Grok is left out on grok 1.0.34: its headless mode (`grok -p`) takes the prompt only as a command-line argument or
-/// a file and does not read stdin, so the dictation would be visible in the process list or written to disk (the
-/// spec's anti-goal). The evidence is in `app/crates/engines/tests/fixtures/agents/README.md`.
-pub const ORDER: &[AgentId] = &[AgentId::OpenCode, AgentId::Codex];
+/// grok 1.0.34's headless mode does not read stdin, so CUE hands Grok the text through a one-shot named pipe only the
+/// user can open (`agent::pipe`), never an argument or a file. The evidence is in
+/// `app/crates/engines/tests/fixtures/agents/README.md`.
+pub const ORDER: &[AgentId] = &[AgentId::OpenCode, AgentId::Codex, AgentId::Grok];
 
 /// The words in a model's name that mark a small fast one, in the order OpenCode's "Быстрая · авто" prefers them.
 pub const FAST_NAMES: [&str; 7] = ["haiku", "flash", "mini", "lite", "luna", "fast", "small"];
@@ -31,8 +31,9 @@ const CODEX_MODELS: &[(&str, &str)] = &[
     ("gpt-5.6-luna", "GPT-5.6 Luna"),
 ];
 
-/// Grok's models (`grok models`, grok 1.0.34), its default first.
-const GROK_MODELS: &[(&str, &str)] = &[("grok-4.6", "Grok 4.6"), ("grok-4.5", "Grok 4.5")];
+/// Grok's models (`grok models`, grok 1.0.34), CUE's default first: grok-4.7 kept every dictated sentence where
+/// grok-4.7-build-fast and grok-4.6 acted on or commented on dictations (09.11.2026), so the fast one is not offered.
+const GROK_MODELS: &[(&str, &str)] = &[("grok-4.7", "Grok 4.7"), ("grok-4.6", "Grok 4.6"), ("grok-4.5", "Grok 4.5")];
 
 impl AgentId {
     /// The id settings keep.
@@ -97,16 +98,16 @@ mod tests {
     }
 
     #[test]
-    fn order_starts_with_opencode_then_codex() {
-        assert_eq!(&ORDER[..2], &[AgentId::OpenCode, AgentId::Codex]);
-        // Grok keeps its place after Codex whenever it is offered again.
-        assert!(ORDER.iter().all(|a| *a != AgentId::Grok) || ORDER.last() == Some(&AgentId::Grok));
+    fn order_offers_grok_third() {
+        assert_eq!(ORDER, &[AgentId::OpenCode, AgentId::Codex, AgentId::Grok]);
     }
 
     #[test]
     fn default_models() {
         assert_eq!(AgentId::Codex.models()[0], ("gpt-6-luna", "GPT-6 Luna"));
-        assert_eq!(AgentId::Grok.models()[0].0, "grok-4.6");
+        // grok-4.7 first: the fast model acts on or comments on dictations (fixtures README, "Signed-in run").
+        let grok: Vec<&str> = AgentId::Grok.models().iter().map(|m| m.0).collect();
+        assert_eq!(grok, ["grok-4.7", "grok-4.6", "grok-4.5"]);
         assert!(AgentId::OpenCode.models().is_empty());
         assert_eq!(FAST_NAMES, ["haiku", "flash", "mini", "lite", "luna", "fast", "small"]);
     }
