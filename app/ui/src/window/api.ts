@@ -278,5 +278,5 @@ export async function onCoreState(cb: (s: CoreState) => void): Promise<void> {
 export const welcomeStep = (dictation: boolean) => invoke<void>('welcome_step', { dictation });
 /** "Done": the welcome window closes. */
 export const welcomeClose = () => invoke<void>('welcome_close');
-/** Opens where to get a key, or the Windows microphone settings; CUE holds the addresses. */
+/** Opens the Windows microphone settings; CUE holds the address. */
 export const openLink = (target: LinkTarget) => invoke<void>('open_link', { target });

@@ -7,8 +7,9 @@
 //! window's own channel (`history_subscribe`). An entry's recording is read by its id alone, checked to be an entry
 //! id, never a path from the page, and comes as bytes (`history_audio`). The settings are read and changed through the
 //! core, which owns them (`CoreEvent::Settings`). Start at sign-in is the autostart plugin's Run key, as in the tray
-//! menu, whose check follows within 5 s. The microphones are listed as Windows names them, and a preview sends the page that started it a microphone's level alone (`micpreview`). The welcome window opens its links
-//! by name, never by an address of its page's (`open_link`).
+//! menu, whose check follows within 5 s. The microphones are listed as Windows names them, and a preview sends the page
+//! that started it a microphone's level alone (`micpreview`). The welcome window opens its links by name, never by an
+//! address of its page's (`open_link`).
 use std::path::Path;
 use std::time::Duration;
 

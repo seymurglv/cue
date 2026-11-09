@@ -1,5 +1,5 @@
 //! Windows Credential Manager (service "CUE"): the habits' hash secret (`habit_secret`), the one entry CUE keeps. CUE
-//! holds no API key: the keys an earlier version saved for its cloud connections are deleted at startup
+//! holds no API key: the keys earlier versions saved (the cloud connections', Soniox's) are deleted at startup
 //! ([`forget_api_keys`]).
 //!
 //! No value read from the store reaches the output, the log or an error text.
@@ -8,8 +8,10 @@ use cue_core::habits::Secret;
 
 pub const SERVICE: &str = "CUE";
 
-/// The entries earlier versions saved the cloud connections' keys under: one per connection, by its id.
-pub const API_KEY_NAMES: [&str; 8] = ["anthropic", "openrouter", "openai", "gemini", "deepseek", "mistral", "groq", "xai"];
+/// The entries earlier versions saved API keys under: the cloud connections' eight, one per connection by its id, and
+/// Soniox's of the versions before local recognition.
+pub const API_KEY_NAMES: [&str; 9] =
+    ["anthropic", "openrouter", "openai", "gemini", "deepseek", "mistral", "groq", "xai", "soniox"];
 
 /// What [`forget_api_keys`] did: the entries it deleted, and those the store failed on with keyring's reason (its
 /// `Display` only, which holds no stored value).
@@ -168,20 +170,22 @@ mod tests {
         assert!(msg.contains("habits' secret") && msg.contains("denied"), "{msg}");
     }
 
-    /// A store of entries by name, as Credential Manager keeps service `CUE`'s: the eight keys an earlier version saved
-    /// go, `habits-secret` stays, and one the store fails on does not stop the others.
+    /// A store of entries by name, as Credential Manager keeps service `CUE`'s: every key an earlier version saved goes
+    /// (the eight cloud connections' and Soniox's), `habits-secret` alone stays, and one the store fails on does not stop
+    /// the others.
     #[test]
     fn forget_api_keys_deletes_the_eight_and_keeps_habits_secret() {
         let mut store: BTreeMap<String, String> = API_KEY_NAMES
             .iter()
             .map(|n| (n.to_string(), format!("sk-SECRET-{n}")))
-            .chain([(HABIT_SECRET.to_owned(), "5c".repeat(32)), ("soniox".to_owned(), "x".into())])
+            .chain([(HABIT_SECRET.to_owned(), "5c".repeat(32))])
             .collect();
         let gone = forget_with(|name| store.remove(name).map(|_| ()).ok_or(keyring::Error::NoEntry));
         assert_eq!(gone.deleted, API_KEY_NAMES.to_vec());
         assert!(gone.failed.is_empty());
-        assert_eq!(store.keys().map(String::as_str).collect::<Vec<_>>(), [HABIT_SECRET, "soniox"], "only the eight go");
-        assert_eq!(API_KEY_NAMES, ["anthropic", "openrouter", "openai", "gemini", "deepseek", "mistral", "groq", "xai"]);
+        assert_eq!(store.keys().map(String::as_str).collect::<Vec<_>>(), [HABIT_SECRET], "only the habits' secret stays");
+        let names = ["anthropic", "openrouter", "openai", "gemini", "deepseek", "mistral", "groq", "xai", "soniox"];
+        assert_eq!(API_KEY_NAMES, names);
 
         // Run again: nothing is left to delete, and that is no failure.
         let again = forget_with(|_| Err(keyring::Error::NoEntry));
@@ -193,8 +197,8 @@ mod tests {
             asked.push(name.to_owned());
             if name == "openai" { Err(platform_failure("denied")) } else { Ok(()) }
         });
-        assert_eq!(asked.len(), 8, "every name is tried");
-        assert_eq!(partly.deleted.len(), 7);
+        assert_eq!(asked.len(), 9, "every name is tried");
+        assert_eq!(partly.deleted.len(), 8);
         assert_eq!(partly.failed.len(), 1);
         let (name, why) = &partly.failed[0];
         assert_eq!(*name, "openai");

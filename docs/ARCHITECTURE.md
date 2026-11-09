@@ -1351,27 +1351,26 @@ written back as it was.
 
 An attempt is a recording and its transcription; Retry starts a second attempt of the same dictation, and each gets
 its own row in `%LOCALAPPDATA%\CUE\usage.csv`:
-`ts, audio_ms, stt_engine, stt_path, stt_usd, refine_model, input_tokens, cache_read_tokens, cache_write_tokens,
-output_tokens, refine_usd, latency_ms, outcome, mode, web_searches, search_usd, words, day`. A new row has
-`stt_engine` `parakeet`, `stt_path` `local` and `stt_usd` 0: recognition on this computer costs nothing, and the
-columns stay as they were. Rows of earlier versions (`soniox` with `stream`, `stream+batch` or `batch`) are read as
-text and keep the cost they were written with. Outcomes are `inserted`, `no_field`, `cancelled`, `empty`, `failed`,
-`discarded` (written only when audio ran past 380 ms) and `answered` (an "Ask" answer shown in full, a refusal too: paid
-for, nothing pasted). `mode` is `dictate`, `translate` or `ask` as the dictation's refine or question started (for an
-attempt that ends before that, the mode it was recording in: the attempt follows a `ModeToggle` or `ModeChange` the flow
-accepts), or `warmup`. The Retry of a failed translation re-translates the saved text: a new row with no audio. A cache
-warm-up is a row of its own: its tokens and cost, no audio, latency 0, outcome `discarded`, mode `warmup`, and the model
-it warmed (the cleanup's model, `RefineSettings::usage_model`, or `ask.model` for "Ask"; a cleanup over another
-connection names its model behind it, `openai:gpt-6-luna`, priced from `cue_core::connections`). Rows written before the last three columns existed read as
-dictation, and the header of an existing file is never rewritten (new files get the 18-column header). `words` is how
-many words the attempt wrote (`usage::count_words` of the text of a dictation or translation; 0 for a question, a
-warm-up or one that wrote nothing) and `day` its local date; rows written before them are 13 or 16 columns wide. Latency
-runs from the second press to Ctrl+V (from Retry or Restore when used); the target for a ~30-word phrase is 1.5 s or
-less. Rows that fail to write, for example while the file is open in Excel, wait in memory and go out before the next
-one. `cue-cli usage` sums a UTC month: dictations are `inserted` plus `no_field` rows (an `answered` row is not one),
-average latency counts only `inserted` rows, and a separate average covers recordings of 20 s or less. The cost includes
-failed attempts and warm-ups; web search is shown only when there was some, and the rows and dollars of each `mode`
-value follow, in the order they first appear.
+`ts, audio_ms, stt_engine, stt_path, refine_model, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+latency_ms, outcome, mode, web_searches, words, day` — words and time, no money: CUE pays for nothing and holds no
+price. A new row has `stt_engine` `parakeet` and `stt_path` `local`. Outcomes are `inserted`, `no_field`, `cancelled`,
+`empty`, `failed`, `discarded` (written only when audio ran past 380 ms) and `answered` (an "Ask" answer shown in full, a
+refusal too: nothing pasted). `mode` is `dictate`, `translate` or `ask` as the dictation's refine or question started
+(for an attempt that ends before that, the mode it was recording in: the attempt follows a `ModeToggle` or `ModeChange`
+the flow accepts). The Retry of a failed translation re-translates the saved text: a new row with no audio.
+`refine_model` is `RefineSettings::usage_model` (`local:<id>`, `agent:<agent>:<model>`, `off`), or `ask.model` for
+"Ask". `words` is how many words the attempt wrote (`usage::count_words` of the text of a dictation or translation; 0
+for a question or one that wrote nothing) and `day` its local date.
+Rows of earlier versions are 13, 16 or 18 columns wide and carry the dollars they were priced at (`stt_usd`,
+`refine_usd`, `search_usd`), Soniox's paths and cache warm-up rows (`warmup`); they are read with the dollars passed
+over (`usage::fields`). A file an earlier version started, its header not this version's, is rolled over at the first
+row this version writes: it moves aside, whole, to `usage-<day>.csv` (`-2`, `-3`… when taken) and a new `usage.csv`
+starts under the 15-column header. Today and `cue-cli usage` read `usage.csv` alone, so after the rollover they count
+from that row on. Latency runs from the second press to Ctrl+V (from Retry or Restore when used); the target for a
+~30-word phrase is 1.5 s or less. Rows that fail to write, for example while the file is open in Excel, wait in memory
+and go out before the next one. `cue-cli usage` sums a UTC month: dictations are `inserted` plus `no_field` rows (an
+`answered` row is not one), the audio, average latency over `inserted` rows only, a separate average for recordings of
+20 s or less, and the rows of each `mode` value, in the order they first appear.
 
 An `ask` row carries `ask.model` in `refine_model`, the tokens of all the question's requests (continuations, a widened
 write, and a request aborted by `Esc` before Restore asked again), and its searches in `web_searches`, priced in
@@ -1462,8 +1461,8 @@ icon and path `!define`s); makensis stores none of them.
   contain dictated text. Debug output of focus results, of the selection read and copied, of the "Ask" context, of
   microphone frames and events, of history entries (their `raw` too) and their views, and of the microphone setting
   and its changes shows only lengths and counts; a recording's snapshot has no `Debug` at all.
-- CUE holds no API key: the eight an earlier version saved in Credential Manager (service `CUE`: anthropic,
-  openrouter, openai, gemini, deepseek, mistral, groq, xai) are deleted at startup, off the core thread
+- CUE holds no API key: the nine earlier versions saved in Credential Manager (service `CUE`: anthropic,
+  openrouter, openai, gemini, deepseek, mistral, groq, xai, and soniox) are deleted at startup, off the core thread
   (`keys::forget_api_keys`); the habits' secret is the one entry kept there. No window, command or `cue-cli` reads or
   asks for a key.
 - The history's text and its recordings go to the main window alone: its commands read the files, and new entries come

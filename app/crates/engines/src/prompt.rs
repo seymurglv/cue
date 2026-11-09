@@ -357,4 +357,13 @@ mod tests {
         assert_eq!(decide_translation(raw, Parsed::Text("Ну привет.".into()), &Default::default(), "en"), (raw.into(), RefineOutcome::RawFallback));
         assert_eq!(decide_translation(raw, Parsed::Truncated, &Default::default(), "en"), (raw.into(), RefineOutcome::RawFallback));
     }
+
+    /// A translation is checked against the dictionary too: an answer that is the dictionary's terms written over the
+    /// speech, the rest left in its language, is not a translation, and the raw text comes back.
+    #[test]
+    fn translate_checks_the_answer_against_the_dictionary_too() {
+        let raw = "кубернетес и докер";
+        let (t, o) = decide_translation(raw, Parsed::Text("Kubernetes и Docker.".into()), &dict(&["Kubernetes", "Docker"]), "en");
+        assert_eq!((t.as_str(), o), (raw, RefineOutcome::RawFallback));
+    }
 }

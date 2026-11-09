@@ -14,7 +14,9 @@
 //! A row of this version has 15 columns ([`HEADER`]). Rows of earlier versions have 13, 16 or 18, with the dollars
 //! they were priced at (`stt_usd`, `refine_usd`, `search_usd`): they are read with those columns passed over, whatever
 //! they hold ([`fields`]). A row of 13 was written before the modes (no `mode`, `web_searches`) and reads as dictation;
-//! one of 16 before Today (no `words`, `day`). The header of an existing file is not rewritten. A cache warm-up of an
+//! one of 16 before Today (no `words`, `day`). A file an earlier version started, its header not this version's, is
+//! rolled over at the first record this version writes: it moves aside, whole, to `usage-<day>.csv` (`-2`, `-3`… when
+//! taken), and a new `usage.csv` starts under [`HEADER`]; the readers read `usage.csv` alone. A cache warm-up of an
 //! earlier version is a row of its own (`warmup`, outcome `discarded`), and `answered` (an "Ask" answer shown in full):
 //! neither is a dictation.
 //!
@@ -209,10 +211,18 @@ pub fn line(r: &UsageRecord) -> String {
 
 /// Appends a record; writes the header if the file is missing or empty. If the previous record was cut off
 /// (no newline at the end of the file), the new one starts on a new line instead of gluing onto the fragment.
-/// Everything appended goes to disk in a single write.
+/// Everything appended goes to disk in a single write. A file whose first line is not this version's [`HEADER`] (one an
+/// earlier version started, with its dollar columns) is rolled over first ([`roll_over`]); should that fail, the record
+/// goes after its rows, which the readers take at any width.
 pub fn append(path: &Path, r: &UsageRecord) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
+    }
+    if !starts_with_header(path)? {
+        // The record's local date names the old file; only digits and dashes go into a file name.
+        let day = if r.day.is_empty() { r.ts.get(..10).unwrap_or_default() } else { r.day.as_str() };
+        let day = if !day.is_empty() && day.bytes().all(|b| b.is_ascii_digit() || b == b'-') { day } else { "old" };
+        let _ = roll_over(path, day);
     }
     let mut f = std::fs::OpenOptions::new().read(true).append(true).create(true).open(path)?;
     let len = f.metadata()?.len();
@@ -231,6 +241,37 @@ pub fn append(path: &Path, r: &UsageRecord) -> std::io::Result<()> {
     out.push_str(&line(r));
     out.push('\n');
     f.write_all(out.as_bytes())
+}
+
+/// Whether the file at `path` starts with this version's [`HEADER`]; a missing or empty file has nothing to roll over.
+fn starts_with_header(path: &Path) -> std::io::Result<bool> {
+    let f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => return Err(e),
+    };
+    let mut head = Vec::with_capacity(HEADER.len() + 2);
+    Read::take(&f, HEADER.len() as u64 + 2).read_to_end(&mut head)?;
+    if head.is_empty() {
+        return Ok(true);
+    }
+    let first = head.split(|&b| b == b'\n').next().unwrap_or_default();
+    Ok(first.strip_suffix(b"\r").unwrap_or(first) == HEADER.as_bytes())
+}
+
+/// The file at `path` (`usage.csv`) moves aside to `usage-<day>.csv` beside it, or `usage-<day>-2.csv` and on when that
+/// is taken: the next record starts a new file under this version's header. Returns where it went.
+pub(crate) fn roll_over(path: &Path, day: &str) -> std::io::Result<std::path::PathBuf> {
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("usage");
+    for n in 1..=1_000 {
+        let name = if n == 1 { format!("{stem}-{day}.csv") } else { format!("{stem}-{day}-{n}.csv") };
+        let to = path.with_file_name(name);
+        if !to.exists() {
+            std::fs::rename(path, &to)?;
+            return Ok(to);
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free name to roll usage.csv over to"))
 }
 
 /// The columns of a row the summary and Today read, from a row of any width CUE wrote; the dollars of an earlier
@@ -789,16 +830,44 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
-    /// A file an earlier version started keeps its header; this version's rows go after its rows.
+    /// A file an earlier version started (its header has the dollar columns) moves aside, whole, to
+    /// `usage-<day>.csv`, and the record starts a new `usage.csv` under this version's header; a second file of that
+    /// day takes `-2`. A file of this version is appended to as it is.
     #[test]
-    fn append_to_a_file_of_an_earlier_version_keeps_its_header() {
-        let path = tmp("earlier");
-        std::fs::write(&path, format!("{HEADER_V3}\n{OLD_V3}\n")).unwrap();
-        append(&path, &rec_with("2026-11-01T11:00:00Z", Outcome::Inserted)).unwrap();
+    fn a_file_of_an_earlier_version_is_rolled_over_and_a_new_one_started() {
+        let dir = tmp("rollover");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("usage.csv");
+        let old = format!("{HEADER_V3}\n{OLD_V3}\n");
+        std::fs::write(&path, &old).unwrap();
+        let r = rec_with("2026-11-01T11:00:00Z", Outcome::Inserted);
+        append(&path, &r).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("usage-2026-11-01.csv")).unwrap(), old, "the old file, untouched");
         let csv = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(csv.lines().next(), Some(HEADER_V3));
-        assert_eq!(summarize(&csv, "2026-11").dictations, 2);
-        std::fs::remove_file(path).unwrap();
+        assert_eq!(csv, format!("{HEADER}\n{}\n", line(&r)));
+        assert_eq!(summarize(&csv, "2026-11").dictations, 1, "the new file holds this version's rows only");
+
+        // Appended to as it is now.
+        append(&path, &r).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
+        assert!(!dir.join("usage-2026-11-01-2.csv").exists());
+
+        // Another file of the old kind the same day (one put back by hand, a 13-column one): the next free name.
+        std::fs::write(&path, format!("{HEADER_V1}\n{OLD_V1}\n")).unwrap();
+        append(&path, &r).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("usage-2026-11-01-2.csv")).unwrap(), format!("{HEADER_V1}\n{OLD_V1}\n"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().next(), Some(HEADER));
+
+        // A file with no header at all, and a record with no local date: named by its UTC date.
+        std::fs::write(&path, format!("{OLD_V1}\n")).unwrap();
+        append(&path, &UsageRecord { day: String::new(), ..r.clone() }).unwrap();
+        assert!(dir.join("usage-2026-11-01-3.csv").exists());
+        // A header with a CRLF line end is this version's all the same.
+        std::fs::write(&path, format!("{HEADER}\r\n{}\r\n", line(&r))).unwrap();
+        append(&path, &r).unwrap();
+        assert!(!dir.join("usage-2026-11-01-4.csv").exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
