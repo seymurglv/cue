@@ -296,13 +296,13 @@ pub struct UiSettings {
     pub language: UiLanguage,
 }
 
-/// Where the Drop sits on the work area: centered at the bottom (the default) or the top edge, or vertically centered
+/// Where the Drop sits on the work area: centered at the top edge (the default) or the bottom edge, or vertically centered
 /// at the left or the right edge. The user picks it by dragging the Drop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DropPosition {
-    #[default]
     Bottom,
+    #[default]
     Top,
     Left,
     Right,
@@ -328,7 +328,7 @@ impl DropPosition {
     }
 }
 
-/// Like `UiLanguage`: any value that is not one of the four names (another word, a number, `null`) reads as `Bottom`,
+/// Like `UiLanguage`: any value that is not one of the four names (another word, a number, `null`) reads as `Top`,
 /// so a typo never makes the whole file unreadable.
 impl<'de> Deserialize<'de> for DropPosition {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -343,7 +343,7 @@ pub struct DropSettings {
 }
 
 /// `drop` that is not an object (a string, a number, `null`) reads as the defaults instead of failing the whole file;
-/// inside it, unknown fields are ignored and a bad `position` reads as `bottom`.
+/// inside it, unknown fields are ignored and a bad `position` reads as `top`.
 impl<'de> Deserialize<'de> for DropSettings {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
@@ -966,7 +966,7 @@ pub struct Settings {
     /// Not written while it is the default (`auto`): files of users who never set it stay as they were.
     #[serde(skip_serializing_if = "UiSettings::is_default")]
     pub ui: UiSettings,
-    /// Where the Drop sits. Not written while it is the default (`bottom`), like `ui`.
+    /// Where the Drop sits. Not written while it is the default (`top`), like `ui`.
     #[serde(skip_serializing_if = "DropSettings::is_default")]
     pub drop: DropSettings,
     /// Not written while the list is empty, like `ui`.
@@ -1142,7 +1142,7 @@ mod tests {
         assert_eq!(s.hold_hints_left, 2);
         assert!(!s.bench.save_recordings);
         assert_eq!(s.ui.language, UiLanguage::Auto);
-        assert_eq!(s.drop.position, DropPosition::Bottom);
+        assert_eq!(s.drop.position, DropPosition::Top);
         assert!(s.dictionary.terms.is_empty());
         assert_eq!(s.ask, AskSettings::default());
     }
@@ -1727,7 +1727,7 @@ mod tests {
 
     /// A typo in the position or in the whole block reads as the default and the rest of the file still loads.
     #[test]
-    fn invalid_drop_position_reads_as_bottom_and_keeps_the_rest() {
+    fn invalid_drop_position_reads_as_top_and_keeps_the_rest() {
         for drop in [
             r#"{"position":"middle"}"#,
             r#"{"position":"le ft"}"#,
@@ -1744,32 +1744,32 @@ mod tests {
         ] {
             let text = format!(r#"{{"drop":{drop},"hold_hints_left":0}}"#);
             let s: Settings = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{drop}: {e}"));
-            assert_eq!(s.drop.position, DropPosition::Bottom, "{drop}");
+            assert_eq!(s.drop.position, DropPosition::Top, "{drop}");
             assert_eq!(s.hold_hints_left, 0, "{drop}");
         }
     }
 
     #[test]
-    fn file_without_drop_block_reads_as_bottom() {
+    fn file_without_drop_block_reads_as_top() {
         let s: Settings = serde_json::from_str(r#"{"hold_hints_left":1}"#).unwrap();
         assert_eq!(s.drop, DropSettings::default());
-        assert_eq!(s.drop.position, DropPosition::Bottom);
+        assert_eq!(s.drop.position, DropPosition::Top);
     }
 
-    /// Like `ui`: the default (also an explicit `"bottom"`) is not written; another place is, and survives a roundtrip.
+    /// Like `ui`: the default (also an explicit `"top"`) is not written; another place is, and survives a roundtrip.
     #[test]
-    fn drop_position_is_written_only_when_not_bottom() {
+    fn drop_position_is_written_only_when_not_top() {
         let dir = tmp("drop-position");
         let p = dir.join("settings.json");
         let written = |p: &Path| serde_json::from_slice::<serde_json::Value>(&std::fs::read(p).unwrap()).unwrap();
         save(&Settings::default(), &p).unwrap();
         assert!(written(&p).get("drop").is_none(), "the default position ended up in the file");
 
-        std::fs::write(&p, r#"{"drop":{"position":"BOTTOM"},"hold_hints_left":2}"#).unwrap();
+        std::fs::write(&p, r#"{"drop":{"position":"TOP"},"hold_hints_left":2}"#).unwrap();
         save(&load(&p).unwrap(), &p).unwrap();
-        assert!(written(&p).get("drop").is_none(), "an explicit bottom was written back");
+        assert!(written(&p).get("drop").is_none(), "an explicit top was written back");
 
-        for position in [DropPosition::Top, DropPosition::Left, DropPosition::Right] {
+        for position in [DropPosition::Bottom, DropPosition::Left, DropPosition::Right] {
             let mut s = Settings::default();
             s.drop.position = position;
             save(&s, &p).unwrap();

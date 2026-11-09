@@ -6,7 +6,7 @@ punctuation added, your own words kept, in Russian or English. Speech is recogni
 CUE downloads once (Parakeet Ultra), and the text is tidied up by whoever you choose: the AI you already have (OpenCode
 or Codex, signed in by you), a small model CUE downloads and runs on your computer, or nobody (CUE's own tidy-up
 alone). CUE holds no API key. Add `Shift` and the text comes out translated; add `Alt` instead and ask a question out
-loud, and the answer appears next to your work. CUE runs quietly in the background: a small indicator at the bottom of
+loud, and the answer appears next to your work. CUE runs quietly in the background: a small indicator at the top of
 the screen (the Drop) shows what it is doing, and an icon next to the clock opens the main window, with the history of
 everything CUE wrote and the settings.
 
@@ -243,7 +243,7 @@ from source.
 - **Recording limit:** at 8:00 a card says one minute is left, at 9:00 recording ends on its own and the text is pasted
   as usual. The Drop shows no timer while recording, only the voice bars.
 - **The Drop stays where you put it.** Hover over the thin strip to open it, then drag it: when you let go it snaps
-  to the nearest of four places: the bottom (the default) or the top edge, centered, or the left or the right edge,
+  to the nearest of four places: the top edge (the default) or the bottom, centered, or the left or the right edge,
   halfway up. The place is remembered (`drop.position` in `settings.json`). A plain click without moving does what it
   always did, and dragging never takes the focus from the app you are typing in. The Drop can be dragged only while
   idle, and it always stays on top of ordinary windows.
@@ -538,10 +538,10 @@ history is neither written nor cleaned up until a period is chosen in the window
   shorter of this and `history.keep` holds, and none is made while the history is off. Any other value leaves the
   period unknown: no recording is made until one is chosen in the main window, and only the history's own period
   deletes them. The value is kept in the file only when it is not `"week"`. Example: `"history": { "audio": "day" }`.
-- `drop.position`: where the Drop sits: `"bottom"` (the default; centered, 12 px above the taskbar), `"top"`
-  (centered, 12 px below the top of the screen), `"left"` or `"right"` (halfway up, 12 px from the edge). Dragging the
-  Drop sets it. Case and surrounding spaces do not matter; any other value means `"bottom"`. The value is kept in the
-  file only when it is not `"bottom"`. Example: `"drop": { "position": "right" }`.
+- `drop.position`: where the Drop sits: `"top"` (the default; centered, 12 px below the top of the screen), `"bottom"`
+  (centered, 12 px above the taskbar), `"left"` or `"right"` (halfway up, 12 px from the edge). Dragging the
+  Drop sets it. Case and surrounding spaces do not matter; any other value means `"top"`. The value is kept in the
+  file only when it is not `"top"`. Example: `"drop": { "position": "right" }`.
 - `dictionary.terms`: names and terms you often say, written as they should appear; the main window's Dictionary edits
   the same list. Example:
   `"dictionary": { "terms": ["Parakeet", "OpenCode", "GitHub"] }`. When the transcript clearly means one of them

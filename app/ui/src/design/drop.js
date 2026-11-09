@@ -5,9 +5,7 @@
    No recording timer: while recording the Drop shows only the mark and stays a circle of the same size.
    Sizes come from drop.css (--h, the Drop's height in every state); nothing here assumes a size.
    Also: the mark, buttons and icons open to their own size measured once (this.nat), not to their scrollWidth;
-   with prefers-reduced-motion the mark's spring has almost no inertia (k=20, d=.05) and the tray card folds at once.
-   The idle key hint is two soft key plates, "Ctrl" and the Windows logo ("fn" on mac), with the screen-reader name in
-   aria-label. */
+   with prefers-reduced-motion the mark's spring has almost no inertia (k=20, d=.05) and the tray card folds at once. */
 (function(){
 const el=h=>{const t=document.createElement('template');t.innerHTML=h.trim();return t.content.firstElementChild};
 const SV=d=>`<svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
@@ -29,15 +27,13 @@ const IC={
  model:SV('<path d="M10 2.8l6.2 3.5v7.4L10 17.2l-6.2-3.5V6.3z"/><path d="M3.8 6.3 10 9.8l6.2-3.5M10 9.8v7.4"/>'),
  gear:SV('<circle cx="10" cy="10" r="2.6"/><path d="M10 2.5v2.2M10 15.3v2.2M2.5 10h2.2M15.3 10h2.2M4.7 4.7l1.5 1.5M13.8 13.8l1.5 1.5M4.7 15.3l1.5-1.5M13.8 6.2l1.5-1.5"/>')
 };
-/* Windows key logo for the idle hint: four squares in 10 × 10, current color */
-const WIN='<svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" style="display:block" aria-hidden="true"><rect x="0" y="0" width="4.4" height="4.4"/><rect x="5.6" y="0" width="4.4" height="4.4"/><rect x="0" y="5.6" width="4.4" height="4.4"/><rect x="5.6" y="5.6" width="4.4" height="4.4"/></svg>';
 const RING='<svg class="ring" viewBox="0 0 28 28" width="28" height="28"><circle cx="14" cy="14" r="12.4" pathLength="100"/></svg>';
 const RM='(prefers-reduced-motion: reduce)';
 /* How long the suggestion's capsule stays open, and its "Undo" after "+" (the rings in drop.css draw the same times) */
 const SG_MS={sugg:8000,added:6000};
 const reduced=()=>!!(window.matchMedia&&window.matchMedia(RM).matches);
 /* parts whose width depends on text: their width is still taken from scrollWidth on every layout */
-const TXT=new Set(['chip','lab','act','kc','swd']);
+const TXT=new Set(['chip','lab','act','swd']);
 /* While a text part is folded, its scrollWidth misses the right padding of its inner block (.chip>span, .act>span):
    the text overflows that block's zero-width content box. Add it back so the open chip and button are not clipped.
    The other text parts have no such padding (0). */
@@ -56,7 +52,7 @@ class Drop{
   P('lab','<span class="lab"></span>');P('act','<button class="act"></button>');
   P('undo',`<button class="ib solid" title="${T.restore}" aria-label="${T.restore}">${RING}${IC.undo}</button>`);
   P('retry',`<button class="ib solid" title="${T.retry}" aria-label="${T.retry}">${IC.retry}</button>`);
-  P('kc','<span class="kc"></span>');P('ok',`<button class="ib solid" title="${T.done}" aria-label="${T.done}">${IC.ok}</button>`);
+  P('ok',`<button class="ib solid" title="${T.done}" aria-label="${T.done}">${IC.ok}</button>`);
   P('sbk',`<span class="mi sbk">${IC.book}</span>`);P('swd','<span class="lab swd"></span>');
   P('sbt','<button class="ib solid sbt"></button>');
   this.dot=el('<i class="sgdot" aria-hidden="true"></i>');this.root.append(this.dot);
@@ -101,16 +97,14 @@ class Drop{
  layout(){
   const s=this.s,h=this.hov,m=this.mode,ic=(this.api.lbl?this.api.lbl():'icons')==='icons',p=this.parts,T=this.api.text;
   this.p.classList.toggle('hov',h);
-  p.kc.innerHTML=this.api.os()==='mac'?'<span role="img" aria-label="fn"><span class="key">fn</span></span>'
-   :`<span role="img" aria-label="Ctrl + Win"><span class="key">Ctrl</span><span class="key w">${WIN}</span></span>`;
   p.mi.innerHTML=m==='translate'?IC.tr:m==='ask'?IC.ask:'';p.mi.classList.toggle('ask',m==='ask');
   p.chip.innerHTML=`<span>${m==='translate'?'EN':T.ask}</span>`;
   p.why.innerHTML=this.err==='mic'?IC.mic:IC.net;
   if(s==='cancel'){CUE.setLabel(p.lab,T.cancelled);p.act.innerHTML=`<span>${T.restore}</span>`}
   if(s==='error'){CUE.setLabel(p.lab,this.api.errLabel?this.api.errLabel():'');p.act.innerHTML=`<span>${T.retry}</span>`}
   const md=m!=='dictate',why=this.err!=='key',rt=this.api.retry?this.api.retry():true;
-  const V=ic?{sugg:{sbk:1,swd:1,sbt:1},added:{sbk:1,swd:1,sbt:1},idle:{mk:h,kc:h},start:{mk:1},listen:{bx:h,mk:1,mi:md,ok:h},think:{mk:1},done:{mk:1},empty:{mk:1},cancel:{mk:1,lab:h,undo:1},error:{bx:h,mk:1,why,lab:h,retry:rt}}
-           :{sugg:{sbk:1,swd:1,sbt:1},added:{sbk:1,swd:1,sbt:1},idle:{mk:h,kc:h},start:{mk:1},listen:{bx:h,mk:1,chip:md,ok:h},think:{mk:1},done:{mk:1},empty:{mk:1},cancel:{mk:1,lab:1,act:1},error:{bx:h,mk:1,lab:1,act:rt}};
+  const V=ic?{sugg:{sbk:1,swd:1,sbt:1},added:{sbk:1,swd:1,sbt:1},idle:{mk:h},start:{mk:1},listen:{bx:h,mk:1,mi:md,ok:h},think:{mk:1},done:{mk:1},empty:{mk:1},cancel:{mk:1,lab:h,undo:1},error:{bx:h,mk:1,why,lab:h,retry:rt}}
+           :{sugg:{sbk:1,swd:1,sbt:1},added:{sbk:1,swd:1,sbt:1},idle:{mk:h},start:{mk:1},listen:{bx:h,mk:1,chip:md,ok:h},think:{mk:1},done:{mk:1},empty:{mk:1},cancel:{mk:1,lab:1,act:1},error:{bx:h,mk:1,lab:1,act:rt}};
   const vis=V[s]||{};
   const open=(k,e)=>TXT.has(k)?Math.max(e.scrollWidth+padEnd(k,e),this.nat[k]||0):this.nat[k]||0;
   for(const [k,e] of Object.entries(p)){const on=!!vis[k];e.classList.toggle('on',on);e.style.maxWidth=on?(open(k,e)+2)+'px':'0px'}

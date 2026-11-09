@@ -914,7 +914,7 @@ The "Ask" card below).
 ### Places
 
 The Drop sits at one of four places on the work area of the monitor with the foreground window (`drop.position`):
-`bottom` (the default) and `top` are centered on that edge, `left` and `right` halfway up it; in each the Drop's outer
+`top` (the default) and `bottom` are centered on that edge, `left` and `right` halfway up it; in each the Drop's outer
 edge is 12 px from the work area's edge. The window is always centered on the Drop's center (the center of its
 circle), and the page draws the Drop at the window's center. A new place therefore moves only the window, never the Drop
 inside it; the rest of the layout changes with CSS transitions. The window reaches far enough every way for the widest
@@ -1027,7 +1027,7 @@ in Windows, states change instantly.
 The mode shows while recording: in a translation the mark of `start` takes the translation shape and `listen` adds
 the arrows icon next to the voice bars, and "Ask" has an icon of its own; a mode change re-enters the phase, so the icon
 changes at once. The error of a failed translation reads "Couldn't translate" with the network cause icon and Retry.
-The idle Drop shows no mode, and its hint stays `Ctrl + Win`.
+The idle Drop shows no mode: on hover it shows only the mark.
 
 Tray cards grow out of the Drop, one at a time; a new card replaces the old one, a new recording and an "Ask" answer
 that opens close it, and hovering pauses the countdown ring:
@@ -1406,8 +1406,8 @@ only an agent's entries; a custom style's text goes into `instructions.md` and s
 `custom` until the runtime has seen that file written, so a failed first write never loses it. There is no price
 anywhere: the `pricing` of earlier versions is read past and dropped at the next write. `ui.language` (`auto`, `en`, `ru`, in any case and with spaces trimmed; any other value
 reads as `auto`) is likewise written only when it is not `auto`, `drop.position` (`bottom`, `top`, `left`, `right`, in
-any case and with spaces trimmed; any other value, or a `drop` that is not an object, reads as `bottom`) only when it
-is not `bottom`, and `dictionary` only when its list is not empty. `dictionary.terms` is kept as written; a value that
+any case and with spaces trimmed; any other value, or a `drop` that is not an object, reads as `top`) only when it
+is not `top`, and `dictionary` only when its list is not empty. `dictionary.terms` is kept as written; a value that
 is not a list reads as an empty list and items that are not strings are skipped, so a typo there never makes the file
 unreadable. `dictionary.learned` (`{ word, heard }` items, newest first) reads the same way and is written only when it
 is not empty; `learn.enabled` is turned off only by `false` and written only then.

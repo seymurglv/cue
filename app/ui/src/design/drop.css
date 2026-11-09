@@ -29,13 +29,12 @@
 }
 @media (prefers-reduced-motion:reduce){.drop[data-s=idle]:not(.hov){animation:none}}
 /* Idle on hover: even margins to what is painted. 0.3 h from each end of the capsule to the bar's left stroke edge and
-   to the last key's right edge, 0.2 h from the lamp dot to the first key, 4u between the keys. Where the bar and the dot
-   are painted in the mark's box comes from the idle mark in cue.js (on its 24 grid: the first bar at x 7.5 with a 2.2
-   stroke, the dot at x 21 with r 1.9; a test keeps them equal); the padding and the two parts' margins take the rest. */
+   to the lamp dot's right edge. Where the bar and the dot are painted in the mark's box comes from the idle mark in cue.js
+   (on its 24 grid: the first bar at x 7.5 with a 2.2 stroke, the dot at x 21 with r 1.9; a test keeps them equal); the
+   padding and the mark's margin take the rest. */
 .drop{--bar-l:calc((7.5 - 2.2 / 2) / 24 * var(--mk));--dot-r:calc((21 + 1.9) / 24 * var(--mk))}
-.drop[data-s=idle].hov{height:var(--h);opacity:1;padding-left:0;padding-right:calc(.3 * var(--h) - 4 * var(--u))}
+.drop[data-s=idle].hov{height:var(--h);opacity:1;padding-left:0;padding-right:calc(.3 * var(--h) - (var(--mk) - var(--dot-r)))}
 .drop[data-s=idle].hov>.mkw.on{margin-left:calc(.3 * var(--h) - var(--bar-l));margin-right:0}
-.drop[data-s=idle].hov>.kc.on{margin-left:calc(.2 * var(--h) - (var(--mk) - var(--dot-r)));margin-right:calc(4 * var(--u))}
 /* at the side places the idle strip stands upright against the edge: as high as the Drop, a fifth of it wide */
 :is([data-place=left],[data-place=right]) .drop[data-s=idle]:not(.hov){height:var(--h);min-width:calc(var(--h) / 5);padding-left:0;padding-right:0}
 .drop.away{opacity:0!important;transition:opacity .18s}
@@ -82,13 +81,6 @@
 .mi{color:rgba(255,255,255,.85)}
 .mi.ask{color:var(--ask)}
 .why{color:rgba(255,255,255,.7)}
-.kc{line-height:calc(18 * var(--u))}
-.kc>span{display:flex;gap:calc(4 * var(--u))}
-/* flex:none — the keys do not shrink while the part is folded: otherwise scrollWidth in layout() is less than the real width and the hint gets clipped */
-/* the keys are soft plates: a quiet fill, no outline, the system type */
-.key{flex:none;display:grid;place-items:center;min-width:calc(18 * var(--u));height:calc(18 * var(--u));padding-left:calc(5 * var(--u));padding-right:calc(5 * var(--u));border-radius:calc(6 * var(--u));background:rgba(255,255,255,.12);font-family:var(--win-font,"Segoe UI Variable","Segoe UI",system-ui,sans-serif);font-size:calc(11 * var(--u));font-weight:600;line-height:calc(18 * var(--u));color:rgba(255,255,255,.82)}
-.key.w{padding-left:calc(4 * var(--u));padding-right:calc(4 * var(--u))}
-.key.w svg{width:calc(10 * var(--u));height:calc(10 * var(--u))}
 
 .tray{z-index:7;border-radius:20px;background:rgba(18,18,20,.92);color:#fff;--warn:#F5B82E;--ask:#5C8DFF;--ok:#33C27A;box-shadow:0 16px 40px -12px rgba(0,0,0,.5),inset 0 0 0 .5px rgba(255,255,255,.14);backdrop-filter:blur(24px) saturate(1.6);-webkit-backdrop-filter:blur(24px) saturate(1.6);overflow:hidden;transition:width .55s var(--e-spring),height .5s var(--e-spring),border-radius .45s var(--e-out)}
 .tray[hidden]{display:none}

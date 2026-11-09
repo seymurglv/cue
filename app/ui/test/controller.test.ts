@@ -13,7 +13,7 @@ let wakes: number;
 let ctl: DropController;
 const on = () => [...document.querySelectorAll('.drop .pt.on')].map((e) => e.className);
 
-/** Visible Drop parts by their names in drop.js: bx, mk, mi, chip, why, lab, act, undo, retry, kc, ok. */
+/** Visible Drop parts by their names in drop.js: bx, mk, mi, chip, why, lab, act, undo, retry, ok. */
 const BY_TITLE: Record<string, string> = { [en.drop.cancel]: 'bx', [en.drop.restore]: 'undo', [en.drop.retry]: 'retry', [en.drop.done]: 'ok' };
 const shown = () =>
   [...document.querySelectorAll('.drop .pt.on')]
@@ -204,40 +204,14 @@ describe('The Drop follows the core', () => {
 });
 
 describe('Which Drop parts are visible in each state', () => {
-  it('idle: nothing without hover; on hover the mark and the keys', () => {
+  it('idle: nothing without hover; on hover only the mark', () => {
     ctl.apply(base);
     expect(document.querySelector('.drop')!.getAttribute('data-s')).toBe('idle');
     expect(shown()).toEqual([]);
     hover(true);
-    expect(shown()).toEqual(['kc', 'mk']);
+    expect(shown()).toEqual(['mk']);
     hover(false);
     expect(shown()).toEqual([]);
-  });
-
-  it('idle hint: two keys — "Ctrl" and the Windows logo, "Ctrl + Win" for screen readers', () => {
-    ctl.apply(base);
-    hover(true);
-    const hint = document.querySelector('.drop .kc > span')!;
-    expect(hint.getAttribute('role')).toBe('img');
-    expect(hint.getAttribute('aria-label')).toBe(KEY_NAME);
-    const keys = [...hint.children];
-    expect(keys.map((k) => k.className)).toEqual(['key', 'key w']);
-    expect(keys[0].textContent).toBe('Ctrl');
-    const win = keys[1].querySelector('svg')!;
-    expect(win.getAttribute('aria-hidden')).toBe('true');
-    expect(win.querySelectorAll('rect').length).toBe(4);
-    expect(keys[1].textContent).toBe('');
-  });
-
-  it('idle hint on mac: one "fn" key', () => {
-    document.body.innerHTML = '';
-    const api = { mode: () => 'dictate', err: () => 'net', lbl: () => 'icons', os: () => 'mac', text: en.drop, voice: new (CUE().Voice)(), onEsc() {}, onPress() {}, onAction() {} };
-    const drop = new (CUE().Drop)(document.body, api);
-    drop.p.dispatchEvent(new MouseEvent('mouseenter'));
-    expect(drop.parts.kc.classList.contains('on')).toBe(true);
-    const hint = drop.parts.kc.firstElementChild!;
-    expect(hint.getAttribute('aria-label')).toBe('fn');
-    expect([...hint.children].map((k) => [k.className, k.textContent])).toEqual([['key', 'fn']]);
   });
 
   it('thinking: three dots centered on the 24 × 24 mark grid (center 12, like the circle)', () => {
@@ -474,7 +448,7 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
     expect(at(24)).toBeCloseTo(markBox(), 6);
   });
 
-  it('derived sizes: buttons 0.7 h, small icons 0.5 h, keys and label text 0.9 of the 40 px drawing', () => {
+  it('derived sizes: buttons 0.7 h, small icons 0.5 h and label text 0.9 of the 40 px drawing', () => {
     ctl.apply({ ...base, phase: 'error', error: 'model', retry: true });
     hover(true);
     expect(size(part('.ib'), 'width')).toBeCloseTo(0.7 * H, 6);
@@ -485,16 +459,10 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
     expect(size(part('.lab'), 'line-height')).toBeCloseTo(24 * 0.9, 6);
     expect(size(part('.act'), 'height')).toBeCloseTo(28 * 0.9, 6);
     expect(size(part('.pt.on'), 'margin-left')).toBeCloseTo(4 * 0.9, 6);
-    ctl.apply(base);
-    hover(true);
-    const key = part('.kc .key');
-    expect(size(key, 'height')).toBeCloseTo(18 * 0.9, 6);
-    // The keys' system type is 11 in the 40 px drawing.
-    expect(size(key, 'font-size')).toBeCloseTo(11 * 0.9, 6);
   });
 
-  /** The four visible gaps of the idle capsule on hover, CSS px: capsule edge to the bar's left stroke edge, the lamp
-   *  dot to the first key, between the keys, the last key to the capsule edge. Where the bar and the dot are painted is
+  /** The two visible gaps of the idle capsule on hover, CSS px: capsule edge to the bar's left stroke edge, and the lamp
+   *  dot's right edge to the capsule edge. Where the bar and the dot are painted is
    *  read from the idle mark itself (cue.js), not from drop.css. */
   const idleGaps = () => {
     const mark = part('.mkw svg');
@@ -505,16 +473,13 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
     const barL = ((n(line, 'x1') - n(line, 'stroke-width') / 2) / 24) * box;
     const dotR = ((n(dot, 'cx') + n(dot, 'r')) / 24) * box;
     const mk = part('.mkw');
-    const kc = part('.kc');
     return {
       left: size(drop(), 'padding-left') + size(mk, 'margin-left') + barL,
-      dotToKey: box - dotR + size(mk, 'margin-right') + size(kc, 'margin-left'),
-      keys: size(part('.kc > span'), 'gap'),
-      right: size(kc, 'margin-right') + size(drop(), 'padding-right'),
+      right: box - dotR + size(mk, 'margin-right') + size(drop(), 'padding-right'),
     };
   };
 
-  it('idle on hover: 0.3 h at both ends to what is painted, 0.2 h from the lamp to the keys, at every place and size', () => {
+  it('idle on hover: 0.3 h at both ends to what is painted, at every place and size', () => {
     ctl.apply(base);
     hover(true);
     // The idle mark the margins are measured from: the first bar at x 7.5 with a 2.2 stroke, the lamp at 21 with r 1.9.
@@ -526,19 +491,15 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
       const g = idleGaps();
       expect(g.left, `${at} left`).toBeCloseTo(0.3 * h, 6);
       expect(g.right, `${at} right`).toBeCloseTo(0.3 * h, 6);
-      expect(g.dotToKey, `${at} lamp to key`).toBeCloseTo(0.2 * h, 6);
-      expect(g.keys, `${at} keys`).toBeCloseTo(0.1 * h, 6);
     };
     for (const place of ['bottom', 'top', 'left', 'right'] as const) {
       ctl.place(place);
       check(H, place);
     }
-    // 36 px: no padding on the left, 7.2 on the right; the mark's margins 5.04 and 0, the keys' 6.21 and 3.6.
+    // 36 px: no padding on the left; the mark's margins 5.04 and 0.
     ctl.place('bottom');
     expect(size(drop(), 'padding-left')).toBe(0);
-    expect(size(drop(), 'padding-right')).toBeCloseTo(7.2, 6);
     expect([size(part('.mkw'), 'margin-left'), size(part('.mkw'), 'margin-right')].map((v) => +v.toFixed(4))).toEqual([5.04, 0]);
-    expect([size(part('.kc'), 'margin-left'), size(part('.kc'), 'margin-right')].map((v) => +v.toFixed(4))).toEqual([6.21, 3.6]);
     const big = document.createElement('style');
     big.textContent = ':root{--h:48px}';
     document.head.append(big);
@@ -592,7 +553,7 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
     for (const prop of ['left', 'top', 'transform']) expect(pv).toContain(`${prop} .3s`);
   });
 
-  it('coming to rest the strip breathes three times; on hover it stops and the keys are soft plates in the system type', () => {
+  it('coming to rest the strip breathes three times; on hover it stops', () => {
     ctl.apply(base);
     const anim = () => getComputedStyle(drop()).getPropertyValue('animation');
     expect(anim()).toContain('idle-breathe 3.2s');
@@ -601,12 +562,6 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
     expect(anim()).toMatch(/idle-breathe 3\.2s 3\b/);
     hover(true);
     expect(anim()).not.toContain('idle-breathe');
-    for (const key of document.querySelectorAll('.drop .kc .key')) {
-      const k = getComputedStyle(key);
-      expect(k.boxShadow).toBe('none');
-      expect(k.backgroundColor).toBe('rgba(255, 255, 255, 0.12)');
-      expect(k.fontFamily).not.toContain('Bebas');
-    }
   });
 });
 
