@@ -18,8 +18,9 @@ pub const STDERR_TAIL: usize = 2048;
 /// The most of stdout a run keeps; an answer is far shorter.
 const STDOUT_MAX: usize = 4 << 20;
 
-/// What an agent's run printed.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// What an agent's run printed. Its `Debug` shows the exit code and the lengths only: what was printed may hold the
+/// dictated text.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Output {
     /// The exit code; `None` when the process ended without one.
     pub status: Option<i32>,
@@ -27,6 +28,16 @@ pub struct Output {
     /// The last [`STDERR_TAIL`] bytes of stderr, for classifying a failure only; never logged (it may quote the
     /// text).
     pub stderr_tail: String,
+}
+
+impl std::fmt::Debug for Output {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Output")
+            .field("status", &self.status)
+            .field("stdout_len", &self.stdout.len())
+            .field("stderr_tail_len", &self.stderr_tail.len())
+            .finish()
+    }
 }
 
 /// Runs `exe` with `args` in `cwd`, writes `stdin` to it and closes it, and waits at most `timeout`.
@@ -432,5 +443,14 @@ mod tests {
         err.extend_from_slice(b"END");
         let kept = read_tail(&err[..]);
         assert!(kept.ends_with(b"END") && kept.len() >= STDERR_TAIL);
+    }
+
+    /// A run's output may quote the dictation: its `Debug` holds the exit code and lengths, never the text.
+    #[test]
+    fn debug_shows_no_text() {
+        let out = Output { status: Some(1), stdout: "созвон в десять".into(), stderr_tail: "secret line".into() };
+        let shown = format!("{out:?} {out:#?}");
+        assert!(!shown.contains("созвон") && !shown.contains("secret"), "{shown}");
+        assert!(shown.contains("stdout_len: 28") && shown.contains("Some(1)"), "{shown}");
     }
 }

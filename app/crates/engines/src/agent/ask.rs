@@ -112,11 +112,19 @@ struct Source {
     title: String,
 }
 
-/// The JSON object of a reply, without a code fence around it.
+/// The JSON object of a reply, without a code fence around it: one over several lines (its language tag on the first),
+/// or one on a single line (```` ```{"answer": …}``` ````, a `json` tag before the object taken off too).
 fn unfenced(text: &str) -> &str {
     let t = text.trim();
     let Some(rest) = t.strip_prefix("```") else { return t };
-    let body = rest.split_once('\n').map_or("", |(_, b)| b);
+    let body = match rest.split_once('\n') {
+        Some((_, b)) => b,
+        None => {
+            let line = rest.trim();
+            let tagless = line.strip_prefix("json").map(str::trim_start).filter(|b| b.starts_with('{'));
+            tagless.unwrap_or(line)
+        }
+    };
     body.trim_end().strip_suffix("```").unwrap_or(body).trim()
 }
 
@@ -307,6 +315,12 @@ mod tests {
         let mut none = |_| {};
         let fenced = "```json\n{\"answer\":\"Да.\",\"write\":false,\"replace\":false,\"sources\":[]}\n```";
         assert_eq!(finish(fenced, 0, &mut none).text, "Да.");
+        // A fence closed on the same line, with or without a tag.
+        for one_line in ["```{\"answer\":\"Да.\"}```", "```json {\"answer\":\"Да.\"}```", "  ```{\"answer\":\"Да.\"}```  "] {
+            let r = finish(one_line, 0, &mut none);
+            assert_eq!((r.end, r.text.as_str()), (AskEnd::Answer, "Да."), "{one_line}");
+        }
+        assert_eq!(unfenced("```{\"answer\":\"Да.\"}```"), "{\"answer\":\"Да.\"}");
         let plain = finish("Просто ответ.", 0, &mut none);
         assert_eq!((plain.end, plain.text.as_str()), (AskEnd::Answer, "Просто ответ."));
         assert_eq!(finish("{\"answer\": \"обрыв", 0, &mut none).end, AskEnd::Failed(AskFailure::Failed("answer")));

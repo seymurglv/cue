@@ -24,14 +24,12 @@ run"). The answer fixtures of 08.11 are built from each CLI's documented output 
 | --- | --- |
 | `codex-expired.stdout`, `.stderr` | real: `codex exec` with CUE's flags, the owner's expired sign-in (exit 1, about 3–11 s) |
 | `codex-signed-out.stdout`, `.stderr` | real: the same in a throwaway profile (`CODEX_HOME` = an empty temp folder), never signed in (exit 1 after 15 s of retries) |
-| `grok-signed-out.stdout`, `.stderr` | real: `grok -p` with CUE's flags, signed out (the owner's profile and a throwaway `GROK_HOME` print the same; exit 1, under 2 s) |
 | `codex-answer.jsonl` | constructed: `codex exec --json` events (`thread.started`, `turn.started`, `item.completed` with an `agent_message`, `turn.completed`), the event and field names checked in codex.exe 0.166.0 |
 | `codex-ran-command.jsonl` | constructed: the same with a `command_execution` item, which `codex_text` must refuse |
 | `codex-cleanup.jsonl` | real (09.11.2026, signed in): a cleanup with CUE's flags, gpt-6-luna |
 | `codex-probe-list.jsonl`, `codex-probe-read.jsonl`, `codex-probe-write.jsonl` | real (09.11.2026, signed in): the stripping probes below |
 | `codex-ask-search.jsonl` | real (09.11.2026, signed in): an "Ask" question with live search and the code-mode host on; thread id zeroed |
-| `grok-cleanup.json`, `grok-command-dictation.json`, `grok-max-turns.json` (+ `.stderr`), `grok-probe-read.json`, `grok-probe-write.json` | real (09.11.2026, signed in): see "Grok: signed-in run" |
-| `grok-answer.json` | constructed: `--output-format json`'s object as Grok's own headless guide (`~/.grok/docs/user-guide/14-headless-mode.md`) documents it: `{"text", "stopReason", "sessionId", "requestId"}` |
+| `grok-*` (removed) | Grok's fixtures (signed out, the signed-in runs below, the constructed answer) went with Grok's code once Grok was not offered (fix round after the no-keys review, 09.11.2026); they are in the history of the `no-keys` branch, before that round. The sections on Grok below stay as the record. |
 
 ## Codex: CUE's flags
 
@@ -137,8 +135,8 @@ Stripping probes (the Codex prompts, the pipe, grok-4.7-build-fast, with and wit
 read (the canary `CANARY-7Q4 first line` is in no answer), none was written (no `made.txt`), no command ran. The only
 tool the model has is `todo_write`; without `--max-turns 1` it called it again and again (up to 13 turns, 29 s) before
 saying it could not. Once, without CUE's instructions, it made up a "first line" (`CANARY-codexprobe2-7f3a9c`) for a file
-it never read. `grok_text` now takes the text only when `stopReason` is `end_turn`, and reads the object printed over
-several lines (`grok_text_reads_real_signed_in_runs`).
+it never read. `grok_text` (removed with the route) took the text only when `stopReason` was `end_turn`, and read the
+object printed over several lines.
 
 **Grok keeps every dictation on disk.** Each headless run is a saved session: `~/.grok/sessions/<working folder,
 URL-encoded>/<session id>/` (`chat_history.jsonl`, `updates.jsonl`, `events.jsonl`, `summary.json`, … about 16 files,
@@ -173,10 +171,22 @@ chose OpenCode and Codex only**, for speed; the route was reverted and Grok is n
 - Grok: `{"type":"error","message":"Not signed in. To authenticate without a browser, run: grok login --device-code …"}`
   on stdout and `Error: Not signed in. …` on stderr. Exit 1, under 2 s, no browser opened.
 
+## Out of allowance, as Codex says it
+
+Not seen live (the owner's account never hit it). codex-cli 0.166.0's binary (`codex.exe`, npm package
+`@openai/codex-win32-x64`) holds the words it uses: "Usage limit reached. You've reached your usage limit. Increase your
+limits to continue using codex.", "Your workspace is out of credits. Add credits to continue using Codex." and "rate
+limit exceeded". `cli::rate_limited` looks for "usage limit", "rate limit", "out of credits" and "too many requests" in
+a failed run's error events and stderr only (never the answer), and the Drop says "Codex не ответил".
+
 ## Models
 
 - Codex (`codex debug models`, visibility "list"): gpt-6-luna (GPT-6-Luna), gpt-6-sol, gpt-6-astra, gpt-6.1-sol,
-  gpt-6.1-terra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5.
+  gpt-6.1-terra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5. This list is the account's: on 09.11.2026 the
+  owner's `%USERPROFILE%\.codex\models_cache.json` (Codex's own cache, `{"models": [{"slug", "display_name",
+  "visibility", "priority", …}]}`, client_version 0.166.0) listed only gpt-6-luna, gpt-5.6-terra and gpt-5.6-luna (with
+  gpt-reserve and codex-auto-review hidden). CUE reads that file for Codex's list (`agents::codex_models`), and the list
+  above only when it cannot.
 - Grok (`grok models`, signed in 09.11.2026): grok-4.7 (default), grok-4.7-build-fast, grok-4.6, grok-4.5.
 
 ## OpenCode: endpoints (read from source; OpenCode is not installed here)

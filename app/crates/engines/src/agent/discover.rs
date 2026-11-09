@@ -208,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn discover_order_is_opencode_codex_grok() {
+    fn discover_order_is_opencode_then_codex() {
         let base = temp_dir("order");
         let bin = base.join("bin");
         std::fs::create_dir_all(&bin).unwrap();

@@ -1,7 +1,9 @@
 //! A cleanup or a translation through the user's own agent (docs/specs/2026-11-08-no-keys-design.md, "Your AI"): the
 //! system text CUE gives every model (`prompt::system_text`), the transcript and context in the user message, and the
-//! answer, `{"text": …}`, through the same checks (`drop_copied_context`, `settle`). Never "fails": on any problem the raw text comes back,
-//! with `RawAgent` when the user has to act (the agent is missing or signed out) or it did not answer in time.
+//! answer, `{"text": …}`, through the same checks (`drop_copied_context`, `settle`). Never "fails": on any problem the
+//! raw text comes back, with `RawAgent` when the user has to act (the agent is missing or signed out) or the agent did
+//! not answer (no answer in time, a rate limit, an error of its own), and `RawFallback` when an answer came but failed a
+//! check.
 use std::time::Duration;
 
 use cue_core::agents::AgentId;
@@ -13,7 +15,7 @@ use cue_core::translate;
 use super::{AgentClient, AgentFailure, Prompt};
 use crate::prompt::{self, Job, Parsed, RefineResult, Usage, parse_content};
 
-/// What an agent's request may take before its words: Codex and Grok start a process each; OpenCode's server answers
+/// What an agent's request may take before its words: Codex starts a process each time; OpenCode's server answers
 /// a 165-word cleanup in 5.7–7.5 s (Claude Haiku 5.5 through OpenCode 2.2.5, 09.11.2026), past the cleanup's own
 /// 4 s.
 pub const AGENT_BASE_MS: u64 = 10_000;
@@ -136,16 +138,23 @@ fn held_to_schema(c: &AgentClient) -> bool {
     !matches!(c, AgentClient::OpenCode(_))
 }
 
-/// An agent's failure as the flow takes it, and its word for the log.
+/// An agent's failure as the flow takes it, and its word for the log. Every failure of a request that reached the agent
+/// or tried to (it exited with an error, gave no answer, refused its working folder, the server or its provider
+/// refused) is the agent's "did not answer", so the Drop says what failed; only a request the user cancelled is plain
+/// raw text. `RawFallback` is left to the checks of an answer that came (`settle`, the lead-in).
 fn outcome_of(f: AgentFailure) -> (RefineOutcome, &'static str) {
     match f {
         AgentFailure::NotInstalled => (RefineOutcome::RawAgent(AgentProblem::Missing), "not installed"),
         AgentFailure::SignedOut => (RefineOutcome::RawAgent(AgentProblem::SignedOut), "signed out"),
         AgentFailure::Timeout => (RefineOutcome::RawAgent(AgentProblem::Silent), "timeout"),
         AgentFailure::RateLimited => (RefineOutcome::RawAgent(AgentProblem::Silent), "rate limit"),
-        AgentFailure::Failed(why) => (RefineOutcome::RawFallback, why),
+        AgentFailure::Failed(why @ CANCELLED) => (RefineOutcome::RawFallback, why),
+        AgentFailure::Failed(why) => (RefineOutcome::RawAgent(AgentProblem::Silent), why),
     }
 }
+
+/// The reason of a run the user cancelled (`process::run_until`).
+const CANCELLED: &str = "cancelled";
 
 /// The request for `c`. OpenCode gets CUE's system text (`prompt::system_text`) and
 /// [`KEEP_EVERY_SENTENCE`] as its system prompt. Codex reads its system text from a file, so only CUE's fixed text goes
@@ -430,6 +439,41 @@ mod tests {
         assert_eq!(outcome_of(AgentFailure::SignedOut).0, RefineOutcome::RawAgent(AgentProblem::SignedOut));
         assert_eq!(outcome_of(AgentFailure::Timeout).0, RefineOutcome::RawAgent(AgentProblem::Silent));
         assert_eq!(outcome_of(AgentFailure::RateLimited), (RefineOutcome::RawAgent(AgentProblem::Silent), "rate limit"));
-        assert_eq!(outcome_of(AgentFailure::Failed("no answer")), (RefineOutcome::RawFallback, "no answer"));
+        // Whatever failed on the way to the agent or in it: the agent's word on the Drop.
+        for why in ["no answer", "exit", "cwd", "serve", "connect", "auth", "api", "model", "join", "files", "start"] {
+            assert_eq!(outcome_of(AgentFailure::Failed(why)), (RefineOutcome::RawAgent(AgentProblem::Silent), why));
+        }
+        // Only a request the user cancelled is plain raw text.
+        assert_eq!(outcome_of(AgentFailure::Failed("cancelled")), (RefineOutcome::RawFallback, "cancelled"));
+    }
+
+    /// A Codex run that exits with an error and no message CUE knows: "Codex не ответил", never a silent raw paste.
+    #[test]
+    fn a_codex_that_fails_says_it_did_not_answer() {
+        let r = failed(AgentId::Codex, "ну эм привет", AgentFailure::Failed("exit"));
+        assert_eq!((r.text.as_str(), r.outcome), ("ну эм привет", RefineOutcome::RawAgent(AgentProblem::Silent)));
+    }
+
+    /// OpenCode's own folder is not empty, so CUE starts no server of its own: the agent did not answer, said on the Drop.
+    #[test]
+    fn opencode_folder_refused_is_silent() {
+        let home = std::env::temp_dir().join(format!("cue-refine-cwd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("opencode")).unwrap();
+        std::fs::write(home.join("opencode").join("AGENTS.md"), "orders").unwrap();
+        let f = crate::agent::opencode::server_cwd(&home).unwrap_err();
+        let r = failed(AgentId::OpenCode, "привет", f);
+        assert_eq!(r.outcome, RefineOutcome::RawAgent(AgentProblem::Silent));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// OpenCode's server refuses (its model is gone, an error of its own): the agent did not answer.
+    #[tokio::test]
+    async fn opencode_server_error_is_silent() {
+        let (_api, c) = opencode_answering(500, r#"{"name":"UnknownError","data":{"message":"boom"}}"#.to_string()).await;
+        let raw = "ну эм завтра в десять созвон с командой";
+        let s = RefineSettings::default();
+        let r = refine(&c, "", raw, &RefineContext::default(), &Default::default(), &s, "", false).await;
+        assert_eq!((r.text.as_str(), r.outcome), (raw, RefineOutcome::RawAgent(AgentProblem::Silent)));
     }
 }

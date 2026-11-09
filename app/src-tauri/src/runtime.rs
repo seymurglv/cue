@@ -2117,8 +2117,8 @@ impl Runtime {
                         Route::Waking(slot) => slot.wait(llm::LOAD_WAIT).await,
                         Route::NotReady => None,
                     };
-                    // Task 10: a model that only cleans (`llm::cleans_only`) ends here with "Ask: needs a model that
-                    // answers" (`NeedAnsweringModel`) instead of being asked.
+                    // The new model catalog (postponed: docs/notes/no-keys.md) marks models that only clean: such a
+                    // model is to end here with "Ask: needs a model that answers" instead of being asked.
                     match here {
                         Some(g) => agent::ask::run(agent::ask::AskRoute::Local(g), "", search, &turns, limits, on_step).await,
                         None => engine_ask::AskResult::failed(engine_ask::AskFailure::Failed("local model not ready")),

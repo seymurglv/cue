@@ -8,7 +8,7 @@
 //! go of it.
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Mutex, PoisonError, TryLockError, Weak};
 use std::time::Duration;
 
 use cue_core::agents::AgentId;
@@ -113,10 +113,16 @@ impl OpenCodeSlot {
     }
 
     /// A server already running, never one started for it: the one in use while it runs, else the one the user runs
-    /// (held from then on, and never stopped by CUE). None when neither runs. For the Cleanup page's list of OpenCode's
-    /// models; it finds by OpenCode's state file only, so it is quick (call it off the core's thread all the same).
+    /// (held from then on, and never stopped by CUE). None when neither runs, and None at once while a dictation starts
+    /// one: the page never waits for that start. For the Cleanup page's list of OpenCode's models and the Instructions
+    /// page's sample; it finds by OpenCode's state file only, so it is quick (call it off the core's thread all the
+    /// same).
     pub fn running(&self) -> Option<Arc<Server>> {
-        let _one = lock(&self.starting);
+        let _one = match self.starting.try_lock() {
+            Ok(one) => one,
+            Err(TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(TryLockError::WouldBlock) => return None,
+        };
         let held = lock(&self.held).clone();
         if let Some(s) = held {
             if s.alive() {
@@ -389,6 +395,40 @@ mod tests {
         s.halt();
         assert!(slot.running().is_none(), "a server that died is not started again");
         assert_eq!(starts.load(Ordering::SeqCst), 1);
+        slot.rest();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// While a dictation starts the server, the page's look gets none at once instead of waiting out the start; once
+    /// the start is done it gets that server.
+    #[test]
+    fn running_does_not_wait_for_a_start() {
+        let cwd = temp_dir("running-start");
+        let started = Arc::new(AtomicUsize::new(0));
+        let (seen, dir) = (started.clone(), cwd.clone());
+        let slot = OpenCodeSlot::with(
+            Box::new(|| None),
+            Box::new(move || {
+                seen.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(1_500));
+                Ok(owned(&dir))
+            }),
+            Duration::from_secs(60),
+        );
+        let starting = {
+            let slot = slot.clone();
+            std::thread::spawn(move || slot.get_or_start())
+        };
+        let start = std::time::Instant::now();
+        while started.load(Ordering::SeqCst) == 0 {
+            assert!(start.elapsed() < Duration::from_secs(10), "the start did not begin");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let asked = std::time::Instant::now();
+        assert!(slot.running().is_none());
+        assert!(asked.elapsed() < Duration::from_millis(500), "waited for the start: {:?}", asked.elapsed());
+        let s = starting.join().unwrap().unwrap();
+        assert!(Arc::ptr_eq(&slot.running().unwrap(), &s));
         slot.rest();
         let _ = std::fs::remove_dir_all(&cwd);
     }

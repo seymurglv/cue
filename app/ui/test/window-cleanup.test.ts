@@ -248,6 +248,25 @@ describe('The Cleanup page: No AI, This computer or Your AI on top', () => {
     expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'refineAgentModel', value: { agent: 'opencode', model: '' } });
   });
 
+  it('a Codex pick the account no longer lists shows Codex’s default, the model asked', async () => {
+    stub(view({ refineAgent: 'codex', refineAgentModel: { codex: 'gpt-6-sol' } }));
+    const account = [
+      { id: 'gpt-6-luna', name: 'GPT-6-Luna' },
+      { id: 'gpt-5.6-terra', name: 'GPT-5.6-Terra' },
+    ];
+    core.agentsGet.mockResolvedValue(both({ codex: { models: account, model: 'gpt-6-luna' } }));
+    page = await mount();
+    await open();
+    expect(text(value())).toBe('Codex · GPT-6-Luna');
+    click($('.btray [data-sub="cleanup"]'));
+    await settle();
+    const dd = $<HTMLElement>('.btray [data-dd="amodel"]')!;
+    expect(text(dd.querySelector('.ddv'))).toBe('GPT-6-Luna');
+    click(dd);
+    expect(menuItems().map((b) => text(b.querySelector('.mlb')))).toEqual(['GPT-6-Luna', 'GPT-5.6-Terra']);
+    expect(menuItems()[0].getAttribute('aria-checked')).toBe('true');
+  });
+
   it('Enter in the filter takes the first model left; Esc closes the list', async () => {
     stub(view({ refineAgent: 'opencode' }));
     core.agentsGet.mockResolvedValue(both());

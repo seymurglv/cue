@@ -8,8 +8,9 @@
 //!   tell, is marked from the run itself (`cli::signed_out`). A mark held answers the next dictation at once.
 //! - OpenCode's server is found or started off the core's thread; the dictation waits for it within its own budget.
 //! - The Cleanup page looks at the agents again (`Agents::look`): the marks go, each agent is looked for, Codex is asked
-//!   about its sign-in, and OpenCode lists its models when it cleans and a server of its already runs (none is started
-//!   for the page).
+//!   about its sign-in and its models are read from its own list of the account's (`agents::codex_models`), and
+//!   OpenCode lists its models when it cleans and a server of its already runs (none is started for the page).
+//! - Codex is asked for the model the user picked while its list still holds it, else for its default.
 //! - The log gets the agent and a reason, never a text.
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -140,6 +141,15 @@ impl AgentView {
 type Finder = Box<dyn Fn(AgentId) -> Option<PathBuf> + Send + Sync>;
 /// Whether an OpenCode server announces itself (`opencode::running`): OpenCode counts as installed by it alone.
 type Announced = Box<dyn Fn() -> bool + Send + Sync>;
+/// Codex's models for the user's account, the default first (`agents::codex_models`).
+type CodexModels = Box<dyn Fn() -> Vec<(String, String)> + Send + Sync>;
+
+/// `listed` as the page shows it, with the model asked when none is picked (the first).
+fn listed_view(listed: &[(String, String)]) -> (Vec<AgentModel>, String) {
+    let models: Vec<AgentModel> = listed.iter().map(|(id, name)| AgentModel { id: id.clone(), name: name.clone() }).collect();
+    let default = cue_core::agents::listed_or_default(listed, None).to_owned();
+    (models, default)
+}
 
 /// The user's agents as the dictation path uses them.
 pub struct Agents {
@@ -149,13 +159,14 @@ pub struct Agents {
     /// Where an agent's program is (`discover::program`).
     find: Finder,
     announced: Announced,
+    codex_models: CodexModels,
     pub marks: AgentMarks,
     /// When each agent run once per request (Codex) was last asked: its first request after CUE starts, or after
     /// [`REST_AFTER`] without one, gets the start allowance.
     used: Mutex<HashMap<AgentId, Instant>>,
     /// OpenCode's "Быстрая · авто" for the server in use, picked once from the models it lists.
     auto: Mutex<Option<(Weak<Server>, String)>>,
-    /// Tests only: a shorter budget than an agent's.
+    /// Tests only: a shorter budget than an agent's, and a shorter wait for OpenCode's list than [`LIST_WAIT`].
     budget: Option<Duration>,
 }
 
@@ -166,15 +177,31 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl Agents {
     pub fn new(home: PathBuf, opencode: Arc<OpenCodeSlot>) -> Arc<Self> {
         let announced: Announced = Box::new(|| engine_opencode::state_dir().and_then(|s| engine_opencode::running(&s)).is_some());
-        Self::with(home, opencode, Box::new(agent::discover::program), announced, None)
+        let codex: CodexModels = Box::new(cue_core::agents::codex_models);
+        Self::build(home, opencode, Box::new(agent::discover::program), announced, codex, None)
     }
 
+    /// Tests: Codex's models are CUE's fixed list (no file of the user's is read).
+    #[cfg(test)]
     fn with(home: PathBuf, opencode: Arc<OpenCodeSlot>, find: Finder, announced: Announced, budget: Option<Duration>) -> Arc<Self> {
+        let codex: CodexModels = Box::new(|| cue_core::agents::codex_models_at(None));
+        Self::build(home, opencode, find, announced, codex, budget)
+    }
+
+    fn build(
+        home: PathBuf,
+        opencode: Arc<OpenCodeSlot>,
+        find: Finder,
+        announced: Announced,
+        codex_models: CodexModels,
+        budget: Option<Duration>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             home,
             opencode,
             find,
             announced,
+            codex_models,
             marks: AgentMarks::default(),
             used: Mutex::new(HashMap::new()),
             auto: Mutex::new(None),
@@ -341,15 +368,25 @@ impl Agents {
                 }
                 Ok(AgentClient::Cli { found, home: self.home.clone() })
             }
-            // Grok is offered only through its named pipe, which comes later.
             AgentId::Grok => Err(AgentFailure::Failed("not offered")),
         }
     }
 
-    /// The model the request asks for: the one the user picked; else Codex's default; else OpenCode's "Быстрая ·
-    /// авто", the first of its models whose name marks a small fast one (asked once per server, by `deadline`), else
-    /// OpenCode's own default (empty). OpenCode's model goes in the request's JSON body, never on a command line.
+    /// The model the request asks for. Codex: the one the user picked while Codex's list of the account's models still
+    /// holds it, else the first it lists (its default; a pick no longer listed falls back with no error). OpenCode: the
+    /// one the user picked; else its "Быстрая · авто", the first of its models whose name marks a small fast one
+    /// (asked once per server, by `deadline`), else OpenCode's own default (empty). OpenCode's model goes in the
+    /// request's JSON body, never on a command line.
     async fn model(&self, c: &AgentClient, s: &RefineSettings, deadline: tokio::time::Instant) -> String {
+        if c.id() == AgentId::Codex {
+            let listed = (self.codex_models)();
+            let saved = s.models.get(AgentId::Codex.id()).map(String::as_str);
+            let m = cue_core::agents::listed_or_default(&listed, saved);
+            if saved.is_some_and(|saved| saved != m) {
+                tracing::info!(agent = "codex", "agent: the model picked is no longer listed, Codex's default is asked");
+            }
+            return m.to_owned();
+        }
         if let Some(m) = s.agent_model(c.id()) {
             return m.to_owned();
         }
@@ -375,15 +412,16 @@ impl Agents {
         let expired = self.marks.held(AgentId::Codex) == Some(Mark::Expired);
         self.marks.clear();
         let me = self.clone();
-        let present = tokio::task::spawn_blocking(move || {
-            ORDER
+        let (present, codex) = tokio::task::spawn_blocking(move || {
+            let present = ORDER
                 .iter()
                 .map(|&id| {
                     let exe = (me.find)(id);
                     let found = exe.is_some() || (id == AgentId::OpenCode && (me.announced)());
                     (id, exe, found)
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (present, (me.codex_models)())
         })
         .await
         .unwrap_or_default();
@@ -398,11 +436,16 @@ impl Agents {
                             Some(false)
                         }
                         _ if expired => Some(false),
-                        Ok(Login::SignedIn) => Some(true),
+                        Ok(Login::SignedIn) => {
+                            // As a dictation's check would: the next one does not ask `codex login status` again.
+                            self.marks.set(id, Mark::Checked);
+                            Some(true)
+                        }
                         _ => None,
                     };
-                    AgentView::of(id, found, signed_in, None)
+                    AgentView::of(id, found, signed_in, Some(listed_view(&codex)))
                 }
+                (AgentId::Codex, None) => AgentView::of(id, found, None, Some(listed_view(&codex))),
                 (AgentId::OpenCode, _) if found && opencode_models => AgentView::of(id, true, None, Some(self.opencode_models().await)),
                 (AgentId::OpenCode, _) => AgentView::of(id, found, None, Some((Vec::new(), String::new()))),
                 _ => AgentView::of(id, found, None, None),
@@ -420,11 +463,13 @@ impl Agents {
     /// keeps it.
     async fn opencode_models(&self) -> (Vec<AgentModel>, String) {
         let slot = self.opencode.clone();
-        let Ok(Some(server)) = tokio::task::spawn_blocking(move || slot.running()).await else {
-            tracing::info!("agents: OpenCode's models not listed (no server running)");
+        let wait = self.budget.unwrap_or(LIST_WAIT);
+        // Finding the user's server is quick, but it is bounded too: the page never hangs on it.
+        let Ok(Ok(Some(server))) = tokio::time::timeout(wait, tokio::task::spawn_blocking(move || slot.running())).await else {
+            tracing::info!("agents: OpenCode's models not listed (no server running, or one starting)");
             return (Vec::new(), String::new());
         };
-        let Ok(Ok(models)) = tokio::time::timeout(LIST_WAIT, server.models()).await else {
+        let Ok(Ok(models)) = tokio::time::timeout(wait, server.models()).await else {
             tracing::info!("agents: OpenCode's models not listed");
             return (Vec::new(), String::new());
         };
@@ -468,7 +513,8 @@ pub async fn or_local(
         tracing::info!("cleanup: the local fallback's model is not loaded, the text goes in as said");
         return agent;
     };
-    // Task 10: a model that only cleans (`cleans_only`) is no fallback for a translation; skip it here.
+    // The new model catalog (postponed: docs/notes/no-keys.md) marks models that only clean: such a model is no
+    // fallback for a translation and is to be skipped here.
     let here = match job {
         Job::Clean | Job::Rewrite => local::refine(g, raw, ctx, dict, s, instructions).await,
         Job::Translate(to) => local::translate(g, raw, ctx, dict, s, instructions, to).await,
@@ -573,6 +619,7 @@ mod tests {
         assert_eq!(codex.models.len(), AgentId::Codex.models().len());
         assert_eq!((codex.models[0].id.as_str(), codex.models[0].name.as_str()), ("gpt-6-luna", "GPT-6 Luna"));
         assert_eq!(a.marks.problem(AgentId::Codex), None, "the old marks went");
+        assert!(a.marks.checked(AgentId::Codex), "signed in, as `login status` said");
         assert_eq!(a.marks.problem(AgentId::OpenCode), None);
         assert_eq!(runs(&dir), 0, "only its sign-in was asked");
         let json = serde_json::to_value(&views[1]).unwrap();
@@ -611,6 +658,125 @@ mod tests {
         shim(&dir, "Logged in using ChatGPT", 0, "exit /b 0");
         assert_eq!(a.clone().look(false).await[1].signed_in, Some(true));
         assert_eq!(a.marks.problem(AgentId::Codex), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A look that hears Codex is signed in keeps that, as a dictation's check does: the next dictation goes to Codex
+    /// without asking `codex login status` again.
+    #[tokio::test]
+    async fn a_look_that_finds_codex_signed_in_spares_the_next_check() {
+        let dir = temp_dir("look-checked");
+        let out = dir.join("out.jsonl");
+        let answer = serde_json::json!({"type": "item.completed", "item": {"id": "0", "type": "agent_message", "text": "{\"text\": \"Завтра в десять созвон.\"}"}});
+        std::fs::write(&out, format!("{answer}\n")).unwrap();
+        let exe = shim(&dir, "Logged in using ChatGPT", 0, &format!("type \"{}\"", out.display()));
+        let a = codex_only(&dir, exe);
+        assert_eq!(a.clone().look(false).await[1].signed_in, Some(true));
+        assert!(a.marks.checked(AgentId::Codex));
+        // Were `login status` asked again, it would now say signed out and the dictation would not reach Codex.
+        shim(&dir, "Not logged in", 1, &format!("type \"{}\"", out.display()));
+        let r = clean(&a).await;
+        assert_eq!((r.text.as_str(), r.outcome), ("Завтра в десять созвон.", RefineOutcome::Refined));
+        assert_eq!(runs(&dir), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Codex shim that writes its arguments to `args.txt` and answers with a cleanup.
+    fn codex_recording_args(dir: &Path) -> PathBuf {
+        let out = dir.join("out.jsonl");
+        let answer = serde_json::json!({"type": "item.completed", "item": {"id": "0", "type": "agent_message", "text": "{\"text\": \"Завтра в десять созвон.\"}"}});
+        std::fs::write(&out, format!("{answer}\n")).unwrap();
+        shim(dir, "Logged in using ChatGPT", 0, &format!("echo %*> \"{}\"\r\ntype \"{}\"", dir.join("args.txt").display(), out.display()))
+    }
+
+    /// Codex's models are the account's, read from Codex's own list (a temporary `models_cache.json` here): the page
+    /// shows them with Codex's default first, a dictation asks for the pick while the list holds it, and a pick the list
+    /// no longer holds falls back to the default without an error.
+    #[tokio::test]
+    async fn codex_models_come_from_its_own_list() {
+        let dir = temp_dir("codex-models");
+        let cache = dir.join("models_cache.json");
+        std::fs::write(
+            &cache,
+            r#"{"models":[{"slug":"gpt-reserve","display_name":"GPT-Reserve","visibility":"hide","priority":1},
+            {"slug":"gpt-5.6-terra","display_name":"GPT-5.6-Terra","visibility":"list","priority":3},
+            {"slug":"gpt-6-luna","display_name":"GPT-6-Luna","visibility":"list","priority":2}]}"#,
+        )
+        .unwrap();
+        let exe = codex_recording_args(&dir);
+        let slot = OpenCodeSlot::new(dir.join("agent"));
+        let find: Finder = Box::new(move |id| (id == AgentId::Codex).then(|| exe.clone()));
+        let file = cache.clone();
+        let codex: CodexModels = Box::new(move || cue_core::agents::codex_models_at(Some(&file)));
+        let a = Agents::build(dir.join("agent"), slot, find, Box::new(|| false), codex, None);
+        let views = a.clone().look(false).await;
+        let ids: Vec<&str> = views[1].models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["gpt-6-luna", "gpt-5.6-terra"]);
+        assert_eq!((views[1].model.as_str(), views[1].models[0].name.as_str()), ("gpt-6-luna", "GPT-6-Luna"));
+        let args = dir.join("args.txt");
+        let asked = |a: Arc<Agents>, pick: Option<&'static str>| {
+            let args = args.clone();
+            async move {
+                let mut s = RefineSettings::default();
+                if let Some(m) = pick {
+                    s.models.insert("codex".into(), m.into());
+                }
+                let r = a.refine(AgentId::Codex, RAW, &RefineContext::default(), &Default::default(), &s, "", Job::Clean).await;
+                assert_eq!(r.outcome, RefineOutcome::Refined, "{pick:?}");
+                std::fs::read_to_string(&args).unwrap()
+            }
+        };
+        assert!(asked(a.clone(), Some("gpt-5.6-terra")).await.contains("-m gpt-5.6-terra "), "the pick, still listed");
+        assert!(asked(a.clone(), Some("gpt-6-sol")).await.contains("-m gpt-6-luna "), "a pick no longer listed");
+        assert!(asked(a.clone(), None).await.contains("-m gpt-6-luna "), "no pick: Codex's default");
+        // Without its list, CUE's fixed one.
+        std::fs::remove_file(&cache).unwrap();
+        let views = a.clone().look(false).await;
+        assert_eq!(views[1].models.len(), AgentId::Codex.models().len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Codex says the account is out of its allowance: "Codex не ответил" on the Drop (the agent did not answer), and
+    /// no sign-in mark.
+    #[tokio::test]
+    async fn a_codex_usage_limit_says_it_did_not_answer() {
+        let dir = temp_dir("usage-limit");
+        let out = dir.join("out.jsonl");
+        std::fs::write(
+            &out,
+            "{\"type\":\"error\",\"message\":\"You've reached your usage limit. Increase your limits to continue using codex.\"}\n\
+             {\"type\":\"turn.failed\",\"error\":{\"message\":\"Usage limit reached.\"}}\n",
+        )
+        .unwrap();
+        let exe = shim(&dir, "Logged in using ChatGPT", 0, &format!("type \"{}\"\r\nexit /b 1", out.display()));
+        let a = agents(&dir, Some(exe), None);
+        let r = clean(&a).await;
+        assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawAgent(AgentProblem::Silent)));
+        assert_eq!(a.marks.problem(AgentId::Codex), None, "not a sign-in problem");
+        // A run that fails with nothing CUE knows says the same.
+        let exe = shim(&dir, "Logged in using ChatGPT", 0, "exit /b 3");
+        let a = agents(&dir, Some(exe), None);
+        assert_eq!(clean(&a).await.outcome, RefineOutcome::RawAgent(AgentProblem::Silent));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A server start in progress never holds up the page: OpenCode's list is skipped within the wait.
+    #[tokio::test]
+    async fn the_page_does_not_wait_for_a_slow_opencode_lookup() {
+        let dir = temp_dir("look-slow");
+        let slot = OpenCodeSlot::with(
+            Box::new(|| {
+                std::thread::sleep(Duration::from_secs(3));
+                None
+            }),
+            Box::new(|| Err(AgentFailure::NotInstalled)),
+            REST_AFTER,
+        );
+        let a = Agents::with(dir.join("agent"), slot, Box::new(|_| None), Box::new(|| true), Some(Duration::from_millis(200)));
+        let start = Instant::now();
+        let views = a.look(true).await;
+        assert!(start.elapsed() < Duration::from_millis(2_000), "{:?}", start.elapsed());
+        assert!(views[0].found && views[0].models.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -948,6 +1114,17 @@ mod tests {
         let mut s = RefineSettings { where_: Where::Off, ..unset() };
         assert!(!resolve_agent(&mut s, &[AgentId::OpenCode], true));
         assert_eq!((s.where_, s.agent), (Where::Off, None));
+    }
+
+    /// A settings file that names Grok (built, then not offered) starts like one that names no agent: the first agent
+    /// found cleans.
+    #[test]
+    fn a_settings_file_naming_grok_starts_with_the_first_agent_found() {
+        let mut s: RefineSettings = serde_json::from_str(r#"{"where":"agent","agent":"grok"}"#).unwrap();
+        assert_eq!(s.agent, None);
+        assert!(wants_agents(&s));
+        assert!(resolve_agent(&mut s, &[AgentId::Codex], true));
+        assert_eq!((s.where_, s.agent), (Where::Agent, Some(AgentId::Codex)));
     }
 
     /// The user moved the cleanup to "Ваш AI" on the page: the first agent found cleans; with none found it stays on

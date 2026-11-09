@@ -148,14 +148,6 @@ fn run_of_a_missing_program_is_not_installed() {
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
-#[test]
-fn grok_answer_round_trips_through_run() {
-    let cwd = temp_dir("grok");
-    let out = run(Path::new(FAKE), &args(&["echo-grok"]), "{\"text\": \"Hi.\"}", &cwd, Duration::from_secs(20)).unwrap();
-    assert_eq!(cli::grok_text(&out.stdout).as_deref(), Some("{\"text\": \"Hi.\"}"));
-    let _ = std::fs::remove_dir_all(&cwd);
-}
-
 /// One `GET /` to the fake server at `url`; its JSON report.
 fn get_report(url: &str) -> serde_json::Value {
     use std::io::{Read, Write};

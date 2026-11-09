@@ -318,18 +318,25 @@ export class CleanupPage {
     return rows;
   }
 
-  /** The model's name as the row shows it: the one picked, else the agent's default ("Быстрая · авто" for OpenCode). */
+  /** The model's name as the row shows it: the one picked, else the agent's default ("Быстрая · авто" for OpenCode).
+   *  A Codex pick its list no longer holds shows the default, which is the one asked. */
   private modelName(a: AgentView, pick: string): string {
     const named = (id: string) => a.models.find((m) => m.id === id)?.name ?? id;
+    pick = this.inUse(a, pick);
     if (pick) return named(pick);
     return a.id === OPENCODE ? this.ctx.t.cl.auto : named(a.model);
+  }
+
+  /** The pick as it is asked: Codex's list is the account's, so a pick it no longer holds is its default (none). */
+  private inUse(a: AgentView, pick: string): string {
+    return a.id !== OPENCODE && a.models.length && !a.models.some((m) => m.id === pick) ? '' : pick;
   }
 
   /** The agent's models: OpenCode's "Быстрая · авто" first (naming the model it picks), then its own by provider,
    *  with a field over a long list; Codex's as they are. */
   private modelMenu(dd: HTMLElement, a: AgentView, pick: string): void {
     const t = this.ctx.t.cl;
-    const current = pick || (a.id === OPENCODE ? '' : a.model);
+    const current = this.inUse(a, pick) || (a.id === OPENCODE ? '' : a.model);
     const provider = (id: string) => (id.includes('/') ? id.slice(0, id.indexOf('/')) : undefined);
     const models = a.id === OPENCODE ? [...a.models].sort((x, y) => (provider(x.id) ?? '').localeCompare(provider(y.id) ?? '')) : a.models;
     const items: MenuItem[] = models.map((m) => ({ value: m.id, label: m.name, on: m.id === current, group: a.id === OPENCODE ? provider(m.id) : undefined }));

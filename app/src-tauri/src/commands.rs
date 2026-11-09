@@ -315,7 +315,21 @@ pub async fn settings_set(
         tracing::warn!(window = window.label(), "setting change refused");
         return Err(CmdError::NotMain);
     }
+    // Codex's models are the account's: a pick is kept only when Codex's own list holds it (read now, no process).
+    if let SettingChange::RefineAgentModel { agent: AgentId::Codex, model } = &change {
+        let listed = tokio::task::spawn_blocking(cue_core::agents::codex_models).await.unwrap_or_default();
+        if !codex_lists(&listed, model) {
+            tracing::info!("setting change refused: a model Codex does not list");
+            return ask_core(&core, SettingsCmd::Get).await;
+        }
+    }
     ask_core(&core, SettingsCmd::Set(change)).await
+}
+
+/// Whether `model` may be Codex's pick: one of the models `listed`, or none (Codex's default).
+fn codex_lists(listed: &[(String, String)], model: &str) -> bool {
+    let model = model.trim();
+    model.is_empty() || listed.iter().any(|(id, _)| id == model)
 }
 
 async fn ask_core(core: &CoreTx, cmd: SettingsCmd) -> Result<SettingsView, CmdError> {
@@ -737,6 +751,17 @@ mod tests {
     use super::*;
     use cue_core::history::{Entry, Mode};
     use serde_json::json;
+
+    /// A Codex pick the account's list does not hold is refused; none (the default) always goes.
+    #[test]
+    fn a_codex_pick_must_be_listed() {
+        let listed = vec![("gpt-6-luna".to_owned(), "GPT-6-Luna".to_owned()), ("gpt-5.6-terra".to_owned(), "GPT-5.6-Terra".to_owned())];
+        assert!(codex_lists(&listed, "gpt-5.6-terra"));
+        assert!(codex_lists(&listed, " gpt-6-luna "));
+        assert!(codex_lists(&listed, ""));
+        assert!(!codex_lists(&listed, "gpt-6-sol"));
+        assert!(!codex_lists(&[], "gpt-6-luna"));
+    }
 
     /// Every command a window's page calls (`main`'s handler list, but for the Drop's and the card's own).
     const COMMANDS: [&str; 35] = [

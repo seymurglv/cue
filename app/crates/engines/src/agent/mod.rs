@@ -1,11 +1,10 @@
-//! The agent path (docs/specs/2026-11-08-no-keys-design.md, "Your AI"): finding the user's own OpenCode, Codex or
-//! Grok on this computer and running them safely. CUE holds no key: each agent uses the user's own sign-in.
+//! The agent path (docs/specs/2026-11-08-no-keys-design.md, "Your AI"): finding the user's own OpenCode or Codex on
+//! this computer and running them safely. CUE holds no key: each agent uses the user's own sign-in.
 //!
 //! - [`discover`]: which agents are installed, in [`cue_core::agents::ORDER`].
 //! - [`process::run`]: one run of an agent's CLI with no window, the text on stdin, an empty working folder and a
 //!   timeout that ends the whole process tree.
-//! - [`cli`]: the flags that leave Codex and Grok no shell, no file reading and no network tool, and reading their
-//!   answers.
+//! - [`cli`]: the flags that leave Codex no shell, no file reading and no network tool, and reading its answers.
 //! - [`opencode`]: the user's own OpenCode server, or one CUE starts on 127.0.0.1, over loopback HTTP.
 //! - [`AgentClient`]: one answer from either; [`refine`]: a cleanup or a translation through it; [`ask`]: an "Ask"
 //!   question through it, or through the model on this computer.
@@ -55,12 +54,22 @@ pub enum AgentFailure {
 }
 
 /// One request to an agent: CUE's system text, the user message (the transcript and context), and whether Ask may
-/// search the web.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// search the web. Its `Debug` shows the lengths only: the texts hold the dictation and the user's instructions.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Prompt {
     pub system: String,
     pub user: String,
     pub web_search: bool,
+}
+
+impl std::fmt::Debug for Prompt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Prompt")
+            .field("system_len", &self.system.len())
+            .field("user_len", &self.user.len())
+            .field("web_search", &self.web_search)
+            .finish()
+    }
 }
 
 /// A model an agent offers.
@@ -151,7 +160,7 @@ pub fn codex_instructions(home: &Path, text: &str) -> PathBuf {
 #[derive(Clone, Debug)]
 pub enum AgentClient {
     OpenCode(Arc<opencode::Server>),
-    /// Codex (Grok waits for its pipe). `home` is CUE's agent folder (`%LOCALAPPDATA%\CUE\agent`): the agent runs in
+    /// Codex. `home` is CUE's agent folder (`%LOCALAPPDATA%\CUE\agent`): the agent runs in
     /// its [`cwd`] there, and Codex's instructions and schema files are written beside that folder.
     Cli { found: Found, home: PathBuf },
 }
@@ -183,8 +192,7 @@ impl AgentClient {
                     let out = codex(found, home, model, p, timeout, TEXT_SHAPE).await?;
                     cli::codex_text(&out.stdout).filter(|t| !t.trim().is_empty()).ok_or(AgentFailure::Failed("no answer"))?
                 }
-                // grok 1.0.34 reads the prompt only from an argument or a file; its named pipe comes later.
-                AgentId::Grok => return Err(AgentFailure::Failed("grok needs a pipe")),
+                AgentId::Grok => return Err(AgentFailure::Failed("not offered")),
                 AgentId::OpenCode => return Err(AgentFailure::Failed("opencode is a server")),
             },
         };
@@ -210,7 +218,7 @@ impl AgentClient {
                         .filter(|(t, _)| !t.trim().is_empty())
                         .ok_or(AgentFailure::Failed("no answer"))
                 }
-                AgentId::Grok => Err(AgentFailure::Failed("grok needs a pipe")),
+                AgentId::Grok => Err(AgentFailure::Failed("not offered")),
                 AgentId::OpenCode => Err(AgentFailure::Failed("opencode is a server")),
             },
         }
@@ -300,6 +308,9 @@ async fn codex(
     if cli::signed_out(AgentId::Codex, &out) {
         return Err(AgentFailure::SignedOut);
     }
+    if cli::rate_limited(AgentId::Codex, &out) {
+        return Err(AgentFailure::RateLimited);
+    }
     if out.status != Some(0) {
         return Err(AgentFailure::Failed("exit"));
     }
@@ -333,6 +344,15 @@ mod tests {
         d
     }
 
+    /// A request holds the dictation and the user's instructions: its `Debug` holds their lengths, never the text.
+    #[test]
+    fn prompt_debug_shows_no_text() {
+        let p = Prompt { system: "Пиши коротко.".into(), user: "<transcript>созвон</transcript>".into(), web_search: true };
+        let shown = format!("{p:?} {p:#?}");
+        assert!(!shown.contains("коротко") && !shown.contains("созвон") && !shown.contains("transcript"), "{shown}");
+        assert!(shown.contains("system_len: 24") && shown.contains("web_search: true"), "{shown}");
+    }
+
     #[test]
     fn each_agent_works_in_its_own_folder() {
         let home = Path::new(r"C:\U\AppData\Local\CUE\agent");
@@ -341,14 +361,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn grok_is_not_run_without_a_pipe() {
+    async fn grok_is_not_offered() {
         let home = temp_dir("grok");
         // A program that is not there: had it been run, the answer would be `NotInstalled`.
         let found = Found { id: AgentId::Grok, exe: Some(home.join("grok.exe")), version: None };
         let c = AgentClient::Cli { found, home: home.clone() };
         let p = Prompt { system: "Clean.".into(), user: "<transcript>hi</transcript>".into(), web_search: false };
         let r = c.complete("", &p, Duration::from_secs(5), None).await;
-        assert_eq!(r, Err(AgentFailure::Failed("grok needs a pipe")));
+        assert_eq!(r, Err(AgentFailure::Failed("not offered")));
         assert!(!home.exists(), "nothing was written or run for Grok");
     }
 

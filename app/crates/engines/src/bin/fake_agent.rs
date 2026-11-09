@@ -10,7 +10,6 @@
 //!   with `FAKE_AGENT_EXIT`. `FAKE_AGENT_PID` names a file it writes its process id to before it sleeps.
 //! - `login status` (Codex's): prints `FAKE_AGENT_LOGIN` (default "Logged in using ChatGPT") and exits with
 //!   `FAKE_AGENT_LOGIN_EXIT` (default 0).
-//! - `echo-grok`: prints stdin as Grok's answer, in `grok -p --output-format json`'s object.
 //! - `report`: prints what it was given as JSON: its arguments, stdin, working folder, the folder's entry count and
 //!   whether it has a console window.
 //! - `sleep <ms>`: sleeps.
@@ -57,10 +56,6 @@ fn main() {
             let said = std::env::var("FAKE_AGENT_LOGIN").unwrap_or_else(|_| "Logged in using ChatGPT".into());
             println!("{said}");
             std::process::exit(std::env::var("FAKE_AGENT_LOGIN_EXIT").ok().and_then(|v| v.parse().ok()).unwrap_or(0));
-        }
-        "echo-grok" => {
-            let text = stdin();
-            println!("{}", serde_json::json!({"text": text, "stopReason": "end_turn", "sessionId": "0", "requestId": "0"}));
         }
         "report" => {
             let input = stdin();

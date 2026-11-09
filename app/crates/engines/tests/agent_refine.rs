@@ -204,12 +204,22 @@ async fn signed_out_is_raw_agent_signed_out() {
     assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawAgent(AgentProblem::SignedOut)));
 }
 
-/// A run that failed is never read for an answer, even when its last message looks like one.
+/// A run that failed is never read for an answer, even when its last message looks like one; the Drop says the agent
+/// did not answer.
 #[tokio::test]
 async fn a_failed_run_is_not_pasted() {
     let c = codex("exit-1", Answer { stdout: &says(CLEAN), stderr: "panicked at codex.rs", exit: 1, sleep_ms: 0 });
     let r = clean(&c, RAW, &ctx(), &Default::default()).await;
-    assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawFallback));
+    assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawAgent(AgentProblem::Silent)));
+}
+
+/// Codex says the account is out of its allowance (codex-cli 0.166.0's own words): the agent did not answer.
+#[tokio::test]
+async fn a_usage_limit_says_the_agent_did_not_answer() {
+    let said = "{\"type\":\"error\",\"message\":\"You've reached your usage limit. Increase your limits to continue using codex.\"}\n";
+    let c = codex("usage-limit", Answer { stdout: said, stderr: "", exit: 1, sleep_ms: 0 });
+    let r = clean(&c, RAW, &ctx(), &Default::default()).await;
+    assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawAgent(AgentProblem::Silent)));
 }
 
 /// CUE's agent folder under a user name with a space and Cyrillic letters: the paths still reach Codex, through its

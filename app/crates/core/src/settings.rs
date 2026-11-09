@@ -205,19 +205,17 @@ impl From<StoredRefine> for RefineSettings {
             }
             Where::Local
         });
-        let agent = named(&s.agent).and_then(|id| AgentId::find(&id));
-        // The models of earlier versions were per cloud connection; only an agent's entry stays.
-        // Validated as `apply` does: Codex and Grok keep only listed models other than their default, OpenCode any name
-        // of at most `MAX_MODEL_CHARS` characters.
+        // An agent CUE no longer offers (Grok) reads as none: the first agent found takes its place when CUE starts.
+        let agent = named(&s.agent).and_then(|id| AgentId::find(&id)).filter(AgentId::offered);
+        // The models of earlier versions were per cloud connection; only an agent's entry stays, validated as `apply`
+        // does ([`model_fits`]).
         let models = s
             .models
             .into_iter()
             .filter_map(|(id, m)| {
                 let agent = AgentId::find(&id)?;
                 let m = m.trim();
-                let known = agent.models();
-                let ok = if known.is_empty() { m.chars().count() <= MAX_MODEL_CHARS } else { known.iter().skip(1).any(|(k, _)| *k == m) };
-                (!m.is_empty() && ok).then(|| (id, m.to_owned()))
+                (!m.is_empty() && model_fits(agent, m)).then(|| (id, m.to_owned()))
             })
             .collect();
         let custom = s.custom.trim();
@@ -237,6 +235,17 @@ impl From<StoredRefine> for RefineSettings {
     }
 }
 
+/// Whether `model` may be kept as agent `a`'s pick: for OpenCode, which lists its own models, any name of at most
+/// `MAX_MODEL_CHARS` characters (it goes in a JSON body); for Codex a model id that may go on its command line
+/// (`agents::plain_model`). Whether Codex still lists it is asked when it is used (`agents::listed_or_default`): a pick
+/// the account no longer has falls back to Codex's default.
+fn model_fits(a: AgentId, model: &str) -> bool {
+    match a {
+        AgentId::OpenCode => model.chars().count() <= MAX_MODEL_CHARS,
+        AgentId::Codex | AgentId::Grok => crate::agents::plain_model(model),
+    }
+}
+
 impl RefineSettings {
     /// The model's id in usage.csv: a local model's is `local:<id>`, an agent's `agent:<agent>:<model>` (`auto` for
     /// OpenCode's "Быстрая · авто"). No AI, or nothing chosen, is `off`.
@@ -248,8 +257,9 @@ impl RefineSettings {
         }
     }
 
-    /// The model the cleanup asks agent `a` for: the one the user picked, else the agent's default (Codex's and Grok's
-    /// first). `None` for OpenCode with nothing picked: "Быстрая · авто", chosen from the models the server lists.
+    /// The model the user picked for agent `a`, else the default CUE knows without asking (Codex's fixed list's first;
+    /// a request to Codex asks its live list instead, `agents::listed_or_default`). `None` for OpenCode with nothing
+    /// picked: "Быстрая · авто", chosen from the models the server lists.
     pub fn agent_model(&self, a: AgentId) -> Option<&str> {
         self.models.get(a.id()).map(String::as_str).or_else(|| a.models().first().map(|m| m.0))
     }
@@ -896,18 +906,13 @@ impl Settings {
             }
             SettingChange::UiLanguage(language) => set_if_changed(&mut self.ui.language, language),
             SettingChange::RefineWhere(w) => set_if_changed(&mut self.refine.where_, w),
-            SettingChange::RefineAgent(agent) => set_if_changed(&mut self.refine.agent, Some(agent)),
+            SettingChange::RefineAgent(agent) => agent.offered() && set_if_changed(&mut self.refine.agent, Some(agent)),
             SettingChange::RefineAgentModel { agent, model } => {
                 let model = model.trim();
-                // Codex and Grok have a list CUE knows; OpenCode lists its own, so any short name goes.
-                let known = agent.models();
-                let listed = if known.is_empty() { model.chars().count() <= MAX_MODEL_CHARS } else { known.iter().any(|(id, _)| *id == model) };
-                if !model.is_empty() && !listed {
+                if !model.is_empty() && !model_fits(agent, model) {
                     return false;
                 }
-                let default = known.first().map(|(id, _)| *id);
-                let chosen = (!model.is_empty() && Some(model) != default).then(|| model.to_owned());
-                set_entry(&mut self.refine.models, agent.id(), chosen)
+                set_entry(&mut self.refine.models, agent.id(), (!model.is_empty()).then(|| model.to_owned()))
             }
             SettingChange::RefineFallback(fb) => set_if_changed(&mut self.refine.fallback, fb),
             SettingChange::DictAdd(word) => self.dictionary.put_first(word.trim()),
@@ -1515,11 +1520,13 @@ mod tests {
 
     #[test]
     fn migrated_agent_models_are_validated_like_apply() {
-        let s = read_refine(r#"{"refine":{"models":{"codex":"garbage","opencode":"x/y","grok":"grok-4.6"}}}"#);
+        let s = read_refine(r#"{"refine":{"models":{"codex":"gpt 6 & calc","opencode":"x/y","grok":"grok 4.6!"}}}"#);
         assert_eq!(s.models.get("opencode").map(String::as_str), Some("x/y"));
-        assert_eq!(s.models.len(), 1, "an unlisted model and a default are dropped: {:?}", s.models);
-        let s = read_refine(r#"{"refine":{"models":{"codex":"gpt-6-sol","grok":"grok-4.5","opencode":"  "}}}"#);
-        assert_eq!(s.models.get("codex").map(String::as_str), Some("gpt-6-sol"));
+        assert_eq!(s.models.len(), 1, "a name that is no model id is dropped: {:?}", s.models);
+        // Codex's list is the account's, read when the model is used: any model id is kept (one the account no longer
+        // lists then falls back to Codex's default).
+        let s = read_refine(r#"{"refine":{"models":{"codex":"gpt-5.6-terra","grok":"grok-4.5","opencode":"  "}}}"#);
+        assert_eq!(s.models.get("codex").map(String::as_str), Some("gpt-5.6-terra"));
         assert_eq!(s.models.get("grok").map(String::as_str), Some("grok-4.5"));
         assert_eq!(s.models.len(), 2);
         let long = "m".repeat(201);
@@ -1556,7 +1563,9 @@ mod tests {
         for value in [r#""claude""#, r#""gemini""#, "1", "null", r#""""#] {
             assert_eq!(read_refine(&format!(r#"{{"refine":{{"agent":{value}}}}}"#)).agent, None, "{value}");
         }
-        assert_eq!(read_refine(r#"{"refine":{"agent":"grok"}}"#).agent, Some(AgentId::Grok));
+        // An agent CUE no longer offers reads as none, so CUE starts with the first agent found.
+        assert_eq!(read_refine(r#"{"refine":{"agent":"grok"}}"#).agent, None);
+        assert_eq!(read_refine(r#"{"refine":{"agent":"codex"}}"#).agent, Some(AgentId::Codex));
     }
 
     #[test]
@@ -2228,7 +2237,7 @@ mod tests {
             SettingChange::UiLanguage(UiLanguage::Auto),
             SettingChange::RefineWhere(Where::Agent),
             SettingChange::RefineAgentModel { agent: AgentId::Codex, model: " ".into() },
-            SettingChange::RefineAgentModel { agent: AgentId::Codex, model: "gpt-6-luna".into() },
+            SettingChange::RefineAgent(AgentId::Grok),
             SettingChange::RefineFallback(Fallback::Raw),
         ] {
             assert!(!s.apply(change.clone()), "{change:?}");
@@ -2261,12 +2270,16 @@ mod tests {
     #[test]
     fn apply_refuses_what_the_cleanup_could_not_use() {
         let mut s = Settings::default();
-        assert!(!s.apply(SettingChange::RefineAgentModel { agent: AgentId::Codex, model: "gpt-4".into() }), "a model CUE does not list");
+        assert!(!s.apply(SettingChange::RefineAgentModel { agent: AgentId::Codex, model: "gpt\" & calc".into() }), "not a model id");
         assert!(!s.apply(SettingChange::RefineAgentModel { agent: AgentId::OpenCode, model: "m".repeat(201) }), "too long");
+        assert!(!s.apply(SettingChange::RefineAgent(AgentId::Grok)), "Grok is not offered");
         assert_eq!(s, Settings::default());
-        // A model chosen and then the agent's default again: nothing is kept.
-        assert!(s.apply(SettingChange::RefineAgentModel { agent: AgentId::Codex, model: "gpt-6-sol".into() }));
+        // Codex's models are the account's, read live (`agents::codex_models`; the main window checks a pick against
+        // them): any model id is kept, Codex's default too; empty is the default again.
+        assert!(s.apply(SettingChange::RefineAgentModel { agent: AgentId::Codex, model: "gpt-5.6-terra".into() }));
         assert!(s.apply(SettingChange::RefineAgentModel { agent: AgentId::Codex, model: "gpt-6-luna".into() }));
+        assert_eq!(s.refine.models.get("codex").map(String::as_str), Some("gpt-6-luna"));
+        assert!(s.apply(SettingChange::RefineAgentModel { agent: AgentId::Codex, model: String::new() }));
         assert!(s.refine.models.is_empty());
         // OpenCode lists its own models: any name goes, trimmed; empty is "Быстрая · авто".
         assert!(s.apply(SettingChange::RefineAgentModel { agent: AgentId::OpenCode, model: " anthropic/claude ".into() }));
