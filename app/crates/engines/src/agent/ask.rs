@@ -428,7 +428,7 @@ mod tests {
         assert_eq!(failure(AgentFailure::Failed("exit")), AskFailure::Failed("exit"));
         // A Codex that is not there.
         let home = std::env::temp_dir().join(format!("cue-agent-ask-{}-missing", std::process::id()));
-        let found = super::super::Found { id: cue_core::agents::AgentId::Codex, exe: PathBuf::from(&home).join("codex.exe"), version: None };
+        let found = super::super::Found { id: cue_core::agents::AgentId::Codex, exe: Some(PathBuf::from(&home).join("codex.exe")), version: None };
         let route = AskRoute::Agent(AgentClient::Cli { found, home: home.clone() });
         let (r, steps) = ask(route, true, &question()).await;
         assert_eq!(r.end, AskEnd::Failed(AskFailure::Agent(AgentProblem::Missing)));

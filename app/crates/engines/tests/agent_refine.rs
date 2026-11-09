@@ -77,7 +77,7 @@ fn codex_at(name: &str, home: &str, a: Answer) -> Codex {
     ]
     .concat();
     std::fs::write(&shim, script).unwrap();
-    let found = Found { id: AgentId::Codex, exe: shim, version: Some("0.166.0".into()) };
+    let found = Found { id: AgentId::Codex, exe: Some(shim), version: Some("0.166.0".into()) };
     Codex { dir, home: home.clone(), record, client: AgentClient::Cli { found, home } }
 }
 
@@ -232,7 +232,7 @@ async fn paths_with_spaces_and_cyrillic_reach_codex() {
 #[tokio::test]
 async fn missing_agent_is_raw_agent_missing() {
     let c = answering("missing", &says(CLEAN));
-    let found = Found { id: AgentId::Codex, exe: c.dir.join("no-such-codex.exe"), version: None };
+    let found = Found { id: AgentId::Codex, exe: Some(c.dir.join("no-such-codex.exe")), version: None };
     let gone = AgentClient::Cli { found, home: c.home.clone() };
     let r = refine::refine(&gone, "", RAW, &ctx(), &Default::default(), &RefineSettings::default(), BOLD_PROMPT, false).await;
     assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawAgent(AgentProblem::Missing)));
@@ -331,7 +331,7 @@ async fn codex_login_status_tells_a_never_signed_in_codex() {
     c.env("FAKE_AGENT_LOGIN_EXIT", "1");
     assert_eq!(codex_login(&found, &home).await, Ok(Login::SignedOut));
     assert!(!c.record.exists(), "no exec ran, so no text went anywhere");
-    let gone = Found { exe: c.dir.join("no-such-codex.exe"), ..found };
+    let gone = Found { exe: Some(c.dir.join("no-such-codex.exe")), ..found };
     assert_eq!(codex_login(&gone, &home).await, Err(cue_engines::agent::AgentFailure::NotInstalled));
 }
 

@@ -32,9 +32,11 @@ pub use discover::discover;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
     pub id: AgentId,
-    /// The program CUE starts: an `.exe`, or an npm `.cmd` shim (run through `cmd.exe`).
-    pub exe: PathBuf,
-    /// As the agent's `--version` says it (`0.166.0`), when it answered.
+    /// The program CUE starts: an `.exe`, or an npm `.cmd` shim (run through `cmd.exe`). None for an OpenCode found
+    /// only by the server it announces (`opencode::running`): CUE uses that server and never starts one of its own.
+    pub exe: Option<PathBuf>,
+    /// As the agent's `--version` says it (`0.166.0`), when it answered; for an OpenCode found only by its server, as
+    /// the server announces it.
     pub version: Option<String>,
 }
 
@@ -241,7 +243,8 @@ pub const LOGIN_WAIT: Duration = Duration::from_secs(5);
 /// first; but it says "Logged in" for an expired sign-in too, which only a run tells (`cli::signed_out`). A missing
 /// program is `NotInstalled`.
 pub async fn codex_login(found: &Found, home: &Path) -> Result<Login, AgentFailure> {
-    let (exe, cwd) = (found.exe.clone(), empty_cwd(home, AgentId::Codex)?);
+    let exe = found.exe.clone().ok_or(AgentFailure::NotInstalled)?;
+    let cwd = empty_cwd(home, AgentId::Codex)?;
     let args = cli::codex_login_args();
     let out = tokio::task::spawn_blocking(move || process::run(&exe, &args, "", &cwd, LOGIN_WAIT))
         .await
@@ -284,7 +287,8 @@ async fn codex(
         write_whole(&schema, shape.schema)?;
     }
     let args = cli::codex_args(model, &instructions, &schema, p.web_search);
-    let (exe, stdin, cwd) = (found.exe.clone(), p.user.clone(), empty_cwd(home, AgentId::Codex)?);
+    let exe = found.exe.clone().ok_or(AgentFailure::NotInstalled)?;
+    let (stdin, cwd) = (p.user.clone(), empty_cwd(home, AgentId::Codex)?);
     let cancel = Arc::new(AtomicBool::new(false));
     let _stop = CancelOnDrop(cancel.clone());
     let out = tokio::task::spawn_blocking(move || process::run_until(&exe, &args, &stdin, &cwd, timeout, &cancel))
@@ -337,7 +341,7 @@ mod tests {
     async fn grok_is_not_run_without_a_pipe() {
         let home = temp_dir("grok");
         // A program that is not there: had it been run, the answer would be `NotInstalled`.
-        let found = Found { id: AgentId::Grok, exe: home.join("grok.exe"), version: None };
+        let found = Found { id: AgentId::Grok, exe: Some(home.join("grok.exe")), version: None };
         let c = AgentClient::Cli { found, home: home.clone() };
         let p = Prompt { system: "Clean.".into(), user: "<transcript>hi</transcript>".into(), web_search: false };
         let r = c.complete("", &p, Duration::from_secs(5), None).await;
@@ -383,7 +387,7 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(&file, "already here").unwrap();
         // Codex itself is missing: the run fails once the files are ready.
-        let found = Found { id: AgentId::Codex, exe: home.join("codex.exe"), version: None };
+        let found = Found { id: AgentId::Codex, exe: Some(home.join("codex.exe")), version: None };
         let c = AgentClient::Cli { found, home: home.clone() };
         assert_eq!(c.complete("", &p, Duration::from_secs(5), None).await, Err(AgentFailure::NotInstalled));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "already here");

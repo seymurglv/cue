@@ -106,7 +106,7 @@ pub async fn run(
     let p = prompt(c, raw, ctx, dict, job, instructions);
     match c.complete(model, &p, timeout, None).await {
         Ok(content) => {
-            let parsed = match parse_content(&content, None, true) {
+            let parsed = match parse_content(&content, None, held_to_schema(c)) {
                 Parsed::Text(t) => Parsed::Text(rules::drop_copied_context(&t, ctx.before_cursor.as_deref(), raw).to_owned()),
                 other => other,
             };
@@ -114,6 +114,14 @@ pub async fn run(
         }
         Err(f) => failed(c.id(), raw, f),
     }
+}
+
+/// Whether `c`'s answer is held to `{"text": …}`: Codex's is (its output schema), so plain text from it is not a
+/// cleanup. OpenCode's stateless generation takes no schema, and its models answer the JSON CUE asks for, the same
+/// JSON in a code fence, or the plain text (all three seen from Claude Haiku 5.5 through OpenCode 2.2.5, 10.11.2026):
+/// the plain text is taken as the answer, and goes through the same check.
+fn held_to_schema(c: &AgentClient) -> bool {
+    !matches!(c, AgentClient::OpenCode(_))
 }
 
 /// An agent's failure as the flow takes it, and its word for the log.
@@ -170,7 +178,7 @@ mod tests {
     use crate::agent::opencode::Server;
 
     fn cli() -> AgentClient {
-        let found = Found { id: AgentId::Codex, exe: PathBuf::from("codex.cmd"), version: None };
+        let found = Found { id: AgentId::Codex, exe: Some(PathBuf::from("codex.cmd")), version: None };
         AgentClient::Cli { found, home: std::env::temp_dir().join("cue-agent-home") }
     }
 
@@ -294,6 +302,36 @@ mod tests {
             for block in prompt::system_texts(&dict, &ctx.habits, job, BOLD_PROMPT) {
                 assert!(p.system.contains(&block) || p.user.contains(&block), "{job:?}: a block is missing");
             }
+        }
+    }
+
+    /// OpenCode 2.2.5's stateless generation, as Claude Haiku 5.5 answered through it: the JSON CUE asks for, the same in
+    /// a code fence, or plain text. Each is a cleanup; a JSON fragment is not, and a plain text that fails the check
+    /// is not pasted.
+    #[tokio::test]
+    async fn opencode_plain_fenced_and_json_answers_are_cleanups() {
+        use crate::testing::{Reply, fake_api, reply};
+        const RAW: &str = "ну эм завтра в десять созвон с командой";
+        let cases = [
+            (r#"{"text": "Завтра в 10 созвон с командой."}"#, "Завтра в 10 созвон с командой.", RefineOutcome::Refined),
+            ("```json\n{\"text\": \"Завтра в 10 созвон с командой.\"}\n```", "Завтра в 10 созвон с командой.", RefineOutcome::Refined),
+            ("Завтра в десять созвон с командой.", "Завтра в десять созвон с командой.", RefineOutcome::Refined),
+            (r#"{"text": "Завтра в 10"#, RAW, RefineOutcome::RawFallback),
+            ("Конечно! Вот исправленный текст, который вы просили мне прислать сегодня утром.", RAW, RefineOutcome::RawFallback),
+        ];
+        for (answer, text, outcome) in cases {
+            let body = serde_json::json!({ "data": { "text": answer } }).to_string();
+            let api = fake_api(move |method, path, _| match (method, path) {
+                ("GET", "/global/health") => Reply::Send(200, "<!doctype html>".into(), ""),
+                ("GET", "/api/info") => reply(200, r#"{"version":"2.2.5","pid":14516,"urls":[],"paths":{"tmp":"x"}}"#),
+                ("POST", "/api/experimental/generate/text") => reply(200, &body),
+                _ => reply(500, "{}"),
+            })
+            .await;
+            let c = AgentClient::OpenCode(Arc::new(Server::running_at(api.base.parse().unwrap(), None, None)));
+            let s = RefineSettings::default();
+            let r = refine(&c, "anthropic/claude-haiku-5-5", RAW, &RefineContext::default(), &Default::default(), &s, "", false).await;
+            assert_eq!((r.text.as_str(), r.outcome), (text, outcome), "{answer}");
         }
     }
 

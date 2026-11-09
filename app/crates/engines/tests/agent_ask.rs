@@ -53,7 +53,7 @@ fn codex(name: &str, stdout: &str, exit: i32, sleep_ms: u64) -> Codex {
     .concat();
     let shim = dir.join("codex.cmd");
     std::fs::write(&shim, script).unwrap();
-    let found = Found { id: AgentId::Codex, exe: shim, version: Some("0.166.0".into()) };
+    let found = Found { id: AgentId::Codex, exe: Some(shim), version: Some("0.166.0".into()) };
     Codex { dir, home: home.clone(), record, client: AgentClient::Cli { found, home } }
 }
 

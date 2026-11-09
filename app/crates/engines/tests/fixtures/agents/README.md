@@ -202,3 +202,51 @@ chose OpenCode and Codex only**, for speed; the route was reverted and Grok is n
   has no tools and stores nothing (its own description).
 - A fallback probe `/api/health` was reported for Hex; neither source has that route. V1's health route is
   `/global/health`, V2's probe is `/api/info`.
+
+## OpenCode 2.2.5 (Desktop), live 10.11.2026
+
+Checked through CUE's own code against the owner's running OpenCode Desktop (`agent::opencode::live`, ignored by
+default; run by hand with `cargo test -p cue-engines --lib agent::opencode::live -- --ignored --nocapture
+--test-threads=1`). Only the sentence "ну эм завтра в десять созвон с командой" was sent.
+
+- **Where it is**: the app `%LOCALAPPDATA%\Programs\ai.opencode.desktop\OpenCode.exe`; its CLI
+  `%APPDATA%\ai.opencode.desktop\cli\2.2.5-x64\opencode-cli.exe` (`--version` → `opencode v2.2.5`). Nothing on `PATH`,
+  in `~/.opencode/bin`, npm, WinGet or Scoop. The app runs the CLI as `opencode-cli.exe serve --service`, which
+  registers in `~/.local/state/opencode/service.json` `{id, version: "2.2.5", url: "http://127.0.0.1:<port>", pid,
+  password}`. `serve --help`: "Start the v2 API and web server", flags `--hostname`, `--port`, `--cors`, `--service`,
+  `--stdio`. The OpenAPI document is at `GET /openapi.json` (behind the password).
+- **It is the V2 line.** `GET /global/health` → 200 `text/html` (the web app, served locally, as every unknown
+  non-`/api` path); `GET /api/info` → 200 `{version: "2.2.5", pid, hostname, urls, paths: {tmp}, capabilities}`; any
+  `/api` path without the password → 401 `{"_tag":"UnauthorizedError"}`. CUE's probe takes about 2 ms.
+- **Models**: `GET /api/model` → 200 `{location, data: [Model.Info]}`, 390 models here (anthropic, deepseek, opencode,
+  openrouter, xai), listed in 17–470 ms; ids may hold a slash (`openrouter` / `liquid/lfm-3-1.7b`), so CUE splits a
+  model at its first slash. `GET /api/model/default` → `{location, data}`: `opencode/iceman-free` here, whose free
+  allowance was used up (`502 {"_tag":"ProviderRequestError","reason":"rate_limit","status":429,…}`, about 0.2 s →
+  CUE's `Failed("agent")`, the text pasted as said). "Быстрая · авто" picked `anthropic/claude-haiku-5-5`.
+- **A cleanup**: `POST /api/experimental/generate/text` `{prompt, model: {providerID, id}}` → 200 `{data: {text}}`
+  (`/api/experimental/generate` is its deprecated alias). The request takes `prompt` and `model` only
+  (`additionalProperties: false`), "one stateless model generation using the server's base configuration"; asked to
+  list the tools it can call, Claude Haiku 5.5 answered `NONE`. Errors are tagged: 400 `InvalidRequestError`, 401,
+  404 `ProviderNotFoundError | ModelNotFoundError | LocationNotFoundError`, 422 `UnsupportedModelError`, 502
+  `ProviderRequestError {reason: authentication | rate_limit | content_filter | invalid_request | overloaded |
+  provider}`, 503 `ServiceUnavailableError`.
+- **The answer's form varies**: with the same prompt Claude Haiku 5.5 answered `{"text": "…"}`, the same JSON in a
+  ```` ```json ```` fence, or the plain text. No schema holds it, so CUE takes all three (`refine::held_to_schema`);
+  before, a plain-text answer was refused as "does not match the schema" and the text went in as said.
+- **Time per cleanup** (`agent::refine::refine`, Claude Haiku 5.5, warm server): 1.90, 1.81, 1.75 s in one run and
+  2.10, 1.77, 2.00 s in another (3 s budget, 8 s on the first request); every one `Refined` as "Завтра в 10 созвон с
+  командой."
+- **Nothing left behind**: OpenCode's session list (`GET /api/session`) had 12 sessions before and after, none new;
+  CUE's folder stayed empty.
+- **A folder named is kept as a project.** With `x-opencode-directory` (as CUE sent it, and as Hex does: its
+  `%APPDATA%\hex\opencode` is among the owner's projects) 2.2.5 answers for that folder (`location.directory`), starts
+  an instance for it (the owner's MCP servers connect there) and keeps it in `GET /api/project`, which has no way to
+  remove one. An `AGENTS.md` in that folder did not reach a stateless generation. So V2 requests now name no folder
+  (the location is the server's own, `C:\Users\seymurglv`); V1 sessions still name CUE's. The first live run, before
+  this change, left one project behind: `%TEMP%\cue-live-opencode-11448\opencode`.
+- **A server CUE starts** (`opencode-cli.exe serve --hostname 127.0.0.1 --port <n>`, run once with OpenCode's own
+  folders moved to a temporary one through `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME`,
+  which 2.2.5 follows): listening in about 0.3 s; `OPENCODE_SERVER_PASSWORD` is its password (401 without it, V2 with
+  it); a plain `serve` writes no `service.json`; nothing is written into its working folder (CUE's empty
+  `agent\opencode`), while it runs or after; but that working folder becomes its default location and so one of
+  OpenCode's projects. The owner's `service.json` was unchanged and their running server untouched.

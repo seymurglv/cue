@@ -243,7 +243,7 @@ impl Agents {
             }
             AgentId::Codex => {
                 let exe = (self.find)(id).ok_or(AgentFailure::NotInstalled)?;
-                let found = Found { id, exe, version: None };
+                let found = Found { id, exe: Some(exe), version: None };
                 if !self.marks.checked(id) {
                     match tokio::time::timeout_at(deadline, agent::codex_login(&found, &self.home)).await {
                         Ok(Ok(Login::SignedOut)) => return Err(AgentFailure::SignedOut),

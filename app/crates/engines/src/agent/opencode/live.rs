@@ -1,0 +1,187 @@
+//! The check against the OpenCode server running on this computer, through CUE's own code (first run 10.11.2026,
+//! OpenCode Desktop 2.2.5). Ignored: it needs OpenCode running and a provider signed in, so it is run by hand:
+//!
+//! `cargo test -p cue-engines --lib agent::opencode::live -- --ignored --nocapture --test-threads=1`
+//!
+//! It sends only a harmless sentence, prints no password, header or token, and changes none of OpenCode's settings,
+//! sessions or files: it checks that no session or project of CUE's is left behind, and that CUE's folder stays empty.
+use std::sync::Arc;
+
+use cue_core::agents::AgentId;
+use cue_core::refine::RefineContext;
+use cue_core::settings::{DictionarySettings, RefineSettings};
+use reqwest::Method;
+use serde_json::Value;
+
+use super::*;
+use crate::agent::{AgentClient, empty_cwd, refine};
+
+const RAW: &str = "ну эм завтра в десять созвон с командой";
+
+fn ids(v: &Value) -> Vec<String> {
+    let list = v.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
+    list.iter().filter_map(|s| s.get("id").and_then(Value::as_str).map(str::to_owned)).collect()
+}
+
+async fn get(s: &Server, path: &str) -> (StatusCode, Value) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (status, body) = s.at.call(Method::GET, path, None, deadline).await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+#[ignore = "needs the user's running OpenCode server and a provider signed in"]
+async fn live_opencode_cleans_through_cues_code() {
+    // Found as discovery finds it, and as the slot uses it.
+    let state = state_dir().expect("OpenCode's state folder");
+    let announced = running(&state).expect("no OpenCode server announced and running");
+    println!("announced: {} version {:?}", announced.url, announced.version);
+    // A fixed folder: were it ever named to OpenCode, it would be kept as one project, not one per run.
+    let home = std::env::temp_dir().join("cue-live-opencode");
+    let cwd = empty_cwd(&home, AgentId::OpenCode).unwrap();
+    let server = Arc::new(Server::announced(&state, &cwd).expect("the registration"));
+    println!("server: {server:?}");
+
+    // The text-free probe, step by step, then as CUE runs it.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (status, body) = server.at.call(Method::GET, "/global/health", None, deadline).await.unwrap();
+    let kind = if body.starts_with(b"<") { "html" } else { "other" };
+    println!("GET /global/health -> {status} ({kind}, {} bytes)", body.len());
+    let (status, info) = get(&server, "/api/info").await;
+    println!("GET /api/info -> {status} {info}");
+    let started = std::time::Instant::now();
+    let shape = server.shape(deadline).await.unwrap();
+    println!("line: {shape:?} ({:?})", started.elapsed());
+    assert_eq!(shape, Shape::Generate(0), "2.2.5 is the V2 line");
+
+    // What OpenCode holds before: sessions and projects.
+    let (status, sessions) = get(&server, "/api/session?limit=500").await;
+    println!("GET /api/session -> {status}, {} sessions", ids(&sessions).len());
+    let (status, projects) = get(&server, "/api/project").await;
+    let project_count = projects.as_array().map(Vec::len).or_else(|| Some(ids(&projects).len()));
+    println!("GET /api/project -> {status}, {project_count:?} projects");
+
+    // The models, the default first, and "Быстрая · авто".
+    let started = std::time::Instant::now();
+    let models = server.models().await.unwrap();
+    println!("models: {} in {:?}; first (default): {:?}", models.len(), started.elapsed(), models.first());
+    let (_, default) = get(&server, "/api/model/default").await;
+    // No folder named: the server's own.
+    println!("default's location: {}", default["location"]);
+    let auto = fast_auto(&models).expect("a model").clone();
+    println!("fast_auto: {auto:?}");
+
+    // One raw generation, to see the answer's shape and status (harmless text, CUE's own prompt).
+    let client = AgentClient::OpenCode(server.clone());
+    let (ctx, dict, s) = (RefineContext::default(), DictionarySettings::default(), RefineSettings::default());
+    let p = refine::prompt(&client, RAW, &ctx, &dict, crate::prompt::Job::Rewrite, "");
+    let body = json!({ "prompt": format!("{}\n\n{}", p.system, p.user), "model": { "providerID": auto.id.split_once('/').unwrap().0, "id": auto.id.split_once('/').unwrap().1 } });
+    let started = std::time::Instant::now();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (status, answer) = server.at.call(Method::POST, GENERATE_PATHS[0], Some(&body), deadline).await.unwrap();
+    let answer: Value = serde_json::from_slice(&answer).unwrap_or(Value::Null);
+    let keys: Vec<&String> = answer.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+    let data: Vec<&String> = answer["data"].as_object().map(|o| o.keys().collect()).unwrap_or_default();
+    println!("POST {} -> {status} in {:?}; keys {keys:?}, data keys {data:?}", GENERATE_PATHS[0], started.elapsed());
+    println!("  text: {:?}", answer["data"]["text"].as_str());
+
+    // No tools: the route takes only a prompt and a model, and the model is asked what it could call.
+    let ask = json!({ "prompt": "List the names of the tools or functions you can call in this conversation, one per line, or answer NONE if there are none.", "model": body["model"] });
+    let (status, tools) = server.at.call(Method::POST, GENERATE_PATHS[0], Some(&ask), deadline).await.unwrap();
+    let tools: Value = serde_json::from_slice(&tools).unwrap_or(Value::Null);
+    println!("tools asked -> {status}: {:?}", tools["data"]["text"].as_str());
+
+    // Three cleanups through CUE's real path, as a dictation runs them: the first with the start allowance.
+    for run in 0..3 {
+        let started = std::time::Instant::now();
+        let r = refine::refine(&client, &auto.id, RAW, &ctx, &dict, &s, "", run == 0).await;
+        println!("cleanup {} ({}): {:?} {:?} in {:?}", run + 1, auto.id, r.outcome, r.text, started.elapsed());
+    }
+    // And one with OpenCode's own default model.
+    let started = std::time::Instant::now();
+    let r = refine::refine(&client, "", RAW, &ctx, &dict, &s, "", true).await;
+    println!("cleanup (default model): {:?} {:?} in {:?}", r.outcome, r.text, started.elapsed());
+    println!("route used: {:?}", Shape::of(server.shape.load(Ordering::Relaxed)));
+
+    // Nothing left behind: no new session, no new project, CUE's folder empty.
+    let (_, after) = get(&server, "/api/session?limit=500").await;
+    let new: Vec<String> = ids(&after).into_iter().filter(|id| !ids(&sessions).contains(id)).collect();
+    println!("sessions after: {}, new: {new:?}", ids(&after).len());
+    let (_, projects_after) = get(&server, "/api/project").await;
+    let after_count = projects_after.as_array().map(Vec::len).or_else(|| Some(ids(&projects_after).len()));
+    println!("projects after: {after_count:?}");
+    let left: Vec<_> = std::fs::read_dir(&cwd).unwrap().flatten().map(|e| e.file_name()).collect();
+    println!("CUE's folder after: {left:?}");
+    assert!(new.is_empty(), "a session was left behind");
+    assert_eq!(project_count, after_count, "a project was added");
+    assert!(left.is_empty(), "something was written into CUE's folder");
+}
+
+/// What CUE finds on this computer, and a server CUE starts itself from what it finds (as it does when OpenCode
+/// Desktop is not running), with OpenCode's own folders kept apart in a temporary folder so the user's settings,
+/// sessions and registration are never touched; the user's running server is left alone.
+#[tokio::test]
+#[ignore = "needs OpenCode installed on this computer"]
+async fn live_opencode_server_cue_starts() {
+    let found = crate::agent::discover();
+    println!("discover: {found:?}");
+    let exe = crate::agent::discover::program(AgentId::OpenCode).expect("OpenCode's program");
+    println!("program: {}", exe.display());
+    // The user's registration: its size and time before, never its content.
+    let state = state_dir().unwrap();
+    let meta = |p: &Path| std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()));
+    let registered = meta(&state.join("service.json"));
+
+    let base = std::env::temp_dir().join("cue-live-opencode-serve");
+    let apart = base.join("opencode-folders");
+    let (data, config, cache, state_apart) = (apart.join("data"), apart.join("config"), apart.join("cache"), apart.join("state"));
+    for d in [&data, &config, &cache, &state_apart] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let cwd = empty_cwd(&base.join("agent"), AgentId::OpenCode).unwrap();
+    let env = [
+        ("XDG_DATA_HOME", data.to_str().unwrap()),
+        ("XDG_CONFIG_HOME", config.to_str().unwrap()),
+        ("XDG_CACHE_HOME", cache.to_str().unwrap()),
+        ("XDG_STATE_HOME", state_apart.to_str().unwrap()),
+    ];
+    let started = std::time::Instant::now();
+    let server = serve(&exe, &cwd, &env).expect("opencode serve");
+    println!("started in {:?}: {server:?}, pid {:?}", started.elapsed(), server.pid());
+
+    // Without the password it is refused; with CUE's, it answers as V2.
+    let stranger = Server::running_at(server.url.clone(), None, None);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let refused = stranger.at.call(Method::GET, "/api/info", None, deadline).await;
+    println!("GET /api/info without the password -> {refused:?}");
+    let shape = server.shape(deadline).await;
+    println!("line: {shape:?}");
+    let models = server.models().await.map(|m| m.len());
+    println!("models: {models:?}");
+    let in_cwd = |label: &str| {
+        let left: Vec<_> = std::fs::read_dir(&cwd).unwrap().flatten().map(|e| e.file_name()).collect();
+        println!("CUE's folder {label}: {left:?}");
+        left
+    };
+    let (_, projects) = get(&server, "/api/project").await;
+    let canonical: Vec<&str> = projects.as_array().into_iter().flatten().filter_map(|p| p["canonical"].as_str()).collect();
+    println!("its projects: {canonical:?}");
+    let (_, default) = get(&server, "/api/model/default").await;
+    println!("its default location: {}", default["location"]);
+    let while_running = in_cwd("while it runs");
+    let apart_state: Vec<_> = std::fs::read_dir(&state_apart).unwrap().flatten().map(|e| e.path()).collect();
+    println!("its state folder: {apart_state:?}");
+    let mut apart_top: Vec<_> = Vec::new();
+    for d in [&data, &config, &cache] {
+        apart_top.extend(std::fs::read_dir(d).unwrap().flatten().map(|e| e.path()));
+    }
+    println!("its other folders: {apart_top:?}");
+    server.stop();
+    let after = in_cwd("after it stopped");
+    let still = meta(&state.join("service.json"));
+    println!("the user's registration unchanged: {}", still == registered);
+    assert_eq!(refused, Err(AgentFailure::Failed("auth")));
+    assert_eq!(shape, Ok(Shape::Generate(0)));
+    assert!(while_running.is_empty() && after.is_empty(), "the server wrote into CUE's folder");
+    assert_eq!(still, registered, "the user's registration changed");
+}

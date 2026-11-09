@@ -409,6 +409,15 @@ At its first start this version deletes the Soniox key of earlier versions from 
   - At startup, and when the main window moves the cleanup to `Agent`, with no agent set: `agent::discover` off the
     core's thread, and the first found in `ORDER`
     (OpenCode, Codex) is written to settings.json; none found, the cleanup moves to this computer with nothing chosen.
+    OpenCode is found as `opencode` on `PATH` or in its usual folders, else as OpenCode Desktop's own CLI
+    (`%APPDATA%\ai.opencode.desktop\cli\<version>-<arch>\opencode-cli.exe`, the highest version; nothing else there is
+    run), else by a server it announces in `~\.local\state\opencode\service.json` that accepts a connection (then with
+    no program: CUE uses that server and never starts one).
+  - **OpenCode's requests** (`agent::opencode`): to the server the user runs (OpenCode Desktop's, announced with its
+    password), else to `opencode-cli serve` CUE starts in its empty folder. On OpenCode 2.2.5 a cleanup is one
+    stateless `POST /api/experimental/generate/text` (`{prompt, model}`, no tools, no session) and names no folder:
+    2.2.5 keeps every folder a request names as one of the user's projects. Its answer is the JSON CUE asks for, the
+    same in a code fence, or plain text (no schema holds it), each through the same check (`refine::held_to_schema`).
 - The cloud request described below (the Messages API, OpenRouter, the OpenAI-compatible services) is no longer reached
   by a dictation; it stays in `cue_engines` until the keys go. Right after the second press the runtime asks
   `cue-focus` for the focused app and up to `refine.context_chars` characters before the caret, in parallel with

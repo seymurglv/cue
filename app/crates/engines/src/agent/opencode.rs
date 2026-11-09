@@ -7,7 +7,10 @@
 //! - OpenCode V2 (`@opencode-ai/cli`, the line Hex audited): `GET /api/info` answers; a cleanup is one stateless
 //!   `POST /api/experimental/generate/text` `{prompt, model: {providerID, id}}` → `{data: {text}}` (the older names
 //!   `/api/experimental/generate` and `/api/generate` are tried when a route is missing). A stateless generation
-//!   has no tools and stores nothing. Models come from `/api/model` and `/api/model/default`.
+//!   has no tools and stores nothing. Models come from `/api/model` and `/api/model/default`. Found in OpenCode
+//!   Desktop 2.2.5 (10.11.2026), whose server announces itself in `service.json`. V2 requests name no folder: 2.2.5
+//!   keeps every folder a request names as a project of the user's (shown in OpenCode, with no way to remove it), and
+//!   a stateless generation reads no folder's files anyway (an `AGENTS.md` in the folder named did not reach it).
 //! - OpenCode V1 (`opencode-ai` 1.x, docs.opencode.ai): `GET /global/health` answers; a cleanup is a session created
 //!   with every permission denied, one `POST /session/:id/message` "send and wait" with `tools: {"*": false}` and
 //!   CUE's system text, and the session deleted right after, whatever happened (aborted first on a timeout), so
@@ -61,7 +64,24 @@ pub fn state_dir() -> Option<PathBuf> {
 /// The URL of the server registered in `state_dir` (`service.json`, else another channel's `service-<channel>.json`),
 /// when it is a loopback `http://` address with a port and nothing else.
 pub fn announced(state_dir: &Path) -> Option<Url> {
-    registration(state_dir).map(|(url, _)| url)
+    registration(state_dir).map(|r| r.0)
+}
+
+/// A server OpenCode announces in its state folder and that accepts a connection now: how discovery finds an OpenCode
+/// whose program is nowhere CUE looks (OpenCode Desktop runs one).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Announced {
+    pub url: Url,
+    /// As the registration says it (`2.2.5`), when it does.
+    pub version: Option<String>,
+}
+
+/// The server registered in `state_dir` ([`announced`]), when it accepts a connection within a moment.
+pub fn running(state_dir: &Path) -> Option<Announced> {
+    let (url, _, version) = registration(state_dir)?;
+    let addr = url.socket_addrs(|| None).ok()?.first().copied()?;
+    TcpStream::connect_timeout(&addr, ALIVE_WAIT).ok()?;
+    Some(Announced { url, version })
 }
 
 #[derive(Deserialize)]
@@ -69,9 +89,12 @@ struct Registration {
     url: String,
     #[serde(default)]
     password: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
 }
 
-fn registration(state_dir: &Path) -> Option<(Url, Option<String>)> {
+/// The registered server's URL, password and version.
+fn registration(state_dir: &Path) -> Option<(Url, Option<String>, Option<String>)> {
     let mut others: Vec<PathBuf> = std::fs::read_dir(state_dir)
         .into_iter()
         .flatten()
@@ -88,7 +111,7 @@ fn registration(state_dir: &Path) -> Option<(Url, Option<String>)> {
             return None;
         }
         let r: Registration = serde_json::from_slice(&std::fs::read(&file).ok()?).ok()?;
-        Some((loopback(&r.url)?, r.password.filter(|p| !p.is_empty())))
+        Some((loopback(&r.url)?, r.password.filter(|p| !p.is_empty()), r.version))
     })
 }
 
@@ -124,8 +147,8 @@ fn words(s: &str) -> impl Iterator<Item = String> + '_ {
     s.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase)
 }
 
-/// Where requests go: the server's address, its password, and, for a server the user runs, CUE's empty folder as the
-/// folder OpenCode works in (so no project's files or orders reach the request).
+/// Where requests go: the server's address, its password, and, for a V1 session on a server the user runs, CUE's empty
+/// folder as the folder OpenCode works in (so no project's files or orders reach the request).
 #[derive(Clone)]
 struct Endpoint {
     /// Built for loopback: no proxy, whatever Windows or the environment sets. `None` when it could not be built.
@@ -216,7 +239,10 @@ impl Shape {
 pub struct Server {
     pub url: Url,
     pub owned: bool,
+    /// Requests that name no folder: the probes and V2.
     at: Endpoint,
+    /// Requests that name CUE's folder, when there is one: V1's sessions and settings.
+    in_folder: Endpoint,
     process: Mutex<Option<process::Running>>,
     shape: AtomicU8,
 }
@@ -231,11 +257,17 @@ impl std::fmt::Debug for Server {
 /// Starts `opencode serve` (`exe`) on 127.0.0.1 on a free port, in `cwd` (created empty; refused when anything is in
 /// it), with no window and a password of its own for this run, and waits until it listens (at most [`START_WAIT`]).
 pub fn start(exe: &Path, cwd: &Path) -> Result<Server, AgentFailure> {
+    serve(exe, cwd, &[])
+}
+
+/// [`start`], with `env` added to the server's environment (the live check keeps OpenCode's own folders apart).
+fn serve(exe: &Path, cwd: &Path, env: &[(&str, &str)]) -> Result<Server, AgentFailure> {
     let port = free_port()?;
     let password = new_password()?;
     let args: Vec<String> =
         ["serve", "--hostname", "127.0.0.1", "--port", &port.to_string()].iter().map(|a| a.to_string()).collect();
-    let mut running = process::spawn(exe, &args, &[(PASSWORD_VAR, &password)], cwd)?;
+    let env: Vec<(&str, &str)> = std::iter::once((PASSWORD_VAR, password.as_str())).chain(env.iter().copied()).collect();
+    let mut running = process::spawn(exe, &args, &env, cwd)?;
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let started = std::time::Instant::now();
     while TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_err() {
@@ -290,23 +322,26 @@ fn loopback_client() -> Option<reqwest::Client> {
 }
 
 impl Server {
-    /// A server the user runs at `url`, with its `password`; requests name `directory` as the folder to work in.
+    /// A server the user runs at `url`, with its `password`; V1's session requests name `directory` as the folder to
+    /// work in (V2's name none).
     pub fn running_at(url: Url, password: Option<String>, directory: Option<&Path>) -> Server {
-        let at = Endpoint { http: loopback_client(), url: url.clone(), password, directory: directory.map(header_path) };
-        Server { url, owned: false, at, process: Mutex::new(None), shape: AtomicU8::new(0) }
+        let at = Endpoint { http: loopback_client(), url: url.clone(), password, directory: None };
+        let in_folder = Endpoint { directory: directory.map(header_path), ..at.clone() };
+        Server { url, owned: false, at, in_folder, process: Mutex::new(None), shape: AtomicU8::new(0) }
     }
 
-    /// The server registered in `state_dir` ([`announced`]), with the password it registered; its requests name
-    /// `directory` (CUE's empty agent folder).
+    /// The server registered in `state_dir` ([`announced`]), with the password it registered; V1's session requests
+    /// name `directory` (CUE's empty agent folder).
     pub fn announced(state_dir: &Path, directory: &Path) -> Option<Server> {
-        let (url, password) = registration(state_dir)?;
+        let (url, password, _) = registration(state_dir)?;
         Some(Server::running_at(url, password, Some(directory)))
     }
 
     /// A server CUE started: `process`, listening at `url` with `password` (what [`start`] returns).
     pub fn owned(url: Url, password: Option<String>, process: process::Running) -> Server {
         let at = Endpoint { http: loopback_client(), url: url.clone(), password, directory: None };
-        Server { url, owned: true, at, process: Mutex::new(Some(process)), shape: AtomicU8::new(0) }
+        let in_folder = at.clone();
+        Server { url, owned: true, at, in_folder, process: Mutex::new(Some(process)), shape: AtomicU8::new(0) }
     }
 
     /// The process of a server CUE started, while it is held.
@@ -420,10 +455,10 @@ impl Server {
             "title": SESSION_TITLE,
             "permission": [{ "permission": "*", "pattern": "*", "action": "deny" }],
         });
-        let (status, bytes) = self.at.call(Method::POST, "/session", Some(&create), deadline).await?;
+        let (status, bytes) = self.in_folder.call(Method::POST, "/session", Some(&create), deadline).await?;
         let id = serde_json::from_slice::<Created>(&bytes).ok().map(|c| c.id);
         let id = id.filter(|id| status.is_success() && safe_id(id)).ok_or(AgentFailure::Failed("session"))?;
-        let session = Session { at: self.at.clone(), id, ended: false };
+        let session = Session { at: self.in_folder.clone(), id, ended: false };
         let mut body = json!({
             "tools": { "*": false },
             "parts": [{ "type": "text", "text": p.user }],
@@ -434,7 +469,7 @@ impl Server {
         if let Some((provider, id)) = model {
             body["model"] = json!({ "providerID": provider, "modelID": id });
         }
-        let answer = self.at.call(Method::POST, &format!("/session/{}/message", session.id), Some(&body), deadline).await;
+        let answer = self.in_folder.call(Method::POST, &format!("/session/{}/message", session.id), Some(&body), deadline).await;
         session.end(answer == Err(AgentFailure::Timeout)).await;
         let (status, bytes) = answer?;
         session_text(status, &bytes)
@@ -456,7 +491,7 @@ impl Server {
     }
 
     async fn models_v1(&self, deadline: Instant) -> Result<Vec<AgentModel>, AgentFailure> {
-        let (status, bytes) = self.at.call(Method::GET, "/config/providers", None, deadline).await?;
+        let (status, bytes) = self.in_folder.call(Method::GET, "/config/providers", None, deadline).await?;
         let list: V1Providers = serde_json::from_slice(&bytes)
             .ok()
             .filter(|_| status.is_success())
@@ -472,7 +507,7 @@ impl Server {
                 })
             })
             .collect();
-        let default = match self.at.call(Method::GET, "/config", None, deadline).await {
+        let default = match self.in_folder.call(Method::GET, "/config", None, deadline).await {
             Ok((s, b)) if s.is_success() => serde_json::from_slice::<V1Config>(&b).ok().and_then(|c| c.model),
             _ => None,
         };
@@ -730,6 +765,9 @@ struct V1Config {
 }
 
 #[cfg(test)]
+mod live;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::testing::{Reply, fake_api, reply};
@@ -812,6 +850,28 @@ mod tests {
         assert_eq!(s.pid(), None);
         // Its Debug never shows the password.
         assert!(!format!("{s:?}").contains("pw\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// OpenCode Desktop's service registration (2.2.5): a server counts as running while it accepts a connection, with
+    /// the version it announces; a registration left behind by a server that is gone does not count.
+    #[test]
+    fn running_is_an_announced_server_that_accepts_a_connection() {
+        let dir = temp_dir("running");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let registration = |port: u16| {
+            format!(r#"{{"id":"74545f3a","version":"2.2.5","url":"http://127.0.0.1:{port}","pid":1,"password":"pw"}}"#)
+        };
+        std::fs::write(dir.join("service.json"), registration(port)).unwrap();
+        let found = running(&dir).unwrap();
+        assert_eq!(found.url.port(), Some(port));
+        assert_eq!(found.version.as_deref(), Some("2.2.5"));
+        // What it shows never holds the password.
+        assert!(!format!("{found:?}").contains("pw"));
+        drop(listener);
+        assert_eq!(running(&dir), None);
+        assert_eq!(running(&dir.join("missing")), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -917,6 +977,44 @@ mod tests {
         s.complete("openai/gpt-5-mini", &prompt(), Duration::from_secs(5), None).await.unwrap();
         assert_eq!(api.calls().len(), 7);
         assert_eq!(api.calls()[6], "DELETE /session/ses_1");
+    }
+
+    /// OpenCode 2.2.5 keeps every folder a request names as a project of the user's: V2's probes, models and
+    /// generation name none. V1's sessions still name CUE's folder.
+    #[tokio::test]
+    async fn only_v1_sessions_name_cues_folder() {
+        let dir = temp_dir("folder");
+        let v2 = fake_api(|method, path, _| match (method, path) {
+            ("GET", "/global/health") => Reply::Send(200, "<!doctype html>".into(), ""),
+            ("GET", "/api/info") => reply(200, V2_INFO),
+            ("GET", "/api/model") => reply(200, r#"{"location":{},"data":[]}"#),
+            ("GET", "/api/model/default") => reply(200, r#"{"location":{},"data":null}"#),
+            ("POST", "/api/experimental/generate/text") => reply(200, r#"{"data":{"text":"Hi."}}"#),
+            _ => reply(500, "{}"),
+        })
+        .await;
+        let s = Server::running_at(Url::parse(&v2.base).unwrap(), None, Some(&dir));
+        s.models().await.unwrap();
+        s.complete("", &prompt(), Duration::from_secs(5), None).await.unwrap();
+        assert_eq!(v2.calls().len(), 5);
+        assert!(v2.seen().iter().all(|r| r.header("x-opencode-directory").is_empty()), "a V2 request named a folder");
+
+        let v1 = fake_api(|method, path, _| match (method, path) {
+            ("GET", "/global/health") => reply(200, V1_HEALTH),
+            ("POST", "/session") => reply(200, r#"{"id":"ses_1"}"#),
+            ("POST", "/session/ses_1/message") => {
+                reply(200, r#"{"info":{"role":"assistant"},"parts":[{"type":"text","text":"Hi."}]}"#)
+            }
+            _ => reply(200, "true"),
+        })
+        .await;
+        let s = Server::running_at(Url::parse(&v1.base).unwrap(), None, Some(&dir));
+        s.complete("", &prompt(), Duration::from_secs(5), None).await.unwrap();
+        let folder = header_path(&dir);
+        for r in v1.seen().iter().filter(|r| r.path.starts_with("/session")) {
+            assert_eq!(r.header("x-opencode-directory"), [folder.as_str()], "{} {}", r.method, r.path);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
