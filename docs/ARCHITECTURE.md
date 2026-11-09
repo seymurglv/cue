@@ -1363,10 +1363,12 @@ the flow accepts). The Retry of a failed translation re-translates the saved tex
 for a question or one that wrote nothing) and `day` its local date.
 Rows of earlier versions are 13, 16 or 18 columns wide and carry the dollars they were priced at (`stt_usd`,
 `refine_usd`, `search_usd`), Soniox's paths and cache warm-up rows (`warmup`); they are read with the dollars passed
-over (`usage::fields`). A file an earlier version started, its header not this version's, is rolled over at the first
-row this version writes: it moves aside, whole, to `usage-<day>.csv` (`-2`, `-3`… when taken) and a new `usage.csv`
-starts under the 15-column header. Today and `cue-cli usage` read `usage.csv` alone, so after the rollover they count
-from that row on. Latency runs from the second press to Ctrl+V (from Retry or Restore when used); the target for a
+over (`usage::fields`). A file an earlier version started, its header not this version's, is migrated in place at
+the first row this version writes (`usage::migrate`): every row is read by its own columns and written under the
+15-column header without its dollars (a row from before Today gets an empty `words` and `day`, read as not known, as
+before), the original is kept byte for byte as `usage-<day>.csv` (`-2`, `-3`… when taken), and the new file replaces
+`usage.csv`, so Today and `cue-cli usage` show the same numbers. If any step fails, `usage.csv` stays as it was and
+rows go after its old ones, which the readers read at any width. Latency runs from the second press to Ctrl+V (from Retry or Restore when used); the target for a
 ~30-word phrase is 1.5 s or less. Rows that fail to write, for example while the file is open in Excel, wait in memory
 and go out before the next one. `cue-cli usage` sums a UTC month: dictations are `inserted` plus `no_field` rows (an
 `answered` row is not one), the audio, average latency over `inserted` rows only, a separate average for recordings of

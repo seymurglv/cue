@@ -15,10 +15,11 @@
 //! they were priced at (`stt_usd`, `refine_usd`, `search_usd`): they are read with those columns passed over, whatever
 //! they hold ([`fields`]). A row of 13 was written before the modes (no `mode`, `web_searches`) and reads as dictation;
 //! one of 16 before Today (no `words`, `day`). A file an earlier version started, its header not this version's, is
-//! rolled over at the first record this version writes: it moves aside, whole, to `usage-<day>.csv` (`-2`, `-3`… when
-//! taken), and a new `usage.csv` starts under [`HEADER`]; the readers read `usage.csv` alone. A cache warm-up of an
-//! earlier version is a row of its own (`warmup`, outcome `discarded`), and `answered` (an "Ask" answer shown in full):
-//! neither is a dictation.
+//! migrated in place at the first record this version writes ([`migrate`]): its rows under [`HEADER`], the dollars gone,
+//! a row of 13 or 16 columns with an empty `words` and `day` (not known, as before), and the original kept as
+//! `usage-<day>.csv`; Today and the summary read the same numbers. A failed migration leaves the file as it was. A
+//! cache warm-up of an earlier version is a row of its own (`warmup`, outcome `discarded`), and `answered` (an "Ask"
+//! answer shown in full): neither is a dictation.
 //!
 //! `words` is how many words the attempt wrote (`count_words` of its text; 0 for one that wrote nothing or a question),
 //! `day` its local date. `ts` is UTC, and the summary month is a UTC month too.
@@ -212,17 +213,17 @@ pub fn line(r: &UsageRecord) -> String {
 /// Appends a record; writes the header if the file is missing or empty. If the previous record was cut off
 /// (no newline at the end of the file), the new one starts on a new line instead of gluing onto the fragment.
 /// Everything appended goes to disk in a single write. A file whose first line is not this version's [`HEADER`] (one an
-/// earlier version started, with its dollar columns) is rolled over first ([`roll_over`]); should that fail, the record
-/// goes after its rows, which the readers take at any width.
+/// earlier version started, with its dollar columns) is migrated first ([`migrate`]); should that fail, the file is
+/// left as it was and the record goes after its rows, which the readers take at any width.
 pub fn append(path: &Path, r: &UsageRecord) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     if !starts_with_header(path)? {
-        // The record's local date names the old file; only digits and dashes go into a file name.
+        // The record's local date names the backup; only digits and dashes go into a file name.
         let day = if r.day.is_empty() { r.ts.get(..10).unwrap_or_default() } else { r.day.as_str() };
         let day = if !day.is_empty() && day.bytes().all(|b| b.is_ascii_digit() || b == b'-') { day } else { "old" };
-        let _ = roll_over(path, day);
+        let _ = migrate(path, day);
     }
     let mut f = std::fs::OpenOptions::new().read(true).append(true).create(true).open(path)?;
     let len = f.metadata()?.len();
@@ -243,7 +244,7 @@ pub fn append(path: &Path, r: &UsageRecord) -> std::io::Result<()> {
     f.write_all(out.as_bytes())
 }
 
-/// Whether the file at `path` starts with this version's [`HEADER`]; a missing or empty file has nothing to roll over.
+/// Whether the file at `path` starts with this version's [`HEADER`]; a missing or empty file has nothing to migrate.
 fn starts_with_header(path: &Path) -> std::io::Result<bool> {
     let f = match std::fs::File::open(path) {
         Ok(f) => f,
@@ -259,19 +260,78 @@ fn starts_with_header(path: &Path) -> std::io::Result<bool> {
     Ok(first.strip_suffix(b"\r").unwrap_or(first) == HEADER.as_bytes())
 }
 
-/// The file at `path` (`usage.csv`) moves aside to `usage-<day>.csv` beside it, or `usage-<day>-2.csv` and on when that
-/// is taken: the next record starts a new file under this version's header. Returns where it went.
-pub(crate) fn roll_over(path: &Path, day: &str) -> std::io::Result<std::path::PathBuf> {
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("usage");
-    for n in 1..=1_000 {
-        let name = if n == 1 { format!("{stem}-{day}.csv") } else { format!("{stem}-{day}-{n}.csv") };
-        let to = path.with_file_name(name);
-        if !to.exists() {
-            std::fs::rename(path, &to)?;
-            return Ok(to);
+/// The rows of a file an earlier version wrote, under this version's [`HEADER`]: each row of a width CUE wrote is read
+/// by its own columns ([`fields`]) and written again without the dollars; a row of 13 or 16 columns gets an empty
+/// `words` and `day`, which the readers take as "not known", as before. Header lines and lines no reader takes (a
+/// width CUE never wrote, broken quoting, a cut-off end) are left out. `None` when the text is not UTF-8.
+fn migrated(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut out = format!("{HEADER}\n");
+    for line in text.lines() {
+        let Some(c) = split_record(line) else { continue };
+        if c.first().is_some_and(|f| f == "ts") {
+            continue;
         }
+        let row: Vec<&str> = match c.len() {
+            COLUMNS => c.iter().map(String::as_str).collect(),
+            COLUMNS_V1 | COLUMNS_V2 | COLUMNS_V3 => {
+                let Some(f) = fields(&c) else { continue };
+                let searches = if c.len() == COLUMNS_V1 { "0" } else { c[14].as_str() };
+                // ts, audio_ms, stt_engine, stt_path, refine_model, tokens ×4, latency_ms, outcome, mode, web_searches,
+                // words, day: the old columns 4 (`stt_usd`), 10 (`refine_usd`) and 15 (`search_usd`) go.
+                vec![
+                    f.ts, f.audio_ms, &c[2], &c[3], &c[5], &c[6], &c[7], &c[8], &c[9], f.latency_ms, f.outcome, f.mode,
+                    searches, f.words.unwrap_or(""), f.day.unwrap_or(""),
+                ]
+            }
+            _ => continue,
+        };
+        let fields: Vec<Cow<'_, str>> = row.into_iter().map(csv_field).collect();
+        out.push_str(&fields.join(","));
+        out.push('\n');
     }
-    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free name to roll usage.csv over to"))
+    Some(out)
+}
+
+/// The one-time move of a file an earlier version started onto this version's [`HEADER`] ([`migrated`]): the rows go
+/// to a temporary file beside it, the original is copied, byte for byte, to `usage-<day>.csv` (`-2`, `-3`… when
+/// taken), and the temporary file replaces `usage.csv`. Any step that fails leaves `usage.csv` as it was, with no backup
+/// and no temporary file left. Returns the backup's path.
+fn migrate(path: &Path, day: &str) -> std::io::Result<std::path::PathBuf> {
+    migrate_with(path, day, |from, to| std::fs::rename(from, to))
+}
+
+/// [`migrate`] with the final `replace` given (tests make it fail).
+fn migrate_with(
+    path: &Path,
+    day: &str,
+    replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<std::path::PathBuf> {
+    let bytes = std::fs::read(path)?;
+    let Some(text) = migrated(&bytes) else {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "usage.csv is not UTF-8"));
+    };
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("usage");
+    let tmp = path.with_file_name(format!("{stem}.{}.migrating.tmp", std::process::id()));
+    let backup = (1..=1_000)
+        .map(|n| path.with_file_name(if n == 1 { format!("{stem}-{day}.csv") } else { format!("{stem}-{day}-{n}.csv") }))
+        .find(|p| !p.exists())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free name for the usage.csv backup"))?;
+    let written = (|| {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::copy(path, &backup).and_then(|_| replace(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&backup);
+        return Err(e);
+    }
+    Ok(backup)
 }
 
 /// The columns of a row the summary and Today read, from a row of any width CUE wrote; the dollars of an earlier
@@ -295,8 +355,9 @@ pub(crate) fn fields(c: &[String]) -> Option<Fields<'_>> {
             latency_ms: &c[9],
             outcome: &c[10],
             mode: &c[11],
-            words: Some(&c[13]),
-            day: Some(&c[14]),
+            // Empty in a row migrated from before Today: not known.
+            words: Some(c[13].as_str()).filter(|w| !w.is_empty()),
+            day: Some(c[14].as_str()).filter(|d| !d.is_empty()),
         },
         COLUMNS_V1 | COLUMNS_V2 | COLUMNS_V3 => Fields {
             ts: &c[0],
@@ -830,43 +891,106 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
-    /// A file an earlier version started (its header has the dollar columns) moves aside, whole, to
-    /// `usage-<day>.csv`, and the record starts a new `usage.csv` under this version's header; a second file of that
-    /// day takes `-2`. A file of this version is appended to as it is.
+    /// A file of rows of every earlier width (13, 16 and 18 columns, a warm-up row, a header line in the middle as an
+    /// old file had after an update, a cut-off end).
+    fn earlier_file() -> String {
+        let warm = "2026-11-01T09:00:00Z,0,parakeet,local,0.000000,claude-haiku-5-5,0,0,900,0,0.000112,0,discarded,warmup,0,0.000000,0,2026-11-01";
+        let tr = "2026-10-31T21:30:00Z,60000,parakeet,local,0.000000,\"my,model\",5,0,0,9,0.000020,1200,inserted,translate,0,0.000000,40,2026-11-01";
+        let ask = "2026-11-01T10:05:00Z,3000,parakeet,local,0.000000,claude-haiku-5-5,10,0,0,5,0.000004,700,answered,ask,2,0.020000,0,2026-11-01";
+        [HEADER_V1, OLD_V1, OLD_V2, HEADER_V3, OLD_V3, warm, tr, ask, "2026-11-01T10:09:00Z,30000,son"].join("\n") + "\n"
+    }
+
+    /// Today's numbers and the month's summary of a file.
+    fn numbers(csv: &str) -> (crate::stats::Stats, Summary, Summary) {
+        (crate::stats::compute(csv, "2026-11-01", 240), summarize(csv, "2026-11"), summarize(csv, "2026-10"))
+    }
+
+    /// A file an earlier version started moves onto this version's header once: every row read by its own columns and
+    /// written without its dollars, Today and the summary the same as before, the original kept byte for byte as
+    /// `usage-<day>.csv`, and the new record after the moved rows. The next record touches nothing.
     #[test]
-    fn a_file_of_an_earlier_version_is_rolled_over_and_a_new_one_started() {
-        let dir = tmp("rollover");
+    fn a_file_of_an_earlier_version_is_migrated_in_place_with_a_backup() {
+        let dir = tmp("migrate");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("usage.csv");
-        let old = format!("{HEADER_V3}\n{OLD_V3}\n");
+        let old = earlier_file();
         std::fs::write(&path, &old).unwrap();
+        let before = numbers(&old);
+        assert_eq!((before.1.dictations, before.2.dictations, before.0.total), (3, 1, 45), "{before:?}");
+
+        let backup = migrate(&path, "2026-11-01").unwrap();
+        assert_eq!(backup, dir.join("usage-2026-11-01.csv"));
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), old, "the backup holds the original bytes");
+        let csv = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(csv.lines().next(), Some(HEADER));
+        assert!(csv.lines().skip(1).all(|l| split_record(l).unwrap().len() == COLUMNS), "{csv}");
+        assert!(!csv.contains("0.000004") && !csv.contains("0.020000") && !csv.contains("ts,audio_ms,stt_engine,stt_path,stt_usd"));
+        assert!(csv.contains(",\"my,model\","), "string fields stay escaped: {csv}");
+        assert_eq!(numbers(&csv), before, "Today and the summary are the same");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "no temporary file left");
+
+        // Through `append`: the next record goes after the moved rows, and nothing is migrated again.
+        std::fs::write(&path, &old).unwrap();
+        std::fs::remove_file(&backup).unwrap();
         let r = rec_with("2026-11-01T11:00:00Z", Outcome::Inserted);
         append(&path, &r).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("usage-2026-11-01.csv")).unwrap(), old, "the old file, untouched");
-        let csv = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(csv, format!("{HEADER}\n{}\n", line(&r)));
-        assert_eq!(summarize(&csv, "2026-11").dictations, 1, "the new file holds this version's rows only");
-
-        // Appended to as it is now.
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, format!("{csv}{}\n", line(&r)));
         append(&path, &r).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
-        assert!(!dir.join("usage-2026-11-01-2.csv").exists());
+        assert!(!dir.join("usage-2026-11-01-2.csv").exists(), "a file on this version's header is not migrated");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), old);
 
-        // Another file of the old kind the same day (one put back by hand, a 13-column one): the next free name.
-        std::fs::write(&path, format!("{HEADER_V1}\n{OLD_V1}\n")).unwrap();
-        append(&path, &r).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("usage-2026-11-01-2.csv")).unwrap(), format!("{HEADER_V1}\n{OLD_V1}\n"));
-        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().next(), Some(HEADER));
+        // A second migration the same day takes the next free name.
+        std::fs::write(&path, &old).unwrap();
+        assert_eq!(migrate(&path, "2026-11-01").unwrap(), dir.join("usage-2026-11-01-2.csv"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
-        // A file with no header at all, and a record with no local date: named by its UTC date.
-        std::fs::write(&path, format!("{OLD_V1}\n")).unwrap();
-        append(&path, &UsageRecord { day: String::new(), ..r.clone() }).unwrap();
-        assert!(dir.join("usage-2026-11-01-3.csv").exists());
-        // A header with a CRLF line end is this version's all the same.
-        std::fs::write(&path, format!("{HEADER}\r\n{}\r\n", line(&r))).unwrap();
+    /// A step that fails leaves usage.csv exactly as it was, with no backup and no temporary file; the record then goes
+    /// after the old rows, as before.
+    #[test]
+    fn a_failed_migration_leaves_the_file_as_it_was() {
+        let dir = tmp("migrate-fails");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("usage.csv");
+        let old = earlier_file();
+        std::fs::write(&path, &old).unwrap();
+        let failed = migrate_with(&path, "2026-11-01", |_, _| Err(std::io::Error::other("the file is open in Excel")));
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no backup and no temporary file left");
+
+        // Not UTF-8: not migrated, and appended to as before.
+        let mut bytes = old.clone().into_bytes();
+        bytes.extend(b"\xff\xfe\n");
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(migrate(&path, "2026-11-01").is_err());
+        let r = rec_with("2026-11-01T11:00:00Z", Outcome::Inserted);
         append(&path, &r).unwrap();
-        assert!(!dir.join("usage-2026-11-01-4.csv").exists());
+        let mut expected = bytes.clone();
+        expected.extend(format!("{}\n", line(&r)).into_bytes());
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A file on this version's header (a CRLF line end too) is appended to as it is.
+    #[test]
+    fn a_file_on_the_current_header_is_not_migrated() {
+        let dir = tmp("current");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("usage.csv");
+        let r = rec_with("2026-11-01T11:00:00Z", Outcome::Inserted);
+        for nl in ["\n", "\r\n"] {
+            let start = format!("{HEADER}{nl}{}{nl}", line(&r));
+            std::fs::write(&path, &start).unwrap();
+            append(&path, &r).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{start}{}\n", line(&r)));
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
