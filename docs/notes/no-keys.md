@@ -1,8 +1,9 @@
-# Branch `no-keys`: CUE without keys (built, to be reviewed and merged)
+# CUE without keys (`no-keys`, merged into `main` 09.11.2026)
 
 Spec `docs/specs/2026-11-08-no-keys-design.md`, plan `docs/specs/2026-11-08-no-keys-plan.md`, approved 08.11.2026. The
-branch is cut from `optimize` (which carries the model and Drop rests of that line) and is 35 commits ahead of `main`;
-it is local, not pushed. The ledger with every ruling made while the plan ran:
+branch was cut from `optimize` (which carries the model and Drop rests of that line); after the final whole-branch
+review it was merged into `main` (fast-forward) and pushed on 09.11.2026 at the owner's word. The installed CUE is this
+build (f5317b2). The ledger with every ruling made while the plan ran:
 `.superpowers/sdd/2026-11-08-no-keys-plan/progress.md`. Linear project **P-BAN-1** tracks the progress.
 
 ## What CUE does on this branch
@@ -57,11 +58,11 @@ it is local, not pushed. The ledger with every ruling made while the plan ran:
 
 ## What is left
 
-1. Installed on 09.11.2026 over the owner's everyday CUE (`scripts\build-release.ps1`, then the installer with `/S`;
-   the owner's data was backed up first). At startup it moved the settings to "Ваш AI · OpenCode", deleted the old
-   keys and wrote the standard instructions. Left: the owner's spoken check (a Russian and an English sentence
-   through OpenCode).
-2. The final whole-branch review.
-3. The owner's merge decision: merge `no-keys` into `main`, then a release and the installer (version bump and tag are
-   the owner's).
-4. Later, if the owner wants them: Task 10's models, a bench phase over the agents, Grok again (if it gets faster).
+Done on 09.11.2026: installed over the owner's everyday CUE (data backed up first; at startup it moved the settings to
+"Ваш AI · OpenCode", deleted the old keys and wrote the standard instructions); the final whole-branch review and its
+fix round; the Drop at the top by default with its mark centered (bars on the circle's center, the red lamp inside near
+the upper right); "Быстрая · авто" prefers the provider's own Haiku (a measured Gemini 3.5 Flash Lite was faster; the
+owner kept Haiku, `examples/opencode_speed.rs` measures); merged into `main` and pushed.
+
+Left, if the owner wants them: a release (version bump and tag are the owner's), Task 10's models, a bench phase over
+the agents, Grok again (if it gets faster).
