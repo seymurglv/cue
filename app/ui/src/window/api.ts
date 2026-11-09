@@ -289,6 +289,8 @@ export interface InstructionsView {
   edited: boolean;
   broken: boolean;
   path: string;
+  /** The instructions' folder can be opened in a terminal ("Открыть в"); otherwise only the copy is offered. */
+  open: boolean;
 }
 /** The last dictation cleaned again with the new instructions: the app it went to (empty when not known), the text as it
  *  was pasted, the text the new instructions give. */
@@ -303,14 +305,22 @@ export interface InstructionsNews {
   text: string;
   edited: boolean;
   broken: boolean;
+  path: string;
+  open: boolean;
   sample: InstructionsSample | null;
+  check: SampleCheck;
 }
+/** Where the before and after stands: none with no AI, being made, none now (it comes after the next dictation), or
+ *  in `sample`. */
+export type SampleCheck = 'off' | 'checking' | 'later' | 'shown';
 /** How "Открыть в <agent>" went: with the task as its first message, or without it (the task is in the clipboard). */
 export type Opened = 'withTask' | 'taskCopied';
 /** The instructions; a file saved since is read again first (ask again while the page is shown). */
 export const instructionsGet = () => invoke<InstructionsView>('instructions_get');
-/** The page's text saved as the instructions; fails `failed` when the file cannot be written. */
-export const instructionsSet = (text: string) => invoke<InstructionsView>('instructions_set', { text });
+/** The page's text saved as the instructions. `base` — the file's text the edit started from: fails `changed` when the
+ *  file holds another now (nothing is saved over it); null saves whatever is there. Fails `failed` when the file cannot
+ *  be written. */
+export const instructionsSet = (text: string, base: string | null) => invoke<InstructionsView>('instructions_set', { text, base });
 /** "Вернуть стандартные". */
 export const instructionsReset = () => invoke<InstructionsView>('instructions_reset');
 /** The task for any AI, with the instructions' folder, into the clipboard. */

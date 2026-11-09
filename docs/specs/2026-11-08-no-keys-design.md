@@ -113,7 +113,11 @@ line under the row, as the speech model's row does today. When the chosen agent 
 - The instructions are one file, `%APPDATA%\CUE\instructions\instructions.md`, shown in a text box on the page and
   editable there. Its folder holds only the instructions' files (`instructions.md`, `instructions.prev.md`, `AGENTS.md`),
   so an agent opened in it sees nothing else of CUE's (settings.json and the dictionary stay in `%APPDATA%\CUE\`); an
-  earlier build's files beside settings.json move into it once at startup **(controller's ruling, 09.11.2026)**.
+  earlier build's files beside settings.json move into it once at startup, nothing lost (a failed move is a copy; of
+  two different files the newer stays and the other is kept as `instructions.old-<date>.md`) **(controller's ruling,
+  09.11.2026)**.
+- An edit in the box is never replaced by a file an AI saved meanwhile, and never saved over it: the page asks "Взять
+  из файла" or "Оставить моё".
   It holds only CUE's style rules in plain words — today's `BOLD_PROMPT`, or the user's `refine.custom` text. The fixed
   protocol stays in code and is never in the file: `SYSTEM_PROMPT` (output format, never answering the text, the context
   tags), the dictionary and habits blocks, the translate instruction. No placeholders in the file.
@@ -135,8 +139,9 @@ line under the row, as the speech model's row does today. When the chosen agent 
   looks every 1.5 s. The page shows "Изменены вами · только что" and "было → стало" on the last dictation of the history
   (re-cleaned once with the new instructions on the current route, off the core's thread, written to neither the history
   nor usage.csv; skipped on Без ИИ, with a local model not loaded, with an agent marked signed out or missing, and with
-  OpenCode when no server of its runs: none is started for it). An empty or unreadable file means the standard
-  instructions, with an amber line on the page.
+  OpenCode when no server of its runs: none is started for it). Meanwhile a quiet line says "Проверяем на последней
+  диктовке…"; when none can come now, "Было и стало появятся после следующей диктовки." An empty or unreadable file
+  means the standard instructions, with an amber line on the page.
 - CUE keeps the previous version as `instructions.prev.md` each time the file changes. There is no `cue-cli
   instructions test` **(my call, after the builder check)**: `cue-cli` is not in the installer and would load a second
   model; the page's before/after on the last dictation is the check, for the user and for the agent.

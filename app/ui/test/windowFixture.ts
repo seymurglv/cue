@@ -117,9 +117,12 @@ export const feeds: {
 export const STANDARD_INSTRUCTIONS = 'Bold editing: remove filler words and fix the speech.';
 export const INSTRUCTIONS_PATH = 'C:\\Users\\Ann\\AppData\\Roaming\\CUE\\instructions\\instructions.md';
 
+/** The core's instructions file changed by someone else (an AI): the next `instructions_get` reads it. */
+export let instructionsFile: (over: Partial<api.InstructionsView>) => void = () => {};
+
 /** The instructions as `instructions_get` answers: the standard ones by default. */
 export function instructions(over: Partial<api.InstructionsView> = {}): api.InstructionsView {
-  return { text: STANDARD_INSTRUCTIONS, edited: false, broken: false, path: INSTRUCTIONS_PATH, ...over };
+  return { text: STANDARD_INSTRUCTIONS, edited: false, broken: false, path: INSTRUCTIONS_PATH, open: true, ...over };
 }
 
 /** Answers of a core that holds `settings` and changes them as asked. */
@@ -217,10 +220,15 @@ export function stub(settings: api.SettingsView = view()): void {
   // The instructions as the core keeps them: saved as sent, restored to the standard ones.
   let ins = instructions();
   core.instructionsGet.mockImplementation(async () => ins);
-  core.instructionsSet.mockImplementation(async (text) => {
+  core.instructionsSet.mockImplementation(async (text, base) => {
+    // A file that changed since the edit started is not saved over.
+    if (base !== null && base !== ins.text) throw 'changed';
     ins = instructions({ text, edited: text !== STANDARD_INSTRUCTIONS });
     return ins;
   });
+  instructionsFile = (over) => {
+    ins = instructions(over);
+  };
   core.instructionsReset.mockImplementation(async () => {
     ins = instructions();
     return ins;

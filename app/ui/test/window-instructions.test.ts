@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { $, $$, INSTRUCTIONS_PATH, NOW, STANDARD_INSTRUCTIONS, agents, click, core, feeds, instructions, mount, settle, stub, text, view } from './windowFixture';
+import { $, $$, INSTRUCTIONS_PATH, NOW, STANDARD_INSTRUCTIONS, agents, click, core, feeds, instructions, instructionsFile, mount, settle, stub, text, view } from './windowFixture';
+import type { InstructionsNews } from '../src/window/api';
 import type { WindowPage } from '../src/window/page';
 
 vi.mock('../src/window/api', async (importOriginal) => {
@@ -24,6 +25,11 @@ const box = () => $<HTMLTextAreaElement>('.btray textarea.pta')!;
 const title = () => text($('.btray .ihead .stx b'));
 const line = () => $<HTMLElement>('.btray .ihead .stx small')!;
 const done = () => $<HTMLElement>('.btray .idone')!;
+/** `cue://instructions` as the core sends it: the file read again, by default with the before and after being made. */
+const news = (over: Partial<InstructionsNews>): InstructionsNews => ({
+  text: STANDARD_INSTRUCTIONS, edited: false, broken: false, path: INSTRUCTIONS_PATH, open: true, sample: null, check: 'checking', ...over,
+});
+const check = () => $<HTMLElement>('.btray .icheck');
 const menuButtons = () => $$('.btray .pmenu button').filter((b) => !b.closest('[hidden]'));
 
 beforeEach(() => {
@@ -70,7 +76,7 @@ describe('The Instructions page', () => {
     box().dispatchEvent(new Event('input', { bubbles: true }));
     box().dispatchEvent(new Event('change', { bubbles: true }));
     await settle();
-    expect(core.instructionsSet).toHaveBeenCalledWith('Keep it short.');
+    expect(core.instructionsSet).toHaveBeenCalledWith('Keep it short.', STANDARD_INSTRUCTIONS);
     expect(title()).toBe('Changed by you');
     // Unchanged text is not saved again; an edit left unsaved goes in when the page is left.
     core.instructionsSet.mockClear();
@@ -80,7 +86,7 @@ describe('The Instructions page', () => {
     click($('.btray [data-tback]'));
     await settle();
     expect(core.instructionsSet).toHaveBeenCalledTimes(1);
-    expect(core.instructionsSet).toHaveBeenCalledWith('Keep it shorter.');
+    expect(core.instructionsSet).toHaveBeenCalledWith('Keep it shorter.', 'Keep it short.');
   });
 
   it('edit_with_ai_menu_has_open_and_copy', async () => {
@@ -149,7 +155,7 @@ describe('The Instructions page', () => {
     page = await mount();
     await openPage();
     // The AI saved the file: the page shows it at once, "just now".
-    feeds.instructions({ text: 'In Telegram: lower case, no full stop.', edited: true, broken: false, sample: null });
+    feeds.instructions(news({ text: 'In Telegram: lower case, no full stop.', edited: true, broken: false, sample: null }));
     await settle();
     expect(box().value).toBe('In Telegram: lower case, no full stop.');
     expect(title()).toBe('Changed by you');
@@ -157,14 +163,14 @@ describe('The Instructions page', () => {
     expect($('.btray .cmpr')).toBeNull();
     // Then the last dictation cleaned again with them.
     const sample = { app: 'Telegram', before: 'Send the file in 5 minutes.', after: 'send the file in 5 minutes' };
-    feeds.instructions({ text: 'In Telegram: lower case, no full stop.', edited: true, broken: false, sample });
+    feeds.instructions(news({ text: 'In Telegram: lower case, no full stop.', edited: true, broken: false, sample, check: 'shown' }));
     await settle();
     const rows = $$('.btray .cmpr > div');
     expect(rows.map((r) => text(r.querySelector('small')))).toEqual(['Last dictation in Telegram, before', 'After']);
     expect(text(rows[0].querySelector('s'))).toBe('Send the file in 5 minutes.');
     expect(text(rows[1].querySelector('span'))).toBe('send the file in 5 minutes');
     // No app known: the label says so without one.
-    feeds.instructions({ text: 'x', edited: true, broken: false, sample: { ...sample, app: '' } });
+    feeds.instructions(news({ text: 'x', edited: true, broken: false, sample: { ...sample, app: '' }, check: 'shown' }));
     await settle();
     expect(text($('.btray .cmpr small'))).toBe('Last dictation, before');
   });
@@ -175,11 +181,110 @@ describe('The Instructions page', () => {
     box().focus();
     box().value = 'My own words';
     box().dispatchEvent(new Event('input', { bubbles: true }));
-    feeds.instructions({ text: 'From the AI.', edited: true, broken: false, sample: null });
+    feeds.instructions(news({ text: 'From the AI.', edited: true, broken: false, sample: null }));
     await settle();
     expect(box().value).toBe('My own words');
     // The box was not moved: the caret is still in it.
     expect(document.activeElement).toBe(box());
+  });
+
+  it('a_focused_box_with_no_edit_takes_the_ais_text', async () => {
+    page = await mount();
+    await openPage();
+    box().focus();
+    instructionsFile({ text: 'From the AI.', edited: true });
+    feeds.instructions(news({ text: 'From the AI.', edited: true }));
+    await settle();
+    expect(box().value).toBe('From the AI.');
+    expect(document.activeElement).toBe(box());
+    // A small edit then is saved over the AI's text, never over the old one.
+    box().value = 'From the AI. Shorter.';
+    box().dispatchEvent(new Event('change', { bubbles: true }));
+    await settle();
+    expect(core.instructionsSet).toHaveBeenCalledWith('From the AI. Shorter.', 'From the AI.');
+    expect($('.btray .iconf')).toBeNull();
+  });
+
+  it('an_unsaved_edit_and_an_ai_save_ask_which_to_keep', async () => {
+    page = await mount();
+    await openPage();
+    box().focus();
+    box().value = 'My own words';
+    box().dispatchEvent(new Event('input', { bubbles: true }));
+    instructionsFile({ text: 'From the AI.', edited: true });
+    feeds.instructions(news({ text: 'From the AI.', edited: true }));
+    await settle();
+    // Nothing replaced, nothing saved: the choice, in amber with "!".
+    expect(box().value).toBe('My own words');
+    expect(text($('.btray .iwarn'))).toBe('!The file changed while you were writing.');
+    expect($$('.btray .iconf button').map((b) => text(b))).toEqual(["Take the file's", 'Keep mine']);
+    // Leaving the box saves nothing over the AI's file: the choice stays.
+    box().dispatchEvent(new Event('change', { bubbles: true }));
+    await settle();
+    expect(core.instructionsSet).toHaveBeenCalledWith('My own words', STANDARD_INSTRUCTIONS);
+    expect(await core.instructionsGet()).toMatchObject({ text: 'From the AI.' });
+    expect($('.btray .iconf')).not.toBeNull();
+    // "Keep mine": saved whatever the file holds.
+    click($('.btray [data-imine]'));
+    await settle();
+    expect(core.instructionsSet).toHaveBeenLastCalledWith('My own words', null);
+    expect(box().value).toBe('My own words');
+    expect($('.btray .iconf')).toBeNull();
+    // Another round, and "Take the file's": the box takes it, nothing is saved.
+    box().value = 'Mine again';
+    box().dispatchEvent(new Event('input', { bubbles: true }));
+    instructionsFile({ text: 'The AI again.', edited: true });
+    feeds.instructions(news({ text: 'The AI again.', edited: true }));
+    await settle();
+    core.instructionsSet.mockClear();
+    click($('.btray [data-itheirs]'));
+    await settle();
+    expect(box().value).toBe('The AI again.');
+    expect($('.btray .iconf')).toBeNull();
+    expect(core.instructionsSet).not.toHaveBeenCalled();
+  });
+
+  it('an_edit_refused_when_leaving_the_page_comes_back_with_the_choice', async () => {
+    page = await mount();
+    await openPage();
+    box().value = 'My own words';
+    box().dispatchEvent(new Event('input', { bubbles: true }));
+    // The AI saves before the page hears it; the page is left.
+    instructionsFile({ text: 'From the AI.', edited: true });
+    click($('.btray [data-tback]'));
+    await settle();
+    click($('.btray [data-sub="instructions"]'));
+    await settle();
+    expect(box().value).toBe('My own words');
+    expect($('.btray .iconf')).not.toBeNull();
+  });
+
+  it('says_while_checking_and_when_the_before_and_after_comes_later', async () => {
+    page = await mount();
+    await openPage();
+    feeds.instructions(news({ text: 'Keep it short.', edited: true, check: 'checking' }));
+    await settle();
+    expect(text(check())).toBe('Checking on your last dictation…');
+    feeds.instructions(news({ text: 'Keep it short.', edited: true, check: 'later' }));
+    await settle();
+    expect(text(check())).toBe('Before and after show up after your next dictation.');
+    feeds.instructions(news({ text: 'Keep it short.', edited: true, check: 'off' }));
+    await settle();
+    expect(check()).toBeNull();
+  });
+
+  it('a_failed_copy_says_so_and_a_folder_no_terminal_takes_offers_only_the_copy', async () => {
+    core.instructionsCopy.mockRejectedValue('core');
+    core.instructionsGet.mockResolvedValue(instructions({ open: false }));
+    page = await mount();
+    await openPage();
+    click($('.btray [data-iai]'));
+    await settle();
+    expect(menuButtons().map((b) => text(b.querySelector('b')))).toEqual(['Copy the task']);
+    click($('.btray [data-icopy]'));
+    await settle();
+    expect(done().classList.contains('warn')).toBe(true);
+    expect(text(done())).toBe("!The task couldn't be copied");
   });
 
   it('looks_at_the_file_again_while_shown', async () => {

@@ -111,7 +111,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
 use crate::card_window::Card;
-use crate::instructions::{Instructions, InstructionsNews, InstructionsView, Sample};
+use crate::instructions::{Instructions, InstructionsNews, InstructionsView, Sample, SampleCheck};
 use crate::ipc::{CardPlaceView, EntryView, SettingsView, Ui};
 use crate::lang::{self, Lang};
 use crate::paths::Paths;
@@ -199,9 +199,15 @@ pub enum CoreEvent {
     /// The Instructions page reads the instructions: a file saved since the last look is read again first, and the page
     /// hears it (`cue://instructions`) with the before and after that follows.
     InstructionsGet(tokio::sync::oneshot::Sender<InstructionsView>),
-    /// The page saved its text (`Some`) or restored the standard ones (`None`); the answer is the instructions as they
-    /// are now, `None` when the file could not be written.
-    InstructionsSet { text: Option<String>, reply: tokio::sync::oneshot::Sender<Option<InstructionsView>> },
+    /// The page saved its text (`Some`) or restored the standard ones (`None`). `base` is the file's text the page's edit
+    /// started from: a file that changed since is not saved over (`SetRefused::Changed`); `None` saves whatever is there.
+    InstructionsSet {
+        text: Option<String>,
+        base: Option<String>,
+        reply: tokio::sync::oneshot::Sender<Result<InstructionsView, SetRefused>>,
+    },
+    /// The before and after of reading `generation` came (`None`: none could be made).
+    InstructionsSampled { generation: u64, sample: Option<Sample> },
     /// "Скопировать задание": the task for any AI, with the instructions' folder, into the clipboard.
     InstructionsCopy,
     /// "Открыть в <agent>": the agent in a new terminal in the instructions' folder, the task as its first message; the
@@ -235,6 +241,15 @@ pub enum CoreEvent {
     /// the main one and is now in front, or "Copy" (`None`) — the clipboard. Neither is a new result: the last result
     /// (Ctrl+Win+V) and the history stay as they are.
     HistoryText { text: String, target: Option<WindowRef> },
+}
+
+/// Why the page's text was not saved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetRefused {
+    /// The file changed since the page's edit started (an AI saved it): the page asks which to keep.
+    Changed,
+    /// The file could not be written.
+    Failed,
 }
 
 /// What the main window wants of the settings: to read them, or to change one.
@@ -284,6 +299,13 @@ pub struct Runtime {
     /// The Instructions page's before and after on the last dictation, cleaned again after the file was read again; a
     /// newer reading replaces it.
     sample_task: Option<JoinHandle<()>>,
+    /// The reading the before and after in flight is for: an older one's answer is dropped.
+    sample_gen: u64,
+    /// The before and after in flight uses the local model: a dictation starting takes it back.
+    sample_local: bool,
+    /// None could be made (no dictation yet, a model not loaded, an agent to sign in to, no OpenCode server): the next
+    /// dictation in the history makes it due again.
+    sample_waits: bool,
     history: HistoryLog,
     /// One client for the whole app (refine, batch transcription, warm-up): a shared connection pool.
     http: reqwest::Client,
@@ -436,6 +458,9 @@ impl Runtime {
             paths,
             instructions,
             sample_task: None,
+            sample_gen: 0,
+            sample_local: false,
+            sample_waits: false,
             history,
             http: reqwest::Client::new(),
             focus: Arc::new(FocusWorker::spawn()),
@@ -861,12 +886,24 @@ impl Runtime {
             }
             CoreEvent::HistoryClear => self.history.clear(),
             CoreEvent::InstructionsGet(reply) => {
-                if self.instructions.reload_if_changed() {
+                // A reading a dictation took, or one waiting for a dictation, is shown now.
+                self.instructions.reload_if_changed();
+                if self.instructions.take_sample_due() {
                     self.instructions_read_again();
                 }
                 let _ = reply.send(self.instructions.view(&self.paths));
             }
-            CoreEvent::InstructionsSet { text, reply } => {
+            CoreEvent::InstructionsSet { text, base, reply } => {
+                // What is in the file now, so a change an AI saved meanwhile is not saved over.
+                if self.instructions.reload_now() {
+                    self.instructions.take_sample_due();
+                    self.instructions_read_again();
+                }
+                if base.is_some_and(|b| b != self.instructions.view(&self.paths).text) {
+                    tracing::info!("instructions: not saved from the page, the file changed since its edit started");
+                    let _ = reply.send(Err(SetRefused::Changed));
+                    return;
+                }
                 let saved = match &text {
                     Some(t) => self.instructions.set(t),
                     None => self.instructions.reset(self.lang.code()),
@@ -875,14 +912,25 @@ impl Runtime {
                     Ok(()) => {
                         let chars = text.as_ref().map(|t| t.chars().count());
                         tracing::info!(restored = text.is_none(), ?chars, "instructions: saved from the page");
+                        self.instructions.take_sample_due();
                         self.instructions_read_again();
-                        let _ = reply.send(Some(self.instructions.view(&self.paths)));
+                        let _ = reply.send(Ok(self.instructions.view(&self.paths)));
                     }
                     Err(e) => {
                         tracing::warn!("instructions: not saved from the page: {e}");
-                        let _ = reply.send(None);
+                        let _ = reply.send(Err(SetRefused::Failed));
                     }
                 }
+            }
+            CoreEvent::InstructionsSampled { generation, sample } => {
+                if generation != self.sample_gen {
+                    return;
+                }
+                self.sample_task = None;
+                self.sample_local = false;
+                let check = if sample.is_some() { SampleCheck::Shown } else { SampleCheck::Later };
+                self.sample_waits = sample.is_none();
+                self.ui.instructions(&InstructionsNews::of(self.instructions.view(&self.paths), sample, check));
             }
             CoreEvent::InstructionsCopy => {
                 let folder = self.paths.instructions_dir();
@@ -910,45 +958,86 @@ impl Runtime {
     /// The instructions were read again (saved from the page, or by the user or an AI): the main window hears them at
     /// once, and the last dictation is cleaned again with them for its before and after.
     fn instructions_read_again(&mut self) {
-        self.ui.instructions(&InstructionsNews::of(self.instructions.view(&self.paths), None));
-        self.start_sample();
+        let check = self.start_sample();
+        self.ui.instructions(&InstructionsNews::of(self.instructions.view(&self.paths), None, check));
+    }
+
+    /// A dictation starts: a before and after on the local model gives way to it (made again once it is in the
+    /// history).
+    fn sample_gives_way(&mut self) {
+        if !self.sample_local {
+            return;
+        }
+        if let Some(t) = self.sample_task.take() {
+            t.abort();
+            tracing::info!("instructions: the before and after gave way to a dictation");
+        }
+        self.sample_local = false;
+        self.sample_gen += 1;
+        self.sample_waits = true;
+        self.ui.instructions(&InstructionsNews::of(self.instructions.view(&self.paths), None, SampleCheck::Later));
+    }
+
+    /// A dictation is in the history: a before and after that could not be made is due again.
+    fn sample_after_dictation(&mut self) {
+        if std::mem::take(&mut self.sample_waits) {
+            self.instructions.mark_sample_due();
+        }
     }
 
     /// The last dictation of the history cleaned once more on the route the cleanup takes now, off the core's thread:
     /// never with no AI or a local model not loaded (it is not woken), through an agent only as `Agents::sample` allows
     /// (no OpenCode server started for it, none marked signed out or missing). Nothing goes to the history or usage.csv;
     /// the text goes to the main window alone, the log gets only that it was shown.
-    fn start_sample(&mut self) {
+    fn start_sample(&mut self) -> SampleCheck {
         if let Some(old) = self.sample_task.take() {
             old.abort();
         }
+        self.sample_gen += 1;
+        self.sample_local = false;
+        self.sample_waits = false;
         let to = match route(&self.settings.refine, &self.llm.slot()) {
-            to @ (Route::Agent(_) | Route::Local(_)) => to,
-            _ => {
-                tracing::info!(reason = off_reason(&self.settings.refine), "instructions: no before and after on this route");
-                return;
+            Route::Off => {
+                tracing::info!(reason = off_reason(&self.settings.refine), "instructions: no before and after with no AI");
+                return SampleCheck::Off;
             }
+            Route::Agent(a) if self.agents.marks.problem(a).is_some() => None,
+            to @ (Route::Agent(_) | Route::Local(_)) => Some(to),
+            Route::NotReady | Route::Waking(_) => None,
         };
-        let (s, dict, agents, ui) = (self.settings.refine.clone(), self.settings.dictionary.clone(), self.agents.clone(), self.ui.clone());
-        let (dir, instructions) = (self.paths.history.clone(), self.instructions.text().into_owned());
-        let view = self.instructions.view(&self.paths);
+        let Some(to) = to else {
+            tracing::info!("instructions: no before and after until the next dictation (the model or the agent cannot clean now)");
+            self.sample_waits = true;
+            return SampleCheck::Later;
+        };
+        self.sample_local = matches!(to, Route::Local(_));
+        let (s, dict, agents, tx) = (self.settings.refine.clone(), self.settings.dictionary.clone(), self.agents.clone(), self.tx.clone());
+        let (dir, instructions, generation) = (self.paths.history.clone(), self.instructions.text().into_owned(), self.sample_gen);
         self.sample_task = Some(tokio::spawn(async move {
-            let Ok(Some(entry)) = tokio::task::spawn_blocking(move || history::last_dictation(&dir)).await else { return };
-            let raw = basics::tidy(entry.raw.as_deref().unwrap_or_default(), &dict);
-            let ctx = RefineContext::new(entry.app.clone(), None, s.context_chars);
-            let after = match to {
-                Route::Agent(a) => agents.sample(a, &raw, &ctx, &dict, &s, &instructions).await,
-                Route::Local(g) => {
-                    let r = local::refine(g, &raw, &ctx, &dict, &s, &instructions).await;
-                    (r.outcome == RefineOutcome::Refined).then_some(r.text)
+            let entry = tokio::task::spawn_blocking(move || history::last_dictation(&dir)).await.ok().flatten();
+            let sample = match entry {
+                Some(entry) => {
+                    let raw = basics::tidy(entry.raw.as_deref().unwrap_or_default(), &dict);
+                    let ctx = RefineContext::new(entry.app.clone(), None, s.context_chars);
+                    let after = match to {
+                        Route::Agent(a) => agents.sample(a, &raw, &ctx, &dict, &s, &instructions).await,
+                        Route::Local(g) => {
+                            let r = local::refine(g, &raw, &ctx, &dict, &s, &instructions).await;
+                            (r.outcome == RefineOutcome::Refined).then_some(r.text)
+                        }
+                        _ => None,
+                    };
+                    let app = known_app(&entry.app).unwrap_or_default().to_owned();
+                    after.map(|after| Sample { app, before: entry.text, after })
                 }
-                _ => None,
+                None => None,
             };
-            let Some(after) = after else { return };
-            tracing::info!("instructions: before and after shown on the last dictation");
-            let app = known_app(&entry.app).unwrap_or_default().to_owned();
-            ui.instructions(&InstructionsNews::of(view, Some(Sample { app, before: entry.text, after })));
+            if sample.is_some() {
+                tracing::info!("instructions: before and after shown on the last dictation");
+            }
+            let _ = tx.send(CoreEvent::InstructionsSampled { generation, sample });
         }));
+        SampleCheck::Checking
     }
 
     /// A setting changed in the main window (spec 3 §3): the core's copy takes it and the file is written
@@ -1692,6 +1781,7 @@ impl Runtime {
     }
 
     fn refine(&mut self, id: DictationId, raw: String, mode: Mode) {
+        self.sample_gives_way();
         // The text as it was heard, for the history: a retry refines the same text again.
         self.raw_text = Some((id, raw.clone()));
         let info = self.focus_for_refine(id);
@@ -2401,6 +2491,9 @@ impl Runtime {
                 // Its recording only once `last\audio.wav` is really this dictation's sound (`committed`).
                 let sound = self.paths.last_wav();
                 let written = self.history.add_dictation(&self.settings.history, entry, committed, &sound);
+                if written.as_ref().is_some_and(|e| e.mode == history::Mode::Dictation && e.raw.is_some()) {
+                    self.sample_after_dictation();
+                }
                 self.show_in_history(written);
                 committed
             }

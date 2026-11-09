@@ -509,14 +509,14 @@ describe('The Cleanup page: Your instructions', () => {
     expect(small(row)).toBe('Standard · you can adjust them with AI');
     expect(row.nextElementSibling?.classList.contains('tft') || row.parentElement?.nextElementSibling?.classList.contains('tft')).toBe(true);
     // The user's own: said so.
-    core.instructionsGet.mockResolvedValue({ text: 'Keep it short.', edited: true, broken: false, path: 'x' });
+    core.instructionsGet.mockResolvedValue({ text: 'Keep it short.', edited: true, broken: false, path: 'x', open: true });
     click($('.btray [data-tback]'));
     await settle();
     click($('.btray [data-sub="cleanup"]'));
     await settle();
     expect(small(insRow())).toBe('Changed by you');
     // A broken file: amber.
-    core.instructionsGet.mockResolvedValue({ text: 'x', edited: false, broken: true, path: 'x' });
+    core.instructionsGet.mockResolvedValue({ text: 'x', edited: false, broken: true, path: 'x', open: true });
     click($('.btray [data-tback]'));
     await settle();
     click($('.btray [data-sub="cleanup"]'));

@@ -454,9 +454,12 @@ At its first start this version deletes the Soniox key of earlier versions from 
   `instructions.prev.md`), cut at 2 000 characters, and an empty, deleted or non-text file means the standard text. The
   protocol (output format, the dictionary and habits blocks, the translation) stays in code. `AGENTS.md` beside the
   file is CUE's own, rewritten when its first line `<!-- CUE <version> -->` is older than the app. The folder holds only
-  these three files, so an AI opened in it sees nothing else of CUE's; an earlier build kept them beside settings.json,
-  and they move into it once at startup (never over a file there; with two `instructions.md`, the newer stays in use
-  and the other becomes `instructions.prev.md`; CUE's old `AGENTS.md` goes).
+  these files, so an AI opened in it sees nothing else of CUE's; an earlier build kept them beside settings.json, and
+  they move into it once at startup without losing anything: a rename that fails is a copy (the original stays, and
+  the next start, finding the same text in both, keeps one); with two different `instructions.md` the newer stays in
+  use and the other is kept as `instructions.old-<date>.md` (copied first, then removed; a taken name gets `-2`, never
+  overwritten), an old previous copy likewise as `instructions.prev.old-<date>.md`; one that can be neither moved nor
+  copied is read where it is, and no standard text is written in its place. CUE's old `AGENTS.md` goes.
 - When the app is unknown (neither the query at the start of recording nor the one after the second press named it),
   the request carries `<app>unknown app</app>`.
 - The answer is used only when it is a complete `{"text": …}` object: a refusal, `max_tokens`, a timeout, a network
@@ -1255,14 +1258,23 @@ again.
   -d <folder>` when it is here, else the agent in a console window of its own; Codex `-C <folder> <task>`, OpenCode
   `--prompt <task> <folder>`; an argument a console or Windows Terminal would misread is never sent, the agent then
   opens without the task and the core puts it in the clipboard) and "Скопировать задание" (`instructions_copy`: the
-  task with its folder, into the clipboard by the insert thread, as the history's Copy); the path and AGENTS.md at the
-  foot. While the page is shown it asks `instructions_get` every 1.5 s, which reads a file saved since; each reading
-  goes to the main window alone as `cue://instructions` (the box takes the new text unless the user is typing in it,
-  "Только что"), and the core cleans the last dictation of the history (`history::last_dictation`, its text as heard,
-  tidied as a dictation is) once more on the route the cleanup takes now, off its thread (`start_sample`; a newer
-  reading replaces it): through a loaded local model, or an agent through `Agents::sample` (never a marked one, never
-  an OpenCode server started for it: `OpenCodeSlot::running` only); none with no AI or a model not loaded. The result
-  comes as a second `cue://instructions` with `sample` (the app, before, after) and goes to neither the history nor
+  task with its folder, into the clipboard by the insert thread, as the history's Copy; a failure in amber); the path
+  and AGENTS.md at the foot. A folder no terminal command line can carry (`InstructionsView.open` false) offers the copy
+  alone. While the page is shown it asks `instructions_get` every 1.5 s, which reads a file saved since; each reading
+  goes to the main window alone as `cue://instructions` ("Только что"). The box takes the new text unless it holds an
+  edit not saved; when the file changed under such an edit, an amber "!" line asks "Взять из файла" or "Оставить моё".
+  A save carries the text its edit started from (`base`), and the core refuses it when the file holds another now
+  (`changed`), so an AI's save is never written over unasked; "Оставить моё" saves with no base. An edit refused as the
+  page is left comes back with the choice. Each reading also starts the before and after: the core cleans the last
+  dictation of the history (`history::last_dictation`, its text as heard, tidied as a dictation is) once more on the
+  route the cleanup takes now, off its thread (`start_sample`; a newer reading replaces it; `InstructionsSampled`
+  brings the result back to the core by its generation): through a loaded local model, or an agent through
+  `Agents::sample` (never a marked one, never an OpenCode server started for it: `OpenCodeSlot::running` only). The
+  event's `check` says where it stands: `checking` ("Проверяем на последней диктовке…"), `later` when none can come now
+  (no dictation yet, a model not loaded, a marked agent, no OpenCode server, no answer: "Было и стало появятся после
+  следующей диктовки.", made due again when the next dictation is in the history), `shown` with `sample` (the app,
+  before, after), `off` with no AI. A reading a dictation took (`Instructions::text`) stays due (`sample_due`) for the
+  page's next look. A dictation starting takes back a sample on the local model. Nothing of it goes to the history or
   usage.csv; the log says only that it was shown.
 - **Microphone**: As in Windows or one of the devices `mic_list` names (with the one Windows uses by default), saved
   as `audio.device` and used from the next recording on (see Recording). A pinned one that is not connected shows as

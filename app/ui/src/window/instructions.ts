@@ -9,14 +9,16 @@
 //   found) starts it in a terminal in the instructions' folder with CUE's task; "Copy the task" puts it in the clipboard
 //   for any AI. A line under it says what happened.
 // - When the file is read again (`cue://instructions`, the core's answer to a save or to the page's look while shown),
-//   the page takes the new text — unless the user is typing in the box — says "Just now", and once the last dictation
-//   is cleaned again with them, shows it before and after.
+//   the page takes the new text, says "Just now", says it is checking on the last dictation, and once that is cleaned
+//   again with them shows it before and after (or says it comes after the next dictation). An edit not saved yet is
+//   never replaced: when the file changed under it (an AI saved it), an amber line asks which to keep — the file's or
+//   the user's — and a save the core refuses for the same reason (`changed`) asks the same. Nothing is lost either way.
 // - Under it all, the file's path and AGENTS.md.
 // The page looks at the file every 1.5 s while it is shown (`instructions_get`): a file an AI saved is read then.
 // The Cleanup page's "Your instructions" row takes its line from here (`line`).
 import * as api from './api';
-import type { AgentView, InstructionsNews, InstructionsSample, InstructionsView } from './api';
-import { h, logFailed, type Ctx } from './page';
+import type { AgentView, InstructionsNews, InstructionsSample, InstructionsView, SampleCheck } from './api';
+import { codeOf, h, logFailed, type Ctx } from './page';
 import { fill } from './text';
 
 /** How often the page looks at the file while it is shown. */
@@ -33,22 +35,31 @@ export interface InstructionsLine {
 
 /** What the line under the menu says: an agent opened (with the task or with it copied), the task copied, or a
  *  failure in amber. */
-type Done = { kind: 'opened' | 'openedCopied' | 'notOpened'; name: string } | { kind: 'copied' | 'notSaved' };
+type Done = { kind: 'opened' | 'openedCopied' | 'notOpened'; name: string } | { kind: 'copied' | 'notSaved' | 'notCopied' };
 
 export class InstructionsPage {
   /** The instructions as the core last said (null — not heard yet). */
   private view: InstructionsView | null = null;
   private sample: InstructionsSample | null = null;
+  /** Where the before and after stands. */
+  private check: SampleCheck = 'off';
+  /** The file changed under an edit not saved yet: the page asks which to keep. */
+  private conflict = false;
+  /** An edit not saved when the page was left (its save refused): the box shows it again. */
+  private draft: string | null = null;
+  /** A save is on its way. */
+  private saving = false;
   /** The core read the file again while the page was shown: "Just now". */
   private fresh = false;
   private menuOpen = false;
   private done: Done | null = null;
-  /** The text the box was last filled with or saved as: a box that differs holds an edit not saved yet. */
+  /** The file's text the box was last filled with or saved as: a box that differs holds an edit not saved yet, and this
+   *  is what that edit started from. */
   private saved = '';
   private box: HTMLTextAreaElement | null = null;
   private root: HTMLElement | null = null;
   /** The page's parts, each filled in its own place. */
-  private slots: Record<'head' | 'sample' | 'acts' | 'menu' | 'done' | 'foot', HTMLElement> | null = null;
+  private slots: Record<'head' | 'conflict' | 'sample' | 'acts' | 'menu' | 'done' | 'foot', HTMLElement> | null = null;
   /** The parts that came since the last paint: they ease in. */
   private readonly entering = new Set<'sample' | 'menu' | 'done'>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -91,6 +102,8 @@ export class InstructionsPage {
 
   /** The page is left (or the tray closed, or the window goes): an edit not saved yet is saved, the looks stop. */
   left(): void {
+    // An edit not saved is kept until its save is taken (or refused: the page asks again when shown).
+    if (this.box && this.box.value !== this.saved) this.draft = this.box.value;
     this.save();
     this.stopLooking();
     this.root = this.box = this.slots = null;
@@ -107,18 +120,21 @@ export class InstructionsPage {
     if (this.root) this.fresh = true;
     if (n.sample) this.entering.add('sample');
     this.sample = n.sample;
-    this.take({ text: n.text, edited: n.edited, broken: n.broken, path: this.view?.path ?? '' });
+    this.check = n.check;
+    this.take({ text: n.text, edited: n.edited, broken: n.broken, path: n.path, open: n.open });
   }
 
-  /** The instructions as the core says they are: the box takes the text unless an edit is being made in it. */
+  /** The instructions as the core says they are. The box takes the text unless it holds an edit not saved; a file
+   *  that changed under such an edit asks which to keep. */
   private take(v: InstructionsView, quiet = false): void {
     const old = this.view;
     const same = !!old && old.text === v.text && old.edited === v.edited && old.broken === v.broken && old.path === v.path;
     // The page's own look found nothing new: nothing is drawn again.
     if (quiet && same) return;
-    const editing = this.typing();
     this.view = { ...v, path: v.path || this.view?.path || '' };
-    if (!editing) {
+    if (this.dirty()) {
+      if (v.text !== this.saved) this.conflict = true;
+    } else {
       this.saved = v.text;
       if (this.box) this.box.value = v.text;
     }
@@ -126,29 +142,52 @@ export class InstructionsPage {
     this.paint();
   }
 
-  /** The user is making an edit: the box has the focus or holds text not saved. */
-  private typing(): boolean {
-    const b = this.box;
-    return !!b && (b.value !== this.saved || document.activeElement === b);
+  /** The box holds an edit not saved yet (or one kept from a refused save). */
+  private dirty(): boolean {
+    const text = this.box ? this.box.value : this.draft;
+    return text !== null && text !== this.saved;
   }
 
-  /** The box's text saved when it differs from what the core holds. */
-  private save(): void {
+  /** The box's edit saved, as long as the file still holds what it started from (`base`); `force` — "keep mine",
+   *  whatever the file holds now. */
+  private save(force = false): void {
     const b = this.box;
-    if (!b || b.value === this.saved) return;
-    const text = b.value;
-    this.saved = text;
-    api.instructionsSet(text).then(
+    const text = b ? b.value : this.draft;
+    if (text === null || this.saving || (!force && text === this.saved)) return;
+    this.saving = true;
+    api.instructionsSet(text, force ? null : this.saved).then(
       (v) => {
+        this.saving = false;
+        this.saved = text;
+        this.draft = null;
+        this.conflict = false;
         this.done = null;
         this.take(v);
       },
       (e) => {
-        logFailed('saving the instructions', e);
-        this.done = { kind: 'notSaved' };
+        this.saving = false;
+        if (codeOf(e) === 'changed') {
+          // An AI saved the file meanwhile: nothing was written over it; the edit waits for the user's choice.
+          this.draft = text;
+          this.conflict = true;
+        } else {
+          logFailed('saving the instructions', e);
+          this.done = { kind: 'notSaved' };
+          this.entering.add('done');
+        }
         this.paint();
       },
     );
+  }
+
+  /** "Взять из файла": the box takes the file's text, the edit goes. */
+  private takeFile(): void {
+    const text = this.view?.text ?? this.saved;
+    this.saved = text;
+    this.draft = null;
+    this.conflict = false;
+    if (this.box) this.box.value = text;
+    this.paint();
   }
 
   /** The page's rows; the page shown is filled in place from then on (`paint`). */
@@ -159,12 +198,14 @@ export class InstructionsPage {
     box.spellcheck = false;
     box.setAttribute('aria-label', t.box);
     box.addEventListener('change', () => this.save());
-    box.value = this.saved;
+    // The file's text as the core last said, or an edit kept from a refused save.
+    if (this.draft === null && this.view) this.saved = this.view.text;
+    box.value = this.draft ?? this.saved;
     // Each part has its own place: the box is never moved, so it keeps its focus, its caret and an edit.
     const slot = () => h('div', 'islot');
-    this.slots = { head: slot(), sample: slot(), acts: slot(), menu: slot(), done: slot(), foot: slot() };
+    this.slots = { head: slot(), conflict: slot(), sample: slot(), acts: slot(), menu: slot(), done: slot(), foot: slot() };
     const sl = this.slots;
-    root.append(sl.head, box, sl.sample, sl.acts, sl.menu, sl.done, sl.foot);
+    root.append(sl.head, box, sl.conflict, sl.sample, sl.acts, sl.menu, sl.done, sl.foot);
     this.root = root;
     this.box = box;
     this.paint();
@@ -179,7 +220,8 @@ export class InstructionsPage {
     const t = this.ctx.t.ins;
     const v = this.view;
     sl.head.replaceChildren(this.head());
-    sl.sample.replaceChildren(...(this.sample ? [this.compare(this.sample)] : []));
+    sl.conflict.replaceChildren(...(this.conflict ? [this.conflictLine()] : []));
+    sl.sample.replaceChildren(...(this.sample ? [this.compare(this.sample)] : this.checkLine()));
     sl.acts.replaceChildren(this.actions());
     sl.menu.replaceChildren(...(this.menuOpen ? [this.menu()] : []));
     const done = this.doneLine();
@@ -202,6 +244,35 @@ export class InstructionsPage {
     }
     this.entering.clear();
     this.resized();
+  }
+
+  /** The file changed under the edit: which to keep. */
+  private conflictLine(): HTMLElement {
+    const t = this.ctx.t.ins;
+    const c = h('div', 'iconf');
+    c.setAttribute('role', 'group');
+    const line = h('div', 'iwarn');
+    line.append(bang(), t.conflict);
+    const acts = h('div', 'acts');
+    const button = (label: string, data: string, act: () => void) => {
+      const b = h('button', 'btn2', label);
+      b.type = 'button';
+      b.dataset[data] = '';
+      b.addEventListener('click', act);
+      acts.append(b);
+    };
+    button(t.takeFile, 'itheirs', () => this.takeFile());
+    button(t.keepMine, 'imine', () => this.save(true));
+    c.append(line, acts);
+    return c;
+  }
+
+  /** While the last dictation is cleaned again, or when that cannot be now: a quiet line. */
+  private checkLine(): HTMLElement[] {
+    const t = this.ctx.t.ins;
+    if (this.check === 'checking') return [h('div', 'icheck', t.checking)];
+    if (this.check === 'later') return [h('div', 'icheck', t.later)];
+    return [];
   }
 
   /** Whose the instructions are, and restore for the user's own or a broken file. */
@@ -237,6 +308,8 @@ export class InstructionsPage {
     this.done = null;
     this.sample = null;
     // The box takes the standard text whatever it held.
+    this.draft = null;
+    this.conflict = false;
     if (this.box) this.box.value = this.saved;
     api.instructionsReset().then(
       (v) => this.take(v),
@@ -299,7 +372,8 @@ export class InstructionsPage {
       b.addEventListener('click', act);
       m.append(b);
     };
-    const a = this.agent();
+    // A folder no terminal can be opened in: only the copy is offered.
+    const a = this.view?.open === false ? null : this.agent();
     if (a) item(fill(t.open, a.name), fill(t.openLine, a.name), 'irun', () => this.open(a));
     item(t.copy, t.copyLine, 'icopy', () => this.copy());
     return m;
@@ -332,7 +406,12 @@ export class InstructionsPage {
         this.entering.add('done');
         this.paint();
       },
-      (e) => logFailed('copying the task', e),
+      (e) => {
+        logFailed('copying the task', e);
+        this.done = { kind: 'notCopied' };
+        this.entering.add('done');
+        this.paint();
+      },
     );
   }
 
@@ -352,9 +431,13 @@ export class InstructionsPage {
         line.textContent = t.copied;
         break;
       case 'notOpened':
-      case 'notSaved':
         line.classList.add('warn');
-        line.append(bang(), d.kind === 'notOpened' ? fill(t.notOpened, d.name) : t.notSaved);
+        line.append(bang(), fill(t.notOpened, d.name));
+        break;
+      case 'notSaved':
+      case 'notCopied':
+        line.classList.add('warn');
+        line.append(bang(), t[d.kind]);
         break;
     }
     return line;

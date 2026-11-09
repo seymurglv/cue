@@ -87,6 +87,12 @@ fn passable(arg: &str) -> bool {
     !arg.contains(['"', '%', '\r', '\n', '\0']) && !arg.ends_with('\\')
 }
 
+/// Whether a folder can go on a terminal's command line ([`passable`]): the Instructions page offers "Открыть в" only
+/// then.
+pub fn passes(dir: &Path) -> bool {
+    passable(&dir.to_string_lossy())
+}
+
 /// What to start to open `exe` with `args` in `dir`; `None` when an argument cannot pass ([`passable`]).
 pub fn launch(term: &Terminal, dir: &Path, exe: &Path, args: &[String]) -> Option<Launch> {
     let dir = dir.to_string_lossy();

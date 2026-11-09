@@ -208,6 +208,12 @@ export interface WinText {
     openedCopied: string;
     notOpened: string;
     notSaved: string;
+    notCopied: string;
+    checking: string;
+    later: string;
+    conflict: string;
+    takeFile: string;
+    keepMine: string;
     before: string;
     beforeNoApp: string;
     after: string;
@@ -418,6 +424,12 @@ export const en: WinText = {
     openedCopied: '{NAME} is open, the task copied: paste it there.',
     notOpened: "{NAME} didn't open",
     notSaved: "The file couldn't be saved",
+    notCopied: "The task couldn't be copied",
+    checking: 'Checking on your last dictation…',
+    later: 'Before and after show up after your next dictation.',
+    conflict: 'The file changed while you were writing.',
+    takeFile: "Take the file's",
+    keepMine: 'Keep mine',
     before: 'Last dictation in {APP}, before',
     beforeNoApp: 'Last dictation, before',
     after: 'After',
@@ -625,6 +637,12 @@ export const ru: WinText = {
     openedCopied: '{NAME} открыт, задание скопировано: вставьте его туда.',
     notOpened: 'Не удалось открыть {NAME}',
     notSaved: 'Не удалось сохранить файл',
+    notCopied: 'Не удалось скопировать задание',
+    checking: 'Проверяем на последней диктовке…',
+    later: 'Было и стало появятся после следующей диктовки.',
+    conflict: 'Файл изменился, пока вы писали.',
+    takeFile: 'Взять из файла',
+    keepMine: 'Оставить моё',
     before: 'Последняя диктовка в {APP}, было',
     beforeNoApp: 'Последняя диктовка, было',
     after: 'Стало',

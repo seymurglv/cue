@@ -7,7 +7,7 @@
 //! earlier version kept them beside settings.json; they move into the folder once, at startup (`move_into_folder`).
 use std::borrow::Cow;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use cue_core::instructions as texts;
@@ -35,6 +35,9 @@ pub struct Instructions {
     broken: bool,
     /// How many times the file was read after loading (tests count them).
     reloads: u32,
+    /// The file was read again (by a dictation, the page or a save) and the page's before and after has not been made
+    /// for it yet.
+    sample_due: bool,
 }
 
 impl Instructions {
@@ -46,6 +49,10 @@ impl Instructions {
     }
 
     fn load_or_create_for(paths: &Paths, lang: &str, legacy: Option<&str>, version: &str) -> Self {
+        Self::load_or_create_with(paths, lang, legacy, version, &REAL_FS, &crate::runtime::local_today())
+    }
+
+    pub(crate) fn load_or_create_with(paths: &Paths, lang: &str, legacy: Option<&str>, version: &str, fs: &Fs, today: &str) -> Self {
         let mut me = Self {
             file: paths.instructions(),
             prev: paths.instructions_prev(),
@@ -57,13 +64,17 @@ impl Instructions {
             edited: false,
             broken: false,
             reloads: 0,
+            sample_due: false,
         };
         if let Some(dir) = me.file.parent()
             && let Err(e) = std::fs::create_dir_all(dir)
         {
             tracing::warn!("instructions: folder not created: {e}");
         }
-        move_into_folder(paths);
+        // An old file that could not come into the folder is read where it is: the standard text never takes its place.
+        if let Some(stuck) = move_into_folder(paths, fs, today) {
+            me.file = stuck;
+        }
         write_agents_md(&paths.agents_md(), lang, version);
         if !me.file.exists() {
             let start = legacy.and_then(texts::usable).unwrap_or_else(|| texts::standard(lang));
@@ -101,13 +112,29 @@ impl Instructions {
         if self.checked.elapsed() < DEBOUNCE {
             return false;
         }
+        self.reload_now()
+    }
+
+    /// The file looked at now, whatever the debounce (a save from the page checks what it was based on).
+    pub fn reload_now(&mut self) -> bool {
         self.checked = Instant::now();
         if stamp_of(&self.file) == self.stamp {
             return false;
         }
         self.keep_previous();
         self.read();
+        self.sample_due = true;
         true
+    }
+
+    /// Whether the page's before and after is due for a reading not shown yet; asking clears it.
+    pub fn take_sample_due(&mut self) -> bool {
+        std::mem::take(&mut self.sample_due)
+    }
+
+    /// A new dictation is in the history: a before and after that could not be made may be made now.
+    pub fn mark_sample_due(&mut self) {
+        self.sample_due = true;
     }
 
     /// The instructions as the page shows them: the file as it is (all of it), or the standard text in use while the
@@ -117,7 +144,8 @@ impl Instructions {
             text: self.raw.clone().unwrap_or_else(|| self.text.clone()),
             edited: self.edited,
             broken: self.broken,
-            path: paths.instructions().to_string_lossy().into_owned(),
+            path: self.file.to_string_lossy().into_owned(),
+            open: crate::terminal::passes(&paths.instructions_dir()),
         }
     }
 
@@ -139,6 +167,7 @@ impl Instructions {
         std::fs::write(&self.file, text)?;
         self.checked = Instant::now();
         self.read();
+        self.sample_due = true;
         Ok(())
     }
 
@@ -200,6 +229,9 @@ pub struct InstructionsView {
     pub broken: bool,
     /// The file's full path, for the page's footer.
     pub path: String,
+    /// The instructions' folder can go on a terminal's command line: "Открыть в <agent>" is offered (else only the
+    /// copy).
+    pub open: bool,
 }
 
 /// The last dictation cleaned again with the new instructions: where it went, the text as it was pasted, and the
@@ -211,56 +243,109 @@ pub struct Sample {
     pub after: String,
 }
 
-/// `cue://instructions`, to the main window after the instructions were read again: what the page shows, and once the
-/// last dictation is cleaned again, `sample`.
+/// Where the page's before and after stands (camelCase in JSON).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SampleCheck {
+    /// No AI cleans: there is none to make.
+    Off,
+    /// The last dictation is being cleaned again.
+    Checking,
+    /// None can be made now (no dictation yet, a model not loaded, an agent to sign in to, no OpenCode server, no
+    /// answer): it comes after the next dictation.
+    Later,
+    /// `sample` holds it.
+    Shown,
+}
+
+/// `cue://instructions`, to the main window after the instructions were read again: what the page shows, where the
+/// before and after stands, and once the last dictation is cleaned again, `sample`.
 #[derive(Clone, serde::Serialize)]
 pub struct InstructionsNews {
     pub text: String,
     pub edited: bool,
     pub broken: bool,
+    pub path: String,
+    pub open: bool,
     pub sample: Option<Sample>,
+    pub check: SampleCheck,
 }
 
 impl InstructionsNews {
-    pub fn of(v: InstructionsView, sample: Option<Sample>) -> Self {
-        Self { text: v.text, edited: v.edited, broken: v.broken, sample }
+    pub fn of(v: InstructionsView, sample: Option<Sample>, check: SampleCheck) -> Self {
+        Self { text: v.text, edited: v.edited, broken: v.broken, path: v.path, open: v.open, sample, check }
     }
 }
 
+/// The file operations the move uses: the real ones, or failing ones in tests.
+pub(crate) struct Fs {
+    pub rename: fn(&Path, &Path) -> io::Result<()>,
+    pub copy: fn(&Path, &Path) -> io::Result<u64>,
+}
+
+pub(crate) const REAL_FS: Fs = Fs { rename: |a, b| std::fs::rename(a, b), copy: |a, b| std::fs::copy(a, b) };
+
 /// An earlier version kept the instructions' files beside settings.json: they move into the instructions' own folder,
-/// never over a file already there. When both places hold `instructions.md`, the newer stays in use and the other
-/// becomes `instructions.prev.md`; an old previous copy goes when the folder has one. CUE's own `AGENTS.md` there goes
-/// (a new one is written in the folder); a file of the user's by that name is left. The log gets what moved, no text.
-fn move_into_folder(paths: &Paths) {
+/// never over a file already there, and nothing of the user's is lost on the way. A move that fails is a copy (the
+/// original stays); when both places hold `instructions.md`, the newer stays in use and the other is kept beside it as
+/// `instructions.old-<today>.md` (copied first, then removed); the same text in both is one file. An old previous copy
+/// moves in, or is kept as `instructions.prev.old-<today>.md` when the folder has one. No backup is ever deleted or
+/// overwritten. CUE's own `AGENTS.md` there goes (a new one is written in the folder); a file of the user's by that
+/// name is left. The log gets what moved, no text. The answer: the old `instructions.md` when it could be neither moved
+/// nor copied, to be read where it is.
+fn move_into_folder(paths: &Paths, fs: &Fs, today: &str) -> Option<PathBuf> {
     let old = |name: &str| paths.config_dir().join(name);
     let (file, prev, agents) = (old("instructions.md"), old("instructions.prev.md"), old("AGENTS.md"));
     if !file.is_file() && !prev.is_file() && !agents.is_file() {
-        return;
+        return None;
     }
-    let step = |what: &str, r: io::Result<()>| match r {
+    let step = |what: &str, r: &io::Result<()>| match r {
         Ok(()) => tracing::info!(what, "instructions: moved into their own folder"),
         Err(e) => tracing::warn!(what, "instructions: not moved into their own folder: {e}"),
     };
+    // Moved, else copied (the original left).
+    let carry = |from: &Path, to: &Path| (fs.rename)(from, to).or_else(|_| (fs.copy)(from, to).map(drop));
+    // Copied under a name of its own, then removed from where it was.
+    let keep = |from: &Path, to: &Path| (fs.copy)(from, to).map(drop).and_then(|()| std::fs::remove_file(from));
+    let dir = paths.instructions_dir();
+    let mut stuck = None;
     if file.is_file() {
         let here = paths.instructions();
-        if !here.exists() {
-            step("instructions", std::fs::rename(&file, &here));
+        let r = if !here.exists() {
+            carry(&file, &here)
+        } else if std::fs::read(&file).ok() == std::fs::read(&here).ok() {
+            std::fs::remove_file(&file)
         } else if modified(&file) > modified(&here) {
-            step("instructions, the newer", std::fs::rename(&here, paths.instructions_prev()).and_then(|()| std::fs::rename(&file, &here)));
+            (fs.copy)(&here, &backup(&dir, "instructions", today)).map(drop).and_then(|()| keep(&file, &here))
         } else {
-            step("instructions, the older as the previous copy", std::fs::rename(&file, paths.instructions_prev()));
+            keep(&file, &backup(&dir, "instructions", today))
+        };
+        step("instructions", &r);
+        if r.is_err() && !here.exists() {
+            stuck = Some(file);
         }
     }
     if prev.is_file() {
-        if paths.instructions_prev().exists() {
-            step("an older previous copy dropped", std::fs::remove_file(&prev));
+        let r = if paths.instructions_prev().exists() {
+            keep(&prev, &backup(&dir, "instructions.prev", today))
         } else {
-            step("previous copy", std::fs::rename(&prev, paths.instructions_prev()));
-        }
+            carry(&prev, &paths.instructions_prev())
+        };
+        step("previous copy", &r);
     }
     if std::fs::read_to_string(&agents).ok().is_some_and(|t| texts::agents_md_version(&t).is_some()) {
-        step("AGENTS.md dropped", std::fs::remove_file(&agents));
+        step("AGENTS.md dropped", &std::fs::remove_file(&agents));
     }
+    stuck
+}
+
+/// `<stem>.old-<date>.md` in `dir`, or `<stem>.old-<date>-2.md` and on when that is taken: never an existing file.
+fn backup(dir: &Path, stem: &str, date: &str) -> PathBuf {
+    (1..)
+        .map(|n| if n == 1 { format!("{stem}.old-{date}.md") } else { format!("{stem}.old-{date}-{n}.md") })
+        .map(|name| dir.join(name))
+        .find(|p| !p.exists())
+        .unwrap_or_else(|| dir.join(format!("{stem}.old-{date}.md")))
 }
 
 fn modified(path: &std::path::Path) -> Option<SystemTime> {
@@ -489,13 +574,15 @@ mod tests {
         assert_eq!(read(&old.join("AGENTS.md")), "# my notes");
     }
 
-    /// Both places hold instructions: the newer stays in use, the other is kept as the previous copy.
+    fn at(path: &Path, secs: u64) {
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs)).unwrap();
+    }
+
+    /// Both places hold instructions: the newer stays in use, the other is kept under a dated name; the previous copy
+    /// already there is left as it is, and a second backup of the same day gets a name of its own.
     #[test]
-    fn both_files_keep_the_newer() {
-        let at = |path: &Path, secs: u64| {
-            let f = std::fs::File::options().write(true).open(path).unwrap();
-            f.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs)).unwrap();
-        };
+    fn both_files_keep_the_newer_and_back_up_the_other() {
         for old_is_newer in [false, true] {
             let d = Dir::new(if old_is_newer { "both-old" } else { "both-new" });
             let p = d.paths();
@@ -503,13 +590,97 @@ mod tests {
             std::fs::create_dir_all(p.instructions_dir()).unwrap();
             std::fs::write(&old, "старые").unwrap();
             std::fs::write(p.instructions(), "новые").unwrap();
+            std::fs::write(p.instructions_prev(), "предыдущие").unwrap();
+            std::fs::write(p.instructions_dir().join("instructions.old-2026-11-09.md"), "раньше").unwrap();
             at(&old, if old_is_newer { 2_000_000_000 } else { 1_000_000_000 });
             at(&p.instructions(), 1_500_000_000);
-            let mut i = Instructions::load_or_create(&p, "ru", None);
-            let (kept, prev) = if old_is_newer { ("старые", "новые") } else { ("новые", "старые") };
-            assert_eq!((i.text().into_owned(), read(&p.instructions_prev())), (kept.to_owned(), prev.to_owned()));
+            let mut i = Instructions::load_or_create_with(&p, "ru", None, "1", &REAL_FS, "2026-11-09");
+            let (kept, other) = if old_is_newer { ("старые", "новые") } else { ("новые", "старые") };
+            assert_eq!(i.text(), kept);
+            assert_eq!(read(&p.instructions_dir().join("instructions.old-2026-11-09-2.md")), other);
+            assert_eq!(read(&p.instructions_dir().join("instructions.old-2026-11-09.md")), "раньше", "a backup is kept");
+            assert_eq!(read(&p.instructions_prev()), "предыдущие", "the previous copy is kept");
             assert!(!old.exists());
         }
+    }
+
+    /// The same text in both places (a copy left by a failed move): the old one goes, nothing is backed up.
+    #[test]
+    fn the_same_text_in_both_places_leaves_one() {
+        let d = Dir::new("both-same");
+        let p = d.paths();
+        let old = p.config_dir().join("instructions.md");
+        std::fs::create_dir_all(p.instructions_dir()).unwrap();
+        std::fs::write(&old, "одно").unwrap();
+        std::fs::write(p.instructions(), "одно").unwrap();
+        let _ = Instructions::load_or_create_with(&p, "ru", None, "1", &REAL_FS, "2026-11-09");
+        assert!(!old.exists());
+        let names: Vec<_> = std::fs::read_dir(p.instructions_dir()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert!(!names.iter().any(|n| n.to_string_lossy().contains(".old-")), "{names:?}");
+    }
+
+    fn no_rename(_: &Path, _: &Path) -> io::Result<()> {
+        Err(io::Error::other("rename refused"))
+    }
+
+    fn no_copy(_: &Path, _: &Path) -> io::Result<u64> {
+        Err(io::Error::other("copy refused"))
+    }
+
+    /// A rename that fails: the files are copied into the folder and the originals left where they were.
+    #[test]
+    fn a_failed_rename_copies_and_keeps_the_original() {
+        let d = Dir::new("move-copy");
+        let p = d.paths();
+        let old = p.config_dir().to_owned();
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("instructions.md"), "Пиши коротко.").unwrap();
+        std::fs::write(old.join("instructions.prev.md"), "Было.").unwrap();
+        let fs = Fs { rename: no_rename, copy: REAL_FS.copy };
+        let mut i = Instructions::load_or_create_with(&p, "ru", None, "1", &fs, "2026-11-09");
+        assert_eq!(i.text(), "Пиши коротко.");
+        assert_eq!(read(&p.instructions()), "Пиши коротко.");
+        assert_eq!(read(&p.instructions_prev()), "Было.");
+        assert_eq!(read(&old.join("instructions.md")), "Пиши коротко.", "the original stays");
+        // The next start finds the same text in both places: one is left, nothing lost.
+        let mut again = Instructions::load_or_create_with(&p, "ru", None, "1", &REAL_FS, "2026-11-10");
+        assert_eq!(again.text(), "Пиши коротко.");
+        assert!(!old.join("instructions.md").exists());
+    }
+
+    /// Neither a rename nor a copy works: the old file is read where it is, and no standard text is written over the
+    /// user's instructions.
+    #[test]
+    fn a_file_that_could_not_move_is_read_where_it_is() {
+        let d = Dir::new("move-none");
+        let p = d.paths();
+        let old = p.config_dir().join("instructions.md");
+        std::fs::create_dir_all(p.config_dir()).unwrap();
+        std::fs::write(&old, "Пиши коротко.").unwrap();
+        let fs = Fs { rename: no_rename, copy: no_copy };
+        let mut i = Instructions::load_or_create_with(&p, "ru", None, "1", &fs, "2026-11-09");
+        assert_eq!(i.text(), "Пиши коротко.");
+        assert!(i.edited() && !i.broken());
+        assert!(!p.instructions().exists(), "no standard text written in its place");
+        assert_eq!(read(&old), "Пиши коротко.");
+    }
+
+    /// A dictation took the change (`text`): the before and after is still due for the page's next look, once.
+    #[test]
+    fn a_reload_taken_by_a_dictation_is_still_due_for_the_sample() {
+        let d = Dir::new("due");
+        let p = d.paths();
+        let mut i = Instructions::load_or_create(&p, "en", None);
+        assert!(!i.take_sample_due(), "loading is no change");
+        wait();
+        std::fs::write(p.instructions(), "Keep it short.").unwrap();
+        wait();
+        assert_eq!(i.text(), "Keep it short.");
+        assert!(!i.reload_if_changed(), "the dictation took it");
+        assert!(i.take_sample_due());
+        assert!(!i.take_sample_due(), "once");
+        i.set("Shorter.").unwrap();
+        assert!(i.take_sample_due(), "a save from the page is a change too");
     }
 
     /// The page's look at the file: a saved change is read and said once; nothing changed, nothing to say.

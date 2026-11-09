@@ -32,7 +32,7 @@ use crate::ipc::{CoreTx, DayView, EntryView, HistoryFeed, MAIN_LABEL, PageView, 
 use crate::micpreview;
 use crate::paths::Paths;
 use crate::runtime::recordings::{self, AudioLimit, Playable};
-use crate::runtime::{AgentView, Choice, CoreEvent, MIC_SETTINGS, SettingsCmd, local_today, open_url, utc_offset_minutes};
+use crate::runtime::{AgentView, Choice, CoreEvent, SetRefused, MIC_SETTINGS, SettingsCmd, local_today, open_url, utc_offset_minutes};
 
 /// How long a command waits for the core's answer about the settings.
 const CORE_WAIT: Duration = Duration::from_secs(3);
@@ -84,6 +84,8 @@ pub enum CmdError {
     Autostart,
     /// The command's work crashed.
     Failed,
+    /// The instructions file changed since the page's edit started (an AI saved it): nothing was saved over it.
+    Changed,
 }
 
 /// Where "Paste again" put the text (camelCase in JSON).
@@ -624,20 +626,27 @@ pub async fn instructions_get(window: WebviewWindow, core: State<'_, CoreTx>) ->
     }
 }
 
-/// The page's text saved as the instructions (the version used until now kept as `instructions.prev.md`). `Failed` —
-/// the file could not be written; `BadValue` — longer than [`MAX_SET_CHARS`].
+/// The page's text saved as the instructions (the version used until now kept as `instructions.prev.md`). `base` — the
+/// file's text the page's edit started from: `Changed` when the file holds another now (an AI saved it), and nothing is
+/// saved over it; `None` saves whatever is there ("keep mine"). `Failed` — the file could not be written; `BadValue` —
+/// longer than [`MAX_SET_CHARS`].
 #[tauri::command]
-pub async fn instructions_set(window: WebviewWindow, text: String, core: State<'_, CoreTx>) -> Result<InstructionsView, CmdError> {
+pub async fn instructions_set(
+    window: WebviewWindow,
+    text: String,
+    base: Option<String>,
+    core: State<'_, CoreTx>,
+) -> Result<InstructionsView, CmdError> {
     guard(&window, "instructions_set")?;
     settable(&text)?;
-    save_instructions(&core, Some(text)).await
+    save_instructions(&core, Some(text), base).await
 }
 
 /// "Вернуть стандартные": the standard instructions in the interface language saved.
 #[tauri::command]
 pub async fn instructions_reset(window: WebviewWindow, core: State<'_, CoreTx>) -> Result<InstructionsView, CmdError> {
     guard(&window, "instructions_reset")?;
-    save_instructions(&core, None).await
+    save_instructions(&core, None, None).await
 }
 
 /// "Скопировать задание": the task for any AI, naming the instructions' folder, put in the clipboard by the core (as the
@@ -676,12 +685,13 @@ fn offered_agent(id: &str) -> Result<AgentId, CmdError> {
     ORDER.iter().copied().find(|a| a.id() == id).ok_or(CmdError::BadValue)
 }
 
-async fn save_instructions(core: &CoreTx, text: Option<String>) -> Result<InstructionsView, CmdError> {
+async fn save_instructions(core: &CoreTx, text: Option<String>, base: Option<String>) -> Result<InstructionsView, CmdError> {
     let (reply, answer) = tokio::sync::oneshot::channel();
-    send(core, CoreEvent::InstructionsSet { text, reply })?;
+    send(core, CoreEvent::InstructionsSet { text, base, reply })?;
     match tokio::time::timeout(CORE_WAIT, answer).await {
-        Ok(Ok(Some(view))) => Ok(view),
-        Ok(Ok(None)) => Err(CmdError::Failed),
+        Ok(Ok(Ok(view))) => Ok(view),
+        Ok(Ok(Err(SetRefused::Changed))) => Err(CmdError::Changed),
+        Ok(Ok(Err(SetRefused::Failed))) => Err(CmdError::Failed),
         _ => Err(CmdError::Core),
     }
 }
@@ -915,6 +925,7 @@ mod tests {
         }
         assert_eq!(serde_json::to_value(Opened::WithTask).unwrap(), json!("withTask"));
         assert_eq!(serde_json::to_value(Opened::TaskCopied).unwrap(), json!("taskCopied"));
+        assert_eq!(serde_json::to_value(CmdError::Changed).unwrap(), json!("changed"));
     }
 
     /// The page saves what the user typed, up to a limit far above what the cleanup uses.
