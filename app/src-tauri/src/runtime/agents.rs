@@ -8,8 +8,8 @@
 //!   tell, is marked from the run itself (`cli::signed_out`). A mark held answers the next dictation at once.
 //! - OpenCode's server is found or started off the core's thread; the dictation waits for it within its own budget.
 //! - The Cleanup page looks at the agents again (`Agents::look`): the marks go, each agent is looked for, Codex is asked
-//!   about its sign-in, and OpenCode lists its models when it cleans (a server CUE starts for that rests as after a
-//!   dictation).
+//!   about its sign-in, and OpenCode lists its models when it cleans and a server of its already runs (none is started
+//!   for the page).
 //! - The log gets the agent and a reason, never a text.
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -21,7 +21,7 @@ use cue_core::ask::AskTurn;
 use cue_core::flow::{AgentProblem, RefineOutcome};
 use cue_core::refine::RefineContext;
 use cue_core::settings::{DictionarySettings, Fallback, RefineSettings, Where};
-use cue_engines::agent::opencode::{self as engine_opencode, START_WAIT, Server, fast_auto};
+use cue_engines::agent::opencode::{self as engine_opencode, Server, fast_auto};
 use cue_engines::agent::ask::{self as agent_ask, AskRoute};
 use cue_engines::agent::refine::START_ALLOWANCE_MS;
 use cue_engines::agent::{self, AgentClient, AgentFailure, AgentModel, Found, Login};
@@ -41,7 +41,11 @@ pub const MARK_FOR: Duration = Duration::from_secs(300);
 enum Mark {
     /// Codex's sign-in was checked (it said it is signed in, said nothing CUE knows, or a run answered).
     Checked,
+    /// The agent said it is not signed in before any text went to it (`codex login status`).
     SignedOut,
+    /// A run failed for its sign-in (expired, revoked, no access): `login status` may still say "Logged in", so only a
+    /// run that answers clears it.
+    Expired,
     Missing,
 }
 
@@ -58,7 +62,7 @@ impl AgentMarks {
     /// What a mark held says the agent needs: a sign-in, or to be installed.
     pub fn problem(&self, id: AgentId) -> Option<AgentProblem> {
         match self.held(id)? {
-            Mark::SignedOut => Some(AgentProblem::SignedOut),
+            Mark::SignedOut | Mark::Expired => Some(AgentProblem::SignedOut),
             Mark::Missing => Some(AgentProblem::Missing),
             Mark::Checked => None,
         }
@@ -75,7 +79,11 @@ impl AgentMarks {
     fn set_at(&self, id: AgentId, mark: Mark, at: Instant) {
         let was = self.0.lock().unwrap_or_else(PoisonError::into_inner).insert(id, (mark, at)).map(|(m, _)| m);
         if was != Some(mark) && mark != Mark::Checked {
-            let mark = if mark == Mark::SignedOut { "signed out" } else { "missing" };
+            let mark = match mark {
+                Mark::SignedOut => "signed out",
+                Mark::Expired => "sign-in failed in a run",
+                _ => "missing",
+            };
             tracing::info!(agent = id.id(), mark, "agent: marked for 5 minutes");
         }
     }
@@ -95,9 +103,8 @@ impl AgentMarks {
     }
 }
 
-/// How long the Cleanup page waits for OpenCode's server (found or started) before it lists no models: past the start's
-/// own wait, so a start is never cut short here.
-const LIST_WAIT: Duration = Duration::from_secs(START_WAIT.as_secs() + 2);
+/// How long the Cleanup page waits for a running OpenCode server to list its models.
+const LIST_WAIT: Duration = Duration::from_secs(5);
 
 /// An agent as the Cleanup page lists it (`agents_get`), in [`ORDER`]: whether it is installed here, whether it is
 /// signed in (Codex alone tells: `None` for OpenCode, whose providers are its own, and for a Codex that said nothing CUE
@@ -203,14 +210,14 @@ impl Agents {
             Ok(c) => c,
             Err(f) => {
                 let r = agent::refine::failed(id, raw, f);
-                self.note(id, r.outcome);
+                self.note(id, r.outcome, false);
                 return r;
             }
         };
         let model = self.model(&client, s, deadline).await;
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         let r = agent::refine::run(&client, &model, raw, ctx, dict, s, instructions, job, left).await;
-        self.note(id, r.outcome);
+        self.note(id, r.outcome, true);
         r
     }
 
@@ -238,18 +245,22 @@ impl Agents {
             agent_ask::wait_for(limits, false, searching)
         });
         let deadline = tokio::time::Instant::now() + wait;
+        // The question reached the agent (its client was had): a sign-in failure is then the run's own.
+        let ran = std::sync::atomic::AtomicBool::new(false);
         let asked = async {
             let client = match self.client(id, deadline).await {
                 Ok(c) => c,
                 Err(f) => return AskResult::failed(agent_ask::failure(f)),
             };
+            ran.store(true, std::sync::atomic::Ordering::Relaxed);
             let model = self.model(&client, s, deadline).await;
             agent_ask::run(AskRoute::Agent(client), &model, web_search, turns, limits, on_step).await
         };
         // Whatever the setup took comes out of the same deadline.
         let r = tokio::time::timeout_at(deadline, asked).await.unwrap_or_else(|_| AskResult::failed(AskFailure::Timeout));
+        let signed_out = if ran.load(std::sync::atomic::Ordering::Relaxed) { Mark::Expired } else { Mark::SignedOut };
         match r.end {
-            AskEnd::Failed(AskFailure::Agent(AgentProblem::SignedOut)) => self.marks.set(id, Mark::SignedOut),
+            AskEnd::Failed(AskFailure::Agent(AgentProblem::SignedOut)) => self.marks.set(id, signed_out),
             AskEnd::Failed(AskFailure::Agent(AgentProblem::Missing)) => self.marks.set(id, Mark::Missing),
             AskEnd::Answer | AskEnd::Write { .. } if id == AgentId::Codex => self.marks.set(id, Mark::Checked),
             _ => {}
@@ -321,12 +332,12 @@ impl Agents {
 
     /// The Cleanup page looks at the agents again: every mark goes (the next dictation asks the agents anew), each
     /// agent of [`ORDER`] is looked for (OpenCode also by the server it announces), Codex is asked about its sign-in
-    /// (no text; a signed-out answer is marked again, and a sign-in a run found expired still shows as signed out), and
-    /// OpenCode, when it is found and `opencode_models`, lists its models through its server: found or started here
-    /// (off the core's thread), resting after [`REST_AFTER`] like after a dictation. Never fails: what was not learned
-    /// shows as not known.
+    /// (no text; a signed-out answer is marked again, and a sign-in a run found expired, which `login status` does not
+    /// tell, still shows as signed out), and OpenCode, when it is found and `opencode_models`, lists its models through
+    /// a server already running (never one started for the page). Never fails: what was not learned shows as not
+    /// known.
     pub async fn look(self: Arc<Self>, opencode_models: bool) -> Vec<AgentView> {
-        let expired = self.marks.problem(AgentId::Codex) == Some(AgentProblem::SignedOut);
+        let expired = self.marks.held(AgentId::Codex) == Some(Mark::Expired);
         self.marks.clear();
         let me = self.clone();
         let present = tokio::task::spawn_blocking(move || {
@@ -368,21 +379,17 @@ impl Agents {
         views
     }
 
-    /// OpenCode's models and its "Быстрая · авто" pick, from the server in use or one found or started now; none when
-    /// it cannot be had in [`LIST_WAIT`]. The pick is kept for the next cleanup, as [`Agents::model`] keeps it.
+    /// OpenCode's models and its "Быстрая · авто" pick, from a server already running (the one in use, or the user's
+    /// own), never one started for the page; none without one, or when it does not list them in [`LIST_WAIT`] (the
+    /// drop-down then offers "Быстрая · авто" alone). The pick is kept for the next cleanup, as [`Agents::model`]
+    /// keeps it.
     async fn opencode_models(&self) -> (Vec<AgentModel>, String) {
         let slot = self.opencode.clone();
-        let start = tokio::task::spawn_blocking(move || slot.get_or_start());
-        let server = match tokio::time::timeout(LIST_WAIT, start).await {
-            Ok(Ok(Ok(server))) => server,
-            _ => {
-                tracing::info!("agents: OpenCode's models not listed (no server)");
-                return (Vec::new(), String::new());
-            }
+        let Ok(Some(server)) = tokio::task::spawn_blocking(move || slot.running()).await else {
+            tracing::info!("agents: OpenCode's models not listed (no server running)");
+            return (Vec::new(), String::new());
         };
-        // Started for the page alone, it rests as after a dictation.
-        self.opencode.idle();
-        let Ok(models) = server.models().await else {
+        let Ok(Ok(models)) = tokio::time::timeout(LIST_WAIT, server.models()).await else {
             tracing::info!("agents: OpenCode's models not listed");
             return (Vec::new(), String::new());
         };
@@ -391,10 +398,11 @@ impl Agents {
         (models, auto)
     }
 
-    /// What a request's outcome says of the agent: signed out or missing is marked; a Codex that answered is signed in.
-    fn note(&self, id: AgentId, outcome: RefineOutcome) {
+    /// What a request's outcome says of the agent: signed out or missing is marked (signed out in a run that reached
+    /// the agent, `ran`, as expired); a Codex that answered is signed in.
+    fn note(&self, id: AgentId, outcome: RefineOutcome, ran: bool) {
         match outcome {
-            RefineOutcome::RawAgent(AgentProblem::SignedOut) => self.marks.set(id, Mark::SignedOut),
+            RefineOutcome::RawAgent(AgentProblem::SignedOut) => self.marks.set(id, if ran { Mark::Expired } else { Mark::SignedOut }),
             RefineOutcome::RawAgent(AgentProblem::Missing) => self.marks.set(id, Mark::Missing),
             RefineOutcome::Refined if id == AgentId::Codex => self.marks.set(id, Mark::Checked),
             _ => {}
@@ -550,9 +558,46 @@ mod tests {
         // A run that found the sign-in expired (which `login status` does not tell) still shows on the page.
         let exe = shim(&dir, "Logged in using ChatGPT", 0, "exit /b 0");
         let a = codex_only(&dir, exe);
-        a.marks.set(AgentId::Codex, Mark::SignedOut);
+        a.marks.set(AgentId::Codex, Mark::Expired);
         assert_eq!(a.clone().look(false).await[1].signed_in, Some(false));
         assert_eq!(a.marks.problem(AgentId::Codex), None, "the next dictation asks Codex again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The user signs in to Codex after the page said "войдите заново": the next look says signed in, since only
+    /// `login status` said it was not (no run found it expired).
+    #[tokio::test]
+    async fn a_codex_signed_in_since_the_last_look_shows_signed_in() {
+        let dir = temp_dir("look-again");
+        let exe = shim(&dir, "Not logged in", 1, "exit /b 0");
+        let a = codex_only(&dir, exe);
+        assert_eq!(a.clone().look(false).await[1].signed_in, Some(false));
+        assert_eq!(a.marks.held(AgentId::Codex), Some(Mark::SignedOut));
+        shim(&dir, "Logged in using ChatGPT", 0, "exit /b 0");
+        assert_eq!(a.clone().look(false).await[1].signed_in, Some(true));
+        assert_eq!(a.marks.problem(AgentId::Codex), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The page's look never starts OpenCode's server: with none running its models are not listed.
+    #[tokio::test]
+    async fn the_page_never_starts_opencode() {
+        let dir = temp_dir("look-no-start");
+        let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = starts.clone();
+        let slot = OpenCodeSlot::with(
+            Box::new(|| None),
+            Box::new(move || {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(AgentFailure::NotInstalled)
+            }),
+            REST_AFTER,
+        );
+        let a = Agents::with(dir.join("agent"), slot, Box::new(|_| None), Box::new(|| true), None);
+        let views = a.look(true).await;
+        assert!(views[0].found);
+        assert!(views[0].models.is_empty() && views[0].model.is_empty());
+        assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 0, "a server was started for the page");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -636,6 +681,7 @@ mod tests {
         assert_eq!((r.text.as_str(), r.outcome), (RAW, RefineOutcome::RawAgent(AgentProblem::SignedOut)));
         assert!(start.elapsed() < Duration::from_millis(200), "{:?}", start.elapsed());
         assert_eq!(runs(&dir), 1, "the agent was not run again");
+        assert_eq!(a.marks.held(AgentId::Codex), Some(Mark::Expired), "found by the run, not by `login status`");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -651,6 +697,7 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
         assert_eq!(runs(&dir), 0, "nothing of the dictation went to Codex");
         assert_eq!(a.marks.problem(AgentId::Codex), Some(AgentProblem::SignedOut));
+        assert_eq!(a.marks.held(AgentId::Codex), Some(Mark::SignedOut), "said by `login status`");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

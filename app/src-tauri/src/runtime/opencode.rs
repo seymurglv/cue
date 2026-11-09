@@ -67,7 +67,7 @@ impl OpenCodeSlot {
         Self::with(find, start, REST_AFTER)
     }
 
-    fn with(find: Finder, start: Starter, rest_after: Duration) -> Arc<Self> {
+    pub(super) fn with(find: Finder, start: Starter, rest_after: Duration) -> Arc<Self> {
         Arc::new(Self {
             held: Mutex::new(None),
             starting: Mutex::new(()),
@@ -112,6 +112,24 @@ impl OpenCodeSlot {
         Ok(server)
     }
 
+    /// A server already running, never one started for it: the one in use while it runs, else the one the user runs
+    /// (held from then on, and never stopped by CUE). None when neither runs. For the Cleanup page's list of OpenCode's
+    /// models; it finds by OpenCode's state file only, so it is quick (call it off the core's thread all the same).
+    pub fn running(&self) -> Option<Arc<Server>> {
+        let _one = lock(&self.starting);
+        let held = lock(&self.held).clone();
+        if let Some(s) = held {
+            if s.alive() {
+                return Some(s);
+            }
+            self.let_go(&s);
+        }
+        let server = Arc::new((self.find)().filter(Server::alive)?);
+        tracing::info!("opencode: the Cleanup page uses the server the user runs");
+        *lock(&self.held) = Some(server.clone());
+        Some(server)
+    }
+
     /// A server is held: the next cleanup goes to it without finding or starting one. None after CUE starts and after a
     /// rest, so the next request is OpenCode's first and gets the start allowance.
     pub fn holds(&self) -> bool {
@@ -142,21 +160,6 @@ impl OpenCodeSlot {
         if std::mem::take(&mut rest.when_done) {
             drop(rest);
             self.rest();
-            return;
-        }
-        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
-        let (me, after) = (Arc::downgrade(self), self.rest_after);
-        rest.timer = Some(rt.spawn(rest_later(me, after)).abort_handle());
-    }
-
-    /// A server is held while no dictation runs and no rest waits (the Cleanup page started it to list OpenCode's
-    /// models): it rests after the same wait as after a dictation. During a dictation its end starts the wait.
-    pub fn idle(self: &Arc<Self>) {
-        if !self.holds() {
-            return;
-        }
-        let mut rest = lock(&self.rest);
-        if rest.busy || rest.timer.as_ref().is_some_and(|t| !t.is_finished()) {
             return;
         }
         let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
@@ -372,27 +375,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
-    /// A server the Cleanup page started to list OpenCode's models, with no dictation after it, rests too; one asked for
-    /// during a dictation waits for the dictation's end, as before.
-    #[tokio::test]
-    async fn a_server_started_outside_a_dictation_rests_too() {
-        let cwd = temp_dir("idle");
+    /// The Cleanup page's look never starts a server: nothing running is none; the one in use is that one.
+    #[test]
+    fn running_never_starts_a_server() {
+        let cwd = temp_dir("running");
         let starts = Arc::new(AtomicUsize::new(0));
-        let slot = OpenCodeSlot::with(Box::new(|| None), counting(&starts, cwd.clone()), Duration::from_millis(100));
-        slot.idle();
-        assert!(!slot.holds(), "nothing held: nothing to rest");
-        let s = slot.get_or_start().unwrap();
-        slot.idle();
-        gone(&s).await;
+        let slot = OpenCodeSlot::with(Box::new(|| None), counting(&starts, cwd.clone()), Duration::from_secs(60));
+        assert!(slot.running().is_none());
         assert!(!slot.holds());
-        // During a dictation the page's look leaves it to the dictation's end.
-        slot.busy(true);
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
         let s = slot.get_or_start().unwrap();
-        slot.idle();
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        assert!(s.alive(), "stopped during a dictation");
-        slot.busy(false);
-        gone(&s).await;
+        assert!(Arc::ptr_eq(&slot.running().unwrap(), &s), "the server in use");
+        s.halt();
+        assert!(slot.running().is_none(), "a server that died is not started again");
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        slot.rest();
         let _ = std::fs::remove_dir_all(&cwd);
     }
 

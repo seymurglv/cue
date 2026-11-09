@@ -56,6 +56,9 @@ describe('The settings tray', () => {
       'General',
     ]);
     expect($$('.btray .trw').map((r) => r.dataset.sub)).toEqual(['model', 'cleanup', 'mic', 'languages', 'history', 'general']);
+    // Cleanup's glyph is even lines of text, never a sparkle (no AI clichés).
+    const glyph = $('.btray [data-sub="cleanup"] .si svg path')!.getAttribute('d');
+    expect(glyph).toBe('M3.5 5.5h13M3.5 10h13M3.5 14.5h8');
     // Each row with its value.
     expect($$('.btray .trw em').map((e) => e.textContent)).toEqual([
       'Ready',

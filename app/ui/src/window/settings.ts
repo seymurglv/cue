@@ -37,7 +37,7 @@ const SUBS: readonly Exclude<Sub, 'models'>[] = ['model', 'cleanup', 'mic', 'lan
 const PARENT: Partial<Record<Sub, Sub>> = { models: 'model' };
 const SUB_ICON: Record<Exclude<Sub, 'models'>, IconName> = {
   model: 'wave',
-  cleanup: 'sparkle',
+  cleanup: 'lines',
   mic: 'micOn',
   languages: 'globe',
   history: 'clock',
@@ -408,7 +408,7 @@ export class SettingsTray {
         // The thumb slides to the part pressed at once; the list follows the core's answer.
         for (const x of seg.querySelectorAll('button')) x.setAttribute('aria-pressed', String(x === b));
         syncSeg(seg);
-        this.cleanup.choose(v as Where);
+        this.cleanup.choose(v as Where, seg);
       } else void this.ctx.change({ kind: 'uiLanguage', value: v as UiLanguage });
     }
   }

@@ -1232,8 +1232,10 @@ again.
   Hugging Face search last; a model downloads only when pressed, and pressed again on its way it stops. Ваш AI lists
   OpenCode then Codex as `agents_get` finds them, each time the tray or the page opens: the core clears the agents'
   marks, looks for each (OpenCode also by the server it announces), asks Codex `codex login status`, and lists
-  OpenCode's models through its server when it cleans (a server CUE starts for that rests as after a dictation,
-  `OpenCodeSlot::idle`); the page says "Проверяем…" meanwhile. A found agent is chosen by its row; one not installed
+  OpenCode's models when it cleans, through a server already running (`OpenCodeSlot::running`: the one in use or the
+  user's own; none is started for the page, and without one the drop-down offers "Быстрая · авто" alone); the page
+  says "Проверяем…" meanwhile. A sign-in a run found failed (`Mark::Expired`) still shows as "войдите заново" though
+  `login status` says "Logged in"; one only `login status` refused shows signed in once it says so. A found agent is chosen by its row; one not installed
   has its install page (`agent_install_link`, by id). The chosen agent's model is a drop-down (OpenCode's hundreds with
   a filter, "Быстрая · авто" first), then the fallback, "Почистить: <model>" offered only when the local model's file
   is here. A move to Ваш AI with no agent set takes the first found; with none it stays there, nothing chosen. The

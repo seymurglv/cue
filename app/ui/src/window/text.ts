@@ -340,7 +340,8 @@ export const en: WinText = {
     downloading: 'Downloading: {DONE} of {TOTAL} MB · press to stop',
     found: 'Found on this computer',
     checking: 'Checking…',
-    lines: { opencode: 'Any provider: your key or subscription · ~2 s', codex: 'Signs in with ChatGPT · ~4 s' },
+    // The time keeps to the word before it (no-break spaces): never alone on a line, nor a "·" at a line's end.
+    lines: { opencode: 'Any provider: your key or subscription · ~2 s', codex: 'Signs in with ChatGPT · ~4 s' },
     signIn: { codex: 'Sign in again: codex login in a terminal' },
     notInstalled: 'Not installed',
     openCodeMissing: 'Not installed: install it and CUE finds it by itself',
@@ -521,7 +522,7 @@ export const ru: WinText = {
     downloading: 'Скачивается: {DONE} из {TOTAL} МБ · нажмите, чтобы остановить',
     found: 'Найдено на этом компьютере',
     checking: 'Проверяем…',
-    lines: { opencode: 'Любой провайдер: ваш ключ или подписка · ~2 с', codex: 'Вход через ChatGPT · ~4 с' },
+    lines: { opencode: 'Любой провайдер: ваш ключ или подписка · ~2 с', codex: 'Вход через ChatGPT · ~4 с' },
     signIn: { codex: 'Войдите заново: codex login в терминале' },
     notInstalled: 'Не установлен',
     openCodeMissing: 'Не установлен: поставьте, и CUE найдёт его сам',

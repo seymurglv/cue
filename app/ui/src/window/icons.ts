@@ -2,7 +2,8 @@
 // approved design (stage 5): search, chevron, paste again, microphone, globe, half circle, play and pause. The key of
 // the "Keys" row is new: the design's key icon is a keyboard, for its hotkeys section, which the window does not have;
 // so are the clock of the "History" row, the open book of the milestone (its pages of a book), the sound wave of
-// "Speech recognition", the sparkle of "Cleanup" and the trash of a habit's row.
+// "Speech recognition", the even lines of tidied text of "Cleanup" (never a sparkle: no AI clichés) and the trash of a
+// habit's row.
 import { CUE } from '../designParts';
 
 const SV = (d: string) =>
@@ -20,7 +21,7 @@ const OWN = {
   pages: SV('<path d="M10 5.6C8.5 4.4 6.5 3.9 3.3 3.9v11.3c3.2 0 5.2.5 6.7 1.7 1.5-1.2 3.5-1.7 6.7-1.7V3.9c-3.2 0-5.2.5-6.7 1.7z"/><path d="M10 5.6v11.3"/>'),
   plus: SV('<path d="M10 4.6v10.8M4.6 10h10.8"/>'),
   wave: SV('<path d="M3.5 8.5v3M6.7 6v8M10 3.5v13M13.3 6.5v7M16.5 8.5v3"/>'),
-  sparkle: SV('<path d="M10 3.2c.6 3.6 2.8 5.8 6.4 6.4-3.6.6-5.8 2.8-6.4 6.4-.6-3.6-2.8-5.8-6.4-6.4 3.6-.6 5.8-2.8 6.4-6.4z"/>'),
+  lines: SV('<path d="M3.5 5.5h13M3.5 10h13M3.5 14.5h8"/>'),
   play: '<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M7 5.2v9.6l7.6-4.8z" fill="currentColor"/></svg>',
   pause: SV('<path d="M7.5 5.5v9M12.5 5.5v9"/>'),
   trash: SV('<path d="M4 5.8h12M8 5.8V4h4v1.8M5.6 5.8l.7 10.4h7.4l.7-10.4"/>'),

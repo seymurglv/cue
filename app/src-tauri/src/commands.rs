@@ -33,9 +33,9 @@ use crate::runtime::{AgentView, Choice, CoreEvent, MIC_SETTINGS, SettingsCmd, lo
 
 /// How long a command waits for the core's answer about the settings.
 const CORE_WAIT: Duration = Duration::from_secs(3);
-/// How long the Cleanup page's look at the agents may take: each looked for, Codex's sign-in (5 s at most), OpenCode's
-/// server found or started (30 s at most) and its models listed.
-const AGENTS_WAIT: Duration = Duration::from_secs(60);
+/// How long the Cleanup page's look at the agents may take: each looked for, Codex's sign-in (5 s at most), and the
+/// models of an OpenCode server already running (5 s at most).
+const AGENTS_WAIT: Duration = Duration::from_secs(15);
 /// How long a search of Hugging Face may take, its repositories' files asked for included.
 const MODELS_SEARCH_WAIT: Duration = Duration::from_secs(30);
 /// The longest search text sent.
@@ -584,7 +584,7 @@ pub async fn open_link(window: WebviewWindow, target: String) -> Result<(), CmdE
 }
 
 /// The agents as the Cleanup page lists them (OpenCode, then Codex): looked for again, Codex asked about its sign-in,
-/// OpenCode's models listed when it cleans or is about to (`Agents::look`); the marks that let a dictation skip a
+/// OpenCode's models listed when it cleans or is about to and a server of its already runs (`Agents::look`); the marks that let a dictation skip a
 /// signed-out or missing agent go. Off the core's thread: the page shows a quiet "checking" meanwhile. The agents found
 /// also settle a cleanup moved to "Ваш AI" with none chosen.
 #[tauri::command]

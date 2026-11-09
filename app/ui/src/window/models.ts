@@ -32,6 +32,8 @@ export function joined(el: HTMLElement, parts: Part[]): boolean {
 /** The search runs this long after the last key, once the field holds this many letters. */
 export const SEARCH_MS = 300;
 const SEARCH_FROM = 2;
+/** A second press on the same row sooner than this is the same press. */
+export const AGAIN_MS = 400;
 /** Megabytes and gigabytes as the design writes them: decimal. */
 const MB = 1_000_000;
 const GB = 1_000_000_000;
@@ -153,6 +155,8 @@ export class ModelsPage {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private list: HTMLElement | null = null;
   private found: HTMLElement | null = null;
+  /** The row pressed last, and when. */
+  private last: { row: string; at: number } | null = null;
 
   /** `resized` — the page's height changed (the tray follows it). */
   constructor(
@@ -306,11 +310,23 @@ export class ModelsPage {
     } else if ((b = target.closest<HTMLElement>('[data-mid]'))) {
       const v = this.view;
       const id = b.dataset.mid!;
+      if (this.again(`id:${id}`)) return;
       // The model in use is chosen again only to stop a switch; a model on its way, pressed again, stops too (the
       // core's choice of the model it is switching to).
       const switching = v?.entries.some((e) => e.id !== v.current && RUNNING.includes(e.state));
       if (id !== v?.current || switching) this.choose({ id });
-    } else if ((b = target.closest<HTMLElement>('[data-repo]:not(.off)'))) this.choose({ repo: b.dataset.repo! });
+    } else if ((b = target.closest<HTMLElement>('[data-repo]:not(.off)'))) {
+      if (!this.again(`repo:${b.dataset.repo}`)) this.choose({ repo: b.dataset.repo! });
+    }
+  }
+
+  /** The same row pressed again within `AGAIN_MS` (a double-click): taken as one press, so a download is never started
+   *  and stopped by one gesture. */
+  private again(row: string): boolean {
+    const now = Date.now();
+    const twice = this.last?.row === row && now - this.last.at < AGAIN_MS;
+    this.last = { row, at: now };
+    return twice;
   }
 
   private choose(choice: { id: string } | { repo: string }): void {

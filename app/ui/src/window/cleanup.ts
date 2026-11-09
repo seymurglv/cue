@@ -18,7 +18,7 @@ import type { AgentView, Where } from './api';
 import { icon } from './icons';
 import { percent } from './model';
 import { ModelsPage, joined, llmSource } from './models';
-import { dropDown, h, logFailed, segment, srow, type Ctx, type MenuItem } from './page';
+import { dropDown, h, logFailed, segment, srow, syncSeg, type Ctx, type MenuItem } from './page';
 import { fill } from './text';
 
 const WHERE: readonly Where[] = ['off', 'local', 'agent'];
@@ -31,8 +31,9 @@ const AGENTS: readonly { id: string; name: string }[] = [
 const OPENCODE = 'opencode';
 /** A model list longer than this gets a field over it. */
 const FILTER_FROM = 12;
-/** The local model's states on its way or stuck: the first page's value follows them. */
-const BUSY = ['preparing', 'downloading', 'loading', 'failed', 'noSpace', 'notRunnable'] as const;
+/** The local model's states on its way, and with those stuck: the first page's value follows them. */
+const ON_ITS_WAY: readonly string[] = ['preparing', 'downloading', 'loading'];
+const BUSY: readonly string[] = [...ON_ITS_WAY, 'failed', 'noSpace', 'notRunnable'];
 
 /** The first page's Cleanup value: its text, in amber (`warn`), and the share for the line under the row while the
  *  local model downloads (`progress`; its text is then the percent, in Bebas). */
@@ -154,10 +155,15 @@ export class CleanupPage {
     return true;
   }
 
-  /** A part pressed: the thumb slides there at once, the core is told, and the agents are looked at for "Ваш AI". */
-  choose(where: Where): void {
+  /** A part pressed in `seg` (its thumb already slid there): the core is told, and the agents are looked at for "Ваш
+   *  AI". Refused, the thumb goes back to the part the settings hold. */
+  choose(where: Where, seg: HTMLElement): void {
     void this.ctx.change({ kind: 'refineWhere', value: where }).then((v) => {
       if (v && where === 'agent') this.refresh();
+      if (v || !seg.isConnected) return;
+      const now = this.where;
+      for (const b of seg.querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.v === now));
+      syncSeg(seg);
     });
   }
 
@@ -321,7 +327,10 @@ export class CleanupPage {
     if (s.refineWhere === 'local') {
       const v = this.llms.listView();
       if (!v) return plain('');
-      const e = v.entries.find((x) => (BUSY as readonly string[]).includes(x.state));
+      const current = v.entries.find((x) => x.id === v.current);
+      // A model on its way shows its step; a stuck one shows only while no model cleans: one that failed to come
+      // never hides the model still in use.
+      const e = v.entries.find((x) => (current ? ON_ITS_WAY : BUSY).includes(x.state));
       switch (e?.state) {
         case 'downloading':
           return { text: `${percent(e.done, e.total)} %`, warn: false, progress: e.done / (e.total || 1) };
@@ -335,7 +344,6 @@ export class CleanupPage {
         case 'noSpace':
           return plain(t.modelValue.failed, true);
       }
-      const current = v.entries.find((x) => x.id === v.current);
       if (current) return plain(current.name);
       return s.refineLocal ? plain(t.cl.value.notDownloaded, true) : plain(t.cl.value.none);
     }

@@ -253,6 +253,12 @@ describe('The Cleanup page: No AI, This computer or Your AI on top', () => {
     core.agentsGet.mockResolvedValue(both());
     page = await mount();
     await cleanup();
+    // Esc in the field closes the list, and only the list: the tray stays on its page.
+    click($('.btray [data-dd="amodel"]'));
+    $<HTMLInputElement>('.menu .mfl input')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect($('.menu')).toBeNull();
+    expect(core.settingsSet).not.toHaveBeenCalled();
+    expect($('.btray [data-seg="where"]')).not.toBeNull();
     click($('.btray [data-dd="amodel"]'));
     const filter = $<HTMLInputElement>('.menu .mfl input')!;
     type(filter, 'haiku');
@@ -260,6 +266,27 @@ describe('The Cleanup page: No AI, This computer or Your AI on top', () => {
     await settle();
     expect(core.settingsSet).toHaveBeenCalledWith({ kind: 'refineAgentModel', value: { agent: 'opencode', model: 'anthropic/claude-haiku-5-5' } });
     expect($('.menu')).toBeNull();
+  });
+
+  it('a move the core refuses puts the thumb back on the part the settings hold', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    page = await mount();
+    await cleanup();
+    core.settingsSet.mockRejectedValueOnce('badValue');
+    click(where()[1]);
+    expect(pressed()).toBe('local');
+    await settle();
+    expect(pressed()).toBe('agent');
+    expect($('.btray .mlist')).toBeNull();
+    errors.mockRestore();
+  });
+
+  it('the time in an agent line keeps to the word before it', async () => {
+    core.agentsGet.mockResolvedValue(both());
+    page = await mount();
+    await cleanup();
+    expect(agentRow('opencode').querySelector('.stx small')!.textContent).toContain('subscription · ~2 s');
+    expect(agentRow('codex').querySelector('.stx small')!.textContent).toBe('Signs in with ChatGPT · ~4 s');
   });
 
   it('fallback_offers_local_only_when_downloaded', async () => {
@@ -327,6 +354,10 @@ describe('The Cleanup page: No AI, This computer or Your AI on top', () => {
     await cleanup();
     click(row(QWEN));
     expect(core.llmChoose).toHaveBeenCalledWith({ id: QWEN });
+    // A double-click is one press: it never starts and stops the download at once.
+    await vi.advanceTimersByTimeAsync(150);
+    click(row(QWEN));
+    expect(core.llmChoose).toHaveBeenCalledTimes(1);
     feeds.llms(llms({ [QWEN]: { state: 'downloading', done: 42 * MB, total: 100 * MB } }));
     await settle();
     expect(text(row(QWEN).querySelector('.mpct'))).toBe('42 %');
@@ -336,7 +367,8 @@ describe('The Cleanup page: No AI, This computer or Your AI on top', () => {
     feeds.llms(llms({ [QWEN]: { state: 'downloading', done: 61 * MB, total: 100 * MB } }));
     expect(row(QWEN).querySelector('.mbar')).toBe(bar);
     expect(text(row(QWEN).querySelector('.mpct'))).toBe('61 %');
-    // Pressed again: the core stops it.
+    // Pressed again later: the core stops it.
+    await vi.advanceTimersByTimeAsync(500);
     click(row(QWEN));
     expect(core.llmChoose).toHaveBeenCalledTimes(2);
     expect(core.llmChoose).toHaveBeenLastCalledWith({ id: QWEN });
@@ -430,6 +462,23 @@ describe('The Cleanup page: No AI, This computer or Your AI on top', () => {
     feeds.settings(view({ refineWhere: 'local', refineLocal: QWEN }));
     page.tray.settingsChanged();
     expect(text(value())).toBe('Model not downloaded');
+    expect(value().classList.contains('warn')).toBe(true);
+  });
+
+  it('a switch that failed never hides the model still cleaning; one on its way shows its step', async () => {
+    stub(view({ refineWhere: 'local', refineLocal: GEMMA }));
+    page = await mount();
+    await open();
+    for (const stuck of [{ state: 'failed', done: 1, total: 2 }, { state: 'noSpace', needed: GB, free: 0 }, { state: 'notRunnable' }]) {
+      feeds.llms(llms({ [GEMMA]: { state: 'inUse' }, [QWEN]: stuck }, GEMMA));
+      expect(text(value()), stuck.state).toBe('Gemma 4 E2B');
+      expect(value().classList.contains('warn')).toBe(false);
+    }
+    feeds.llms(llms({ [GEMMA]: { state: 'inUse' }, [QWEN]: { state: 'downloading', done: 30, total: 100 } }, GEMMA));
+    expect(text(value())).toBe('30 %');
+    // With no model cleaning, the failure shows.
+    feeds.llms(llms({ [QWEN]: { state: 'failed', done: 1, total: 2 } }));
+    expect(text(value())).toBe('Did not download');
     expect(value().classList.contains('warn')).toBe(true);
   });
 
