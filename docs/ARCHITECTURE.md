@@ -936,8 +936,9 @@ edge is 12 px from the work area's edge. The window is always centered on the Dr
 circle), and the page draws the Drop at the window's center. A new place therefore moves only the window, never the Drop
 inside it; the rest of the layout changes with CSS transitions. The window reaches far enough every way for the widest
 Drop, the tray cards and the "Ask" answer tray (420 × up to 410 logical px, with its spring overshoot and shadow)
-growing toward the screen center, so its size depends on the place (`drop_window::window_size`): 640 × 860 logical px
-at the bottom and the top, 900 × 540 at the sides. A square big enough for both would lie mostly on the old monitor
+growing toward the screen center, so its size depends on the place (`drop_window::window_size`): 640 × 900 logical px
+at the bottom and the top (at the top the answer grows down, the side its shadow is longest on), 900 × 540 at the
+sides. A square big enough for both would lie mostly on the old monitor
 after a move to a monitor of another scale, so it would keep the old scale and never arrive there (see below). The size
 changes at the end of a drag, around the Drop's center, so the Drop stays where it was let go; no drag happens while the
 answer tray is open. The part past the edge of the work area (over the taskbar, or off the screen) is transparent and
@@ -1028,7 +1029,11 @@ One size: the Drop is 36 px high in every state (`--h` in `drop.css`; `DROP_SIZE
 test keeps them equal). The circle states are 36 × 36. Everything inside is the original 40 px drawing scaled by
 `--h / 40`: the mark 0.6 h (the same while recording), buttons 0.7 h, small icons 0.5 h, keys and label text 0.9 of
 the drawing, paddings and gaps alike. The idle strip is 36 × 7 (upright at the sides), so starting a dictation grows it
-into a circle of the same diameter. Tray cards keep their own sizes.
+into a circle of the same diameter. Tray cards keep their own sizes. The capsule is centered on the window, so on the
+work area's center at the top and the bottom in every state and while it changes. What the mark paints is centered in
+it, the red lamp included: the Drop's mark (`Morph` with `centered`) draws the voice bars and the lamp 2.65 units of
+its 24 grid left of where other marks draw them, so the hover capsule and the circle hold them in the same place and
+from rest through start into listen only their heights change.
 
 Phases: `idle` (a thin strip; on hover the mark and the hotkey), `start`, `listen` (voice bars and no timer; cancel
 and done buttons on hover), `think` (three dots), `done` (a check, gone after 1.5 s), `empty`, `cancel` (Restore with

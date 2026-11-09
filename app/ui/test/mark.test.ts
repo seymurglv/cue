@@ -49,17 +49,17 @@ function group() {
   return g;
 }
 
-/** The mark drawn straight in `state` (no spring), as the static pages draw it. */
-function still(state: string, lvl = 0) {
+/** The mark drawn straight in `state` (no spring), as the static pages draw it; `centered` as the Drop makes it. */
+function still(state: string, lvl = 0, centered = false) {
   const g = group();
-  new (CUE().Morph)(g, { state, static: true, lvl });
+  new (CUE().Morph)(g, { state, static: true, lvl, centered });
   return g;
 }
 
 /** The live mark after `ms` of frames in `state` at a constant voice level: what the Drop shows. */
-function live(state: string, lvl = 0, ms = 3000) {
+function live(state: string, lvl = 0, ms = 3000, centered = false) {
   const g = group();
-  const m = new (CUE().Morph)(g, { state });
+  const m = new (CUE().Morph)(g, { state, centered });
   for (let t = 0; t <= ms; t += 16) m.tick(t, lvl, [0.5, 0.5, 0.5, 0.5]);
   return g;
 }
@@ -193,9 +193,9 @@ describe('The mark in the circle', () => {
    *  given) listen, the voice level starting at 0 (the controller resets it) and smoothed by Voice, here jumping between
    *  silence and the loudest level again and again, with the bars' jitter at its highest. The farthest the mark's
    *  paint reaches. */
-  function intoListen(from: string, startMs: number | null) {
+  function intoListen(from: string, startMs: number | null, centered = false) {
     const g = group();
-    const m = new (CUE().Morph)(g, { state: from });
+    const m = new (CUE().Morph)(g, { state: from, centered });
     const voice = new (CUE().Voice)();
     let worst = { left: 24, top: 24, right: 0, bottom: 0 };
     const track = () => {
@@ -231,13 +231,16 @@ describe('The mark in the circle', () => {
     ...['idle', 'think', 'done', 'cancel', 'error', 'ask', 'translate'].flatMap((s) => [0, 50, 150, 400].map((ms): [string, number] => [s, ms])),
   ];
   it.each(ways)('from %s (through start for %s ms) the spring keeps everything inside the grid', (from, startMs) => {
-    const worst = intoListen(from, startMs);
-    // The attributes are written to 3 decimals.
-    const eps = 1e-3;
-    expect(worst.left).toBeGreaterThanOrEqual(0.5 - eps);
-    expect(worst.top).toBeGreaterThanOrEqual(0.5 - eps);
-    expect(worst.right).toBeLessThanOrEqual(23.5 + eps);
-    expect(worst.bottom).toBeLessThanOrEqual(23.5 + eps);
+    for (const centered of [false, true]) {
+      const worst = intoListen(from, startMs, centered);
+      // The attributes are written to 3 decimals.
+      const eps = 1e-3;
+      const at = centered ? 'centered' : 'as drawn';
+      expect(worst.left, at).toBeGreaterThanOrEqual(0.5 - eps);
+      expect(worst.top, at).toBeGreaterThanOrEqual(0.5 - eps);
+      expect(worst.right, at).toBeLessThanOrEqual(23.5 + eps);
+      expect(worst.bottom, at).toBeLessThanOrEqual(23.5 + eps);
+    }
   });
 
   it('ask and translate park their hidden lamp at the listen lamp\'s spot, so no clamp is needed on their way in', () => {
@@ -260,5 +263,51 @@ describe('The mark in the circle', () => {
 
   it.each(['think', 'done', 'cancel', 'error', 'ask', 'translate'])('%s is centered on x = 12 within 0.3', (state) => {
     expect(Math.abs(paintedBox(still(state)).cx - 12)).toBeLessThanOrEqual(0.3);
+  });
+});
+
+describe("The Drop's mark: what it paints is centered, the lamp included", () => {
+  it("moves the voice poses left by 2.65: what idle paints, from the bar's left stroke edge to the lamp's right edge, centered", () => {
+    expect(CUE().CENTER_SHIFT).toBeCloseTo(2.65, 10);
+    const b = paintedBox(still('idle', 0, true));
+    expect(b.left).toBeCloseTo(3.75, 3);
+    expect(b.right).toBeCloseTo(20.25, 3);
+  });
+
+  it.each([0, 0.5, 1])('start and listen at level %s paint their box on x = 12 within 0.3, still and live', (lvl) => {
+    for (const state of ['start', 'listen']) {
+      for (const g of [still(state, lvl, true), live(state, lvl, 3000, true)]) {
+        expect(Math.abs(paintedBox(g).cx - 12), `${state} at ${lvl}`).toBeLessThanOrEqual(0.3 + 1e-9);
+        // The bars stand as before, only further left: the lamp still at their top right, the bars on y = 12.
+        expect(dotBox(g)!.left).toBeGreaterThan(linesBox(g).right);
+        expect(Math.abs(linesBox(g).cy - 12)).toBeLessThanOrEqual(0.05);
+      }
+    }
+  });
+
+  it('every other pose is centered as it is drawn anywhere', () => {
+    for (const state of ['think', 'done', 'cancel', 'error', 'ask', 'translate']) {
+      expect(Math.abs(paintedBox(still(state, 0, true)).cx - 12), state).toBeLessThanOrEqual(0.3);
+    }
+  });
+
+  it('from rest through start into listen the bars and the lamp stay where they are, as in the mark drawn anywhere', () => {
+    const at = (state: string) => {
+      const g = still(state, 0, true);
+      const all = [...g.querySelectorAll('line')];
+      const dot = g.querySelector('circle')!;
+      return { x: all.map((l) => num(l, 'x1')), o: all.map((l) => num(l, 'opacity')), lamp: [num(dot, 'cx'), num(dot, 'cy')] };
+    };
+    expect(at('idle').x.filter((_, i) => i % 2 === 0)).toEqual([4.85, 9.35, 13.85]);
+    expect(at('idle').lamp).toEqual([18.35, 4.5]);
+    expect(at('start')).toEqual(at('idle'));
+    expect(at('listen')).toEqual(at('idle'));
+  });
+
+  it("ask and translate park their hidden lamp at the centered listen lamp's spot", () => {
+    for (const state of ['ask', 'translate']) {
+      const dot = still(state, 0, true).querySelector('circle')!;
+      expect([num(dot, 'cx'), num(dot, 'cy'), num(dot, 'opacity')], state).toEqual([18.35, 4.5, 0]);
+    }
   });
 });

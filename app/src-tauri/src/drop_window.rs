@@ -23,13 +23,15 @@ pub const GAP_PX: f64 = 12.0;
 pub const METRICS: DropMetrics = DropMetrics { size: DROP_SIZE, gap: GAP_PX };
 /// Logical px. The window is centered on the Drop's center in every place (the page puts the Drop at its center), so a
 /// new place never moves the Drop inside the window. It reaches far enough every way for the widest Drop, the tray
-/// cards and the "Ask" answer tray (420 × up to 410, 2 % of spring overshoot, its shadow: 28 px to the sides, 12 up,
-/// 44 down) growing toward the screen center: tall at the top and bottom, wide at the sides. A square big enough for
-/// both would lie mostly on the old monitor after a move to one of another scale (see the test of rest moves). The
-/// part beyond the edge of the work area is transparent and lets the mouse through, like the rest of the window.
+/// cards and the "Ask" answer tray (420 × up to 410, 2 % of spring overshoot, its shadow: 28 px to the sides, 12 up, 44
+/// down) growing toward the screen center: tall at the top and bottom, wide at the sides. At the top the answer grows
+/// down, the side its shadow is longest on: 410 + 8 + 44 px below the Drop's outer edge, which is half a Drop above the
+/// window's center, so the window is 900 high (a test checks every place). A square big enough for both would lie
+/// mostly on the old monitor after a move to one of another scale (see the test of rest moves). The part beyond the
+/// edge of the work area is transparent and lets the mouse through, like the rest of the window.
 pub fn window_size(place: DropPosition) -> (f64, f64) {
     match place {
-        DropPosition::Bottom | DropPosition::Top => (640.0, 860.0),
+        DropPosition::Bottom | DropPosition::Top => (640.0, 900.0),
         DropPosition::Left | DropPosition::Right => (900.0, 540.0),
     }
 }
@@ -735,8 +737,8 @@ mod tests {
     fn at_rest_the_window_gets_its_places_size_back() {
         let bottom = placement::anchor(FHD.work, 1.0, DropPosition::Bottom, METRICS);
         let to = rest_rect(FHD, DropPosition::Bottom, window_at(bottom, 900, 540), 1.0);
-        assert_eq!((to.width(), to.height(), to.center()), (640, 860, bottom));
-        let close = window_at(bottom, 641, 859);
+        assert_eq!((to.width(), to.height(), to.center()), (640, 900, bottom));
+        let close = window_at(bottom, 641, 899);
         assert_eq!(rest_rect(FHD, DropPosition::Bottom, close, 1.0), close, "rounding: left as it is");
         let left = placement::anchor(FHD.work, FHD.scale, DropPosition::Left, METRICS);
         let to = rest_rect(FHD, DropPosition::Left, window_at((5, 5), 960, 1290), 1.5);
@@ -772,7 +774,7 @@ mod tests {
         fn new() -> Self {
             let bottom = placement::anchor(FHD.work, 1.0, DropPosition::Bottom, METRICS);
             Self {
-                window: Some(window_at(bottom, 640, 860)),
+                window: Some(window_at(bottom, 640, 900)),
                 cursor: (bottom.0, bottom.1 - 2),
                 button: true,
                 animations: true,
@@ -936,16 +938,97 @@ mod tests {
         let (mut m, mut d) = (Motion::new(DropPosition::Bottom), Fake::new());
         drag_to(&mut m, &mut d, (800, 900), now);
         m.end(&mut d, now);
-        assert_eq!(d.window.map(|r| (r.width(), r.height())), Some((640, 860)), "the same place: the same window");
+        assert_eq!(d.window.map(|r| (r.width(), r.height())), Some((640, 900)), "the same place: the same window");
     }
 
     /// Tall where the answer grows up or down, wide where it grows sideways; the same for opposite places.
     #[test]
     fn the_window_size_follows_the_place() {
-        assert_eq!(window_size(DropPosition::Bottom), (640.0, 860.0));
+        assert_eq!(window_size(DropPosition::Bottom), (640.0, 900.0));
         assert_eq!(window_size(DropPosition::Top), window_size(DropPosition::Bottom));
         assert_eq!(window_size(DropPosition::Left), (900.0, 540.0));
         assert_eq!(window_size(DropPosition::Right), window_size(DropPosition::Left));
+    }
+
+    /// The "Ask" answer tray, the largest thing the window holds, as drop.css and answer.css draw it: it starts as the
+    /// Drop (the idle strip at the smallest, a fifth of it), grows to 420 × 410 at most on the `--e-spring` curve,
+    /// which goes 2.04 % of the way past the end, and casts `0 16px 40px -12px`: 28 px to the sides, 12 up and 44 down.
+    /// It is pinned at the Drop's outer edge (half a Drop from the window's center) and grows toward the screen center;
+    /// at the sides it is centered on the Drop up and down.
+    #[test]
+    fn the_answer_tray_fits_the_window_at_every_place() {
+        let drop_css = include_str!("../../ui/src/design/drop.css");
+        let cue_css = include_str!("../../ui/src/design/cue.css");
+        let answer_css = include_str!("../../ui/src/design/answer.css");
+        assert!(cue_css.contains("--e-spring:cubic-bezier(.3,1.25,.5,1)"));
+        assert!(drop_css.contains("box-shadow:0 16px 40px -12px"), "the tray's shadow");
+        assert!(answer_css.contains(".ansA .in{display:flex;flex-direction:column;gap:12px;max-height:410px"));
+        assert!(include_str!("../../ui/src/controller.ts").contains("{ width: 420, cls: 'ansA' }"));
+        // The spring's farthest point past the end: y of the Bézier at its peak.
+        let y = |t: f64| 3.0 * (1.0 - t).powi(2) * t * 1.25 + 3.0 * (1.0 - t) * t * t + t.powi(3);
+        let over = (0..=10_000).map(|i| y(f64::from(i) / 10_000.0)).fold(0.0, f64::max) - 1.0;
+        assert!((0.0203..0.0206).contains(&over), "{over}");
+        let from = DROP_SIZE / 5.0;
+        let (w, h) = (420.0 + (420.0 - from) * over, 410.0 + (410.0 - from) * over);
+        let (side, up, down) = (28.0, 12.0, 44.0);
+        let half = DROP_SIZE / 2.0;
+        for place in DropPosition::ALL {
+            let (ww, wh) = window_size(place);
+            // Room from the Drop's center to each edge of the window (the Drop's center is the window's).
+            let (rx, ry) = (ww / 2.0, wh / 2.0);
+            let fits = match place {
+                // Pinned at the Drop's bottom edge, grows up; centered across.
+                DropPosition::Bottom => h + up <= ry + half && down <= ry - half && w / 2.0 + side <= rx,
+                // Pinned at the Drop's top edge, grows down, the side the shadow is longest on.
+                DropPosition::Top => h + down <= ry + half && up <= ry - half && w / 2.0 + side <= rx,
+                // Pinned at the Drop's outer end, grows toward the center; centered on the Drop up and down.
+                DropPosition::Left | DropPosition::Right => {
+                    w + side <= rx + half && side <= rx - half && h / 2.0 + down <= ry && h / 2.0 + up <= ry
+                }
+            };
+            assert!(fits, "{place:?}: the answer tray {w:.1} × {h:.1} in a window of {ww} × {wh}");
+        }
+        // At the top it is a near thing: 20 px less and the shadow would be cut.
+        let (_, wh) = window_size(DropPosition::Top);
+        assert!(h + down > (wh - 20.0) / 2.0 + half);
+    }
+
+    /// The page draws the capsule centered on the window's center at every scale (drop.css: `left: 50%`,
+    /// `translate(-50%, ...)`), so its center in physical px is the window's left edge plus half its physical width. At
+    /// the top and the bottom that is the work area's horizontal center, within half a pixel (an odd width, the
+    /// window's or the work area's, has its center between two pixels), at every scale, on any monitor; and up and down
+    /// it is half a Drop plus the gap in from the edge.
+    #[test]
+    fn at_the_top_and_the_bottom_the_capsule_is_centered_on_the_work_area() {
+        let works = [
+            PxRect { left: 0, top: 0, right: 1920, bottom: 1032 },
+            PxRect { left: 0, top: 0, right: 2560, bottom: 1380 },
+            PxRect { left: 1920, top: 0, right: 5760, bottom: 2088 },
+            PxRect { left: -1365, top: -200, right: 0, bottom: 568 },
+            PxRect { left: 0, top: 48, right: 1366, bottom: 768 },
+        ];
+        for work in works {
+            for scale in [1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5] {
+                let mon = Monitor { work, scale };
+                for place in [DropPosition::Top, DropPosition::Bottom] {
+                    let (lw, lh) = window_size(place);
+                    let (w, h) = ((lw * scale).round() as i32, (lh * scale).round() as i32);
+                    // Wherever the window was, at rest it goes to its place.
+                    let (x, y) = rest_origin(mon, place, PxRect { left: 7, top: 9, right: 7 + w, bottom: 9 + h });
+                    let capsule_x = f64::from(x) + f64::from(w) / 2.0;
+                    let work_x = f64::from(work.left) + f64::from(work.width()) / 2.0;
+                    let at = format!("{place:?} at {scale} on {work:?}");
+                    assert!((capsule_x - work_x).abs() <= 0.5, "{at}: {capsule_x} vs {work_x}");
+                    let capsule_y = f64::from(y) + f64::from(h) / 2.0;
+                    let inset = (GAP_PX + DROP_SIZE / 2.0) * scale;
+                    let edge_y = match place {
+                        DropPosition::Top => f64::from(work.top) + inset,
+                        _ => f64::from(work.bottom) - inset,
+                    };
+                    assert!((capsule_y - edge_y).abs() <= 1.0, "{at}: {capsule_y} vs {edge_y}");
+                }
+            }
+        }
     }
 
     #[test]

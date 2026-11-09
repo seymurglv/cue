@@ -283,6 +283,33 @@ mod tests {
         assert_eq!(drop_origin(m, DropPosition::Right, M, 640.0, 400.0), (1535, 296));
     }
 
+    /// At the top and the bottom the Drop's center is the work area's horizontal center at every scale, and a window of
+    /// any size placed around it has its own center there: within half a pixel, where an odd width (the work area's or
+    /// the window's) puts the true center between two pixels.
+    #[test]
+    fn top_and_bottom_are_centered_on_the_work_area_at_every_scale() {
+        let works = [
+            FHD,
+            PxRect { left: 1920, top: 0, right: 5760, bottom: 2088 },
+            PxRect { left: -1365, top: -200, right: 0, bottom: 568 },
+        ];
+        for work in works {
+            let mid = f64::from(work.left) + f64::from(work.width()) / 2.0;
+            for scale in [1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5] {
+                for place in [DropPosition::Top, DropPosition::Bottom] {
+                    let center = anchor(work, scale, place, M);
+                    assert!((f64::from(center.0) - mid).abs() <= 0.5, "{place:?} at {scale} on {work:?}");
+                    for w in [640.0, 641.0, 900.0] {
+                        let w = (w * scale).round() as i32;
+                        let (x, _) = origin_for_center(center, w, 100);
+                        let window_mid = f64::from(x) + f64::from(w) / 2.0;
+                        assert!((window_mid - mid).abs() <= 0.5, "{place:?} at {scale}, {w} px wide on {work:?}");
+                    }
+                }
+            }
+        }
+    }
+
     /// Whatever the scale, the outer edge of the Drop is `gap` (scaled, ±1 px of rounding) from the work area edge.
     #[test]
     fn outer_edge_is_one_gap_from_the_work_area_edge() {

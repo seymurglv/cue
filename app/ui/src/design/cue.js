@@ -10,7 +10,11 @@
    inside, and wherever the lamp flies from (the
    error lamp, or the hidden one of think and cancel, both near the middle, into listen through a short start) it is
    drawn no closer than 0.5 to the grid's edge, a line no still pose crosses. A test runs every way into listen.
-   idle has the same bars and lamp; the hover capsule's margins in drop.css are measured from where they are painted. */
+   idle has the same bars and lamp; the hover capsule's margins in drop.css are measured from where they are painted.
+   In the Drop (a Morph made with {centered:true}) what is painted is centered, the lamp included: idle, start and listen
+   move left by CENTER_SHIFT (and ask and translate park their hidden lamp with listen's), so the bars' left stroke edge
+   and the lamp's right edge are as far from the middle of the grid on either side; the hover capsule and the circle
+   then hold the mark in the same place, and from rest through start into listen only the heights change. */
 (function(){
 const TAU=Math.PI*2;
 const L=(x1,y1,x2,y2,o=1)=>({x1,y1,x2,y2,o});
@@ -29,21 +33,25 @@ const shake=t=>t<460?Math.sin(t/26)*1.3*(1-t/460):0;
    start is listen before the microphone has sent anything: the bars at rest while the lamp grows red. Listening then
    changes nothing: the bars move only with the voice. */
 const VOICE_X=[7.5,12,16.5],VOICE_K=[.72,1,.8],IDLE_H=VOICE_K.map(k=>16*k);
-const voiceBars=h=>[BAR(VOICE_X[0],12,h(0)),PT(9.75,12),BAR(VOICE_X[1],12,h(1)),PT(14.25,12),BAR(VOICE_X[2],12,h(2))];
+const voiceBars=(h,s=0)=>[BAR(VOICE_X[0]-s,12,h(0)),PT(9.75-s,12),BAR(VOICE_X[1]-s,12,h(1)),PT(14.25-s,12),BAR(VOICE_X[2]-s,12,h(2))];
+/* How far the voice poses move left in the Drop: what idle paints (the first bar's left stroke edge 7.5 - 1.1, the
+   lamp's right edge 21 + 1.9) centered on x = 12. 2.65: the bars on 4.85 / 9.35 / 13.85, the lamp at 18.35. The lamp's
+   size changes (start 1.5, listen 1.5 to 2.5), so in the circle the painted box sits within 0.3 of the middle. */
+const CENTER_SHIFT=((VOICE_X[0]-2.2/2)+(21+1.9))/2-12;
 /* Mark states on a 24×24 grid. */
 const STATES=['idle','start','listen','think','done','cancel','error','ask','translate'];
 function pose(s,c){
- const {t,lvl,jit,now}=c;
+ const {t,lvl,jit,now}=c,sx=c.centered?CENTER_SHIFT:0;
  switch(s){
-  case 'idle':{const s=i=>c.static?1:.725+.275*Math.sin(TAU*(t+i*500)/2400);return pack(voiceBars(i=>IDLE_H[i]*s(i)),{dx:21,dy:4.5,dr:1.9,do:c.static?1:.775+.225*Math.sin(TAU*t/1800)})}
-  case 'start':return pack(voiceBars(()=>3),{dx:21,dy:4.5,dr:c.static?1.5:Math.min(1.5,.4+t/180),do:1});
-  case 'listen':{const h=i=>3+11.5*lvl*VOICE_K[i]*(.5+.5*jit[i]);return pack(voiceBars(h),{dx:21,dy:4.5,dr:1.5+lvl,do:1})}
+  case 'idle':{const s=i=>c.static?1:.725+.275*Math.sin(TAU*(t+i*500)/2400);return pack(voiceBars(i=>IDLE_H[i]*s(i),sx),{dx:21-sx,dy:4.5,dr:1.9,do:c.static?1:.775+.225*Math.sin(TAU*t/1800)})}
+  case 'start':return pack(voiceBars(()=>3,sx),{dx:21-sx,dy:4.5,dr:c.static?1.5:Math.min(1.5,.4+t/180),do:1});
+  case 'listen':{const h=i=>3+11.5*lvl*VOICE_K[i]*(.5+.5*jit[i]);return pack(voiceBars(h,sx),{dx:21-sx,dy:4.5,dr:1.5+lvl,do:1})}
   case 'think':{const y=i=>12.5-2.4*Math.max(0,Math.sin(now/150-i*.9));return pack([DOT(7.5,y(0)),DOT(12,y(1)),DOT(16.5,y(2)),PT(12,12),PT(12,12)],{dx:12,dy:12.5,dr:0,do:0})}
   case 'done':return pack([L(6,12.5,10,16.5),L(10,16.5,18,8.5),PT(10,16.5),PT(12,12),PT(12,12)],{dx:18,dy:8.5,dr:0,do:0});
   case 'error':{const sh=shake(t),l=L(12+sh,5,12+sh,14);return pack([l,{...l},{...l},PT(12,12),PT(12,12)],{dx:12+sh,dy:19.2,dr:1.6,do:1})}
   case 'cancel':return pack([L(7,7,17,17),L(17,7,7,17),PT(12,12),PT(12,12),PT(12,12)],{dx:12,dy:12,dr:0,do:0});
-  case 'ask':{const a=c.static?0:now/1600;return pack([ROT(12,12,14,a),ROT(12,12,14,a+Math.PI/3),ROT(12,12,14,a+2*Math.PI/3),PT(12,12),PT(12,12)],{dx:21,dy:4.5,dr:0,do:0})}
-  case 'translate':return pack([L(5,9,19,9),L(19,9,15.5,5.5),L(19,15,5,15),L(5,15,8.5,18.5),PT(12,12)],{dx:21,dy:4.5,dr:0,do:0});
+  case 'ask':{const a=c.static?0:now/1600;return pack([ROT(12,12,14,a),ROT(12,12,14,a+Math.PI/3),ROT(12,12,14,a+2*Math.PI/3),PT(12,12),PT(12,12)],{dx:21-sx,dy:4.5,dr:0,do:0})}
+  case 'translate':return pack([L(5,9,19,9),L(19,9,15.5,5.5),L(19,15,5,15),L(5,15,8.5,18.5),PT(12,12)],{dx:21-sx,dy:4.5,dr:0,do:0});
  }
 }
 const toneOf=s=>s==='error'?'warn':s==='ask'?'ask':'';
@@ -55,15 +63,15 @@ class Morph{
   this.g=g;g.classList.add('mk');
   g.innerHTML=[0,1,2,3,4].map(()=>`<line class="m-l" stroke-width="${o.sw||SW}"/>`).join('')+'<circle class="m-dot"/>';
   this.lines=[...g.querySelectorAll('.m-l')];this.dot=g.querySelector('.m-dot');
-  this.state=o.state||'idle';this.t0=0;this.k=o.k||.17;this.d=o.d||.7;
-  const ctx={t:0,lvl:o.lvl??0,jit:o.jit||[.7,.95,.75,.6],now:0,static:!!o.static};
+  this.state=o.state||'idle';this.t0=0;this.k=o.k||.17;this.d=o.d||.7;this.centered=!!o.centered;
+  const ctx={t:0,lvl:o.lvl??0,jit:o.jit||[.7,.95,.75,.6],now:0,static:!!o.static,centered:this.centered};
   this.x=pose(this.state,ctx);this.v={};for(const k in this.x)this.v[k]=0;
   this.tone(o.tone??toneOf(this.state));this.render();
  }
  tone(t){if(t)this.g.dataset.tone=t;else delete this.g.dataset.tone}
  set(s,now,tone){if(s!==this.state){this.state=s;this.t0=now}this.tone(tone??toneOf(s))}
  tick(now,lvl=0,jit=[.5,.5,.5,.5]){
-  const tg=pose(this.state,{t:now-this.t0,lvl,jit,now,static:false});
+  const tg=pose(this.state,{t:now-this.t0,lvl,jit,now,static:false,centered:this.centered});
   for(const k in tg){const a=(tg[k]-this.x[k])*this.k;this.v[k]=(this.v[k]+a)*this.d;this.x[k]+=this.v[k]}
   this.render();
  }
@@ -120,5 +128,5 @@ const WALL={
 };
 const store={get(k,d){try{const v=localStorage.getItem('cue.'+k);return v==null?d:v}catch(e){return d}},set(k,v){try{localStorage.setItem('cue.'+k,v)}catch(e){}}};
 
-window.CUE={Morph,plate,glyph,Voice,setLabel,WALL,STATES,store,SQ};
+window.CUE={Morph,plate,glyph,Voice,setLabel,WALL,STATES,store,SQ,CENTER_SHIFT};
 })();

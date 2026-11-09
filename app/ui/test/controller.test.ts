@@ -482,11 +482,12 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
   it('idle on hover: 0.3 h at both ends to what is painted, at every place and size', () => {
     ctl.apply(base);
     hover(true);
-    // The idle mark the margins are measured from: the first bar at x 7.5 with a 2.2 stroke, the lamp at 21 with r 1.9.
+    // The Drop's idle mark the margins are measured from, centered (cue.js): the first bar at x 4.85 with a 2.2 stroke,
+    // the lamp at 18.35 with r 1.9.
     const line = part('.mkw svg line');
-    expect([line.getAttribute('x1'), line.getAttribute('stroke-width')]).toEqual(['7.500', '2.2']);
+    expect([line.getAttribute('x1'), line.getAttribute('stroke-width')]).toEqual(['4.850', '2.2']);
     const dot = part('.mkw svg circle');
-    expect([dot.getAttribute('cx'), dot.getAttribute('r')]).toEqual(['21.000', '1.900']);
+    expect([dot.getAttribute('cx'), dot.getAttribute('r')]).toEqual(['18.350', '1.900']);
     const check = (h: number, at: string) => {
       const g = idleGaps();
       expect(g.left, `${at} left`).toBeCloseTo(0.3 * h, 6);
@@ -496,10 +497,12 @@ describe('One size: every Drop size comes from --h (with drop.css)', () => {
       ctl.place(place);
       check(H, place);
     }
-    // 36 px: no padding on the left; the mark's margins 5.04 and 0.
+    // 36 px: no padding on the left; the mark's margins 7.425 and 0, and 7.425 of padding on the right: the mark's box
+    // is centered in the capsule, as in the circle.
     ctl.place('bottom');
     expect(size(drop(), 'padding-left')).toBe(0);
-    expect([size(part('.mkw'), 'margin-left'), size(part('.mkw'), 'margin-right')].map((v) => +v.toFixed(4))).toEqual([5.04, 0]);
+    expect([size(part('.mkw'), 'margin-left'), size(part('.mkw'), 'margin-right')].map((v) => +v.toFixed(4))).toEqual([7.425, 0]);
+    expect(+size(drop(), 'padding-right').toFixed(4)).toBe(7.425);
     const big = document.createElement('style');
     big.textContent = ':root{--h:48px}';
     document.head.append(big);
@@ -597,6 +600,59 @@ describe('The mark opens to its own size, the same in every state', () => {
   });
 });
 
+describe("The Drop's mark is centered in the circle and stays put from hover into a dictation", () => {
+  const n = (el: Element, a: string) => parseFloat(el.getAttribute(a)!);
+  /** What the Drop's mark paints on its 24 grid, the lines with half their stroke and the lamp. */
+  const painted = () => {
+    const g = document.querySelector('.drop .mkw svg g')!;
+    const xs: number[] = [];
+    for (const l of g.querySelectorAll('line')) {
+      if (n(l, 'opacity') <= 0) continue;
+      const half = n(l, 'stroke-width') / 2;
+      xs.push(n(l, 'x1') - half, n(l, 'x1') + half, n(l, 'x2') - half, n(l, 'x2') + half);
+    }
+    const dot = g.querySelector('circle')!;
+    if (n(dot, 'opacity') > 0 && n(dot, 'r') > 0) xs.push(n(dot, 'cx') - n(dot, 'r'), n(dot, 'cx') + n(dot, 'r'));
+    return (Math.min(...xs) + Math.max(...xs)) / 2;
+  };
+  const bars = () => {
+    const l = [...document.querySelectorAll('.drop .mkw svg line')];
+    return [l[0], l[2], l[4]].map((x) => +n(x, 'x1').toFixed(2));
+  };
+  const lamp = () => +n(document.querySelector('.drop .mkw svg circle')!, 'cx').toFixed(2);
+  /** 1.5 s of frames from now: the Drop times its poses from performance.now(). */
+  const settle = () => {
+    for (let t = performance.now(), end = t + 1500; t < end; t += 16) ctl.frame(t);
+  };
+
+  it('every pose of a dictation paints its box on x = 12 within 0.3, the lamp included', () => {
+    for (const phase of ['start', 'listen', 'think', 'done', 'empty', 'cancel', 'error'] as const) {
+      ctl.apply({ ...base, phase, error: phase === 'error' ? 'model' : null });
+      settle();
+      expect(Math.abs(painted() - 12), phase).toBeLessThanOrEqual(0.3 + 1e-9);
+    }
+    for (const lvl of [0, 0.5, 1]) {
+      ctl.apply({ ...base, phase: 'listen' });
+      ctl.level(lvl);
+      settle();
+      expect(Math.abs(painted() - 12), `listen at ${lvl}`).toBeLessThanOrEqual(0.3 + 1e-9);
+    }
+  });
+
+  it('from the hover capsule into start and listen the bars and the lamp do not move: only their heights change', () => {
+    ctl.apply(base);
+    hover(true);
+    settle();
+    const rest = { bars: bars(), lamp: lamp() };
+    expect(rest).toEqual({ bars: [4.85, 9.35, 13.85], lamp: 18.35 });
+    for (const phase of ['start', 'listen'] as const) {
+      ctl.apply({ ...base, phase });
+      settle();
+      expect({ bars: bars(), lamp: lamp() }, phase).toEqual(rest);
+    }
+  });
+});
+
 describe('Places', () => {
   const css = readFileSync(join(__dirname, '../src/design/drop.css'), 'utf8');
   let sheet: HTMLStyleElement;
@@ -653,6 +709,30 @@ describe('Places', () => {
     for (const place of PLACES) {
       ctl.place(place);
       expect([flat(ans().left), flat(ans().top), flat(ans().transform)], place).toEqual([flat(card().left), flat(card().top), flat(card().transform)]);
+    }
+  });
+
+  it('at the top every tray card and the answer open downward from the Drop, pinned at its top edge as the Drop is', () => {
+    ctl.place('top');
+    const pv = getComputedStyle(document.querySelector('.pv')!);
+    const answer: Answer = { place: 'tray', quote: null, turns: [], sources: [], listening: false, missed: false, actions: ['insert', 'copy'] };
+    const opened: [string, () => HTMLElement][] = [
+      ...KINDS.map((kind): [string, () => HTMLElement] => [kind, () => (ctl.tray(kind), document.querySelector('.tray:not(.ansA)') as HTMLElement)]),
+      ['answer', () => (ctl.tray(null), ctl.answer(answer), document.querySelector('.tray.ansA') as HTMLElement)],
+    ];
+    for (const [what, open] of opened) {
+      const box = open();
+      expect(box.hidden, what).toBe(false);
+      const s = getComputedStyle(box);
+      // The same top edge as the Drop's (the anchor less half a Drop) and no upward shift: its height grows downward.
+      expect(flat(s.top), what).toBe(flat(pv.top));
+      expect(flat(s.top), what).toBe('calc(var(--ay,50%)-var(--h)/2)');
+      expect(flat(s.transform), what).toBe('translate(-50%,0)');
+      // It starts as the Drop: the Drop's size and radius, then grows to the card's (Tray.fit on the next frame).
+      expect(box.style.borderRadius, what).toMatch(/px$/);
+      // The content is pinned to the top, next to the Drop, and is revealed downward as the card grows.
+      const inner = getComputedStyle(box.querySelector('.in')!);
+      expect([inner.getPropertyValue('top'), inner.getPropertyValue('bottom')].map((v) => (v === '0' ? '0px' : v)), what).toEqual(['0px', 'auto']);
     }
   });
 });
