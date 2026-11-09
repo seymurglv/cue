@@ -73,6 +73,15 @@ impl AgentMarks {
         }
     }
 
+    /// A signed-out or missing mark of `id` goes (a "checked" one stays): the user's Retry right after signing in or
+    /// installing asks the agent again. A new dictation keeps the mark for its 5 minutes.
+    pub fn forget_problem(&self, id: AgentId) {
+        let mut marks = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if marks.get(&id).is_some_and(|(m, _)| *m != Mark::Checked) {
+            marks.remove(&id);
+        }
+    }
+
     /// Every mark goes: the agents are looked at again (the Cleanup page's list).
     // Task 11: `agents_get` clears them.
     #[allow(dead_code)]
@@ -272,10 +281,16 @@ pub async fn or_local(
     RefineResult { outcome, ..here }
 }
 
+/// The cleanup goes to the user's agent and none is set: the agents on this computer are to be looked for (at startup,
+/// and when the main window moves the cleanup to "your AI").
+pub fn wants_agents(s: &RefineSettings) -> bool {
+    s.where_ == Where::Agent && s.agent.is_none()
+}
+
 /// At startup, `refine.agent` not set on the agent route: the first agent found in [`ORDER`]; none found, the cleanup
 /// runs on this computer, with nothing chosen there unless a model was. Whether the settings changed.
 pub fn resolve_agent(s: &mut RefineSettings, found: &[AgentId]) -> bool {
-    if s.where_ != Where::Agent || s.agent.is_some() {
+    if !wants_agents(s) {
         return false;
     }
     match ORDER.iter().find(|a| found.contains(a)) {
@@ -322,7 +337,7 @@ mod tests {
     }
 
     fn agents(dir: &Path, exe: Option<PathBuf>, budget: Option<Duration>) -> Arc<Agents> {
-        let slot = OpenCodeSlot::new(dir.join("agent").join("opencode"));
+        let slot = OpenCodeSlot::new(dir.join("agent"));
         Agents::with(dir.join("agent"), slot, Box::new(move |_| exe.clone()), budget)
     }
 
@@ -411,6 +426,37 @@ mod tests {
         assert_eq!(runs(&dir), 0, "nothing of the dictation went to Codex");
         assert_eq!(a.marks.problem(AgentId::Codex), Some(AgentProblem::SignedOut));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Retry of a dictation the mark answered: the mark goes and the agent is asked again; a new dictation without a
+    /// Retry keeps the mark.
+    #[tokio::test]
+    async fn a_retry_clears_the_mark_and_asks_the_agent_again() {
+        let dir = temp_dir("retry");
+        let out = dir.join("out.jsonl");
+        std::fs::write(&out, "{\"type\":\"error\",\"message\":\"Please log out and sign in again.\"}\n").unwrap();
+        let exe = shim(&dir, "Logged in using ChatGPT", 0, &format!("type \"{}\"\r\nexit /b 1", out.display()));
+        let a = agents(&dir, Some(exe), None);
+        assert_eq!(clean(&a).await.outcome, RefineOutcome::RawAgent(AgentProblem::SignedOut));
+        assert_eq!(clean(&a).await.outcome, RefineOutcome::RawAgent(AgentProblem::SignedOut));
+        assert_eq!(runs(&dir), 1, "a new dictation keeps the mark");
+        a.marks.forget_problem(AgentId::Codex);
+        assert_eq!(clean(&a).await.outcome, RefineOutcome::RawAgent(AgentProblem::SignedOut));
+        assert_eq!(runs(&dir), 2, "the Retry asked Codex again");
+        // A "checked" mark is not a problem: it stays.
+        a.marks.set(AgentId::Codex, Mark::Checked);
+        a.marks.forget_problem(AgentId::Codex);
+        assert!(a.marks.checked(AgentId::Codex));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_move_to_your_ai_with_none_set_looks_for_agents() {
+        let s = RefineSettings { where_: Where::Agent, agent: None, ..RefineSettings::default() };
+        assert!(wants_agents(&s));
+        assert!(!wants_agents(&RefineSettings { agent: Some(AgentId::Codex), ..s.clone() }));
+        assert!(!wants_agents(&RefineSettings { where_: Where::Local, ..s.clone() }));
+        assert!(!wants_agents(&RefineSettings { where_: Where::Off, ..s }));
     }
 
     #[tokio::test]

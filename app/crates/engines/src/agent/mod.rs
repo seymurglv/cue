@@ -16,8 +16,8 @@ pub mod refine;
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use cue_core::agents::AgentId;
@@ -68,6 +68,39 @@ pub struct AgentModel {
 /// agent (Codex's instructions and schema, in `home`) is in no working folder.
 pub fn cwd(home: &Path, id: AgentId) -> PathBuf {
     home.join(id.id())
+}
+
+/// The most folders [`empty_cwd`] tries beside an agent's own.
+const SPARE_FOLDERS: usize = 64;
+
+/// An empty working folder for agent `id`: its own [`cwd`] while that is empty (created when missing), else the first of
+/// `<id>-1`, `<id>-2`, … beside it that is absent (created empty) or empty, reused while it stays empty. Nothing in any
+/// of them is ever deleted: a stray file in the agent's folder (an `AGENTS.md` with orders, say) never reaches the
+/// agent, and never stops it either. The first move to a spare folder writes one warning naming the agent, never a
+/// path. `Failed("cwd")` when none can be had.
+pub fn empty_cwd(home: &Path, id: AgentId) -> Result<PathBuf, AgentFailure> {
+    static WARNED: Mutex<Vec<(AgentId, PathBuf)>> = Mutex::new(Vec::new());
+    let own = cwd(home, id);
+    let candidates = std::iter::once(own.clone()).chain((1..=SPARE_FOLDERS).map(|n| home.join(format!("{}-{n}", id.id()))));
+    for dir in candidates {
+        let usable = match std::fs::read_dir(&dir) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir_all(&dir).is_ok(),
+            Err(_) => false,
+        };
+        if !usable {
+            continue;
+        }
+        if dir != own {
+            let mut warned = WARNED.lock().unwrap_or_else(PoisonError::into_inner);
+            if !warned.iter().any(|(a, d)| *a == id && *d == dir) {
+                warned.push((id, dir.clone()));
+                tracing::warn!(agent = id.id(), "agent: folder not empty, runs in a spare empty folder beside it");
+            }
+        }
+        return Ok(dir);
+    }
+    Err(AgentFailure::Failed("cwd"))
 }
 
 /// The files Codex reads CUE's fixed instructions from are `codex-instructions-<hash>.md` in CUE's agent folder
@@ -152,7 +185,7 @@ pub const LOGIN_WAIT: Duration = Duration::from_secs(5);
 /// first; but it says "Logged in" for an expired sign-in too, which only a run tells (`cli::signed_out`). A missing
 /// program is `NotInstalled`.
 pub async fn codex_login(found: &Found, home: &Path) -> Result<Login, AgentFailure> {
-    let (exe, cwd) = (found.exe.clone(), cwd(home, AgentId::Codex));
+    let (exe, cwd) = (found.exe.clone(), empty_cwd(home, AgentId::Codex)?);
     let args = cli::codex_login_args();
     let out = tokio::task::spawn_blocking(move || process::run(&exe, &args, "", &cwd, LOGIN_WAIT))
         .await
@@ -187,7 +220,7 @@ async fn codex(found: &Found, home: &Path, model: &str, p: &Prompt, timeout: Dur
         write_whole(&schema, ANSWER_SCHEMA)?;
     }
     let args = cli::codex_args(model, &instructions, &schema);
-    let (exe, stdin, cwd) = (found.exe.clone(), p.user.clone(), cwd(home, AgentId::Codex));
+    let (exe, stdin, cwd) = (found.exe.clone(), p.user.clone(), empty_cwd(home, AgentId::Codex)?);
     let cancel = Arc::new(AtomicBool::new(false));
     let _stop = CancelOnDrop(cancel.clone());
     let out = tokio::task::spawn_blocking(move || process::run_until(&exe, &args, &stdin, &cwd, timeout, &cancel))
@@ -246,6 +279,24 @@ mod tests {
         let r = c.complete("", &p, Duration::from_secs(5), None).await;
         assert_eq!(r, Err(AgentFailure::Failed("grok needs a pipe")));
         assert!(!home.exists(), "nothing was written or run for Grok");
+    }
+
+    /// A stray file in the agent's folder: the next empty folder beside it, created empty and reused; nothing deleted.
+    #[test]
+    fn a_folder_that_is_not_empty_is_left_for_an_empty_one_beside_it() {
+        let home = temp_dir("spare");
+        assert_eq!(empty_cwd(&home, AgentId::Codex).unwrap(), home.join("codex"), "created empty");
+        assert!(home.join("codex").is_dir());
+        std::fs::write(home.join("codex").join("AGENTS.md"), "orders").unwrap();
+        assert_eq!(empty_cwd(&home, AgentId::Codex).unwrap(), home.join("codex-1"));
+        assert_eq!(empty_cwd(&home, AgentId::Codex).unwrap(), home.join("codex-1"), "reused while empty");
+        std::fs::write(home.join("codex-1").join("x.txt"), "x").unwrap();
+        // A file where a folder would be is passed over too.
+        std::fs::write(home.join("codex-2"), "a file").unwrap();
+        assert_eq!(empty_cwd(&home, AgentId::Codex).unwrap(), home.join("codex-3"));
+        assert_eq!(std::fs::read_to_string(home.join("codex").join("AGENTS.md")).unwrap(), "orders", "nothing deleted");
+        assert_eq!(empty_cwd(&home, AgentId::OpenCode).unwrap(), home.join("opencode"), "each agent its own");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

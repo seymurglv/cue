@@ -399,7 +399,7 @@ impl Runtime {
         let translate_home = pair_now(&settings);
         let model = ModelKeeper::new(paths.models.clone(), &settings.stt.model);
         let llm = llm::LlmKeeper::new(paths.models.clone(), &settings.refine.local, llm_active(&settings.refine));
-        let opencode = opencode::OpenCodeSlot::new(agent::cwd(&paths.agent_dir(), AgentId::OpenCode));
+        let opencode = opencode::OpenCodeSlot::new(paths.agent_dir());
         let agents = agents::Agents::new(paths.agent_dir(), opencode.clone());
         let instructions = Instructions::load_or_create(&paths, lang.code(), settings.refine.legacy_custom());
         // The old custom text leaves settings.json once the instructions file exists.
@@ -887,6 +887,8 @@ impl Runtime {
             // Otherwise the local model is let go (its memory freed), and a local download goes on.
             self.llm.set_active(llm_active(&s.refine), &self.tx, &self.http);
             self.ui.llms(&self.llm.view());
+            // Moved to "your AI" with none set: the agents are looked for now, not at the next start.
+            self.find_agents();
         }
         let s = &self.settings;
         if s.audio.device != device {
@@ -1065,11 +1067,11 @@ impl Runtime {
         self.ui.settings(&SettingsView::of(&self.settings, self.lang, self.can_save_settings));
     }
 
-    /// At startup, the cleanup goes to the user's agent but none is set yet: the agents on this computer are looked for
-    /// off the core's thread (`AgentsFound`). Meanwhile a dictation goes in through the no-AI layer.
+    /// The cleanup goes to the user's agent but none is set (at startup, or the main window moved it there): the agents
+    /// on this computer are looked for off the core's thread (`AgentsFound`). Meanwhile a dictation goes in through the
+    /// no-AI layer.
     fn find_agents(&self) {
-        let s = &self.settings.refine;
-        if s.where_ != settings::Where::Agent || s.agent.is_some() {
+        if !agents::wants_agents(&self.settings.refine) {
             return;
         }
         let tx = self.tx.clone();
@@ -1293,6 +1295,11 @@ impl Runtime {
                 if self.attempt.id == id {
                     let now = self.now();
                     self.attempt.retry_text(now);
+                }
+                // The user's Retry, maybe right after signing in: the agent's signed-out or missing mark goes, and the
+                // agent is asked again.
+                if let Some(a) = self.settings.refine.agent {
+                    self.agents.marks.forget_problem(a);
                 }
                 self.refine(id, raw, mode)
             }

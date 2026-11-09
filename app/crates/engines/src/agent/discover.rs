@@ -27,11 +27,11 @@ pub fn discover() -> Vec<Found> {
         d.extend(usual_dirs(id, home.as_deref(), roaming.as_deref(), local.as_deref()));
         d
     };
-    let cwd = match cue_core::paths::local_app_data() {
+    let home = match cue_core::paths::local_app_data() {
         Some(l) => cue_core::paths::local_dir(&l).join("agent"),
         None => std::env::temp_dir().join("CUE-agent"),
     };
-    discover_in(&dirs, &cwd)
+    discover_in(&dirs, &home)
 }
 
 /// Where agent `id`'s program is, by the same search as [`discover`] but without asking its version.
@@ -43,8 +43,9 @@ pub fn program(id: AgentId) -> Option<PathBuf> {
     dirs.iter().find_map(|d| program_in(d, id.id()))
 }
 
-/// [`discover`] over the folders `dirs` gives for each agent, asking versions in `cwd` (the agents' empty folder).
-pub(crate) fn discover_in(dirs: &dyn Fn(AgentId) -> Vec<PathBuf>, cwd: &Path) -> Vec<Found> {
+/// [`discover`] over the folders `dirs` gives for each agent, asking each version in that agent's empty folder in
+/// `home`, CUE's agent folder ([`super::empty_cwd`]).
+pub(crate) fn discover_in(dirs: &dyn Fn(AgentId) -> Vec<PathBuf>, home: &Path) -> Vec<Found> {
     let programs: Vec<(AgentId, PathBuf)> =
         ORDER.iter().filter_map(|&id| dirs(id).iter().find_map(|d| program_in(d, id.id())).map(|exe| (id, exe))).collect();
     // Asked together: an npm shim starts Node, which takes a moment.
@@ -53,7 +54,8 @@ pub(crate) fn discover_in(dirs: &dyn Fn(AgentId) -> Vec<PathBuf>, cwd: &Path) ->
             .into_iter()
             .map(|(id, exe)| {
                 s.spawn(move || {
-                    let version = process::run(&exe, &["--version".to_string()], "", cwd, VERSION_TIMEOUT)
+                    let version = super::empty_cwd(home, id)
+                        .and_then(|cwd| process::run(&exe, &["--version".to_string()], "", &cwd, VERSION_TIMEOUT))
                         .ok()
                         .filter(|o| o.status == Some(0))
                         .and_then(|o| version_of(&o.stdout));

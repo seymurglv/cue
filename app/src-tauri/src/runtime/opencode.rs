@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use cue_core::agents::AgentId;
 use cue_engines::agent::opencode::{self, Server};
-use cue_engines::agent::{AgentFailure, discover};
+use cue_engines::agent::{self, AgentFailure, discover};
 use tokio::task::AbortHandle;
 
 use super::model::REST_AFTER;
@@ -50,13 +50,17 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl OpenCodeSlot {
     /// The slot for this computer: the user's server from OpenCode's state folder, else `opencode serve` started in
-    /// `cwd` (`%LOCALAPPDATA%\CUE\agent\opencode`, its own empty folder: `agent::cwd`).
-    pub fn new(cwd: PathBuf) -> Arc<Self> {
-        let dir = cwd.clone();
-        let find: Finder = Box::new(move || opencode::state_dir().and_then(|s| Server::announced(&s, &dir)));
+    /// OpenCode's own empty folder in `home` (`%LOCALAPPDATA%\CUE\agent\opencode`, or a spare empty one beside it:
+    /// `agent::empty_cwd`), which is also the folder a server the user runs is told to work in.
+    pub fn new(home: PathBuf) -> Arc<Self> {
+        let dir = home.clone();
+        let find: Finder = Box::new(move || {
+            let cwd = agent::empty_cwd(&dir, AgentId::OpenCode).ok()?;
+            opencode::state_dir().and_then(|s| Server::announced(&s, &cwd))
+        });
         let start: Starter = Box::new(move || {
             let exe = discover::program(AgentId::OpenCode).ok_or(AgentFailure::NotInstalled)?;
-            opencode::start(&exe, &cwd)
+            opencode::start(&exe, &agent::empty_cwd(&home, AgentId::OpenCode)?)
         });
         Self::with(find, start, REST_AFTER)
     }

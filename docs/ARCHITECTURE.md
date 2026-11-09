@@ -393,7 +393,11 @@ At its first start this version deletes the Soniox key of earlier versions from 
     (`cli::signed_out`), and a missing program marks the agent missing. While a mark holds, a dictation goes in at once
     with `RawAgent(SignedOut | Missing)`, without the agent.
   - **Esc** drops the request: a running Codex is ended with its whole process tree at once (`process::run_until`'s
-    cancel flag, set when the request's future is dropped), not at its timeout.
+    cancel flag, set when the request's future is dropped), not at its timeout. The user's Retry of a translation the
+    mark answered clears that agent's signed-out or missing mark first, so it asks the agent again.
+  - **Working folder** (`agent::empty_cwd`): each agent runs, says its version and its sign-in in its own empty folder
+    in `%LOCALAPPDATA%\CUE\agent`; when a stray file is there, in the first empty (or new) `<agent>-1`, `<agent>-2`, …
+    beside it, reused while it stays empty. Nothing in them is deleted; one warning names the agent.
   - **Fallback** (`refine.fallback`, `agents::or_local`): "paste as said" leaves the no-AI layer's text and the Drop's
     word. "Почистить: <local model>" cleans (or translates) with the local model only when it is in its slot at that
     moment; a resting one is never woken or waited for. Cleaned in place of an agent that did not answer, nothing is
@@ -401,7 +405,8 @@ At its first start this version deletes the Soniox key of earlier versions from 
     (`RefineOutcome::Covered`). With this fallback the local model is kept loaded beside the agent (`llm_active`).
   - The Drop's words after the paste, without Retry, name the agent (`cue://cleanup-name`): `agentSignIn`
     "<Agent>: войдите заново", `agentMissing` "<Agent> не найден", `agentSilent` "<Agent> не ответил".
-  - At startup, `Agent` with no agent set: `agent::discover` off the core's thread, and the first found in `ORDER`
+  - At startup, and when the main window moves the cleanup to `Agent`, with no agent set: `agent::discover` off the
+    core's thread, and the first found in `ORDER`
     (OpenCode, Codex) is written to settings.json; none found, the cleanup moves to this computer with nothing chosen.
 - The cloud request described below (the Messages API, OpenRouter, the OpenAI-compatible services) is no longer reached
   by a dictation; it stays in `cue_engines` until the keys go. Right after the second press the runtime asks
@@ -621,9 +626,9 @@ the correction watch's end: the path from there to a card, and on to a result:
    too.
    `habits::rule_messages` builds it: instructions that name the interface language, and a user message that holds the
    kind(s), the example and the app, nothing else. The answer is a `{rule, short}` object (`read_rule` accepts a rule of
-   at most `MAX_RULE_CHARS` (80) on one line, and a short name of at most `MAX_SHORT_CHARS`). With no key for a cloud
-   connection, an error, an answer that cannot be used, or no answer within `RULE_WAIT_MS` (5 s), `habits::template`
-   writes the rule and the short name from the kinds; a scoped habit's rule starts with the app. The request is not a
+   at most `MAX_RULE_CHARS` (80) on one line, and a short name of at most `MAX_SHORT_CHARS`). On an agent route, with no
+   AI, with the local model not in its slot, or on an error, an answer that cannot be used, or no answer within
+   `RULE_WAIT_MS` (5 s), `habits::template` writes the rule and the short name from the kinds; a scoped habit's rule starts with the app. The request is not a
    usage row, and its log line says why it fell back, never the answer.
 5. `CoreEvent::HabitRule` reaches `on_habit_rule`, which drops the draft if "Learn from me" went off meanwhile, else
    `Habits::learn` (the habit goes first in `list`, past `MAX_HABITS` the oldest go; its id is `id_of` its forms and

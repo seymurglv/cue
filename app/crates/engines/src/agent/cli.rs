@@ -158,12 +158,12 @@ pub fn codex_login_args() -> Vec<String> {
     vec!["login".to_string(), "status".to_string()]
 }
 
-/// What `codex login status` printed: "Not logged in" (exit 1) is signed out, exit 0 ("Logged in using ChatGPT") signed
-/// in; anything else (another exit code, an older Codex without the command) is unknown.
+/// What `codex login status` printed: a failure that says "Not logged in" (any case) is signed out, exit 0 ("Logged in
+/// using ChatGPT") signed in; any other failure (another message, an older Codex without the command) is unknown, and
+/// a run tells.
 pub fn codex_login(out: &Output) -> super::Login {
-    let said = format!("{}
-{}", out.stdout, out.stderr_tail).to_lowercase();
-    if said.contains("not logged in") || out.status == Some(1) {
+    let said = format!("{}\n{}", out.stdout, out.stderr_tail).to_lowercase();
+    if out.status != Some(0) && said.contains("not logged in") {
         super::Login::SignedOut
     } else if out.status == Some(0) {
         super::Login::SignedIn
@@ -413,13 +413,13 @@ mod tests {
     fn codex_login_status_reads_signed_out_and_in() {
         use crate::agent::Login;
         assert_eq!(codex_login_args(), ["login", "status"]);
-        assert_eq!(codex_login(&output(1, "", "Not logged in
-")), Login::SignedOut);
-        assert_eq!(codex_login(&output(1, "Not logged in
-", "")), Login::SignedOut);
-        assert_eq!(codex_login(&output(0, "Logged in using ChatGPT
-", "")), Login::SignedIn);
+        assert_eq!(codex_login(&output(1, "", "Not logged in\n")), Login::SignedOut);
+        assert_eq!(codex_login(&output(1, "Not logged in\n", "")), Login::SignedOut);
+        assert_eq!(codex_login(&output(0, "Logged in using ChatGPT\n", "")), Login::SignedIn);
+        assert_eq!(codex_login(&output(1, "", "NOT LOGGED IN")), Login::SignedOut, "any case");
         assert_eq!(codex_login(&output(2, "", "error: unrecognized subcommand 'status'")), Login::Unknown);
+        assert_eq!(codex_login(&output(1, "", "")), Login::Unknown, "exit 1 alone is not a sign-out");
+        assert_eq!(codex_login(&output(1, "", "Error: could not read auth.json")), Login::Unknown);
     }
 
     #[test]
